@@ -735,8 +735,16 @@ export function Receipt({ data, autoPrint = false, onAfterPrint, template }: Pro
 
         @media print {
           @page {
-            size: 80mm auto;
+            size: ${tpl.paper_width_mm}mm ${tpl.paper_height_mm ? `${tpl.paper_height_mm}mm` : 'auto'};
             margin: 0;
+          }
+          html, body {
+            margin: 0 !important;
+            padding: 0 !important;
+            width: ${tpl.paper_width_mm}mm !important;
+            background: #fff !important;
+            -webkit-print-color-adjust: exact !important;
+            print-color-adjust: exact !important;
           }
           body * {
             visibility: hidden !important;
@@ -749,10 +757,13 @@ export function Receipt({ data, autoPrint = false, onAfterPrint, template }: Pro
             position: absolute !important;
             top: 0;
             left: 0;
-            width: 80mm;
+            right: 0;
+            width: ${tpl.paper_width_mm}mm !important;
           }
           .receipt-80mm {
-            padding: 0 2mm;
+            width: ${tpl.paper_width_mm}mm !important;
+            box-sizing: border-box;
+            page-break-inside: avoid;
           }
         }
       `}</style>
