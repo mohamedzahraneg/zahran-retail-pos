@@ -750,16 +750,27 @@ export function Receipt({ data, autoPrint = false, onAfterPrint, template }: Pro
             -webkit-print-color-adjust: exact !important;
             print-color-adjust: exact !important;
           }
-          body > :not(.receipt-print-root) {
-            display: none !important;
+          /* Hide everything on the page via visibility (preserves layout),
+             then reveal the receipt subtree. This is safe whether the
+             receipt is a direct child of body or nested inside #root. */
+          body * {
+            visibility: hidden !important;
+          }
+          .receipt-print-root,
+          .receipt-print-root * {
+            visibility: visible !important;
           }
           .receipt-print-root {
-            /* static, top-of-page, no viewport clipping */
-            position: static !important;
-            display: block !important;
+            position: absolute !important;
+            top: 0 !important;
+            left: 0 !important;
+            right: 0 !important;
             width: ${tpl.paper_width_mm}mm !important;
             margin: 0 !important;
             padding: 0 !important;
+            height: auto !important;
+            max-height: none !important;
+            overflow: visible !important;
           }
           .receipt-80mm {
             width: ${tpl.paper_width_mm}mm !important;
@@ -767,8 +778,6 @@ export function Receipt({ data, autoPrint = false, onAfterPrint, template }: Pro
             height: auto !important;
             max-height: none !important;
             box-sizing: border-box;
-            /* Don't force the receipt onto one page — thermal rolls are
-               continuous, and the browser was clipping when we did. */
             page-break-inside: auto;
             break-inside: auto;
             overflow: visible !important;
