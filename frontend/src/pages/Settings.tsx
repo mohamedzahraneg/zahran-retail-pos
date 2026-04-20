@@ -931,6 +931,7 @@ interface ReceiptSettings {
   footerNote: string;
   headerNote: string;
   qrUrl: string;
+  qrImageUrl: string;
   qrCaption: string;
   website: string;
   terms: string;
@@ -938,7 +939,7 @@ interface ReceiptSettings {
 
 const EMPTY_RECEIPT: ReceiptSettings = {
   shopName: '', address: '', phone: '', taxId: '', logoUrl: '', footerNote: '',
-  headerNote: '', qrUrl: '', qrCaption: '', website: '', terms: '',
+  headerNote: '', qrUrl: '', qrImageUrl: '', qrCaption: '', website: '', terms: '',
 };
 
 function ReceiptTab() {
@@ -966,6 +967,7 @@ function ReceiptTab() {
       footerNote: info.footer_note || receipt.footer_note || '',
       headerNote: receipt.header_note || '',
       qrUrl: receipt.qr_url || '',
+      qrImageUrl: receipt.qr_image_url || '',
       qrCaption: receipt.qr_caption || '',
       website: receipt.website || '',
       terms: receipt.terms || '',
@@ -994,6 +996,7 @@ function ReceiptTab() {
         value: {
           header_note: form.headerNote,
           qr_url: form.qrUrl,
+          qr_image_url: form.qrImageUrl,
           qr_caption: form.qrCaption,
           website: form.website,
           terms: form.terms,
@@ -1010,15 +1013,17 @@ function ReceiptTab() {
   const set = <K extends keyof ReceiptSettings>(key: K, value: ReceiptSettings[K]) =>
     setForm((f) => ({ ...f, [key]: value }));
 
-  const pickLogo = (file: File) => {
-    if (file.size > 500 * 1024) {
-      toast.error('حجم الصورة أكبر من 500KB — اضغطها أو اختار أصغر');
+  const readImage = (key: 'logoUrl' | 'qrImageUrl', file: File, maxKB = 500) => {
+    if (file.size > maxKB * 1024) {
+      toast.error(`حجم الصورة أكبر من ${maxKB}KB — اضغطها أو اختار أصغر`);
       return;
     }
     const reader = new FileReader();
-    reader.onload = () => set('logoUrl', String(reader.result || ''));
+    reader.onload = () => set(key, String(reader.result || ''));
     reader.readAsDataURL(file);
   };
+  const pickLogo = (file: File) => readImage('logoUrl', file, 500);
+  const pickQr = (file: File) => readImage('qrImageUrl', file, 300);
 
   return (
     <div className="max-w-3xl space-y-4">
@@ -1068,11 +1073,57 @@ function ReceiptTab() {
         <Field label="العنوان" value={form.address} onChange={(v) => set('address', v)} />
         <Field label="الرقم الضريبي" value={form.taxId} onChange={(v) => set('taxId', v)} />
         <Field label="الموقع الإلكتروني" value={form.website} onChange={(v) => set('website', v)} />
-        <Field label="رابط الـ QR" value={form.qrUrl} onChange={(v) => set('qrUrl', v)}
-          hint="الرابط اللي هيفتح لما الزبون يمسح الـ QR (موقعك، انستجرام، تقييم...)" />
         <Field label="تعليق تحت الـ QR" value={form.qrCaption} onChange={(v) => set('qrCaption', v)} />
         <Field label="رابط الشعار (اختياري — لو مرفوع خارجياً)" value={form.logoUrl} onChange={(v) => set('logoUrl', v)}
           hint="اتركه فاضي لو رافع الصورة أعلاه" />
+        <Field
+          label="رابط الـ QR (بديل — لو مفيش صورة مرفوعة)"
+          value={form.qrUrl}
+          onChange={(v) => set('qrUrl', v)}
+          hint="رابط يتولّد منه QR تلقائياً — يُتجاهل لو في صورة QR مرفوعة"
+        />
+      </div>
+
+      {/* QR image uploader */}
+      <div className="rounded-xl border border-slate-200 p-4 flex items-center gap-4">
+        <div className="w-20 h-20 rounded-lg bg-slate-50 border border-dashed border-slate-300 flex items-center justify-center overflow-hidden shrink-0">
+          {form.qrImageUrl ? (
+            <img src={form.qrImageUrl} alt="qr" className="w-full h-full object-contain" />
+          ) : (
+            <span className="text-xs text-slate-400">بدون QR</span>
+          )}
+        </div>
+        <div className="flex-1">
+          <div className="text-sm font-bold text-slate-700 mb-1">
+            صورة الـ QR (تظهر أسفل الفاتورة)
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <label className="inline-flex items-center gap-2 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 px-3 py-1.5 rounded-lg text-sm font-semibold cursor-pointer">
+              رفع صورة QR
+              <input
+                type="file"
+                accept="image/png,image/jpeg,image/svg+xml,image/webp"
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) pickQr(f);
+                  e.currentTarget.value = '';
+                }}
+              />
+            </label>
+            {form.qrImageUrl && (
+              <button
+                onClick={() => set('qrImageUrl', '')}
+                className="text-xs text-rose-600 hover:text-rose-700 px-2 py-1"
+              >
+                حذف الصورة
+              </button>
+            )}
+          </div>
+          <div className="text-xs text-slate-500 mt-1">
+            PNG / JPG / SVG — أقصى 300KB. لو رفعت صورة، تجاهل حقل "رابط الـ QR".
+          </div>
+        </div>
       </div>
 
       <Textarea

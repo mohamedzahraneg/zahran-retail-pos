@@ -77,9 +77,12 @@ export interface ReceiptData {
     footer_note?: string;
     /** Text printed above the items — e.g. branch motto or offer banner */
     header_note?: string;
-    /** Content encoded into the QR code at the bottom of the receipt.
+    /** Content encoded into the QR code when qr_image_url is not set.
      *  Use a short URL (website, Google review, Instagram, etc.). */
     qr_url?: string;
+    /** Uploaded QR image (data URL or external URL). If set, it is shown
+     *  as-is and qr_url is ignored — useful for payment QRs from banks. */
+    qr_image_url?: string;
     /** Caption below the QR, e.g. "تابعنا على إنستجرام" */
     qr_caption?: string;
     /** Multi-line terms & conditions (admin-editable) */
@@ -489,14 +492,22 @@ export function Receipt({ data, autoPrint = false, onAfterPrint, template }: Pro
           </div>
         )}
 
-        {tpl.show_qr && shop.qr_url && (
+        {tpl.show_qr && (shop.qr_image_url || shop.qr_url) && (
           <div className="receipt-qr">
-            <QRCodeSVG
-              value={shop.qr_url}
-              size={96}
-              level="M"
-              includeMargin={false}
-            />
+            {shop.qr_image_url ? (
+              <img
+                src={shop.qr_image_url}
+                alt="qr"
+                className="receipt-qr-image"
+              />
+            ) : (
+              <QRCodeSVG
+                value={shop.qr_url!}
+                size={96}
+                level="M"
+                includeMargin={false}
+              />
+            )}
             {shop.qr_caption && (
               <div className="receipt-qr-caption">{shop.qr_caption}</div>
             )}
@@ -689,7 +700,13 @@ export function Receipt({ data, autoPrint = false, onAfterPrint, template }: Pro
           margin: 6px auto 2px;
           text-align: center;
         }
-        .receipt-qr svg { display: block; margin: 0 auto; }
+        .receipt-qr svg,
+        .receipt-qr-image { display: block; margin: 0 auto; }
+        .receipt-qr-image {
+          width: 28mm;
+          height: 28mm;
+          object-fit: contain;
+        }
         .receipt-qr-caption {
           font-size: 9px;
           margin-top: 2px;
