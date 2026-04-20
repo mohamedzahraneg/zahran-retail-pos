@@ -2,12 +2,28 @@ import { Injectable, BadRequestException, NotFoundException } from '@nestjs/comm
 import { DataSource } from 'typeorm';
 import { OpenShiftDto, CloseShiftDto } from './dto/shift.dto';
 
+/**
+ * Cashier shift (وردية) service.
+ *
+ * A shift is the period between a cashier opening a cashbox with an opening
+ * balance and closing it with a counted cash amount. At close we reconcile:
+ *
+ *   expected_closing = opening_balance
+ *                      + cash_sales
+ *                      - cash_refunds
+ *                      + customer_payments       (cash in from receivables)
+ *                      - supplier_payments       (cash out to payables)
+ *                      - cash_expenses
+ *                      + other_cash_in           (manual deposits)
+ *                      - other_cash_out          (manual withdrawals)
+ *
+ *   variance = actual_closing - expected_closing    (+ surplus / − deficit)
+ */
 @Injectable()
 export class ShiftsService {
   constructor(private readonly ds: DataSource) {}
 
   async open(dto: OpenShiftDto, userId: string) {
-    // Prevent multiple open shifts for same cashbox
     const [existing] = await this.ds.query(
       `SELECT id, shift_no FROM shifts WHERE cashbox_id = $1 AND status = 'open' LIMIT 1`,
       [dto.cashbox_id],
@@ -38,6 +54,214 @@ export class ShiftsService {
     return row;
   }
 
+  /**
+   * Gather every number that matters for the close-out dialog. Accepts any
+   * shift id (open or closed) and returns a fresh reconciled summary.
+   */
+  async summary(id: string) {
+    const [shift] = await this.ds.query(`SELECT * FROM shifts WHERE id = $1`, [id]);
+    if (!shift) throw new NotFoundException('الوردية غير موجودة');
+    return this.computeSummary(shift);
+  }
+
+  private async computeSummary(shift: any) {
+    // When the shift is still open we bound by NOW; when closed we stop at
+    // the closed_at timestamp. This lets the summary stay stable for closed
+    // shifts and live for open ones.
+    const upperBound = shift.closed_at || new Date();
+
+    // Invoice totals — match either by explicit shift_id OR by the same
+    // cashier creating invoices during the shift window. This makes us
+    // resilient to shift_id being NULL (e.g. warehouse mismatch or pre-fix
+    // legacy rows).
+    const invMatch = `(
+      i.shift_id = $1
+      OR (
+        i.shift_id IS NULL
+        AND i.cashier_id = $2
+        AND i.created_at >= $3
+        AND i.created_at <= $4
+      )
+    )`;
+
+    const [inv] = await this.ds.query(
+      `
+      SELECT
+        COALESCE(SUM(CASE WHEN i.status IN ('paid','completed','partially_paid') THEN i.grand_total ELSE 0 END),0)::numeric AS total_sales,
+        COALESCE(SUM(CASE WHEN i.status = 'cancelled' THEN i.grand_total ELSE 0 END),0)::numeric AS total_cancelled,
+        COUNT(*) FILTER (WHERE i.status IN ('paid','completed','partially_paid'))::int AS invoice_count,
+        COUNT(*) FILTER (WHERE i.status = 'cancelled')::int AS cancelled_count,
+        COALESCE(SUM(CASE WHEN i.status IN ('paid','completed','partially_paid') THEN (i.grand_total - i.paid_amount) ELSE 0 END),0)::numeric AS remaining_receivable
+      FROM invoices i
+      WHERE ${invMatch}
+      `,
+      [shift.id, shift.opened_by, shift.opened_at, upperBound],
+    );
+
+    // Payment method breakdown.
+    const payRows = await this.ds.query(
+      `
+      SELECT ip.payment_method::text AS method,
+             COALESCE(SUM(ip.amount),0)::numeric AS amount,
+             COUNT(*)::int AS count
+        FROM invoice_payments ip
+        JOIN invoices i ON i.id = ip.invoice_id
+       WHERE ${invMatch}
+         AND i.status IN ('paid','completed','partially_paid')
+       GROUP BY ip.payment_method
+      `,
+      [shift.id, shift.opened_by, shift.opened_at, upperBound],
+    );
+    const byMethod: Record<string, { amount: number; count: number }> = {};
+    for (const r of payRows) {
+      byMethod[r.method] = { amount: Number(r.amount), count: r.count };
+    }
+    const cashFromSales = Number(byMethod.cash?.amount || 0);
+    const cardSales = Number(byMethod.card?.amount || 0);
+    const instapaySales = Number(byMethod.instapay?.amount || 0);
+    const bankSales = Number(byMethod.bank_transfer?.amount || 0);
+
+    // Returns refunded within the shift window against the same invoices.
+    const [ret] = await this.ds.query(
+      `
+      SELECT
+        COALESCE(SUM(r.net_refund),0)::numeric AS total_returns,
+        COUNT(*)::int AS return_count
+        FROM returns r
+        JOIN invoices i ON i.id = r.original_invoice_id
+       WHERE ${invMatch}
+         AND r.status IN ('refunded','approved')
+      `,
+      [shift.id, shift.opened_by, shift.opened_at, upperBound],
+    );
+
+    // Cashbox txns during the shift — these cover BOTH invoice-linked
+    // in/outs AND manual receipts / disbursements. We break them down by
+    // category (the actual column; some older code called it "source").
+    const txRows = await this.ds.query(
+      `
+      SELECT direction::text AS direction, category::text AS category,
+             COALESCE(SUM(amount),0)::numeric AS amount,
+             COUNT(*)::int AS count
+        FROM cashbox_transactions
+       WHERE cashbox_id = $1 AND created_at >= $2
+       GROUP BY direction, category
+      `,
+      [shift.cashbox_id, shift.opened_at],
+    );
+    const tx: Record<string, { amount: number; count: number }> = {};
+    for (const r of txRows) {
+      tx[`${r.direction}_${r.category}`] = {
+        amount: Number(r.amount),
+        count: r.count,
+      };
+    }
+    // Customer receipts (قبض من عميل — direction 'in', category 'receipt').
+    const customerReceipts = Number(tx.in_receipt?.amount || 0);
+    // Supplier payments (صرف لمورد — direction 'out', category 'payment' or 'purchase').
+    const supplierPayments =
+      Number(tx.out_payment?.amount || 0) +
+      Number(tx.out_purchase?.amount || 0);
+    // Manual cash adjustments — anything labeled 'manual' / 'other' / 'adjustment'.
+    const otherCashIn =
+      Number(tx.in_manual?.amount || 0) +
+      Number(tx.in_other?.amount || 0) +
+      Number(tx.in_adjustment?.amount || 0) +
+      Number(tx.in_deposit?.amount || 0);
+    const otherCashOut =
+      Number(tx.out_manual?.amount || 0) +
+      Number(tx.out_other?.amount || 0) +
+      Number(tx.out_adjustment?.amount || 0) +
+      Number(tx.out_withdrawal?.amount || 0);
+
+    // Expenses paid from this cashbox during the shift.
+    const expenseRows = await this.ds.query(
+      `
+      SELECT e.id, e.expense_no, e.amount, e.description,
+             ec.name_ar AS category_name, e.expense_date, e.status
+        FROM expenses e
+        LEFT JOIN expense_categories ec ON ec.id = e.category_id
+       WHERE e.cashbox_id = $1
+         AND e.expense_date >= $2::date
+         AND e.status IN ('approved','paid','pending')
+       ORDER BY e.expense_date DESC, e.created_at DESC
+      `,
+      [shift.cashbox_id, shift.opened_at],
+    );
+    const totalExpenses = expenseRows.reduce(
+      (s: number, e: any) => s + Number(e.amount || 0),
+      0,
+    );
+
+    // Cash receipts are already the cash-method invoice payments; cash refunds
+    // happen when a return is settled in cash — we proxy them by subtracting
+    // total_returns here (simple model: treat every refund as cash out).
+    const cashRefunds = Number(ret.total_returns || 0);
+
+    // Totals
+    const totalCashIn = cashFromSales + customerReceipts + otherCashIn;
+    const totalCashOut =
+      cashRefunds + supplierPayments + totalExpenses + otherCashOut;
+    const expectedClosing =
+      Number(shift.opening_balance || 0) + totalCashIn - totalCashOut;
+
+    // Variance against a counted cash (only meaningful post-close)
+    const actualClosing = Number(shift.actual_closing ?? 0);
+    const variance = shift.closed_at
+      ? actualClosing - expectedClosing
+      : null;
+
+    return {
+      shift_id: shift.id,
+      shift_no: shift.shift_no,
+      status: shift.status,
+      opening_balance: Number(shift.opening_balance || 0),
+      opened_at: shift.opened_at,
+      closed_at: shift.closed_at,
+
+      // sales
+      total_sales: Number(inv.total_sales),
+      invoice_count: inv.invoice_count,
+      cancelled_count: inv.cancelled_count,
+      total_cancelled: Number(inv.total_cancelled),
+      remaining_receivable: Number(inv.remaining_receivable),
+
+      // payment method split
+      payment_breakdown: {
+        cash: { amount: cashFromSales, count: byMethod.cash?.count || 0 },
+        card: { amount: cardSales, count: byMethod.card?.count || 0 },
+        instapay: {
+          amount: instapaySales,
+          count: byMethod.instapay?.count || 0,
+        },
+        bank_transfer: {
+          amount: bankSales,
+          count: byMethod.bank_transfer?.count || 0,
+        },
+      },
+
+      // cashbox flows
+      customer_receipts: customerReceipts,
+      supplier_payments: supplierPayments,
+      other_cash_in: otherCashIn,
+      other_cash_out: otherCashOut,
+
+      // returns + expenses
+      total_returns: Number(ret.total_returns),
+      return_count: ret.return_count,
+      total_expenses: totalExpenses,
+      expense_count: expenseRows.length,
+      expenses: expenseRows,
+
+      // reconciliation
+      total_cash_in: totalCashIn,
+      total_cash_out: totalCashOut,
+      expected_closing: expectedClosing,
+      actual_closing: shift.closed_at ? actualClosing : null,
+      variance,
+    };
+  }
+
   async close(id: string, dto: CloseShiftDto, userId: string) {
     const [shift] = await this.ds.query(
       `SELECT * FROM shifts WHERE id = $1`,
@@ -48,34 +272,7 @@ export class ShiftsService {
       throw new BadRequestException('الوردية مغلقة بالفعل');
     }
 
-    // Compute totals from invoices / returns / expenses / cash movements
-    const [stats] = await this.ds.query(
-      `
-      SELECT
-        COALESCE((SELECT SUM(grand_total) FROM invoices WHERE shift_id = $1 AND status = 'completed'), 0)::numeric AS total_sales,
-        COALESCE((SELECT COUNT(*) FROM invoices WHERE shift_id = $1 AND status = 'completed'), 0)::int AS invoice_count,
-        COALESCE((SELECT SUM(r.net_refund) FROM returns r
-                  JOIN invoices i ON i.id = r.original_invoice_id
-                  WHERE i.shift_id = $1 AND r.status = 'refunded'), 0)::numeric AS total_returns,
-        COALESCE((SELECT SUM(amount) FROM cashbox_transactions
-                  WHERE cashbox_id = $2 AND direction = 'in'
-                    AND created_at >= $3), 0)::numeric AS total_cash_in,
-        COALESCE((SELECT SUM(amount) FROM cashbox_transactions
-                  WHERE cashbox_id = $2 AND direction = 'out'
-                    AND created_at >= $3), 0)::numeric AS total_cash_out,
-        COALESCE((SELECT SUM(amount) FROM expenses
-                  WHERE cashbox_id = $2 AND expense_date >= $3::date), 0)::numeric AS total_expenses
-      `,
-      [id, shift.cashbox_id, shift.opened_at],
-    );
-
-    const expectedClosing =
-      Number(shift.opening_balance) +
-      Number(stats.total_sales) -
-      Number(stats.total_returns) -
-      Number(stats.total_expenses) +
-      Number(stats.total_cash_in) -
-      Number(stats.total_cash_out);
+    const summary = await this.computeSummary(shift);
 
     const [updated] = await this.ds.query(
       `
@@ -98,18 +295,25 @@ export class ShiftsService {
       [
         userId,
         dto.actual_closing,
-        expectedClosing,
-        stats.total_sales,
-        stats.total_returns,
-        stats.total_expenses,
-        stats.total_cash_in,
-        stats.total_cash_out,
-        stats.invoice_count,
+        summary.expected_closing,
+        summary.total_sales,
+        summary.total_returns,
+        summary.total_expenses,
+        summary.total_cash_in,
+        summary.total_cash_out,
+        summary.invoice_count,
         dto.notes ?? null,
         id,
       ],
     );
-    return updated;
+    return {
+      ...updated,
+      summary: {
+        ...summary,
+        actual_closing: Number(dto.actual_closing),
+        variance: Number(dto.actual_closing) - summary.expected_closing,
+      },
+    };
   }
 
   list(status?: string, userId?: string) {
@@ -131,7 +335,8 @@ export class ShiftsService {
         cb.name_ar AS cashbox_name,
         w.name_ar AS warehouse_name,
         u1.full_name AS opened_by_name,
-        u2.full_name AS closed_by_name
+        u2.full_name AS closed_by_name,
+        (s.actual_closing - s.expected_closing) AS variance
       FROM shifts s
       LEFT JOIN cashboxes cb ON cb.id = s.cashbox_id
       LEFT JOIN warehouses w ON w.id = s.warehouse_id
@@ -164,23 +369,34 @@ export class ShiftsService {
     );
     if (!shift) throw new NotFoundException('الوردية غير موجودة');
 
+    const upperBound = shift.closed_at || new Date();
     const invoices = await this.ds.query(
-      `SELECT id, invoice_no, grand_total, paid_amount, status, completed_at
-       FROM invoices WHERE shift_id = $1 ORDER BY completed_at DESC LIMIT 200`,
-      [id],
+      `SELECT id, invoice_no, grand_total, paid_amount, status, completed_at, created_at
+         FROM invoices i
+        WHERE i.shift_id = $1
+           OR (i.shift_id IS NULL
+               AND i.cashier_id = $2
+               AND i.created_at >= $3
+               AND i.created_at <= $4)
+        ORDER BY COALESCE(i.completed_at, i.created_at) DESC LIMIT 200`,
+      [id, shift.opened_by, shift.opened_at, upperBound],
     );
-    return { ...shift, invoices };
+    const summary = await this.computeSummary(shift);
+    return { ...shift, invoices, summary };
   }
 
   async currentOpen(userId: string) {
     const [row] = await this.ds.query(
-      `SELECT s.*, cb.name_ar AS cashbox_name
+      `SELECT s.*, cb.name_ar AS cashbox_name, w.name_ar AS warehouse_name
        FROM shifts s
        LEFT JOIN cashboxes cb ON cb.id = s.cashbox_id
+       LEFT JOIN warehouses w ON w.id = s.warehouse_id
        WHERE s.opened_by = $1 AND s.status = 'open'
        ORDER BY s.opened_at DESC LIMIT 1`,
       [userId],
     );
-    return row || null;
+    if (!row) return null;
+    const summary = await this.computeSummary(row);
+    return { ...row, summary };
   }
 }

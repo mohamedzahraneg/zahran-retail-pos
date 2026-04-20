@@ -57,4 +57,10 @@ export class ShiftsController {
   findOne(@Param('id', ParseUUIDPipe) id: string) {
     return this.svc.findOne(id);
   }
+
+  @Get(':id/summary')
+  @ApiOperation({ summary: 'ملخص مالي حي للوردية (للإقفال والمتابعة)' })
+  summary(@Param('id', ParseUUIDPipe) id: string) {
+    return this.svc.summary(id);
+  }
 }
