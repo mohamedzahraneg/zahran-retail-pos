@@ -1,0 +1,155 @@
+# =============================================================================
+#  Zahran Retail System — Local / Production Stack
+#  تشغيل سريع: docker compose up -d
+# =============================================================================
+version: "3.9"
+
+name: zahran
+
+services:
+
+  # ---------------------------------------------------------------------------
+  #  PostgreSQL — القاعدة الرئيسية (يتم تحميل schema.sql تلقائياً عند أول تشغيل)
+  # ---------------------------------------------------------------------------
+  db:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       ${DB_NAME:-zahran_retail}
+      POSTGRES_USER:     ${DB_USER:-zahran}
+      POSTGRES_PASSWORD: ${DB_PASS:-change_me_strong}
+      TZ: Africa/Cairo
+      PGTZ: Africa/Cairo
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # يتم تشغيل schema.sql عند أول إقلاع، الترتيب أبجدي:
+      - ./database/schema_combined.sql:/docker-entrypoint-initdb.d/000_master.sql:ro
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-zahran} -d ${DB_NAME:-zahran_retail}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    command:
+      - postgres
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - work_mem=16MB
+      - -c
+      - maintenance_work_mem=64MB
+
+  # ---------------------------------------------------------------------------
+  #  Redis — كاش + قوائم انتظار + WebSocket pub/sub
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - redisdata:/data
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  #  MinIO — S3-compatible لصور المنتجات وملفات الاستيراد
+  # ---------------------------------------------------------------------------
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER:     ${MINIO_USER:-zahran}
+      MINIO_ROOT_PASSWORD: ${MINIO_PASS:-change_me_strong}
+      MINIO_BROWSER_REDIRECT_URL: http://localhost:9001
+    volumes:
+      - miniodata:/data
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"     # S3 API
+      - "${MINIO_CONSOLE_PORT:-9001}:9001" # Web console
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 15s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  #  Backend API (NestJS / Laravel) — يُضاف Dockerfile لاحقاً في backend/
+  # ---------------------------------------------------------------------------
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: postgres://${DB_USER:-zahran}:${DB_PASS:-change_me_strong}@db:5432/${DB_NAME:-zahran_retail}
+      REDIS_URL:   redis://redis:6379
+      S3_ENDPOINT: http://minio:9000
+      S3_KEY:      ${MINIO_USER:-zahran}
+      S3_SECRET:   ${MINIO_PASS:-change_me_strong}
+      S3_BUCKET:   ${S3_BUCKET:-zahran-media}
+      JWT_SECRET:  ${JWT_SECRET:-please_change_in_env}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-12h}
+      REFRESH_TOKEN_DAYS: ${REFRESH_TOKEN_DAYS:-14}
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:8080,http://localhost:5173}
+      TZ: Africa/Cairo
+    depends_on:
+      db:    { condition: service_healthy }
+      redis: { condition: service_started }
+      minio: { condition: service_started }
+    ports:
+      - "${API_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/health"]
+      interval: 20s
+      retries: 5
+    profiles: ["full"]   # لا يُشغَّل افتراضياً لغاية إضافة backend/
+
+  # ---------------------------------------------------------------------------
+  #  Frontend (React PWA) — يُضاف Dockerfile لاحقاً في frontend/
+  # ---------------------------------------------------------------------------
+  web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      VITE_API_URL: ${VITE_API_URL:-http://localhost:3000}
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    depends_on: [api]
+    profiles: ["full"]   # لا يُشغَّل افتراضياً لغاية إضافة frontend/
+
+  # ---------------------------------------------------------------------------
+  #  Caddy — reverse proxy + HTTPS تلقائية (للإنتاج فقط)
+  # ---------------------------------------------------------------------------
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+      - caddyconfig:/config
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on: [api, web]
+    profiles: ["prod"]   # docker compose --profile prod up -d
+
+# =============================================================================
+volumes:
+  pgdata:       { driver: local }
+  redisdata:    { driver: local }
+  miniodata:    { driver: local }
+  caddydata:    { driver: local }
+  caddyconfig:  { driver: local }
+
+networks:
+  default:
+    name: zahran_net

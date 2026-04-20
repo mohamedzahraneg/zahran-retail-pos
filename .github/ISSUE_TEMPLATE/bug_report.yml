@@ -1,0 +1,63 @@
+name: "🐞 Bug report"
+description: Report something that is broken
+labels: [bug, needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Please fill in the fields below so we can reproduce it quickly.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the bug in one or two sentences.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open page X
+        2. Click Y
+        3. See error Z
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      multiple: true
+      options:
+        - backend
+        - frontend
+        - database
+        - PWA / offline
+        - accounting
+        - POS
+        - inventory
+        - reports
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      placeholder: v1.2.3 or a9f3b1c
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / screenshots
+      render: shell

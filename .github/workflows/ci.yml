@@ -1,0 +1,204 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+# Cancel in-progress runs for the same PR when new commits land.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Backend — type-check + lint + unit tests (Jest) + e2e health smoke
+  # ---------------------------------------------------------------------------
+  backend:
+    name: Backend (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20]
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+
+      - name: Lint
+        run: npm run lint -- --max-warnings=0 || true
+        # Lint is informative for now — we don't block CI on style yet.
+
+      - name: Type-check / build
+        run: npm run build
+
+      - name: Unit tests
+        run: npm test -- --ci --passWithNoTests
+
+      - name: E2E smoke (health)
+        run: npm run test:e2e -- --passWithNoTests
+
+  # ---------------------------------------------------------------------------
+  # Frontend — type-check + lint + Vitest + production build
+  # ---------------------------------------------------------------------------
+  frontend:
+    name: Frontend (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20]
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint || true
+
+      - name: Unit tests (Vitest)
+        run: npm test -- --run --passWithNoTests
+
+      - name: Production build
+        run: npm run build
+        env:
+          VITE_API_URL: http://localhost:3000
+
+      - name: Upload dist
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist-node-${{ matrix.node }}
+          path: frontend/dist
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Database — sanity-check that schema.sql + seeds apply to a live Postgres 15
+  # ---------------------------------------------------------------------------
+  database:
+    name: Database (PostgreSQL 15)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_DB: zahran_ci
+          POSTGRES_USER: zahran
+          POSTGRES_PASSWORD: zahran
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U zahran -d zahran_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install psql client
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client
+
+      - name: Apply schema
+        env:
+          PGPASSWORD: zahran
+        run: |
+          set -euo pipefail
+          # Apply the full schema, in-order. If a consolidated schema.sql
+          # exists, prefer it; otherwise apply the numbered migration files
+          # inside database/migrations/.
+          if [ -f database/schema.sql ]; then
+            psql -h localhost -U zahran -d zahran_ci -v ON_ERROR_STOP=1 -f database/schema.sql
+          else
+            for f in $(ls database/migrations/*.sql 2>/dev/null | sort); do
+              echo "==> applying $f"
+              psql -h localhost -U zahran -d zahran_ci -v ON_ERROR_STOP=1 -f "$f"
+            done
+          fi
+
+      - name: Apply seeds (if present)
+        env:
+          PGPASSWORD: zahran
+        run: |
+          set -euo pipefail
+          if [ -d database/seeds ]; then
+            for f in $(ls database/seeds/*.sql 2>/dev/null | sort); do
+              echo "==> seeding $f"
+              psql -h localhost -U zahran -d zahran_ci -v ON_ERROR_STOP=1 -f "$f"
+            done
+          fi
+
+      - name: Smoke query
+        env:
+          PGPASSWORD: zahran
+        run: |
+          psql -h localhost -U zahran -d zahran_ci -c "\dt public.*" | head -n 40
+          psql -h localhost -U zahran -d zahran_ci -c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public';"
+
+  # ---------------------------------------------------------------------------
+  # Docker images — only build on main / tags; don't push (no registry yet)
+  # ---------------------------------------------------------------------------
+  docker:
+    name: Docker build
+    runs-on: ubuntu-latest
+    needs: [backend, frontend]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build backend image
+        uses: docker/build-push-action@v5
+        with:
+          context: backend
+          file: backend/Dockerfile
+          push: false
+          tags: zahran/backend:ci
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,scope=backend,mode=max
+
+      - name: Build frontend image
+        uses: docker/build-push-action@v5
+        with:
+          context: frontend
+          file: frontend/Dockerfile
+          push: false
+          tags: zahran/frontend:ci
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,scope=frontend,mode=max

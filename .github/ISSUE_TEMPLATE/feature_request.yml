@@ -1,0 +1,41 @@
+name: "✨ Feature request"
+description: Suggest a new feature or improvement
+labels: [enhancement, needs-triage]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you solving?
+      description: Describe the user pain point or workflow gap.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      multiple: true
+      options:
+        - backend
+        - frontend
+        - database
+        - PWA / offline
+        - accounting
+        - POS
+        - inventory
+        - reports
+        - other
+    validations:
+      required: true
