@@ -205,7 +205,7 @@ export default function Dashboard() {
   });
 
   const [period, setPeriod] = useState<PeriodRange>(() =>
-    resolvePeriod('month'),
+    resolvePeriod('day'),
   );
 
   const { data: pl } = useQuery({
@@ -512,55 +512,15 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* ═════ Top products + Cashier performance ═════ */}
+      {/* ═════ Smart analysis panel + Cashier performance ═════ */}
       <div className="grid lg:grid-cols-2 gap-6">
-        <div className="card p-5">
-          <h3 className="font-black text-slate-800 flex items-center gap-2 mb-4">
-            <Award size={18} className="text-amber-500" />
-            أفضل المنتجات — آخر 30 يوم
-          </h3>
-          {products.length > 0 ? (
-            <div className="space-y-2">
-              {products.slice(0, 6).map((p: any, i: number) => (
-                <div
-                  key={p.product_id || i}
-                  className="flex items-center justify-between p-2 rounded-lg hover:bg-slate-50"
-                >
-                  <div className="flex items-center gap-3">
-                    <div
-                      className={`w-8 h-8 rounded-lg flex items-center justify-center font-black text-sm ${
-                        i === 0
-                          ? 'bg-amber-100 text-amber-700'
-                          : i === 1
-                            ? 'bg-slate-100 text-slate-700'
-                            : i === 2
-                              ? 'bg-orange-100 text-orange-700'
-                              : 'bg-slate-50 text-slate-500'
-                      }`}
-                    >
-                      {i + 1}
-                    </div>
-                    <div>
-                      <div className="font-bold text-sm text-slate-800">
-                        {p.name_ar || p.product_name || '—'}
-                      </div>
-                      <div className="text-xs text-slate-500">
-                        {NUM(Number(p.units_sold || 0))} قطعة
-                      </div>
-                    </div>
-                  </div>
-                  <div className="text-sm font-bold text-brand-600">
-                    {EGP.format(Number(p.revenue || 0))}
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="text-center text-slate-400 py-6 text-sm">
-              لا توجد مبيعات بعد
-            </div>
-          )}
-        </div>
+        <SmartAnalysisPanel
+          data={data}
+          pl={pl}
+          analytics={analytics}
+          period={period}
+          periodNoun={periodNoun}
+        />
 
         <div className="card p-5">
           <h3 className="font-black text-slate-800 flex items-center gap-2 mb-4">
@@ -844,6 +804,207 @@ function ProductPerfPanel({
       ) : (
         <div className="text-center text-slate-400 py-6 text-sm">
           {emptyText || 'لا توجد بيانات للفترة المختارة'}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─── Smart analysis panel — rule-based insights per selected period ─── */
+function SmartAnalysisPanel({
+  data, pl, analytics, period, periodNoun,
+}: {
+  data: any; pl: any; analytics: any;
+  period: PeriodRange; periodNoun: string;
+}) {
+  const insights = useMemo(() => {
+    const out: Array<{
+      level: 'good' | 'warn' | 'bad' | 'info';
+      icon: any;
+      title: string;
+      detail: string;
+    }> = [];
+    const t = analytics?.totals;
+    if (!t) return out;
+
+    const revenue = Number(t.revenue || 0);
+    const profit = Number(t.profit || 0);
+    const margin = Number(t.margin_pct || 0);
+    const expenses = Number(t.expenses || 0);
+    const returnsAmt = Number(t.returns_amount || 0);
+    const net = Number(t.net || 0);
+    const invoices = Number(t.invoices || 0);
+    const discounts = Number(t.discounts || 0);
+    const aov = invoices > 0 ? revenue / invoices : 0;
+
+    // Headline: profit vs loss
+    if (net < 0) {
+      out.push({
+        level: 'bad',
+        icon: TrendingDown,
+        title: `صافي خسارة ${EGP.format(Math.abs(net))} في ${periodNoun}`,
+        detail:
+          profit < 0
+            ? 'الإيراد أقل من تكلفة البضاعة — راجع أسعار البيع وسياسة الخصم.'
+            : `الربح الإجمالي ${EGP.format(profit)}، لكن المصاريف والمرتجعات (${EGP.format(expenses + returnsAmt)}) ابتلعت الأرباح.`,
+      });
+    } else if (net > 0) {
+      out.push({
+        level: 'good',
+        icon: TrendingUp,
+        title: `ربح صافي ${EGP.format(net)}`,
+        detail: `هامش إجمالي ${margin.toFixed(1)}% على ${invoices} فاتورة.`,
+      });
+    }
+
+    // Margin assessment
+    if (revenue > 0) {
+      if (margin < 15 && margin >= 0) {
+        out.push({
+          level: 'warn',
+          icon: Target,
+          title: `هامش ربح ضعيف: ${margin.toFixed(1)}%`,
+          detail: 'الهامش الصحي للأحذية/الحقائب عادةً 25-40%. راجع الخصومات أو أسعار الشراء.',
+        });
+      } else if (margin >= 30) {
+        out.push({
+          level: 'good',
+          icon: Target,
+          title: `هامش ربح ممتاز: ${margin.toFixed(1)}%`,
+          detail: 'معدل الربحية أعلى من المتوسط في القطاع.',
+        });
+      }
+    }
+
+    // Discount share
+    if (revenue > 0 && discounts / revenue > 0.15) {
+      out.push({
+        level: 'warn',
+        icon: ArrowDownRight,
+        title: `الخصومات ${((discounts / revenue) * 100).toFixed(0)}% من المبيعات`,
+        detail: `إجمالي الخصومات ${EGP.format(discounts)} — كم منها خصم مُعتمد وكم ضياع غير محسوب؟`,
+      });
+    }
+
+    // Returns rate
+    if (revenue > 0 && returnsAmt > 0) {
+      const rate = (returnsAmt / revenue) * 100;
+      if (rate >= 5) {
+        out.push({
+          level: 'bad',
+          icon: TrendingDown,
+          title: `معدل مرتجعات ${rate.toFixed(1)}% (${EGP.format(returnsAmt)})`,
+          detail: 'المعدل المقلق أكثر من 5%. راجع أسباب الإرجاع في تحليلات المرتجعات.',
+        });
+      }
+    }
+
+    // AOV insight
+    if (invoices >= 5 && aov > 0) {
+      out.push({
+        level: 'info',
+        icon: DollarSign,
+        title: `متوسط قيمة الفاتورة: ${EGP.format(aov)}`,
+        detail: `${invoices} فاتورة بإيراد ${EGP.format(revenue)}.`,
+      });
+    } else if (invoices === 0) {
+      out.push({
+        level: 'info',
+        icon: Activity,
+        title: 'لا توجد فواتير في هذه الفترة',
+        detail: 'اختر فترة أطول أو افتح نقطة البيع.',
+      });
+    }
+
+    // Losing products callout
+    const losing = analytics?.losingProducts || [];
+    if (losing.length > 0) {
+      const top = losing[0];
+      out.push({
+        level: 'bad',
+        icon: AlertTriangle,
+        title: `${losing.length} منتج بيع بخسارة`,
+        detail: `الأسوأ: "${top.name_ar}" بخسارة ${EGP.format(Math.abs(Number(top.profit)))}. اضبط سعر البيع.`,
+      });
+    }
+
+    // Best performer
+    const best = (analytics?.topProducts || [])[0];
+    if (best && Number(best.profit) > 0) {
+      out.push({
+        level: 'good',
+        icon: Award,
+        title: `المنتج الأربح: ${best.name_ar}`,
+        detail: `${NUM(Number(best.units_sold))} قطعة، ربح ${EGP.format(Number(best.profit))} (${Number(best.profit_share_pct).toFixed(1)}% من إجمالي الربح).`,
+      });
+    }
+
+    // Low stock echo from overview
+    const lowStock = data?.lowStock || [];
+    if (lowStock.length > 0) {
+      out.push({
+        level: 'warn',
+        icon: Package,
+        title: `${lowStock.length} صنف على وشك النفاد`,
+        detail: `${lowStock[0]?.product_name || ''} — المتبقي ${lowStock[0]?.quantity ?? 0}`,
+      });
+    }
+
+    // Expenses warning
+    if (expenses > 0 && revenue > 0 && expenses / revenue > 0.3) {
+      out.push({
+        level: 'warn',
+        icon: AlertTriangle,
+        title: `المصاريف ${((expenses / revenue) * 100).toFixed(0)}% من المبيعات`,
+        detail: `مصاريف ${EGP.format(expenses)} — راجع المصروفات الثابتة.`,
+      });
+    }
+
+    return out;
+  }, [analytics, data, pl, periodNoun]);
+
+  const toneMap: Record<string, string> = {
+    good: 'bg-emerald-50 border-emerald-200 text-emerald-800',
+    warn: 'bg-amber-50 border-amber-200 text-amber-800',
+    bad: 'bg-rose-50 border-rose-200 text-rose-800',
+    info: 'bg-slate-50 border-slate-200 text-slate-700',
+  };
+  const iconMap: Record<string, string> = {
+    good: 'bg-emerald-100 text-emerald-600',
+    warn: 'bg-amber-100 text-amber-600',
+    bad: 'bg-rose-100 text-rose-600',
+    info: 'bg-slate-100 text-slate-600',
+  };
+
+  return (
+    <div className="card p-5">
+      <h3 className="font-black text-slate-800 flex items-center gap-2 mb-4">
+        <Sparkles size={18} className="text-violet-500" />
+        التحليل الذكي — {periodNoun}
+      </h3>
+      {insights.length === 0 ? (
+        <div className="text-center text-slate-400 py-6 text-sm">
+          لا توجد مؤشرات كافية للتحليل في هذه الفترة
+        </div>
+      ) : (
+        <div className="space-y-2 max-h-[420px] overflow-y-auto pr-1">
+          {insights.map((ins, i) => {
+            const Icon = ins.icon;
+            return (
+              <div
+                key={i}
+                className={`flex items-start gap-3 rounded-lg border p-3 ${toneMap[ins.level]}`}
+              >
+                <div className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 ${iconMap[ins.level]}`}>
+                  <Icon size={16} />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="font-bold text-sm">{ins.title}</div>
+                  <div className="text-xs opacity-80 mt-0.5">{ins.detail}</div>
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
