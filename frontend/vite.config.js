@@ -39,7 +39,7 @@ export default defineConfig(function (_a) {
                     theme_color: '#ec4899',
                     background_color: '#0b1020',
                     display: 'standalone',
-                    orientation: 'landscape',
+                    orientation: 'any',
                     dir: 'rtl',
                     lang: 'ar',
                     scope: '/',
