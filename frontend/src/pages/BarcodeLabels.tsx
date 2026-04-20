@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Search, Printer, Plus, Minus, Trash2, Barcode as BarcodeIcon } from 'lucide-react';
+import { Search, Printer, Plus, Minus, Trash2, Barcode as BarcodeIcon, PackageCheck } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { productsApi, Product, Variant } from '@/api/products.api';
+import { stockApi } from '@/api/stock.api';
 import { Barcode } from '@/components/Barcode';
 
 interface LabelRow {
@@ -10,8 +11,11 @@ interface LabelRow {
   code: string;
   sku: string;
   name: string;
+  color: string | null;
+  size: string | null;
   price: number;
   qty: number;
+  stockQty: number;
 }
 
 type LabelSize = 'small' | 'medium' | 'large' | 'roll';
@@ -83,22 +87,37 @@ export default function BarcodeLabels() {
     enabled: !!selected?.id,
   });
 
+  const { data: stockRows = [] } = useQuery({
+    queryKey: ['product-stock', selected?.id],
+    queryFn: () => stockApi.byProduct(selected!.id),
+    enabled: !!selected?.id,
+  });
+  const stockByVariant = useMemo(() => {
+    const m: Record<string, number> = {};
+    for (const s of stockRows) m[s.variant_id] = Number(s.quantity_on_hand) || 0;
+    return m;
+  }, [stockRows]);
+
   const totalLabels = useMemo(
     () => rows.reduce((s, r) => s + r.qty, 0),
     [rows],
   );
 
-  const addVariant = (variant: Variant) => {
+  const addVariant = (variant: Variant, qtyOverride?: number) => {
     if (!selected) return;
     if (!variant.barcode) {
       toast.error('لا يوجد باركود لهذا المتغير');
       return;
     }
+    const stockQty = stockByVariant[variant.id] ?? 0;
+    const initialQty = qtyOverride ?? 1;
     setRows((prev) => {
       const existing = prev.find((r) => r.variantId === variant.id);
       if (existing) {
         return prev.map((r) =>
-          r.variantId === variant.id ? { ...r, qty: r.qty + 1 } : r,
+          r.variantId === variant.id
+            ? { ...r, qty: qtyOverride ?? r.qty + 1, stockQty }
+            : r,
         );
       }
       return [
@@ -108,11 +127,28 @@ export default function BarcodeLabels() {
           code: variant.barcode!,
           sku: variant.sku,
           name: selected.name_ar,
+          color: (variant as any).color ?? null,
+          size: (variant as any).size ?? null,
           price: Number(variant.price_override ?? selected.base_price),
-          qty: 1,
+          qty: initialQty,
+          stockQty,
         },
       ];
     });
+  };
+
+  const addAllFromStock = () => {
+    if (!detail?.variants?.length) return;
+    let added = 0;
+    for (const v of detail.variants) {
+      const s = stockByVariant[v.id] ?? 0;
+      if (s > 0 && v.barcode) {
+        addVariant(v as any, s);
+        added++;
+      }
+    }
+    if (added === 0) toast.error('لا يوجد مخزون لهذا المنتج');
+    else toast.success(`تمت إضافة ${added} صنف بكمية المخزون`);
   };
 
   const updateQty = (variantId: string, qty: number) => {
@@ -214,14 +250,34 @@ export default function BarcodeLabels() {
                   جارٍ التحميل...
                 </div>
               )}
-              {detail?.variants?.map((v) => (
+              {detail?.variants && detail.variants.length > 0 && (
+                <div className="p-2 border-b border-slate-100 bg-emerald-50">
+                  <button
+                    onClick={addAllFromStock}
+                    className="w-full text-xs font-bold text-emerald-700 hover:bg-emerald-100 rounded p-2 flex items-center justify-center gap-1"
+                  >
+                    <PackageCheck size={14} />
+                    إضافة الكل بكميات المخزون
+                  </button>
+                </div>
+              )}
+              {detail?.variants?.map((v) => {
+                const stockQty = stockByVariant[v.id] ?? 0;
+                return (
                 <div
                   key={v.id}
                   className="p-3 border-b border-slate-100 flex items-center gap-2"
                 >
                   <div className="flex-1 min-w-0">
                     <div className="font-mono text-xs text-slate-700">{v.sku}</div>
-                    <div className="text-xs text-slate-500">
+                    <div className="text-xs text-slate-500 flex gap-2 flex-wrap">
+                      {(v as any).color && <span>{(v as any).color}</span>}
+                      {(v as any).size && <span className="font-bold">مقاس {(v as any).size}</span>}
+                      <span className={stockQty > 0 ? 'text-emerald-600 font-bold' : 'text-slate-400'}>
+                        رصيد: {stockQty}
+                      </span>
+                    </div>
+                    <div className="text-xs text-slate-400 font-mono mt-0.5">
                       {v.barcode || '— لا يوجد باركود —'}
                     </div>
                   </div>
@@ -233,7 +289,8 @@ export default function BarcodeLabels() {
                     <Plus size={14} /> إضافة
                   </button>
                 </div>
-              ))}
+              );
+              })}
             </div>
           </div>
         </div>
@@ -275,8 +332,11 @@ export default function BarcodeLabels() {
               >
                 <div className="flex-1 min-w-0">
                   <div className="font-semibold text-sm truncate">{r.name}</div>
-                  <div className="text-xs text-slate-500 font-mono">
-                    {r.sku} · {r.code}
+                  <div className="text-xs text-slate-500 font-mono flex gap-2 flex-wrap">
+                    <span>{r.sku}</span>
+                    {r.size && <span className="font-bold text-slate-700">مقاس {r.size}</span>}
+                    {r.color && <span>{r.color}</span>}
+                    {r.stockQty > 0 && <span className="text-emerald-600">رصيد: {r.stockQty}</span>}
                   </div>
                 </div>
                 <div className="flex items-center gap-1">
@@ -400,14 +460,17 @@ function LabelCard({ row, size }: { row: LabelRow; size: LabelSize }) {
         margin={0}
         textMargin={1}
       />
-      {preset.showPrice && (
-        <div
-          className="font-black"
-          style={{ fontSize: `${preset.fontSize}px`, lineHeight: 1 }}
-        >
-          {row.price.toFixed(0)} EGP
-        </div>
-      )}
+      <div
+        className="flex items-center justify-center gap-1.5 w-full"
+        style={{ fontSize: `${preset.fontSize}px`, lineHeight: 1 }}
+      >
+        {row.size && (
+          <span className="font-bold">مقاس {row.size}</span>
+        )}
+        {preset.showPrice && (
+          <span className="font-black">{row.price.toFixed(0)} ج.م</span>
+        )}
+      </div>
     </div>
   );
 }
