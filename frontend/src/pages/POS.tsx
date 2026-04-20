@@ -865,7 +865,8 @@ export default function POS() {
                   >
                     <div className="flex items-start justify-between mb-3">
                       <div className="text-4xl">
-                        {p.type === 'shoe' ? '👠' : p.type === 'bag' ? '👜' : '💍'}
+                        {/* Name-based icon: anything that mentions a bag gets a handbag, everything else gets a shoe */}
+                        {/(^|\s)(شنط|شنطة|حقيبة|حقائب|كلاتش|ظهر)/i.test(p.name_ar || '') ? '👜' : '👠'}
                       </div>
                       {outOfStock ? (
                         <span className="chip bg-rose-500/20 text-rose-300 border border-rose-500/30 text-[10px] font-black">
