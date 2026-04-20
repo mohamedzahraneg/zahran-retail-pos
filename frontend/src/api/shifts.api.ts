@@ -116,7 +116,14 @@ export const shiftsApi = {
   open: (payload: OpenShiftPayload) =>
     unwrap<Shift>(api.post('/shifts/open', payload)),
 
-  close: (id: string, payload: { actual_closing: number; notes?: string }) =>
+  close: (
+    id: string,
+    payload: {
+      actual_closing: number;
+      notes?: string;
+      denominations?: Record<string, number>;
+    },
+  ) =>
     unwrap<Shift & { summary?: ShiftSummary }>(
       api.post(`/shifts/${id}/close`, payload),
     ),

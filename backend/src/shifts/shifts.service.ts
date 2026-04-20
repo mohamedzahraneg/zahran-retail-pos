@@ -174,19 +174,33 @@ export class ShiftsService {
       Number(tx.out_adjustment?.amount || 0) +
       Number(tx.out_withdrawal?.amount || 0);
 
-    // Expenses paid from this cashbox during the shift.
+    // Expenses posted during the shift window. Match generously: same
+    // cashbox OR same warehouse OR created by the shift opener — cashiers
+    // often leave cashbox_id blank when adding expenses from the UI.
     const expenseRows = await this.ds.query(
       `
       SELECT e.id, e.expense_no, e.amount, e.description,
-             ec.name_ar AS category_name, e.expense_date, e.status
+             ec.name_ar AS category_name, e.expense_date,
+             CASE WHEN e.is_approved THEN 'approved' ELSE 'pending' END AS status
         FROM expenses e
         LEFT JOIN expense_categories ec ON ec.id = e.category_id
-       WHERE e.cashbox_id = $1
-         AND e.expense_date >= $2::date
-         AND e.status IN ('approved','paid','pending')
+       WHERE e.created_at >= $1
+         AND e.created_at <= $2
+         AND (
+           e.cashbox_id = $3
+           OR (e.cashbox_id IS NULL)
+           OR e.warehouse_id = $4
+           OR e.created_by = $5
+         )
        ORDER BY e.expense_date DESC, e.created_at DESC
       `,
-      [shift.cashbox_id, shift.opened_at],
+      [
+        shift.opened_at,
+        upperBound,
+        shift.cashbox_id,
+        shift.warehouse_id,
+        shift.opened_by,
+      ],
     );
     const totalExpenses = expenseRows.reduce(
       (s: number, e: any) => s + Number(e.amount || 0),
@@ -274,35 +288,52 @@ export class ShiftsService {
 
     const summary = await this.computeSummary(shift);
 
+    // Build a notes field that preserves any user note AND appends the cash
+    // denomination breakdown for the audit trail.
+    let notesOut: string | null = dto.notes ?? null;
+    if (dto.denominations && Object.keys(dto.denominations).length > 0) {
+      const lines = Object.entries(dto.denominations)
+        .filter(([, c]) => Number(c) > 0)
+        .sort(([a], [b]) => Number(b) - Number(a))
+        .map(
+          ([v, c]) =>
+            `${v} × ${c} = ${Number(v) * Number(c)}`,
+        );
+      const breakdown = `عدّ الدرج:\n${lines.join('\n')}`;
+      notesOut = notesOut ? `${notesOut}\n\n${breakdown}` : breakdown;
+    }
+
+    // Every parameter is explicitly cast so Postgres can parse the statement
+    // even when some values arrive as null (driver can't infer type there).
     const [updated] = await this.ds.query(
       `
       UPDATE shifts SET
-        status = 'closed',
-        closed_by = $1,
-        closed_at = NOW(),
-        actual_closing = $2,
-        expected_closing = $3,
-        total_sales = $4,
-        total_returns = $5,
-        total_expenses = $6,
-        total_cash_in = $7,
-        total_cash_out = $8,
-        invoice_count = $9,
-        notes = COALESCE($10, notes)
-      WHERE id = $11
+        status           = 'closed',
+        closed_by        = $1::uuid,
+        closed_at        = NOW(),
+        actual_closing   = $2::numeric,
+        expected_closing = $3::numeric,
+        total_sales      = $4::numeric,
+        total_returns    = $5::numeric,
+        total_expenses   = $6::numeric,
+        total_cash_in    = $7::numeric,
+        total_cash_out   = $8::numeric,
+        invoice_count    = $9::int,
+        notes            = COALESCE($10::text, notes)
+      WHERE id = $11::uuid
       RETURNING *
       `,
       [
         userId,
-        dto.actual_closing,
-        summary.expected_closing,
-        summary.total_sales,
-        summary.total_returns,
-        summary.total_expenses,
-        summary.total_cash_in,
-        summary.total_cash_out,
-        summary.invoice_count,
-        dto.notes ?? null,
+        Number(dto.actual_closing) || 0,
+        Number(summary.expected_closing) || 0,
+        Number(summary.total_sales) || 0,
+        Number(summary.total_returns) || 0,
+        Number(summary.total_expenses) || 0,
+        Number(summary.total_cash_in) || 0,
+        Number(summary.total_cash_out) || 0,
+        Number(summary.invoice_count) || 0,
+        notesOut,
         id,
       ],
     );

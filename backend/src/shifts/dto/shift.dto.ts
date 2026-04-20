@@ -17,4 +17,12 @@ export class OpenShiftDto {
 export class CloseShiftDto {
   @ApiProperty() @IsNumber() @Min(0) actual_closing: number;
   @ApiPropertyOptional() @IsOptional() @IsString() notes?: string;
+  /**
+   * Optional cash denomination breakdown: { "200": 3, "100": 7, "50": 12, ... }.
+   * When supplied, stored on the shift for the audit trail. The server does
+   * NOT re-derive actual_closing from this — the client is responsible for
+   * sending the explicit total.
+   */
+  @ApiPropertyOptional() @IsOptional()
+  denominations?: Record<string, number>;
 }

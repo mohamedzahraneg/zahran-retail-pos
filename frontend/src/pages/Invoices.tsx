@@ -21,6 +21,7 @@ import { usersApi } from '@/api/users.api';
 import { Receipt, ReceiptData } from '@/components/Receipt';
 import { InvoiceHoverCard } from '@/components/InvoiceHoverCard';
 import { useAuthStore } from '@/stores/auth.store';
+import { printInvoiceThermal } from '@/lib/printInvoiceThermal';
 import { useTableSort } from '@/lib/useTableSort';
 import {
   PeriodSelector,
@@ -411,9 +412,23 @@ export default function Invoices() {
                       <button
                         className="p-1.5 rounded hover:bg-brand-50 text-slate-500 hover:text-brand-600"
                         onClick={() => setPreviewId(i.id)}
-                        title="عرض/طباعة الإيصال"
+                        title="عرض الإيصال"
                       >
                         <Printer size={14} />
+                      </button>
+                      <button
+                        className="p-1.5 rounded hover:bg-emerald-50 text-slate-500 hover:text-emerald-600"
+                        onClick={() => {
+                          printInvoiceThermal(i.id).catch((err) => {
+                            toast.error(
+                              err?.response?.data?.message ||
+                                'فشل إرسال الطباعة الحرارية',
+                            );
+                          });
+                        }}
+                        title="طباعة حرارية 80mm"
+                      >
+                        🧾
                       </button>
                       {canEdit && i.status !== 'cancelled' && (
                         <button
@@ -533,11 +548,26 @@ function ReceiptPreviewModal({
           <h3 className="font-black text-slate-800">معاينة الإيصال</h3>
           <div className="flex gap-2">
             <button
-              className="btn-primary text-xs"
+              className="btn-primary text-xs bg-emerald-600 hover:bg-emerald-700"
+              onClick={() => {
+                printInvoiceThermal(invoiceId).catch((err) =>
+                  toast.error(
+                    err?.response?.data?.message || 'فشل الطباعة الحرارية',
+                  ),
+                );
+              }}
+              disabled={isLoading}
+              title="طباعة حرارية 80mm"
+            >
+              🧾 طباعة حرارية
+            </button>
+            <button
+              className="btn-ghost text-xs border border-slate-300"
               onClick={() => window.print()}
               disabled={isLoading}
+              title="طباعة بحجم A4"
             >
-              <Printer size={14} /> إعادة طباعة
+              <Printer size={14} /> طباعة A4
             </button>
             <button
               className="btn-ghost text-xs"

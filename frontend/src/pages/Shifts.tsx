@@ -561,6 +561,9 @@ function OpenShiftModal({
   );
 }
 
+// Egyptian currency denominations that a cashier would typically count.
+const DENOMINATIONS = [200, 100, 50, 20, 10, 5, 1] as const;
+
 function CloseShiftModal({
   shift,
   onClose,
@@ -572,6 +575,10 @@ function CloseShiftModal({
 }) {
   const [actual, setActual] = useState('');
   const [notes, setNotes] = useState('');
+  // denomination → count of bills/coins
+  const [denom, setDenom] = useState<Record<number, number>>({});
+  // Toggle between typing the total manually or using the denomination counter.
+  const [useCounter, setUseCounter] = useState(true);
 
   // Fetch the freshest summary right now so the cashier sees the exact
   // expected number.
@@ -582,15 +589,32 @@ function CloseShiftModal({
   });
 
   const expected = s?.expected_closing ?? 0;
-  const actualNum = Number(actual);
-  const liveVariance = actual ? actualNum - expected : 0;
+
+  // Sum across denominations (value × count) — replaces manual input when
+  // useCounter is on.
+  const counterTotal = DENOMINATIONS.reduce(
+    (sum, v) => sum + v * (denom[v] || 0),
+    0,
+  );
+  const billsCount = DENOMINATIONS.reduce((n, v) => n + (denom[v] || 0), 0);
+
+  const actualNum = useCounter ? counterTotal : Number(actual) || 0;
+  const liveVariance =
+    (useCounter ? billsCount > 0 : !!actual) ? actualNum - expected : 0;
+  const canSubmit =
+    (useCounter && billsCount > 0) || (!useCounter && actual !== '');
 
   const mutation = useMutation({
     mutationFn: () =>
       shiftsApi.close(shift.id, {
-        actual_closing: Number(actual),
+        actual_closing: Number(actualNum),
         notes: notes || undefined,
-      }),
+        denominations: useCounter
+          ? Object.fromEntries(
+              Object.entries(denom).filter(([, c]) => Number(c) > 0),
+            )
+          : undefined,
+      } as any),
     onSuccess: (result) => {
       const v =
         result.summary?.variance ??
@@ -680,20 +704,95 @@ function CloseShiftModal({
           </div>
         )}
 
-        <Field label="الرصيد الفعلي في الدرج (عدّ النقدية)">
-          <input
-            autoFocus
-            type="number"
-            step="0.01"
-            className="input text-lg font-bold"
-            value={actual}
-            onChange={(e) => setActual(e.target.value)}
-            placeholder="0.00"
-          />
-        </Field>
+        {/* Toggle between denomination counter and free-form entry */}
+        <div className="flex items-center gap-2 text-xs">
+          <span className="text-slate-600 font-bold">طريقة الإدخال:</span>
+          <button
+            type="button"
+            onClick={() => setUseCounter(true)}
+            className={`px-3 py-1 rounded-md font-bold ${
+              useCounter
+                ? 'bg-brand-600 text-white'
+                : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+            }`}
+          >
+            عدّاد الفئات
+          </button>
+          <button
+            type="button"
+            onClick={() => setUseCounter(false)}
+            className={`px-3 py-1 rounded-md font-bold ${
+              !useCounter
+                ? 'bg-brand-600 text-white'
+                : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+            }`}
+          >
+            إجمالي يدوي
+          </button>
+        </div>
+
+        {useCounter ? (
+          <div className="bg-slate-50 rounded-lg p-3 space-y-2">
+            <div className="text-xs font-bold text-slate-700 mb-1">
+              عدّ الدرج حسب الفئة
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              {DENOMINATIONS.map((v) => {
+                const count = denom[v] || 0;
+                const sub = v * count;
+                return (
+                  <div
+                    key={v}
+                    className="flex items-center gap-2 bg-white border border-slate-200 rounded-lg px-2 py-1.5"
+                  >
+                    <span className="w-10 text-center font-black text-slate-700 shrink-0">
+                      {v}
+                    </span>
+                    <span className="text-xs text-slate-400 shrink-0">×</span>
+                    <input
+                      type="number"
+                      min={0}
+                      className="w-14 border rounded px-1.5 py-1 text-sm text-center"
+                      value={count || ''}
+                      onChange={(e) => {
+                        const n = Math.max(0, Number(e.target.value) || 0);
+                        setDenom((d) => ({ ...d, [v]: n }));
+                      }}
+                      placeholder="0"
+                    />
+                    <span className="text-xs text-slate-400 shrink-0">=</span>
+                    <span className="ms-auto font-bold font-mono text-sm tabular-nums text-emerald-700">
+                      {sub ? sub.toLocaleString('en-US') : '—'}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="border-t border-slate-300 pt-2 mt-2 flex items-center justify-between">
+              <span className="text-xs text-slate-500">
+                {billsCount} قطعة نقدية
+              </span>
+              <span className="font-black text-lg text-brand-700">
+                إجمالي الدرج: {EGP(counterTotal)}
+              </span>
+            </div>
+          </div>
+        ) : (
+          <Field label="الرصيد الفعلي في الدرج (عدّ النقدية)">
+            <input
+              autoFocus
+              type="number"
+              step="0.01"
+              className="input text-lg font-bold"
+              value={actual}
+              onChange={(e) => setActual(e.target.value)}
+              placeholder="0.00"
+            />
+          </Field>
+        )}
 
         {/* Live variance preview before submit */}
-        {actual && (
+        {canSubmit && (
           <div
             className={`rounded-lg p-3 text-center font-black ${
               Math.abs(liveVariance) < 0.01
@@ -703,6 +802,9 @@ function CloseShiftModal({
                   : 'bg-rose-50 border border-rose-200 text-rose-800'
             }`}
           >
+            <div className="text-sm opacity-80 mb-1">
+              الفعلي {EGP(actualNum)} − المتوقع {EGP(expected)} =
+            </div>
             {Math.abs(liveVariance) < 0.01
               ? '✓ مطابقة تامة'
               : liveVariance > 0
@@ -724,7 +826,7 @@ function CloseShiftModal({
         <div className="flex gap-2 pt-2">
           <button
             className="btn-primary flex-1 bg-rose-600 hover:bg-rose-700"
-            disabled={mutation.isPending || actual === ''}
+            disabled={mutation.isPending || !canSubmit}
             onClick={() => mutation.mutate()}
           >
             <Calculator size={18} /> إغلاق الوردية واحتساب الفروق
