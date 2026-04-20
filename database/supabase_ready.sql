@@ -1727,12 +1727,12 @@ BEGIN
        AND (OLD.quantity_on_hand IS NULL OR OLD.quantity_on_hand > NEW.reorder_point) THEN
         INSERT INTO alerts (alert_type, severity, title, message, entity, entity_id, metadata)
         VALUES (
-            CASE WHEN NEW.quantity_on_hand = 0 THEN 'out_of_stock' ELSE 'low_stock' END,
-            CASE WHEN NEW.quantity_on_hand = 0 THEN 'critical'     ELSE 'warning' END,
+            (CASE WHEN NEW.quantity_on_hand = 0 THEN 'out_of_stock' ELSE 'low_stock' END)::alert_type,
+            (CASE WHEN NEW.quantity_on_hand = 0 THEN 'critical'     ELSE 'warning' END)::alert_severity,
             'تنبيه مخزون',
             format('المنتج (variant %s) أصبح المخزون %s قطعة في المخزن %s',
                    NEW.variant_id, NEW.quantity_on_hand, NEW.warehouse_id),
-            'stock',
+            'stock'::entity_type,
             NEW.id,
             jsonb_build_object(
                 'variant_id',  NEW.variant_id,
@@ -3152,7 +3152,12 @@ LEFT JOIN sales_30 sd ON sd.variant_id = v.id
 WHERE (s.quantity_on_hand - s.quantity_reserved) <= s.reorder_point
   AND p.is_active = TRUE
 ORDER BY
-    CASE priority WHEN 'urgent' THEN 1 WHEN 'soon' THEN 2 ELSE 3 END,
+    CASE
+        WHEN (s.quantity_on_hand - s.quantity_reserved) <= 0 THEN 1
+        WHEN (s.quantity_on_hand - s.quantity_reserved) <=
+             COALESCE(sd.avg_daily_sales,0) * 3 THEN 2
+        ELSE 3
+    END,
     days_of_stock_left ASC NULLS LAST;
 
 -- ---------------------------------------------------------------------------
@@ -3564,12 +3569,12 @@ BEGIN
     SELECT wh_id INTO v_wh_id FROM _ref;
     SELECT admin_id INTO v_admin_id FROM _ref;
 
-    SELECT array_agg(id) INTO v_cashier_ids
+    SELECT array_agg(u.id) INTO v_cashier_ids
     FROM users u JOIN roles r ON r.id = u.role_id
     WHERE r.code = 'cashier';
     IF v_cashier_ids IS NULL THEN v_cashier_ids := ARRAY[v_admin_id]; END IF;
 
-    SELECT array_agg(id) INTO v_sales_ids
+    SELECT array_agg(u.id) INTO v_sales_ids
     FROM users u JOIN roles r ON r.id = u.role_id
     WHERE r.code = 'salesperson';
 
@@ -4098,7 +4103,7 @@ SELECT
     re.warehouse_id,
     re.category_id,
     ec.name_ar   AS category_name,
-    w.name       AS warehouse_name,
+    w.name_ar    AS warehouse_name,
     CASE
         WHEN re.next_run_date <= CURRENT_DATE THEN 'due'
         WHEN re.next_run_date <= CURRENT_DATE + (re.notify_days_before || ' days')::INTERVAL THEN 'upcoming'
