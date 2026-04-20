@@ -346,31 +346,11 @@ export default function Dashboard() {
             tone="rose"
             hint={`${Number(analytics.totals.returns_count || 0)} عملية`}
           />
-          <AnalyticsCell
-            label="الصافي"
-            value={EGP.format(Number(analytics.totals.net || 0))}
-            tone={Number(analytics.totals.net) < 0 ? 'rose' : 'emerald'}
-            hint="ربح − مصاريف − مرتجعات"
-          />
         </div>
       )}
 
       {/* ═════ KPIs ═════ */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <KPI
-          icon={DollarSign}
-          label="إيرادات اليوم"
-          value={EGP.format(Number(todayData.revenue || 0))}
-          hint={`${NUM(Number(todayData.invoice_count || 0))} فاتورة`}
-          tone="emerald"
-        />
-        <KPI
-          icon={Target}
-          label="ربح اليوم"
-          value={EGP.format(Number(todayData.profit || 0))}
-          hint={`متوسط ${EGP.format(Number(todayData.avg_invoice || 0))}`}
-          tone="indigo"
-        />
+      <div className="grid grid-cols-2 gap-4">
         <KPI
           icon={ShoppingBag}
           label="القطع المباعة"
