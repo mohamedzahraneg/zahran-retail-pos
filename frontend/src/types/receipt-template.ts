@@ -49,6 +49,23 @@ export interface ReceiptTemplate {
   // Extra
   grand_total_boxed: boolean; // wrap grand total in a bordered box
   dashed_divider: boolean; // dashed vs solid
+
+  // Paper frame / margins
+  /** 0 = no frame, otherwise border thickness in mm. */
+  border_width_mm: number;
+  border_style: 'solid' | 'dashed' | 'dotted' | 'double';
+  border_color: string;
+  /** rounded corners in mm */
+  border_radius_mm: number;
+  /** gap between sections in mm */
+  section_gap_mm: number;
+  /** extra space above the logo/header in mm */
+  margin_top_mm: number;
+  /** extra space below the footer in mm */
+  margin_bottom_mm: number;
+  /** paper background color (printed backgrounds require the browser
+   *  'Background graphics' print option) */
+  background_color: string;
 }
 
 export const DEFAULT_TEMPLATES: ReceiptTemplate[] = [
@@ -85,6 +102,14 @@ export const DEFAULT_TEMPLATES: ReceiptTemplate[] = [
     show_print_stamp: true,
     grand_total_boxed: false,
     dashed_divider: true,
+    border_width_mm: 0,
+    border_style: 'solid',
+    border_color: '#000',
+    border_radius_mm: 0,
+    section_gap_mm: 2,
+    margin_top_mm: 0,
+    margin_bottom_mm: 0,
+    background_color: '#ffffff',
   },
   {
     id: 'standard-a4',
@@ -119,6 +144,14 @@ export const DEFAULT_TEMPLATES: ReceiptTemplate[] = [
     show_print_stamp: true,
     grand_total_boxed: true,
     dashed_divider: false,
+    border_width_mm: 0.4,
+    border_style: 'solid',
+    border_color: '#cbd5e1',
+    border_radius_mm: 3,
+    section_gap_mm: 4,
+    margin_top_mm: 4,
+    margin_bottom_mm: 4,
+    background_color: '#ffffff',
   },
 ];
 
@@ -153,6 +186,14 @@ export const BLANK_TEMPLATE: Omit<ReceiptTemplate, 'id' | 'name'> = {
   show_print_stamp: true,
   grand_total_boxed: false,
   dashed_divider: true,
+  border_width_mm: 0,
+  border_style: 'solid',
+  border_color: '#000',
+  border_radius_mm: 0,
+  section_gap_mm: 2,
+  margin_top_mm: 0,
+  margin_bottom_mm: 0,
+  background_color: '#ffffff',
 };
 
 export const FONT_OPTIONS: Array<{ value: string; label: string }> = [

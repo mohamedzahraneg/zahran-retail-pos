@@ -182,9 +182,18 @@ export function Receipt({ data, autoPrint = false, onAfterPrint, template }: Pro
     ['--rc-divider' as any]: tpl.color_divider,
     ['--rc-logo-size' as any]: `${tpl.logo_size_mm}mm`,
     ['--rc-logo-align' as any]: tpl.logo_align,
+    ['--rc-section-gap' as any]: `${tpl.section_gap_mm ?? 2}mm`,
     width: `${tpl.paper_width_mm}mm`,
     minHeight: tpl.paper_height_mm ? `${tpl.paper_height_mm}mm` : undefined,
-    padding: `${tpl.padding_mm}mm`,
+    paddingTop: `${tpl.padding_mm + (tpl.margin_top_mm || 0)}mm`,
+    paddingBottom: `${tpl.padding_mm + (tpl.margin_bottom_mm || 0)}mm`,
+    paddingRight: `${tpl.padding_mm}mm`,
+    paddingLeft: `${tpl.padding_mm}mm`,
+    background: tpl.background_color || '#fff',
+    border: tpl.border_width_mm
+      ? `${tpl.border_width_mm}mm ${tpl.border_style || 'solid'} ${tpl.border_color || '#000'}`
+      : undefined,
+    borderRadius: tpl.border_radius_mm ? `${tpl.border_radius_mm}mm` : undefined,
   };
   const dividerChar = tpl.dashed_divider ? '─' : '━';
   const dividerLine = dividerChar.repeat(Math.max(20, Math.round(tpl.paper_width_mm / 2)));
@@ -337,9 +346,8 @@ export function Receipt({ data, autoPrint = false, onAfterPrint, template }: Pro
 
         {/* Totals */}
         <div className="receipt-totals">
-          <div className="receipt-row">
-            <span>عدد الأصناف:</span>
-            <span>{lines.length} صنف · {totalPieces} قطعة</span>
+          <div className="receipt-total-pieces">
+            <strong>{lines.length} صنف · {totalPieces} قطعة</strong>
           </div>
           <div className="receipt-row">
             <span>المجموع:</span>
@@ -573,6 +581,22 @@ export function Receipt({ data, autoPrint = false, onAfterPrint, template }: Pro
           width: 6%;
           font-weight: bold;
           color: var(--rc-muted, #555);
+        }
+        .receipt-total-pieces {
+          text-align: center;
+          font-size: calc(var(--rc-fs, 11px) + 1px);
+          padding: 3px 0;
+          margin: 2px 0;
+          color: var(--rc-primary, #000);
+          border-bottom: 1px dashed var(--rc-divider, #000);
+        }
+        .receipt-divider + * + .receipt-totals,
+        .receipt-totals,
+        .receipt-payments,
+        .receipt-loyalty,
+        .receipt-notes,
+        .receipt-terms {
+          margin-top: var(--rc-section-gap, 2mm);
         }
         .receipt-col-name {
           text-align: right;

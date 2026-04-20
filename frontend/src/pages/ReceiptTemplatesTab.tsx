@@ -302,6 +302,89 @@ export function ReceiptTemplatesTab() {
         </fieldset>
 
         <fieldset className="border border-slate-200 rounded-lg p-4">
+          <legend className="text-sm font-bold text-slate-700 px-2">
+            إطار الورقة والحواف
+          </legend>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <Labeled label="سماكة الإطار (مم) — 0 = بدون">
+              <input
+                type="number"
+                step={0.1}
+                min={0}
+                max={5}
+                className="input"
+                value={selected.border_width_mm ?? 0}
+                onChange={(e) => update('border_width_mm', Number(e.target.value))}
+              />
+            </Labeled>
+            <Labeled label="نوع الإطار">
+              <select
+                className="input"
+                value={selected.border_style ?? 'solid'}
+                onChange={(e) => update('border_style', e.target.value as any)}
+              >
+                <option value="solid">متصل</option>
+                <option value="dashed">متقطع</option>
+                <option value="dotted">نقط</option>
+                <option value="double">مزدوج</option>
+              </select>
+            </Labeled>
+            <Color
+              label="لون الإطار"
+              value={selected.border_color ?? '#000'}
+              onChange={(v) => update('border_color', v)}
+            />
+            <Labeled label="انحناء الزوايا (مم)">
+              <input
+                type="number"
+                step={0.5}
+                min={0}
+                max={20}
+                className="input"
+                value={selected.border_radius_mm ?? 0}
+                onChange={(e) => update('border_radius_mm', Number(e.target.value))}
+              />
+            </Labeled>
+            <Color
+              label="لون الخلفية"
+              value={selected.background_color ?? '#ffffff'}
+              onChange={(v) => update('background_color', v)}
+            />
+            <Labeled label="المسافات بين الأقسام (مم)">
+              <input
+                type="number"
+                step={0.5}
+                min={0}
+                max={20}
+                className="input"
+                value={selected.section_gap_mm ?? 2}
+                onChange={(e) => update('section_gap_mm', Number(e.target.value))}
+              />
+            </Labeled>
+            <Labeled label="هامش أعلى (مم)">
+              <input
+                type="number"
+                min={0}
+                max={40}
+                className="input"
+                value={selected.margin_top_mm ?? 0}
+                onChange={(e) => update('margin_top_mm', Number(e.target.value))}
+              />
+            </Labeled>
+            <Labeled label="هامش أسفل (مم)">
+              <input
+                type="number"
+                min={0}
+                max={40}
+                className="input"
+                value={selected.margin_bottom_mm ?? 0}
+                onChange={(e) => update('margin_bottom_mm', Number(e.target.value))}
+              />
+            </Labeled>
+          </div>
+        </fieldset>
+
+        <fieldset className="border border-slate-200 rounded-lg p-4">
           <legend className="text-sm font-bold text-slate-700 px-2">الشعار</legend>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <Labeled label="حجم الشعار (مم)">
