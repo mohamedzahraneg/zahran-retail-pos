@@ -64,6 +64,8 @@ interface CartState {
 
   addItem: (input: { product: Product; variant: Variant; qty?: number }) => void;
   updateQty: (variantId: string, qty: number) => void;
+  /** Manually override the unit price for a line — cashier-only edit. */
+  updateUnitPrice: (variantId: string, unitPrice: number) => void;
   removeItem: (variantId: string) => void;
   setItemNotes: (variantId: string, notes: string) => void;
   setManualDiscount: (type: ManualDiscountType, value: number) => void;
@@ -143,6 +145,15 @@ export const useCartStore = create<CartState>((set, get) => ({
         qty <= 0
           ? state.items.filter((i) => i.variantId !== variantId)
           : state.items.map((i) => (i.variantId === variantId ? { ...i, qty } : i)),
+    })),
+
+  updateUnitPrice: (variantId, unitPrice) =>
+    set((state) => ({
+      items: state.items.map((i) =>
+        i.variantId === variantId
+          ? { ...i, unitPrice: Math.max(0, Number(unitPrice) || 0) }
+          : i,
+      ),
     })),
 
   removeItem: (variantId) =>

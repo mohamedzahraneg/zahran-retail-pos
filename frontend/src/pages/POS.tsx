@@ -42,6 +42,7 @@ import { useCartStore, PaymentDraft, ManualDiscountType } from '@/stores/cart.st
 import { useAuthStore } from '@/stores/auth.store';
 import { useLayoutStore } from '@/stores/layout.store';
 import { Receipt, ReceiptData } from '@/components/Receipt';
+import { printInvoiceThermal } from '@/lib/printInvoiceThermal';
 
 const EGP = (n: number) =>
   `${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ج.م`;
@@ -504,10 +505,24 @@ export default function POS() {
                     </button>
                   </div>
                   <div className="text-left">
-                    <div className="text-xs text-slate-400">
-                      {EGP(i.unitPrice)}
+                    <div className="flex items-center gap-1 justify-end">
+                      <span className="text-[10px] text-slate-400">سعر:</span>
+                      <input
+                        type="number"
+                        min={0}
+                        step="0.01"
+                        value={i.unitPrice}
+                        onChange={(e) =>
+                          cart.updateUnitPrice(
+                            i.variantId,
+                            parseFloat(e.target.value) || 0,
+                          )
+                        }
+                        className="w-20 bg-white/10 border border-white/20 rounded px-1.5 py-0.5 text-xs text-white text-center font-bold focus:outline-none focus:border-pink-400"
+                        title="اضغط لتعديل السعر"
+                      />
                     </div>
-                    <div className="font-black text-rose-400">
+                    <div className="font-black text-rose-400 mt-0.5">
                       {EGP(i.qty * i.unitPrice - (i.discount || 0))}
                     </div>
                   </div>
@@ -1839,11 +1854,22 @@ function ReceiptModal({
               <h3 className="font-black text-white">معاينة الفاتورة</h3>
               <div className="flex gap-2">
                 <button
+                  className="px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold"
+                  onClick={() => {
+                    printInvoiceThermal(invoiceId).catch(() => {});
+                  }}
+                  disabled={isLoading}
+                  title="طباعة حرارية 80mm"
+                >
+                  🧾 حراري
+                </button>
+                <button
                   className="px-3 py-1.5 rounded bg-brand-500 text-white text-xs font-bold"
                   onClick={() => window.print()}
                   disabled={isLoading}
+                  title="طباعة A4"
                 >
-                  🖨️ طباعة
+                  🖨️ A4
                 </button>
                 <button
                   className="px-3 py-1.5 rounded bg-white/5 text-slate-300 text-xs"
