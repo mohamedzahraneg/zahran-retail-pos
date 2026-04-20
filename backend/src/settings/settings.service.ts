@@ -299,54 +299,130 @@ export class SettingsService {
     const groups: Record<string, Array<{ code: string; label: string }>> = {
       'لوحة التحكم': [
         { code: 'dashboard.view', label: 'عرض لوحة التحكم' },
-        { code: 'reports.view', label: 'عرض التقارير' },
       ],
       'نقطة البيع': [
-        { code: 'pos.sell', label: 'بيع' },
-        { code: 'pos.discount', label: 'خصم يدوي' },
-        { code: 'pos.void', label: 'إلغاء فاتورة' },
-        { code: 'pos.reserve', label: 'حجز بعربون' },
+        { code: 'pos.sell', label: 'بيع وإتمام الفاتورة' },
+        { code: 'pos.discount', label: 'خصم يدوي على الفاتورة' },
+        { code: 'pos.void', label: 'إلغاء/إرجاع فاتورة' },
+        { code: 'pos.reopen', label: 'فتح فاتورة لتعديلها' },
+        { code: 'pos.price_override', label: 'تعديل سعر البيع يدويًا' },
       ],
-      'المنتجات والمخزون': [
+      'الفواتير': [
+        { code: 'invoices.view', label: 'عرض الفواتير' },
+        { code: 'invoices.print', label: 'طباعة الفواتير' },
+        { code: 'invoices.edit', label: 'تعديل فاتورة مبيعات' },
+        { code: 'invoices.void', label: 'إلغاء فاتورة (Admin)' },
+        { code: 'invoices.export', label: 'تصدير الفواتير' },
+      ],
+      'الحجوزات': [
+        { code: 'reservations.view', label: 'عرض الحجوزات' },
+        { code: 'reservations.create', label: 'إنشاء حجز' },
+        { code: 'reservations.fulfill', label: 'استلام/تنفيذ الحجز' },
+        { code: 'reservations.cancel', label: 'إلغاء الحجز' },
+      ],
+      'المرتجعات': [
+        { code: 'returns.view', label: 'عرض المرتجعات' },
+        { code: 'returns.create', label: 'إنشاء مرتجع' },
+        { code: 'returns.approve', label: 'اعتماد مرتجع' },
+        { code: 'returns.refund', label: 'صرف قيمة المرتجع' },
+        { code: 'returns.analytics', label: 'تحليلات المرتجعات' },
+      ],
+      'المنتجات': [
         { code: 'products.view', label: 'عرض المنتجات' },
         { code: 'products.create', label: 'إضافة منتج' },
         { code: 'products.update', label: 'تعديل منتج' },
         { code: 'products.delete', label: 'حذف منتج' },
-        { code: 'stock.adjust', label: 'تعديل المخزون' },
-        { code: 'stock.transfer', label: 'نقل بين الفروع' },
+        { code: 'products.import', label: 'استيراد Excel للمنتجات' },
+        { code: 'products.barcode', label: 'طباعة الباركود' },
+        { code: 'categories.manage', label: 'إدارة المجموعات والفئات' },
       ],
-      'العملاء والموردون': [
-        { code: 'customers.view', label: 'عرض العملاء' },
-        { code: 'customers.manage', label: 'إدارة العملاء' },
-        { code: 'suppliers.view', label: 'عرض الموردين' },
-        { code: 'suppliers.manage', label: 'إدارة الموردين' },
+      'المخزون': [
+        { code: 'stock.view', label: 'عرض المخزون' },
+        { code: 'stock.adjust', label: 'تعديل/تسوية المخزون' },
+        { code: 'stock.transfer', label: 'نقل بين الفروع' },
+        { code: 'stock.count', label: 'الجرد الفعلي' },
+        { code: 'stock.opening', label: 'إدخال رصيد افتتاحي' },
       ],
       'المشتريات': [
         { code: 'purchases.view', label: 'عرض المشتريات' },
         { code: 'purchases.create', label: 'إنشاء فاتورة شراء' },
         { code: 'purchases.receive', label: 'استلام بضاعة' },
+        { code: 'purchases.edit', label: 'تعديل فاتورة مشتريات' },
+        { code: 'purchases.cancel', label: 'إلغاء فاتورة مشتريات' },
+        { code: 'purchases.pay', label: 'دفع لمورد' },
+        { code: 'purchases.return', label: 'مرتجع للمورد' },
       ],
-      'الخزينة والحسابات': [
+      'الموردون': [
+        { code: 'suppliers.view', label: 'عرض الموردين' },
+        { code: 'suppliers.create', label: 'إضافة مورد' },
+        { code: 'suppliers.update', label: 'تعديل مورد' },
+        { code: 'suppliers.pay', label: 'دفع لمورد' },
+      ],
+      'العملاء': [
+        { code: 'customers.view', label: 'عرض العملاء' },
+        { code: 'customers.create', label: 'إضافة عميل' },
+        { code: 'customers.update', label: 'تعديل عميل' },
+        { code: 'customers.delete', label: 'حذف عميل' },
+        { code: 'customers.receive', label: 'قبض من عميل' },
+        { code: 'customer_groups.manage', label: 'مجموعات العملاء والأسعار' },
+      ],
+      'الولاء': [
+        { code: 'loyalty.view', label: 'عرض نقاط الولاء' },
+        { code: 'loyalty.adjust', label: 'تعديل نقاط العميل يدويًا' },
+        { code: 'loyalty.config', label: 'إعدادات معدل الكسب والاستبدال' },
+        { code: 'loyalty.redeem', label: 'استبدال نقاط في POS' },
+      ],
+      'العمولات': [
+        { code: 'commissions.view', label: 'عرض عمولات البائعين' },
+        { code: 'commissions.manage', label: 'تعديل نسب العمولة' },
+      ],
+      'الخزينة': [
         { code: 'cashdesk.view', label: 'عرض الصندوق' },
-        { code: 'cashdesk.receive', label: 'قبض من عميل' },
-        { code: 'cashdesk.pay', label: 'دفع لمورد' },
+        { code: 'cashdesk.receive', label: 'قبض' },
+        { code: 'cashdesk.pay', label: 'صرف' },
+        { code: 'shifts.view', label: 'عرض الورديات' },
+        { code: 'shifts.open', label: 'فتح وردية' },
+        { code: 'shifts.close', label: 'إقفال وردية' },
+      ],
+      'الحسابات والمصاريف': [
+        { code: 'accounting.view', label: 'عرض الحسابات' },
+        { code: 'accounting.reports', label: 'تقارير محاسبية' },
+        { code: 'expenses.view', label: 'عرض المصاريف' },
         { code: 'expenses.create', label: 'إضافة مصروف' },
         { code: 'expenses.approve', label: 'اعتماد مصروف' },
-        { code: 'accounting.reports', label: 'تقارير محاسبية' },
+        { code: 'recurring_expenses.manage', label: 'المصاريف الدورية' },
       ],
-      'المرتجعات': [
-        { code: 'returns.create', label: 'إنشاء مرتجع' },
-        { code: 'returns.approve', label: 'اعتماد مرتجع' },
-        { code: 'returns.refund', label: 'صرف مبلغ مرتجع' },
+      'التقارير والتنبيهات': [
+        { code: 'reports.view', label: 'عرض التقارير' },
+        { code: 'reports.sales', label: 'تقارير المبيعات' },
+        { code: 'reports.stock', label: 'تقارير المخزون' },
+        { code: 'reports.pnl', label: 'تحليل الربح والخسارة' },
+        { code: 'reports.export', label: 'تصدير التقارير' },
+        { code: 'alerts.view', label: 'عرض التنبيهات' },
+      ],
+      'العروض والكوبونات': [
+        { code: 'coupons.view', label: 'عرض الكوبونات' },
+        { code: 'coupons.manage', label: 'إدارة الكوبونات' },
+      ],
+      'الحضور والانصراف': [
+        { code: 'attendance.clock', label: 'تسجيل حضور/انصراف شخصي' },
+        { code: 'attendance.view_team', label: 'عرض حضور الفريق' },
+        { code: 'attendance.adjust', label: 'تعديل سجل الحضور' },
       ],
       'الإدارة': [
+        { code: 'users.view', label: 'عرض المستخدمين' },
         { code: 'users.manage', label: 'إدارة المستخدمين' },
         { code: 'roles.manage', label: 'إدارة الأدوار والصلاحيات' },
-        { code: 'settings.manage', label: 'إعدادات النظام' },
+        { code: 'settings.view', label: 'عرض الإعدادات' },
+        { code: 'settings.manage', label: 'تعديل إعدادات النظام' },
         { code: 'audit.view', label: 'سجل التدقيق' },
+        { code: 'notifications.manage', label: 'الإشعارات (واتساب)' },
+        { code: 'import.run', label: 'استيراد Excel' },
       ],
     };
-    return { groups };
+    // Flatten list for quick lookup/validation.
+    const flat = Object.values(groups).flat().map((p) => p.code);
+    return { groups, all: flat };
   }
 
   listPaymentMethods() {

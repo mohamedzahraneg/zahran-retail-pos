@@ -125,6 +125,103 @@ export class LoyaltyService {
     return { redeemed: params.points };
   }
 
+  /**
+   * Admin: list all customers with their loyalty balances. Lightweight
+   * paginated view for the loyalty dashboard.
+   */
+  async listCustomers(params: { q?: string; limit?: number; tier?: string }) {
+    const where: string[] = ['c.is_active = true'];
+    const args: any[] = [];
+    if (params.q) {
+      args.push(`%${params.q}%`);
+      where.push(
+        `(c.full_name ILIKE $${args.length} OR c.phone ILIKE $${args.length})`,
+      );
+    }
+    if (params.tier) {
+      args.push(params.tier);
+      where.push(`c.loyalty_tier = $${args.length}`);
+    }
+    const limit = Math.min(Math.max(Number(params.limit) || 200, 1), 500);
+    const config = await this.getConfig();
+    const rows = await this.ds.query(
+      `SELECT c.id, c.full_name, c.phone, c.loyalty_points, c.loyalty_tier,
+              c.total_spent, c.last_visit_at, c.visits_count
+         FROM customers c
+        WHERE ${where.join(' AND ')}
+        ORDER BY c.loyalty_points DESC NULLS LAST
+        LIMIT ${limit}`,
+      args,
+    );
+    return rows.map((r: any) => ({
+      ...r,
+      loyalty_points: Number(r.loyalty_points || 0),
+      redeemable_egp: Number(r.loyalty_points || 0) * config.egp_per_point,
+    }));
+  }
+
+  /** Admin: manually add or subtract points for a customer (audited). */
+  async adjust(
+    customerId: string,
+    body: { delta: number; reason?: string; user_id: string },
+  ) {
+    if (!Number.isFinite(body.delta) || body.delta === 0) {
+      throw new BadRequestException('delta يجب أن يكون رقمًا غير صفري');
+    }
+    const [cust] = await this.ds.query(
+      `SELECT loyalty_points FROM customers WHERE id = $1 FOR UPDATE`,
+      [customerId],
+    );
+    if (!cust) throw new NotFoundException('Customer not found');
+    const current = Number(cust.loyalty_points);
+    if (body.delta < 0 && Math.abs(body.delta) > current) {
+      throw new BadRequestException('الرصيد من النقاط غير كافٍ للخصم');
+    }
+    return this.ds.transaction(async (em) => {
+      await em.query(
+        `UPDATE customers
+            SET loyalty_points = loyalty_points + $1,
+                updated_at = NOW()
+          WHERE id = $2`,
+        [body.delta, customerId],
+      );
+      await em.query(
+        `INSERT INTO customer_loyalty_transactions
+           (customer_id, direction, points, reason, reference_type, user_id)
+         VALUES ($1, $2, $3, $4, 'manual', $5)`,
+        [
+          customerId,
+          body.delta > 0 ? 'in' : 'out',
+          Math.abs(body.delta),
+          body.reason || (body.delta > 0 ? 'manual_add' : 'manual_subtract'),
+          body.user_id,
+        ],
+      );
+      const [after] = await em.query(
+        `SELECT loyalty_points FROM customers WHERE id = $1`,
+        [customerId],
+      );
+      return {
+        previous: current,
+        delta: body.delta,
+        current: Number(after.loyalty_points),
+      };
+    });
+  }
+
+  /** Admin: update loyalty settings (points_per_egp, egp_per_point, etc.). */
+  async updateConfig(patch: Partial<Awaited<ReturnType<LoyaltyService['getConfig']>>>) {
+    const current = await this.getConfig();
+    const merged = { ...current, ...patch };
+    await this.ds.query(
+      `INSERT INTO settings (key, value)
+       VALUES ('loyalty.rate', $1::jsonb)
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+      [JSON.stringify(merged)],
+    );
+    return merged;
+  }
+
   async history(customerId: string, limit = 100) {
     return this.ds.query(
       `

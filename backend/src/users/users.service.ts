@@ -103,11 +103,27 @@ export class UsersService {
       role_id: string;
       branch_id: string;
       is_active: boolean;
+      extra_permissions: string[];
+      denied_permissions: string[];
     }>,
   ): Promise<UserEntity> {
     const existing = await this.usersRepo.findOne({ where: { id } });
     if (!existing) throw new NotFoundException(`User ${id} not found`);
     await this.usersRepo.update(id, input);
+    return this.findById(id);
+  }
+
+  async setPermissionOverrides(
+    id: string,
+    extra_permissions: string[],
+    denied_permissions: string[],
+  ): Promise<UserEntity> {
+    const existing = await this.usersRepo.findOne({ where: { id } });
+    if (!existing) throw new NotFoundException(`User ${id} not found`);
+    await this.usersRepo.update(id, {
+      extra_permissions,
+      denied_permissions,
+    });
     return this.findById(id);
   }
 

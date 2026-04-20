@@ -680,7 +680,7 @@ function CreateReservationModal({ onClose }: { onClose: () => void }) {
         {
           variant_id: variant.id,
           product_name: p.name_ar,
-          sku: variant.sku,
+          sku: variant.sku || '',
           quantity: 1,
           unit_price: Number(variant.price_override ?? p.base_price ?? 0),
         },

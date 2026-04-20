@@ -21,8 +21,17 @@ import { cashDeskApi } from '@/api/cash-desk.api';
 const EGP = (n: number | string) =>
   `${Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ج.م`;
 
+type SupplierSort =
+  | 'name'
+  | 'balance_desc'
+  | 'balance_asc'
+  | 'overdue_desc'
+  | 'created_desc';
+
 export default function Suppliers() {
   const [q, setQ] = useState('');
+  const [sort, setSort] = useState<SupplierSort>('balance_desc');
+  const [onlyOutstanding, setOnlyOutstanding] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [selected, setSelected] = useState<Supplier | null>(null);
   const [payTarget, setPayTarget] = useState<Supplier | null>(null);
@@ -53,6 +62,49 @@ export default function Suppliers() {
     queryKey: ['suppliers-outstanding'],
     queryFn: suppliersApi.outstanding,
   });
+
+  const sortedSuppliers = useMemo(() => {
+    const m: Record<string, SupplierOutstanding> = {};
+    for (const o of outstanding) m[o.id] = o;
+    let list = suppliers.slice();
+    if (onlyOutstanding) {
+      list = list.filter(
+        (s) => Number(m[s.id]?.current_balance || s.current_balance || 0) > 0,
+      );
+    }
+    list.sort((a, b) => {
+      const oa = m[a.id];
+      const ob = m[b.id];
+      switch (sort) {
+        case 'name':
+          return String((a as any).full_name || (a as any).name || '').localeCompare(
+            String((b as any).full_name || (b as any).name || ''),
+            'ar',
+          );
+        case 'balance_asc':
+          return (
+            Number(oa?.current_balance || a.current_balance || 0) -
+            Number(ob?.current_balance || b.current_balance || 0)
+          );
+        case 'balance_desc':
+          return (
+            Number(ob?.current_balance || b.current_balance || 0) -
+            Number(oa?.current_balance || a.current_balance || 0)
+          );
+        case 'overdue_desc':
+          return (
+            Number((ob as any)?.overdue_amount || 0) -
+            Number((oa as any)?.overdue_amount || 0)
+          );
+        default:
+          return (
+            Date.parse(String((b as any).created_at || 0)) -
+            Date.parse(String((a as any).created_at || 0))
+          );
+      }
+    });
+    return list;
+  }, [suppliers, outstanding, sort, onlyOutstanding]);
 
   const outstandingMap = useMemo(() => {
     const m: Record<string, SupplierOutstanding> = {};
@@ -108,9 +160,9 @@ export default function Suppliers() {
         />
       </div>
 
-      {/* Search */}
-      <div className="card p-4">
-        <div className="relative">
+      {/* Search + sort + filter */}
+      <div className="card p-4 flex flex-wrap items-center gap-3">
+        <div className="relative flex-1 min-w-[220px]">
           <Search
             size={16}
             className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400"
@@ -122,6 +174,25 @@ export default function Suppliers() {
             onChange={(e) => setQ(e.target.value)}
           />
         </div>
+        <select
+          className="input max-w-[200px]"
+          value={sort}
+          onChange={(e) => setSort(e.target.value as SupplierSort)}
+        >
+          <option value="balance_desc">الرصيد الأعلى</option>
+          <option value="balance_asc">الرصيد الأقل</option>
+          <option value="overdue_desc">متأخر أكثر</option>
+          <option value="name">الاسم (أ-ي)</option>
+          <option value="created_desc">الأحدث أولاً</option>
+        </select>
+        <label className="inline-flex items-center gap-1 text-sm text-slate-600">
+          <input
+            type="checkbox"
+            checked={onlyOutstanding}
+            onChange={(e) => setOnlyOutstanding(e.target.checked)}
+          />
+          لديهم مستحق فقط
+        </label>
       </div>
 
       {/* Grid */}
@@ -131,7 +202,7 @@ export default function Suppliers() {
             جارٍ التحميل...
           </div>
         )}
-        {suppliers.map((s) => {
+        {sortedSuppliers.map((s) => {
           const o = outstandingMap[s.id];
           const due = Number(o?.current_balance || s.current_balance || 0);
           return (

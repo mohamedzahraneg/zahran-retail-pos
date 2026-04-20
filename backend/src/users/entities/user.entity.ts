@@ -47,6 +47,12 @@ export class UserEntity {
   @Column({ type: 'timestamptz', nullable: true })
   locked_until: Date;
 
+  @Column({ type: 'text', array: true, default: () => `'{}'::text[]` })
+  extra_permissions: string[];
+
+  @Column({ type: 'text', array: true, default: () => `'{}'::text[]` })
+  denied_permissions: string[];
+
   @CreateDateColumn({ type: 'timestamptz', name: 'created_at' })
   created_at: Date;
 

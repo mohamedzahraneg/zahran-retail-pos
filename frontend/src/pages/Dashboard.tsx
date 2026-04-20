@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Line, Doughnut, Bar } from 'react-chartjs-2';
 import {
@@ -33,6 +33,11 @@ import {
 import { dashboardApi } from '@/api/dashboard.api';
 import { accountingApi } from '@/api/accounting.api';
 import { ReturnsWidget } from '@/components/dashboard/ReturnsWidget';
+import {
+  PeriodSelector,
+  resolvePeriod,
+  type PeriodRange,
+} from '@/components/common/PeriodSelector';
 
 ChartJS.register(
   CategoryScale,
@@ -59,7 +64,7 @@ function shortDate(iso: string) {
   return d.toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit' });
 }
 
-function useRecommendations(data: any, pl: any) {
+function useRecommendations(data: any, pl: any, periodLabel = 'هذه الفترة') {
   return useMemo(() => {
     const recs: Array<{
       id: string;
@@ -74,24 +79,27 @@ function useRecommendations(data: any, pl: any) {
     const alerts = data?.alerts || [];
     const revenue30 = data?.revenue30 || [];
 
-    if (pl?.analysis) {
-      if (pl.analysis.headline === 'loss') {
+    if (pl) {
+      // Drive headline from the actual sign of net_profit, not just the
+      // backend's analytical label — negative always means loss.
+      const np = Number(pl.net_profit) || 0;
+      if (np < 0) {
         recs.push({
           id: 'pl-loss',
           priority: 'critical',
           icon: TrendingDown,
-          title: `خسارة هذا الشهر: ${EGP.format(Math.abs(Number(pl.net_profit) || 0))}`,
+          title: `خسارة ${periodLabel}: ${EGP.format(Math.abs(np))}`,
           detail:
-            pl.analysis.reasons?.[0]?.message ||
+            pl.analysis?.reasons?.[0]?.message ||
             'راجع المصروفات والإيرادات لمعرفة السبب.',
           action: { to: '/accounting', label: 'افتح تقرير الأرباح' },
         });
-      } else if (pl.analysis.headline === 'profit' && pl.net_profit > 0) {
+      } else if (np > 0) {
         recs.push({
           id: 'pl-profit',
           priority: 'low',
           icon: TrendingUp,
-          title: `ربح الشهر: ${EGP.format(Number(pl.net_profit) || 0)}`,
+          title: `ربح ${periodLabel}: ${EGP.format(np)}`,
           detail: `هامش صافي ${Number(pl.net_margin_pct).toFixed(1)}%.`,
           action: { to: '/accounting', label: 'عرض التفاصيل' },
         });
@@ -196,17 +204,29 @@ export default function Dashboard() {
     refetchInterval: 60_000,
   });
 
-  const today = new Date().toISOString().slice(0, 10);
-  const monthStart = today.slice(0, 7) + '-01';
+  const [period, setPeriod] = useState<PeriodRange>(() =>
+    resolvePeriod('month'),
+  );
 
   const { data: pl } = useQuery({
-    queryKey: ['dashboard-pl', monthStart, today],
+    queryKey: ['dashboard-pl', period.from, period.to],
     queryFn: () =>
-      accountingApi.profitAndLossAnalysis({ from: monthStart, to: today }),
+      accountingApi.profitAndLossAnalysis({
+        from: period.from,
+        to: period.to,
+      }),
     refetchInterval: 120_000,
   });
 
-  const recs = useRecommendations(data, pl);
+  const periodNoun = {
+    day: 'اليوم',
+    week: 'الأسبوع',
+    month: 'الشهر',
+    year: 'السنة',
+    custom: 'الفترة',
+  }[period.key];
+
+  const recs = useRecommendations(data, pl, periodNoun);
 
   if (isLoading) {
     return (
@@ -251,21 +271,45 @@ export default function Dashboard() {
             </div>
           </div>
           <div className="text-left">
-            <div className="text-xs opacity-80 mb-1">صافي ربح الشهر</div>
-            <div
-              className={`text-3xl font-black ${
-                Number(pl?.net_profit || 0) >= 0
-                  ? 'text-emerald-200'
-                  : 'text-rose-200'
-              }`}
-            >
-              {EGP.format(Number(pl?.net_profit || 0))}
-            </div>
+            {(() => {
+              const np = Number(pl?.net_profit || 0);
+              const loss = np < 0;
+              return (
+                <>
+                  <div className="text-xs opacity-80 mb-1">
+                    {loss
+                      ? `صافي خسارة ${periodNoun}`
+                      : `صافي ربح ${periodNoun}`}
+                  </div>
+                  <div
+                    className={`text-3xl font-black ${
+                      loss ? 'text-rose-200' : 'text-emerald-200'
+                    }`}
+                  >
+                    {EGP.format(Math.abs(np))}
+                  </div>
+                </>
+              );
+            })()}
             <div className="text-xs opacity-80 mt-1">
-              هامش {Number(pl?.net_margin_pct || 0).toFixed(1)}% ·{' '}
-              {Number(pl?.invoice_count || 0)} فاتورة
+              {(() => {
+                const m = Number(pl?.net_margin_pct || 0);
+                return (
+                  <>
+                    {m < 0 ? 'هامش خسارة' : 'هامش'} {m.toFixed(1)}%
+                  </>
+                );
+              })()}{' '}
+              · {Number(pl?.invoice_count || 0)} فاتورة
             </div>
           </div>
+        </div>
+        <div className="relative mt-4 bg-white/10 rounded-lg p-2 backdrop-blur-sm">
+          <PeriodSelector
+            value={period}
+            onChange={setPeriod}
+            className="text-white [&_.bg-slate-100]:bg-white/20 [&_button]:text-white [&_button:hover]:text-white [&_.bg-white]:bg-white [&_.bg-white]:text-indigo-700"
+          />
         </div>
       </div>
 

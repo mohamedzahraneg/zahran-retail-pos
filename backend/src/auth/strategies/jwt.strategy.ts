@@ -39,8 +39,22 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
       userId: user.id,
       username: user.username,
       role: user.role?.code || 'guest',
-      permissions: user.role?.permissions || [],
+      permissions: mergePermissions(
+        user.role?.permissions || [],
+        (user as any).extra_permissions || [],
+        (user as any).denied_permissions || [],
+      ),
       branchId: user.branch_id,
     };
   }
+}
+
+export function mergePermissions(
+  rolePerms: string[],
+  extra: string[],
+  denied: string[],
+): string[] {
+  const granted = new Set<string>([...(rolePerms || []), ...(extra || [])]);
+  for (const d of denied || []) granted.delete(d);
+  return Array.from(granted);
 }

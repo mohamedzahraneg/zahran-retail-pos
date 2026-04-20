@@ -11,6 +11,8 @@ export interface User {
   is_active: boolean;
   last_login_at?: string;
   created_at: string;
+  extra_permissions?: string[];
+  denied_permissions?: string[];
 }
 
 export interface Role {
@@ -63,4 +65,9 @@ export const usersApi = {
     unwrap<{ activated: true }>(api.patch(`/users/${id}/activate`, {})),
 
   roles: () => unwrap<Role[]>(api.get('/users/meta/roles')),
+
+  setPermissions: (
+    id: string,
+    body: { extra_permissions: string[]; denied_permissions: string[] },
+  ) => unwrap<User>(api.patch(`/users/${id}/permissions`, body)),
 };

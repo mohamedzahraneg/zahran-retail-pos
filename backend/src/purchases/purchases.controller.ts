@@ -16,7 +16,7 @@ import {
   CreatePurchaseDto,
   ListPurchasesDto,
 } from './dto/purchase.dto';
-import { Roles } from '../common/decorators/roles.decorator';
+import { Permissions, Roles } from '../common/decorators/roles.decorator';
 
 @ApiBearerAuth()
 @ApiTags('purchases')
@@ -80,8 +80,23 @@ export class PurchasesController {
   }
 
   @Patch(':id/cancel')
-  @Roles('admin', 'manager')
-  cancel(@Param('id', ParseUUIDPipe) id: string) {
-    return this.purchases.cancel(id);
+  @Permissions('purchases.cancel')
+  cancel(@Param('id', ParseUUIDPipe) id: string, @Req() req: any) {
+    return this.purchases.cancel(id, req.user?.userId);
+  }
+
+  @Post(':id/edit')
+  @Permissions('purchases.edit')
+  edit(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CreatePurchaseDto & { edit_reason?: string },
+    @Req() req: any,
+  ) {
+    return this.purchases.edit(
+      id,
+      dto,
+      req.user?.userId,
+      dto?.edit_reason || 'تعديل فاتورة مشتريات',
+    );
   }
 }

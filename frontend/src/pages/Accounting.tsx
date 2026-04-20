@@ -16,6 +16,12 @@ import {
 import toast from 'react-hot-toast';
 import { accountingApi, Expense, ExpenseCategory } from '@/api/accounting.api';
 import { settingsApi } from '@/api/settings.api';
+import { profitLabel, marginLabel, formatEGP } from '@/lib/profit';
+import {
+  PeriodSelector,
+  resolvePeriod,
+  type PeriodRange,
+} from '@/components/common/PeriodSelector';
 
 const EGP = (n: number | string) =>
   `${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ج.م`;
@@ -31,42 +37,87 @@ const TABS: { key: TabKey; label: string; icon: any }[] = [
 ];
 
 export default function Accounting() {
-  const today = new Date().toISOString().slice(0, 10);
-  const monthStart = today.slice(0, 7) + '-01';
+  const todayISO = new Date().toISOString().slice(0, 10);
+  const monthStart = todayISO.slice(0, 7) + '-01';
 
   const [tab, setTab] = useState<TabKey>('expenses');
   const [from, setFrom] = useState(monthStart);
-  const [to, setTo] = useState(today);
+  const [to, setTo] = useState(todayISO);
+
+  // Period selector drives the top KPI cards.
+  const [period, setPeriod] = useState<PeriodRange>(() =>
+    resolvePeriod('month'),
+  );
+  const periodNoun = {
+    day: 'اليوم',
+    week: 'الأسبوع',
+    month: 'الشهر',
+    year: 'السنة',
+    custom: 'الفترة',
+  }[period.key];
 
   const kpis = useQuery({
     queryKey: ['accounting-kpis'],
     queryFn: () => accountingApi.kpis(),
   });
 
+  // Period-scoped P&L powers the dynamic KPI cards (اليوم / الأسبوع / الشهر / السنة).
+  const periodPL = useQuery({
+    queryKey: ['accounting-pl-period', period.from, period.to],
+    queryFn: () =>
+      accountingApi.profitAndLoss({ from: period.from, to: period.to }),
+  });
+
   return (
     <div className="space-y-6">
-      {/* KPIs */}
+      {/* Period switcher */}
+      <div className="card p-3 flex items-center justify-between flex-wrap gap-3">
+        <div className="text-sm font-bold text-slate-700">
+          ملخص مالي: {periodNoun}
+        </div>
+        <PeriodSelector value={period} onChange={setPeriod} />
+      </div>
+
+      {/* KPIs — scoped to selected period */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        {(() => {
+          const todayP = profitLabel(kpis.data?.today.net_profit ?? 0, 'ربح اليوم');
+          return (
+            <KpiCard
+              title={todayP.label}
+              value={todayP.amount}
+              icon={TrendingUp}
+              color={todayP.isLoss ? 'rose' : 'emerald'}
+              subtitle={`إيراد ${EGP(kpis.data?.today.revenue ?? 0)}`}
+            />
+          );
+        })()}
+        {(() => {
+          const netP = Number(periodPL.data?.net_profit ?? 0);
+          const label = profitLabel(netP, `ربح ${periodNoun}`);
+          const marg = marginLabel(
+            periodPL.data?.net_margin_pct ?? 0,
+            'هامش الربح',
+          );
+          return (
+            <KpiCard
+              title={label.label}
+              value={label.amount}
+              icon={TrendingUp}
+              color={label.isLoss ? 'rose' : 'indigo'}
+              subtitle={`${marg.label} ${marg.signedAmount}`}
+            />
+          );
+        })()}
         <KpiCard
-          title="ربح اليوم"
-          value={EGP(kpis.data?.today.net_profit ?? 0)}
-          icon={TrendingUp}
-          color="emerald"
-          subtitle={`إيراد ${EGP(kpis.data?.today.revenue ?? 0)}`}
-        />
-        <KpiCard
-          title="ربح الشهر"
-          value={EGP(kpis.data?.month.net_profit ?? 0)}
-          icon={TrendingUp}
-          color="indigo"
-          subtitle={`هامش ${(kpis.data?.month.net_margin_pct ?? 0).toFixed(1)}%`}
-        />
-        <KpiCard
-          title="مصاريف الشهر"
-          value={EGP(kpis.data?.month.total_expenses ?? 0)}
+          title={`مصاريف ${periodNoun}`}
+          value={EGP(
+            Number(periodPL.data?.operating_expenses ?? 0) +
+              Number(periodPL.data?.allocated_expenses ?? 0),
+          )}
           icon={Receipt}
           color="amber"
-          subtitle={`COGS ${EGP(kpis.data?.month.cogs ?? 0)}`}
+          subtitle={`COGS ${EGP(periodPL.data?.cogs ?? 0)}`}
         />
         <KpiCard
           title="مصاريف بانتظار الاعتماد"
@@ -926,10 +977,17 @@ function PnLTab({ from, to }: { from: string; to: string }) {
 
   return (
     <div className="space-y-6">
-      {/* Smart analysis headline */}
+      {/* Smart analysis headline — tone ALWAYS follows the sign of net_profit */}
       <div
         className={`rounded-xl p-5 border-2 ${
-          headlineClasses[a?.headline_tone] || headlineClasses.amber
+          (() => {
+            const p = profitLabel(d.net_profit);
+            return p.isLoss
+              ? headlineClasses.red
+              : p.isProfit
+                ? headlineClasses.green
+                : headlineClasses.amber;
+          })()
         }`}
       >
         <div className="flex items-center justify-between flex-wrap gap-3">
@@ -937,14 +995,31 @@ function PnLTab({ from, to }: { from: string; to: string }) {
             <div className="text-xs uppercase opacity-70 font-bold tracking-wide">
               التحليل الذكي للفترة
             </div>
-            <div className="text-3xl font-black mt-1">{a?.headline_label}</div>
+            <div className="text-3xl font-black mt-1">
+              {(() => {
+                const p = profitLabel(d.net_profit, 'صافي الربح');
+                // Prefer the analyst's own headline when provided, but
+                // ALWAYS reflect the actual sign of the number.
+                if (p.isLoss) return 'خسارة صافية';
+                if (p.isProfit) return 'ربح صافي';
+                return 'تعادل';
+              })()}
+            </div>
             <div className="text-sm mt-1 opacity-80">
-              صافي الربح: <b>{EGP(d.net_profit)}</b> · هامش صافي{' '}
-              <b>{d.net_margin_pct.toFixed(1)}%</b>
+              {(() => {
+                const p = profitLabel(d.net_profit, 'صافي الربح');
+                const m = marginLabel(d.net_margin_pct, 'هامش الربح');
+                return (
+                  <>
+                    {p.label}: <b className={p.color}>{p.amount}</b> ·{' '}
+                    {m.label}: <b className={m.color}>{m.signedAmount}</b>
+                  </>
+                );
+              })()}
             </div>
           </div>
           <div className="text-5xl">
-            {a?.headline === 'profit' ? '📈' : a?.headline === 'loss' ? '📉' : '⚖️'}
+            {profitLabel(d.net_profit).icon}
           </div>
         </div>
 
@@ -985,27 +1060,48 @@ function PnLTab({ from, to }: { from: string; to: string }) {
         <Row label="صافي الإيرادات" value={d.net_revenue} bold />
         <Row label="(−) تكلفة البضاعة (COGS)" value={d.cogs} indent color="text-amber-700" />
         <Row label="(−) مصاريف مخصصة للتكلفة" value={d.allocated_expenses} indent color="text-amber-700" />
-        <Row label="مجمل الربح" value={d.gross_profit} bold />
+        {(() => {
+          const gp = profitLabel(d.gross_profit, 'مجمل الربح');
+          return (
+            <Row
+              label={gp.label}
+              value={d.gross_profit}
+              bold
+              color={gp.color}
+            />
+          );
+        })()}
         <Row label="(−) المصاريف التشغيلية" value={d.operating_expenses} indent color="text-amber-700" />
-        <Row
-          label="صافي الربح"
-          value={d.net_profit}
-          bold
-          color={d.net_profit >= 0 ? 'text-emerald-700' : 'text-rose-700'}
-        />
+        {(() => {
+          const np = profitLabel(d.net_profit, 'صافي الربح');
+          return (
+            <Row
+              label={np.label}
+              value={d.net_profit}
+              bold
+              color={np.color}
+            />
+          );
+        })()}
         <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
-          <div className="bg-white rounded-lg p-3 border border-slate-200">
-            <div className="text-slate-500">هامش الربح الإجمالي</div>
-            <div className="font-bold text-emerald-700">
-              {d.gross_margin_pct.toFixed(1)}%
-            </div>
-          </div>
-          <div className="bg-white rounded-lg p-3 border border-slate-200">
-            <div className="text-slate-500">صافي هامش الربح</div>
-            <div className="font-bold text-indigo-700">
-              {d.net_margin_pct.toFixed(1)}%
-            </div>
-          </div>
+          {(() => {
+            const gm = marginLabel(d.gross_margin_pct, 'هامش الربح الإجمالي');
+            return (
+              <div className="bg-white rounded-lg p-3 border border-slate-200">
+                <div className="text-slate-500">{gm.label}</div>
+                <div className={`font-bold ${gm.color}`}>{gm.signedAmount}</div>
+              </div>
+            );
+          })()}
+          {(() => {
+            const nm = marginLabel(d.net_margin_pct, 'صافي هامش الربح');
+            return (
+              <div className="bg-white rounded-lg p-3 border border-slate-200">
+                <div className="text-slate-500">{nm.label}</div>
+                <div className={`font-bold ${nm.color}`}>{nm.signedAmount}</div>
+              </div>
+            );
+          })()}
         </div>
       </div>
 

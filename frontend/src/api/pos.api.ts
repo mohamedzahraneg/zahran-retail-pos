@@ -71,4 +71,9 @@ export const posApi = {
 
   void: (id: string, reason: string) =>
     unwrap<{ voided: boolean }>(api.post(`/pos/invoices/${id}/void`, { reason })),
+
+  edit: (id: string, body: CreateInvoicePayload & { edit_reason?: string }) =>
+    unwrap<{ replaced: string; invoice: any }>(
+      api.post(`/pos/invoices/${id}/edit`, body),
+    ),
 };

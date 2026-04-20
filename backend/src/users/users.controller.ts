@@ -9,9 +9,9 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
-import { IsString, MinLength, IsOptional, IsEmail } from 'class-validator';
+import { IsArray, IsEmail, IsOptional, IsString, MinLength } from 'class-validator';
 import { UsersService } from './users.service';
-import { Roles } from '../common/decorators/roles.decorator';
+import { Permissions, Roles } from '../common/decorators/roles.decorator';
 import { CurrentUser, JwtUser } from '../common/decorators/current-user.decorator';
 
 class CreateUserDto {
@@ -36,6 +36,11 @@ class ChangePasswordDto {
   @IsString() @MinLength(6) new_password: string;
 }
 
+class PermissionOverridesDto {
+  @IsArray() extra_permissions: string[];
+  @IsArray() denied_permissions: string[];
+}
+
 @ApiBearerAuth()
 @ApiTags('users')
 @Controller('users')
@@ -43,7 +48,7 @@ export class UsersController {
   constructor(private readonly users: UsersService) {}
 
   @Get()
-  @Roles('admin', 'manager')
+  @Permissions('users.view')
   list() {
     return this.users.findAll();
   }
@@ -54,19 +59,19 @@ export class UsersController {
   }
 
   @Get(':id')
-  @Roles('admin', 'manager')
+  @Permissions('users.view')
   findOne(@Param('id', ParseUUIDPipe) id: string) {
     return this.users.findById(id);
   }
 
   @Post()
-  @Roles('admin')
+  @Permissions('users.manage')
   create(@Body() dto: CreateUserDto) {
     return this.users.create(dto);
   }
 
   @Patch(':id/password')
-  @Roles('admin')
+  @Permissions('users.manage')
   changePassword(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: ChangePasswordDto,
@@ -77,19 +82,19 @@ export class UsersController {
   }
 
   @Patch(':id/deactivate')
-  @Roles('admin')
+  @Permissions('users.manage')
   deactivate(@Param('id', ParseUUIDPipe) id: string) {
     return this.users.deactivate(id).then(() => ({ deactivated: true }));
   }
 
   @Patch(':id/activate')
-  @Roles('admin')
+  @Permissions('users.manage')
   activate(@Param('id', ParseUUIDPipe) id: string) {
     return this.users.activate(id).then(() => ({ activated: true }));
   }
 
   @Patch(':id')
-  @Roles('admin')
+  @Permissions('users.manage')
   update(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateUserDto,
@@ -98,8 +103,21 @@ export class UsersController {
   }
 
   @Get('meta/roles')
-  @Roles('admin', 'manager')
+  @Permissions('users.view')
   listRoles() {
     return this.users.listRoles();
+  }
+
+  @Patch(':id/permissions')
+  @Permissions('users.manage')
+  setPermissions(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: PermissionOverridesDto,
+  ) {
+    return this.users.setPermissionOverrides(
+      id,
+      dto.extra_permissions || [],
+      dto.denied_permissions || [],
+    );
   }
 }

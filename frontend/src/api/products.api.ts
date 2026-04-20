@@ -2,7 +2,8 @@ import { api, unwrap } from './client';
 
 export interface Product {
   id: string;
-  sku_root: string;
+  /** Server auto-generates when blank. */
+  sku_root?: string;
   name_ar: string;
   name_en?: string;
   type: 'shoe' | 'bag' | 'accessory';
@@ -39,7 +40,8 @@ export interface SizeOption {
 export interface Variant {
   id: string;
   product_id: string;
-  sku: string;
+  /** Server auto-generates when blank. */
+  sku?: string;
   barcode?: string | null;
   color?: string | null;
   color_id?: string | null;
@@ -88,4 +90,18 @@ export const productsApi = {
   // Master lists
   colors: () => unwrap<ColorOption[]>(api.get('/products/catalog/colors')),
   sizes: () => unwrap<SizeOption[]>(api.get('/products/catalog/sizes')),
+
+  /** Preview the next product SKU the DB trigger would assign. */
+  nextProductSku: (type: string) =>
+    unwrap<{ sku: string }>(
+      api.get('/products/catalog/next-sku', { params: { type } }),
+    ),
+
+  /** Preview the variant SKU for a given product + color + size combo. */
+  nextVariantSku: (product_id: string, color_id: string, size_id?: string) =>
+    unwrap<{ sku: string }>(
+      api.get('/products/catalog/next-variant-sku', {
+        params: { product_id, color_id, size_id: size_id || undefined },
+      }),
+    ),
 };

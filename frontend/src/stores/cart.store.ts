@@ -117,8 +117,8 @@ export const useCartStore = create<CartState>((set, get) => ({
           {
             variantId: variant.id,
             productId: product.id,
-            sku: variant.sku,
-            productCode: product.sku_root || variant.sku,
+            sku: variant.sku || '',
+            productCode: product.sku_root || variant.sku || '',
             name: product.name_ar,
             color: variant.color ?? null,
             size: variant.size ?? null,

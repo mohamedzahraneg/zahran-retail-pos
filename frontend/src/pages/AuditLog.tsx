@@ -16,12 +16,57 @@ const OPERATIONS: Record<'I' | 'U' | 'D', { label: string; color: string }> = {
   D: { label: 'حذف', color: 'bg-rose-50 text-rose-700' },
 };
 
+const deviceSummary = (meta: any): string => {
+  if (!meta || typeof meta !== 'object') return '—';
+  const d = meta.device || {};
+  const browser = d.browser || meta.browser;
+  const os = d.os || meta.os;
+  const type = d.device_type || meta.device_type || 'desktop';
+  const icon = type === 'mobile' ? '📱' : type === 'tablet' ? '📱' : '💻';
+  const parts = [browser, os].filter(Boolean);
+  return parts.length ? `${icon} ${parts.join(' · ')}` : icon + ' —';
+};
+
+const fmtDate = (iso: string) => {
+  const d = new Date(iso);
+  const date = d.toLocaleDateString('en-US', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  });
+  const time = d.toLocaleTimeString('en-US', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true,
+  });
+  const day = d.toLocaleDateString('ar-EG', { weekday: 'long' });
+  return { date, time, day };
+};
+
+const parseActionLabel = (
+  action: string,
+): { op: 'I' | 'U' | 'D' | null; table: string | null } => {
+  // "إضافة invoices" / "تعديل invoices" / "حذف invoices"
+  const m = action.match(/^(إضافة|تعديل|حذف)\s+(.+)$/);
+  if (m) {
+    const op = m[1] === 'إضافة' ? 'I' : m[1] === 'تعديل' ? 'U' : 'D';
+    return { op, table: m[2] };
+  }
+  return { op: null, table: null };
+};
+
 export default function AuditLogPage() {
   const [tab, setTab] = useState<'activity' | 'changes'>('activity');
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
   const [search, setSearch] = useState('');
   const [selectedChange, setSelectedChange] = useState<ChangeLog | null>(null);
+  const [actionDrillDown, setActionDrillDown] = useState<string | null>(null);
+  const [userDrillDown, setUserDrillDown] = useState<{
+    user_id: string;
+    name: string;
+  } | null>(null);
 
   const { data: stats } = useQuery({
     queryKey: ['audit-stats', from, to],
@@ -107,15 +152,22 @@ export default function AuditLogPage() {
             </div>
             <div className="space-y-1">
               {stats.top_users.slice(0, 3).map((u) => (
-                <div
+                <button
                   key={u.user_id}
-                  className="flex items-center justify-between text-sm"
+                  onClick={() =>
+                    setUserDrillDown({
+                      user_id: u.user_id,
+                      name: u.full_name || u.username || 'مستخدم',
+                    })
+                  }
+                  className="w-full flex items-center justify-between text-sm hover:bg-slate-50 rounded px-1 py-0.5 transition"
+                  title="اضغط لعرض التفاصيل"
                 >
-                  <span className="font-medium truncate">
+                  <span className="font-medium truncate text-right">
                     {u.full_name || u.username}
                   </span>
                   <span className="font-bold text-brand-600">{u.events}</span>
-                </div>
+                </button>
               ))}
               {stats.top_users.length === 0 && (
                 <div className="text-xs text-slate-400">لا توجد بيانات</div>
@@ -126,14 +178,21 @@ export default function AuditLogPage() {
             <div className="text-xs text-slate-500 mb-2">أكثر الإجراءات</div>
             <div className="space-y-1">
               {stats.top_actions.slice(0, 3).map((a) => (
-                <div
+                <button
                   key={a.action}
-                  className="flex items-center justify-between text-sm"
+                  onClick={() => setActionDrillDown(a.action)}
+                  className="w-full flex items-center justify-between text-sm hover:bg-slate-50 rounded px-1 py-0.5 transition"
+                  title="اضغط لعرض تفاصيل الإجراء"
                 >
-                  <span className="font-medium truncate">{a.action}</span>
+                  <span className="font-medium truncate text-right">
+                    {a.action}
+                  </span>
                   <span className="font-bold text-brand-600">{a.events}</span>
-                </div>
+                </button>
               ))}
+              {stats.top_actions.length === 0 && (
+                <div className="text-xs text-slate-400">لا توجد بيانات</div>
+              )}
             </div>
           </div>
         </section>
@@ -201,42 +260,49 @@ export default function AuditLogPage() {
               <table className="w-full text-sm">
                 <thead className="bg-slate-50 text-slate-600">
                   <tr>
-                    <th className="p-3 text-right">الوقت</th>
+                    <th className="p-3 text-right">اليوم</th>
+                    <th className="p-3 text-right">التاريخ</th>
+                    <th className="p-3 text-right">الساعة</th>
                     <th className="p-3 text-right">المستخدم</th>
                     <th className="p-3 text-right">الإجراء</th>
-                    <th className="p-3 text-right">الكيان</th>
                     <th className="p-3 text-right">الوصف</th>
+                    <th className="p-3 text-right">الجهاز</th>
                     <th className="p-3 text-right">IP</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {filteredActivity.map((a) => (
-                    <tr key={a.id} className="hover:bg-slate-50">
-                      <td className="p-3 text-xs text-slate-500 whitespace-nowrap">
-                        {new Date(a.created_at).toLocaleString('en-US')}
-                      </td>
-                      <td className="p-3 font-medium">
-                        {a.full_name || a.username || '—'}
-                      </td>
-                      <td className="p-3">
-                        <span className="px-2 py-1 rounded-md bg-slate-100 text-slate-700 text-xs font-mono">
-                          {a.action}
-                        </span>
-                      </td>
-                      <td className="p-3 text-slate-600 text-xs">
-                        {a.entity}
-                        {a.entity_id && (
-                          <div className="font-mono text-[10px] text-slate-400 truncate max-w-[120px]">
-                            {a.entity_id}
-                          </div>
-                        )}
-                      </td>
-                      <td className="p-3 text-slate-700">{a.summary || '—'}</td>
-                      <td className="p-3 text-xs text-slate-500 font-mono">
-                        {a.ip_address || '—'}
-                      </td>
-                    </tr>
-                  ))}
+                  {filteredActivity.map((a) => {
+                    const t = fmtDate(a.created_at);
+                    return (
+                      <tr key={a.id} className="hover:bg-slate-50">
+                        <td className="p-3 text-xs">{t.day}</td>
+                        <td className="p-3 text-xs font-mono">{t.date}</td>
+                        <td className="p-3 text-xs font-mono">{t.time}</td>
+                        <td className="p-3 font-medium">
+                          {a.full_name || a.username || '—'}
+                        </td>
+                        <td className="p-3">
+                          <span className="px-2 py-1 rounded-md bg-slate-100 text-slate-700 text-xs font-mono">
+                            {a.action}
+                          </span>
+                        </td>
+                        <td className="p-3 text-slate-700">
+                          {a.summary || '—'}
+                          {a.entity && a.entity !== 'other' && (
+                            <span className="mr-1 text-[10px] text-slate-400">
+                              ({a.entity})
+                            </span>
+                          )}
+                        </td>
+                        <td className="p-3 text-xs text-slate-600">
+                          {deviceSummary(a.metadata)}
+                        </td>
+                        <td className="p-3 text-xs text-slate-500 font-mono">
+                          {a.ip_address || '—'}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -304,6 +370,404 @@ export default function AuditLogPage() {
           onClose={() => setSelectedChange(null)}
         />
       )}
+
+      {actionDrillDown && (
+        <ActionDrillDownModal
+          action={actionDrillDown}
+          from={from}
+          to={to}
+          onClose={() => setActionDrillDown(null)}
+        />
+      )}
+
+      {userDrillDown && (
+        <UserDrillDownModal
+          user={userDrillDown}
+          from={from}
+          to={to}
+          onClose={() => setUserDrillDown(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function ActionDrillDownModal({
+  action,
+  from,
+  to,
+  onClose,
+}: {
+  action: string;
+  from: string;
+  to: string;
+  onClose: () => void;
+}) {
+  const parsed = parseActionLabel(action);
+
+  const { data: changes = [], isLoading: chgLoading } = useQuery({
+    queryKey: ['audit-drill-changes', action, from, to],
+    queryFn: () =>
+      auditApi.changes({
+        table_name: parsed.table || undefined,
+        operation: parsed.op || undefined,
+        from: from || undefined,
+        to: to || undefined,
+        limit: 500,
+      }),
+    enabled: parsed.op !== null,
+  });
+
+  const { data: activity = [], isLoading: actLoading } = useQuery({
+    queryKey: ['audit-drill-activity', action, from, to],
+    queryFn: () =>
+      auditApi.activity({
+        action,
+        from: from || undefined,
+        to: to || undefined,
+        limit: 500,
+      }),
+    enabled: parsed.op === null,
+  });
+
+  const loading = parsed.op !== null ? chgLoading : actLoading;
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="modal-panel w-full max-w-3xl space-y-4 max-h-[90vh] overflow-y-auto"
+      >
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-lg font-bold">تفاصيل الإجراء</h2>
+            <div className="text-xs text-slate-500 mt-1">
+              <span className="font-bold text-brand-600">{action}</span>
+              {from || to ? (
+                <span className="mr-2">
+                  · {from || '—'} ← {to || 'اليوم'}
+                </span>
+              ) : null}
+            </div>
+          </div>
+          <button onClick={onClose} className="icon-btn">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {loading ? (
+          <div className="p-10 text-center text-slate-400">جاري التحميل…</div>
+        ) : parsed.op !== null ? (
+          changes.length === 0 ? (
+            <div className="p-10 text-center text-slate-400">
+              لا توجد سجلات لهذا الإجراء
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-slate-50 text-slate-600">
+                  <tr>
+                    <th className="p-2 text-right">اليوم</th>
+                    <th className="p-2 text-right">التاريخ</th>
+                    <th className="p-2 text-right">الساعة</th>
+                    <th className="p-2 text-right">المستخدم</th>
+                    <th className="p-2 text-right">السجل</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {changes.map((c) => {
+                    const t = fmtDate(c.changed_at);
+                    return (
+                      <tr key={c.id} className="hover:bg-slate-50">
+                        <td className="p-2 text-xs text-slate-600">{t.day}</td>
+                        <td className="p-2 text-xs text-slate-600 font-mono">
+                          {t.date}
+                        </td>
+                        <td className="p-2 text-xs text-slate-600 font-mono">
+                          {t.time}
+                        </td>
+                        <td className="p-2 text-xs">
+                          {c.full_name || c.username || '—'}
+                        </td>
+                        <td className="p-2 text-xs font-mono text-slate-500 truncate max-w-[180px]">
+                          {c.record_id}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              <div className="mt-3 text-xs text-slate-500">
+                إجمالي السجلات:{' '}
+                <b className="text-slate-800">{changes.length}</b>
+              </div>
+            </div>
+          )
+        ) : activity.length === 0 ? (
+          <div className="p-10 text-center text-slate-400">
+            لا توجد أحداث لهذا الإجراء
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 text-slate-600">
+                <tr>
+                  <th className="p-2 text-right">اليوم</th>
+                  <th className="p-2 text-right">التاريخ</th>
+                  <th className="p-2 text-right">الساعة</th>
+                  <th className="p-2 text-right">المستخدم</th>
+                  <th className="p-2 text-right">الوصف</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {activity.map((a) => {
+                  const t = fmtDate(a.created_at);
+                  return (
+                    <tr key={a.id} className="hover:bg-slate-50">
+                      <td className="p-2 text-xs">{t.day}</td>
+                      <td className="p-2 text-xs font-mono">{t.date}</td>
+                      <td className="p-2 text-xs font-mono">{t.time}</td>
+                      <td className="p-2 text-xs">
+                        {a.full_name || a.username || '—'}
+                      </td>
+                      <td className="p-2 text-xs">{a.summary || '—'}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        <div className="flex justify-end">
+          <button onClick={onClose} className="btn-ghost">
+            إغلاق
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function UserDrillDownModal({
+  user,
+  from,
+  to,
+  onClose,
+}: {
+  user: { user_id: string; name: string };
+  from: string;
+  to: string;
+  onClose: () => void;
+}) {
+  const { data: changes = [], isLoading } = useQuery({
+    queryKey: ['audit-drill-user-changes', user.user_id, from, to],
+    queryFn: () =>
+      auditApi.changes({
+        changed_by: user.user_id,
+        from: from || undefined,
+        to: to || undefined,
+        limit: 500,
+      }),
+  });
+
+  const { data: activity = [] } = useQuery({
+    queryKey: ['audit-drill-user-activity', user.user_id, from, to],
+    queryFn: () =>
+      auditApi.activity({
+        user_id: user.user_id,
+        from: from || undefined,
+        to: to || undefined,
+        limit: 500,
+      }),
+  });
+
+  const combined = [
+    ...changes.map((c) => ({
+      id: `c-${c.id}`,
+      at: c.changed_at,
+      action:
+        c.operation === 'I'
+          ? 'إضافة'
+          : c.operation === 'U'
+            ? 'تعديل'
+            : 'حذف',
+      target: c.table_name,
+      detail: c.record_id,
+      device: '—',
+      ip: '—',
+    })),
+    ...activity.map((a) => ({
+      id: `a-${a.id}`,
+      at: a.created_at,
+      action: a.action,
+      target: a.entity,
+      detail: a.summary || '—',
+      device: deviceSummary(a.metadata),
+      ip: a.ip_address || '—',
+    })),
+  ].sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime());
+
+  const logins = activity.filter((a) => a.action === 'login');
+  const logouts = activity.filter((a) => a.action === 'logout');
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="modal-panel w-full max-w-3xl space-y-4 max-h-[90vh] overflow-y-auto"
+      >
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-lg font-bold flex items-center gap-2">
+              <UserIcon className="w-5 h-5 text-brand-500" />
+              نشاط المستخدم: {user.name}
+            </h2>
+            <div className="text-xs text-slate-500 mt-1">
+              {from || to ? (
+                <span>
+                  {from || '—'} ← {to || 'اليوم'}
+                </span>
+              ) : (
+                'آخر 30 يوم'
+              )}
+            </div>
+          </div>
+          <button onClick={onClose} className="icon-btn">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* Login / logout quick summary */}
+        {(logins.length > 0 || logouts.length > 0) && (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div className="card p-3 bg-emerald-50/60 border border-emerald-100">
+              <div className="text-xs text-emerald-700 font-bold mb-2">
+                آخر تسجيلات الدخول ({logins.length})
+              </div>
+              <div className="space-y-1 max-h-40 overflow-y-auto">
+                {logins.slice(0, 5).map((a) => {
+                  const t = fmtDate(a.created_at);
+                  const success = a.metadata?.success !== false;
+                  return (
+                    <div
+                      key={a.id}
+                      className="flex items-center justify-between text-xs"
+                    >
+                      <div>
+                        <span className="font-mono text-slate-700">
+                          {t.date} {t.time}
+                        </span>
+                        <span className="text-slate-500 mr-1">· {t.day}</span>
+                        {!success && (
+                          <span className="mr-1 text-rose-600 font-bold">
+                            فشل
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-slate-600 text-left">
+                        <div>{deviceSummary(a.metadata)}</div>
+                        <div className="font-mono text-[10px] text-slate-400">
+                          {a.ip_address || '—'}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+            <div className="card p-3 bg-slate-50 border border-slate-200">
+              <div className="text-xs text-slate-700 font-bold mb-2">
+                آخر تسجيلات الخروج ({logouts.length})
+              </div>
+              <div className="space-y-1 max-h-40 overflow-y-auto">
+                {logouts.length === 0 ? (
+                  <div className="text-xs text-slate-400">لا يوجد</div>
+                ) : (
+                  logouts.slice(0, 5).map((a) => {
+                    const t = fmtDate(a.created_at);
+                    return (
+                      <div
+                        key={a.id}
+                        className="flex items-center justify-between text-xs"
+                      >
+                        <div>
+                          <span className="font-mono text-slate-700">
+                            {t.date} {t.time}
+                          </span>
+                          <span className="text-slate-500 mr-1">· {t.day}</span>
+                        </div>
+                        <div className="text-slate-600 text-left">
+                          <div>{deviceSummary(a.metadata)}</div>
+                          <div className="font-mono text-[10px] text-slate-400">
+                            {a.ip_address || '—'}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {isLoading ? (
+          <div className="p-10 text-center text-slate-400">جاري التحميل…</div>
+        ) : combined.length === 0 ? (
+          <div className="p-10 text-center text-slate-400">
+            لا توجد أحداث لهذا المستخدم
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 text-slate-600">
+                <tr>
+                  <th className="p-2 text-right">اليوم</th>
+                  <th className="p-2 text-right">التاريخ</th>
+                  <th className="p-2 text-right">الساعة</th>
+                  <th className="p-2 text-right">الإجراء</th>
+                  <th className="p-2 text-right">الهدف</th>
+                  <th className="p-2 text-right">الجهاز</th>
+                  <th className="p-2 text-right">IP</th>
+                  <th className="p-2 text-right">التفاصيل</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {combined.map((r) => {
+                  const t = fmtDate(r.at);
+                  return (
+                    <tr key={r.id} className="hover:bg-slate-50">
+                      <td className="p-2 text-xs">{t.day}</td>
+                      <td className="p-2 text-xs font-mono">{t.date}</td>
+                      <td className="p-2 text-xs font-mono">{t.time}</td>
+                      <td className="p-2 text-xs font-semibold">{r.action}</td>
+                      <td className="p-2 text-xs text-slate-600">{r.target}</td>
+                      <td className="p-2 text-xs text-slate-600">{r.device}</td>
+                      <td className="p-2 text-xs font-mono text-slate-500">
+                        {r.ip}
+                      </td>
+                      <td className="p-2 text-xs text-slate-500 font-mono truncate max-w-[180px]">
+                        {r.detail}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            <div className="mt-3 text-xs text-slate-500">
+              إجمالي الأحداث:{' '}
+              <b className="text-slate-800">{combined.length}</b>
+            </div>
+          </div>
+        )}
+
+        <div className="flex justify-end">
+          <button onClick={onClose} className="btn-ghost">
+            إغلاق
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

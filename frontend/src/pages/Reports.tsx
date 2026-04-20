@@ -240,9 +240,9 @@ function ReportTable({ tab, rows }: { tab: TabKey; rows: any[] }) {
         { key: 'day', label: 'اليوم', fmt: (v) => new Date(v).toLocaleDateString('en-US') },
         { key: 'revenue', label: 'الإيراد', fmt: EGP },
         { key: 'cogs', label: 'تكلفة البضاعة', fmt: EGP, color: 'text-rose-600' },
-        { key: 'gross_profit', label: 'ربح إجمالي', fmt: EGP, bold: true, color: 'text-emerald-700' },
-        { key: 'net_profit', label: 'ربح صافي', fmt: EGP, bold: true, color: 'text-emerald-800' },
-        { key: 'margin_pct', label: 'الهامش %', fmt: (v) => `${Number(v).toFixed(1)}%` },
+        { key: 'gross_profit', label: 'ربح / خسارة إجمالي', fmt: EGP, bold: true, profitAware: true },
+        { key: 'net_profit', label: 'ربح / خسارة صافي', fmt: EGP, bold: true, profitAware: true },
+        { key: 'margin_pct', label: 'الهامش %', fmt: (v) => `${Number(v).toFixed(1)}%`, profitAware: true },
       ]} />;
     case 'top-products':
       return <GenericTable rows={rows} cols={[
@@ -251,7 +251,7 @@ function ReportTable({ tab, rows }: { tab: TabKey; rows: any[] }) {
         { key: 'units_sold', label: 'كمية مباعة' },
         { key: 'revenue', label: 'الإيراد', fmt: EGP },
         { key: 'cogs', label: 'التكلفة', fmt: EGP },
-        { key: 'profit', label: 'الربح', fmt: EGP, bold: true, color: 'text-emerald-700' },
+        { key: 'profit', label: 'الربح / الخسارة', fmt: EGP, bold: true, profitAware: true },
       ]} />;
     case 'sales-per-user':
       return <GenericTable rows={rows} cols={[
@@ -293,6 +293,11 @@ interface Col {
   bold?: boolean;
   mono?: boolean;
   color?: string;
+  /**
+   * When true, the cell auto-colors by the sign of the numeric value:
+   * negative → rose, positive → emerald, zero → slate. Overrides `color`.
+   */
+  profitAware?: boolean;
 }
 
 function GenericTable({ rows, cols }: { rows: any[]; cols: Col[] }) {
@@ -313,10 +318,20 @@ function GenericTable({ rows, cols }: { rows: any[]; cols: Col[] }) {
             {cols.map((c) => {
               const v = r[c.key];
               const disp = c.fmt ? c.fmt(v) : v == null ? '—' : String(v);
+              let color = c.color || '';
+              if (c.profitAware) {
+                const n = Number(v || 0);
+                color =
+                  n < 0
+                    ? 'text-rose-700'
+                    : n > 0
+                      ? 'text-emerald-700'
+                      : 'text-slate-600';
+              }
               return (
                 <td
                   key={c.key}
-                  className={`px-3 py-2 ${c.bold ? 'font-bold' : ''} ${c.mono ? 'font-mono text-xs' : ''} ${c.color || ''}`}
+                  className={`px-3 py-2 ${c.bold ? 'font-bold' : ''} ${c.mono ? 'font-mono text-xs' : ''} ${color}`}
                 >
                   {disp}
                 </td>

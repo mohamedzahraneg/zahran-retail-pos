@@ -68,6 +68,24 @@ export class ProductsController {
     return this.products.listSizes();
   }
 
+  @Get('catalog/next-sku')
+  nextProductSku(@Query('type') type?: string) {
+    return this.products.previewProductSku(type || 'other');
+  }
+
+  @Get('catalog/next-variant-sku')
+  nextVariantSku(
+    @Query('product_id', ParseUUIDPipe) product_id: string,
+    @Query('color_id', ParseUUIDPipe) color_id: string,
+    @Query('size_id') size_id?: string,
+  ) {
+    return this.products.previewVariantSku(
+      product_id,
+      color_id,
+      size_id || null,
+    );
+  }
+
   @Get(':id')
   findOne(@Param('id', ParseUUIDPipe) id: string) {
     return this.products.findOne(id);

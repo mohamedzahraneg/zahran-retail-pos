@@ -8,10 +8,10 @@ import {
   Query,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
-import { IsString, MinLength } from 'class-validator';
+import { IsOptional, IsString, MinLength } from 'class-validator';
 import { PosService } from './pos.service';
 import { CreateInvoiceDto } from './dto/invoice.dto';
-import { Roles } from '../common/decorators/roles.decorator';
+import { Permissions, Roles } from '../common/decorators/roles.decorator';
 import {
   CurrentUser,
   JwtUser,
@@ -19,6 +19,10 @@ import {
 
 class VoidInvoiceDto {
   @IsString() @MinLength(3) reason: string;
+}
+
+class EditInvoiceDto extends CreateInvoiceDto {
+  @IsOptional() @IsString() edit_reason?: string;
 }
 
 @ApiBearerAuth()
@@ -29,6 +33,7 @@ export class PosController {
 
   @Post('invoices')
   @Roles('admin', 'manager', 'cashier')
+  @Permissions('pos.sell')
   create(@Body() dto: CreateInvoiceDto, @CurrentUser() user: JwtUser) {
     return this.pos.createInvoice(dto, user.userId);
   }
@@ -59,12 +64,27 @@ export class PosController {
   }
 
   @Post('invoices/:id/void')
-  @Roles('admin', 'manager')
+  @Permissions('invoices.void')
   voidInvoice(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: VoidInvoiceDto,
     @CurrentUser() user: JwtUser,
   ) {
     return this.pos.voidInvoice(id, user.userId, dto.reason);
+  }
+
+  @Post('invoices/:id/edit')
+  @Permissions('invoices.edit')
+  editInvoice(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: EditInvoiceDto,
+    @CurrentUser() user: JwtUser,
+  ) {
+    return this.pos.editInvoice(
+      id,
+      dto,
+      user.userId,
+      dto.edit_reason || 'تعديل فاتورة',
+    );
   }
 }

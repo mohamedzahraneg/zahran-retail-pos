@@ -125,7 +125,7 @@ export default function BarcodeLabels() {
         {
           variantId: variant.id,
           code: variant.barcode!,
-          sku: variant.sku,
+          sku: variant.sku || '',
           name: selected.name_ar,
           color: (variant as any).color ?? null,
           size: (variant as any).size ?? null,

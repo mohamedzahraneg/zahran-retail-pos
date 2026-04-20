@@ -1,12 +1,12 @@
 import { Controller, Get, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { AuditService } from './audit.service';
-import { Roles } from '../common/decorators/roles.decorator';
+import { Permissions } from '../common/decorators/roles.decorator';
 
 @ApiBearerAuth()
 @ApiTags('audit')
 @Controller('audit')
-@Roles('admin', 'manager')
+@Permissions('audit.view')
 export class AuditController {
   constructor(private readonly svc: AuditService) {}
 

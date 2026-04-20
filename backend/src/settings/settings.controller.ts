@@ -21,7 +21,7 @@ import {
 } from './dto/settings.dto';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
-import { Roles } from '../common/decorators/roles.decorator';
+import { Permissions, Roles } from '../common/decorators/roles.decorator';
 
 @ApiTags('settings')
 @ApiBearerAuth()
@@ -121,19 +121,19 @@ export class SettingsController {
   }
 
   @Post('roles')
-  @Roles('admin')
+  @Permissions('roles.manage')
   createRole(@Body() body: any) {
     return this.service.createRole(body);
   }
 
   @Patch('roles/:id')
-  @Roles('admin')
+  @Permissions('roles.manage')
   updateRole(@Param('id') id: string, @Body() body: any) {
     return this.service.updateRole(id, body);
   }
 
   @Delete('roles/:id')
-  @Roles('admin')
+  @Permissions('roles.manage')
   deleteRole(@Param('id') id: string) {
     return this.service.deleteRole(id);
   }

@@ -9,9 +9,15 @@ import {
 import { ApiProperty, ApiPropertyOptional, PartialType } from '@nestjs/swagger';
 
 export class CreateProductDto {
-  @ApiProperty({ example: 'ZHR-SHO-001' })
+  /**
+   * Optional — if omitted or blank, the DB trigger auto-generates one in the
+   * form "<TYPE>-NNNNN" (e.g. SH-00042). Kept optional so the UI can leave
+   * it blank and trust the server.
+   */
+  @ApiPropertyOptional({ example: 'SH-00042 (auto if blank)' })
+  @IsOptional()
   @IsString()
-  sku_root: string;
+  sku_root?: string;
 
   @ApiProperty({ example: 'حذاء كلاسيك نسائي' })
   @IsString()
@@ -55,7 +61,11 @@ export class CreateVariantDto {
   @IsOptional() @IsUUID() size_id?: string;
   @IsOptional() @IsString() color?: string;
   @IsOptional() @IsString() size?: string;
-  @IsString() sku: string;
+  /**
+   * Optional — if omitted, the DB trigger auto-generates one derived from the
+   * product's sku_root + color + size (e.g. SH-00042-RD42).
+   */
+  @IsOptional() @IsString() sku?: string;
   @IsOptional() @IsString() barcode?: string;
   @IsOptional() @IsNumber() @Min(0) price_override?: number;
   @IsOptional() @IsNumber() @Min(0) cost_price?: number;

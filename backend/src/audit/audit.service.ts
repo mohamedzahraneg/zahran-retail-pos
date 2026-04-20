@@ -1,5 +1,51 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { DataSource } from 'typeorm';
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const UAParser = require('ua-parser-js');
+
+export interface ActivityEntry {
+  user_id?: string | null;
+  action:
+    | 'login'
+    | 'logout'
+    | 'create'
+    | 'update'
+    | 'delete'
+    | 'void'
+    | 'approve'
+    | 'reject'
+    | 'print'
+    | 'export'
+    | 'import'
+    | 'sync';
+  entity?:
+    | 'user'
+    | 'product'
+    | 'variant'
+    | 'warehouse'
+    | 'stock'
+    | 'invoice'
+    | 'invoice_item'
+    | 'customer'
+    | 'supplier'
+    | 'purchase'
+    | 'reservation'
+    | 'return'
+    | 'exchange'
+    | 'coupon'
+    | 'discount'
+    | 'expense'
+    | 'shift'
+    | 'cashbox'
+    | 'setting'
+    | 'role'
+    | 'other';
+  entity_id?: string | null;
+  summary?: string;
+  ip?: string | null;
+  userAgent?: string | null;
+  extra?: Record<string, any>;
+}
 
 /**
  * Audit / Activity log query service.
@@ -10,7 +56,60 @@ import { DataSource } from 'typeorm';
  */
 @Injectable()
 export class AuditService {
+  private readonly logger = new Logger(AuditService.name);
   constructor(private readonly ds: DataSource) {}
+
+  /**
+   * Write a row into activity_logs. Never throws — logging must not break the
+   * calling request. Parses the user-agent into structured device metadata.
+   */
+  async writeActivity(entry: ActivityEntry): Promise<void> {
+    try {
+      const parser = entry.userAgent ? UAParser(entry.userAgent) : null;
+      const device = parser
+        ? {
+            browser: parser.browser?.name
+              ? `${parser.browser.name}${parser.browser.version ? ' ' + parser.browser.version : ''}`
+              : null,
+            os: parser.os?.name
+              ? `${parser.os.name}${parser.os.version ? ' ' + parser.os.version : ''}`
+              : null,
+            device_type: parser.device?.type || 'desktop',
+            device_model:
+              [parser.device?.vendor, parser.device?.model]
+                .filter(Boolean)
+                .join(' ') || null,
+          }
+        : null;
+      const metadata: Record<string, any> = {
+        ...(entry.extra || {}),
+        ...(entry.userAgent ? { user_agent: entry.userAgent } : {}),
+        ...(device ? { device } : {}),
+      };
+      await this.ds.query(
+        `INSERT INTO activity_logs
+           (user_id, action, entity, entity_id, summary, metadata, ip_address)
+         VALUES ($1, $2::activity_action, $3::entity_type, $4, $5, $6::jsonb, NULLIF($7,'')::inet)`,
+        [
+          entry.user_id || null,
+          entry.action,
+          entry.entity || 'other',
+          entry.entity_id || null,
+          entry.summary || null,
+          JSON.stringify(metadata),
+          entry.ip || '',
+        ],
+      );
+    } catch (err: any) {
+      this.logger.warn(
+        `writeActivity failed: ${err?.message || err} (entry=${JSON.stringify({
+          user_id: entry.user_id,
+          action: entry.action,
+          entity: entry.entity,
+        })})`,
+      );
+    }
+  }
 
   async listActivity(params: {
     user_id?: string;

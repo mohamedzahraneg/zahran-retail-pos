@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import {
@@ -11,6 +11,8 @@ import {
   Eye,
   Trash2,
   FileText,
+  Pencil,
+  Minus,
 } from 'lucide-react';
 import {
   purchasesApi,
@@ -18,10 +20,13 @@ import {
   type PurchaseDetail,
   type PurchaseStatus,
   type CreatePurchaseItemPayload,
+  type CreatePurchasePayload,
 } from '@/api/purchases.api';
 import { suppliersApi } from '@/api/suppliers.api';
 import { settingsApi } from '@/api/settings.api';
 import { productsApi } from '@/api/products.api';
+import { useAuthStore } from '@/stores/auth.store';
+import { useTableSort } from '@/lib/useTableSort';
 
 const EGP = (n: number | string) =>
   `${Number(n || 0).toLocaleString('en-US', {
@@ -51,10 +56,20 @@ export default function PurchasesPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [detailId, setDetailId] = useState<string | null>(null);
   const [payId, setPayId] = useState<string | null>(null);
+  const [editId, setEditId] = useState<string | null>(null);
+
+  const user = useAuthStore((s) => s.user);
+  const hasPermission = useAuthStore((s) => s.hasPermission);
+  const canEdit =
+    hasPermission('purchases.edit') ||
+    user?.role === 'admin' ||
+    user?.role === 'manager';
+  const canCancelNonDraft =
+    hasPermission('purchases.cancel') || user?.role === 'admin';
 
   const qc = useQueryClient();
 
-  const { data: purchases = [], isLoading } = useQuery({
+  const { data: purchasesRaw = [], isLoading } = useQuery({
     queryKey: ['purchases', filter, supplierFilter],
     queryFn: () =>
       purchasesApi.list({
@@ -67,6 +82,16 @@ export default function PurchasesPage() {
     queryKey: ['suppliers-all'],
     queryFn: () => suppliersApi.list(),
   });
+
+  const { sorted: purchases, thProps, sortIcon } = useTableSort(
+    purchasesRaw,
+    'invoice_date',
+    'desc',
+    {
+      remaining: (p: any) =>
+        Number(p.grand_total || 0) - Number(p.paid_amount || 0),
+    },
+  );
 
   const totals = useMemo(() => {
     const t = {
@@ -173,13 +198,27 @@ export default function PurchasesPage() {
             <table className="w-full text-sm">
               <thead className="bg-slate-50 text-slate-600">
                 <tr>
-                  <th className="p-3 text-right">رقم الفاتورة</th>
-                  <th className="p-3 text-right">المورد</th>
-                  <th className="p-3 text-right">التاريخ</th>
-                  <th className="p-3 text-right">الإجمالي</th>
-                  <th className="p-3 text-right">المسدد</th>
-                  <th className="p-3 text-right">المتبقي</th>
-                  <th className="p-3 text-right">الحالة</th>
+                  <th {...thProps('purchase_no')} className={`p-3 text-right ${thProps('purchase_no').className}`}>
+                    {sortIcon('purchase_no')} رقم الفاتورة
+                  </th>
+                  <th {...thProps('supplier_name')} className={`p-3 text-right ${thProps('supplier_name').className}`}>
+                    {sortIcon('supplier_name')} المورد
+                  </th>
+                  <th {...thProps('invoice_date')} className={`p-3 text-right ${thProps('invoice_date').className}`}>
+                    {sortIcon('invoice_date')} التاريخ
+                  </th>
+                  <th {...thProps('grand_total')} className={`p-3 text-right ${thProps('grand_total').className}`}>
+                    {sortIcon('grand_total')} الإجمالي
+                  </th>
+                  <th {...thProps('paid_amount')} className={`p-3 text-right ${thProps('paid_amount').className}`}>
+                    {sortIcon('paid_amount')} المسدد
+                  </th>
+                  <th {...thProps('remaining')} className={`p-3 text-right ${thProps('remaining').className}`}>
+                    {sortIcon('remaining')} المتبقي
+                  </th>
+                  <th {...thProps('status')} className={`p-3 text-right ${thProps('status').className}`}>
+                    {sortIcon('status')} الحالة
+                  </th>
                   <th className="p-3"></th>
                 </tr>
               </thead>
@@ -249,13 +288,25 @@ export default function PurchasesPage() {
                               <CreditCard className="w-4 h-4" />
                             </button>
                           )}
-                          {p.status === 'draft' && (
+                          {canEdit && p.status !== 'cancelled' && (
+                            <button
+                              title="تعديل"
+                              onClick={() => setEditId(p.id)}
+                              className="icon-btn text-amber-600"
+                            >
+                              <Pencil className="w-4 h-4" />
+                            </button>
+                          )}
+                          {(p.status === 'draft' ||
+                            (canCancelNonDraft && p.status !== 'cancelled')) && (
                             <button
                               title="إلغاء"
                               onClick={() => {
                                 if (
                                   window.confirm(
-                                    `هل تريد إلغاء الفاتورة ${p.purchase_no}؟`,
+                                    p.status === 'draft'
+                                      ? `هل تريد إلغاء الفاتورة ${p.purchase_no}؟`
+                                      : `إلغاء الفاتورة ${p.purchase_no} سيعكس المخزون والدفعات. المتابعة؟`,
                                   )
                                 ) {
                                   cancelMut.mutate(p.id);
@@ -287,6 +338,10 @@ export default function PurchasesPage() {
 
       {payId && (
         <PayPurchaseModal id={payId} onClose={() => setPayId(null)} />
+      )}
+
+      {editId && (
+        <EditPurchaseModal id={editId} onClose={() => setEditId(null)} />
       )}
     </div>
   );
@@ -1041,6 +1096,374 @@ function PayPurchaseModal({
           </button>
         </div>
       </form>
+    </div>
+  );
+}
+
+/* ───────── Edit purchase modal ───────── */
+
+interface EditItem {
+  variant_id: string;
+  product_name?: string;
+  sku?: string;
+  quantity: number;
+  unit_cost: number;
+  discount: number;
+  tax: number;
+}
+
+function EditPurchaseModal({
+  id,
+  onClose,
+}: {
+  id: string;
+  onClose: () => void;
+}) {
+  const qc = useQueryClient();
+  const { data: detail, isLoading } = useQuery({
+    queryKey: ['purchase-detail', id],
+    queryFn: () => purchasesApi.get(id),
+  });
+
+  const [items, setItems] = useState<EditItem[]>([]);
+  const [notes, setNotes] = useState('');
+  const [shippingCost, setShippingCost] = useState(0);
+  const [discountAmount, setDiscountAmount] = useState(0);
+  const [taxAmount, setTaxAmount] = useState(0);
+  const [reason, setReason] = useState('');
+
+  useEffect(() => {
+    if (!detail) return;
+    setItems(
+      (detail.items || []).map((it: any) => ({
+        variant_id: it.variant_id,
+        product_name: it.product_name || '',
+        sku: it.sku || '',
+        quantity: Number(it.quantity || 0),
+        unit_cost: Number(it.unit_cost || 0),
+        discount: Number(it.discount || 0),
+        tax: Number(it.tax || 0),
+      })),
+    );
+    setNotes((detail as any).notes || '');
+    setShippingCost(Number((detail as any).shipping_cost || 0));
+    setDiscountAmount(Number((detail as any).discount_amount || 0));
+    setTaxAmount(Number((detail as any).tax_amount || 0));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detail?.id]);
+
+  const subtotal = items.reduce(
+    (s, it) => s + it.quantity * it.unit_cost - (it.discount || 0) + (it.tax || 0),
+    0,
+  );
+  const grand = Math.max(
+    0,
+    subtotal + Number(shippingCost || 0) + Number(taxAmount || 0) -
+      Number(discountAmount || 0),
+  );
+
+  const update = (idx: number, patch: Partial<EditItem>) =>
+    setItems((p) => p.map((it, i) => (i === idx ? { ...it, ...patch } : it)));
+  const remove = (idx: number) =>
+    setItems((p) => p.filter((_, i) => i !== idx));
+
+  const save = useMutation({
+    mutationFn: () => {
+      if (items.length === 0)
+        return Promise.reject(new Error('يجب وجود صنف واحد على الأقل'));
+      if (detail?.status !== 'draft' && !reason.trim())
+        return Promise.reject(new Error('يجب كتابة سبب التعديل'));
+      const body: CreatePurchasePayload & { edit_reason?: string } = {
+        supplier_id: detail!.supplier_id,
+        warehouse_id: detail!.warehouse_id,
+        notes: notes || undefined,
+        shipping_cost: shippingCost || undefined,
+        discount_amount: discountAmount || undefined,
+        tax_amount: taxAmount || undefined,
+        edit_reason: reason || 'تعديل فاتورة مشتريات',
+        items: items.map((it) => ({
+          variant_id: it.variant_id,
+          quantity: it.quantity,
+          unit_cost: it.unit_cost,
+          discount: it.discount || 0,
+          tax: it.tax || 0,
+        })),
+      };
+      return purchasesApi.edit(id, body);
+    },
+    onSuccess: () => {
+      toast.success('تم حفظ التعديل');
+      qc.invalidateQueries({ queryKey: ['purchases'] });
+      qc.invalidateQueries({ queryKey: ['purchase-detail', id] });
+      onClose();
+    },
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.message || e?.message || 'فشل التعديل'),
+  });
+
+  const isDraft = detail?.status === 'draft';
+
+  return (
+    <div className="fixed inset-0 bg-slate-900/50 z-50 flex items-center justify-center p-4">
+      <div
+        className="bg-white rounded-2xl w-full max-w-4xl shadow-xl max-h-[90vh] overflow-hidden flex flex-col"
+        dir="rtl"
+      >
+        <div className="p-4 border-b flex items-center justify-between">
+          <div>
+            <h3 className="font-black text-slate-800 flex items-center gap-2">
+              <Pencil className="w-5 h-5 text-amber-500" />
+              تعديل فاتورة {detail?.purchase_no || ''}
+            </h3>
+            <p className="text-xs text-slate-500 mt-1">
+              {isDraft
+                ? 'الفاتورة مسودة — سيتم التعديل في نفس السجل.'
+                : 'الفاتورة مستلمة — سيُصدر فاتورة جديدة بديلة وتُلغى الحالية مع عكس المخزون والدفعات.'}
+            </p>
+          </div>
+          <button className="icon-btn" onClick={onClose} title="إغلاق">
+            <XCircle className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="p-4 overflow-y-auto space-y-4 flex-1">
+          {isLoading ? (
+            <div className="p-10 text-center text-slate-400">جاري التحميل…</div>
+          ) : (
+            <>
+              <div className="border rounded-lg overflow-hidden">
+                <table className="w-full text-sm">
+                  <thead className="bg-slate-50 text-slate-600 text-xs">
+                    <tr>
+                      <th className="p-2 text-right">الصنف</th>
+                      <th className="p-2 text-right">الكمية</th>
+                      <th className="p-2 text-right">تكلفة الوحدة</th>
+                      <th className="p-2 text-right">خصم</th>
+                      <th className="p-2 text-right">ضريبة</th>
+                      <th className="p-2 text-right">الإجمالي</th>
+                      <th className="p-2"></th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y">
+                    {items.map((it, idx) => {
+                      const total =
+                        it.quantity * it.unit_cost -
+                        (it.discount || 0) +
+                        (it.tax || 0);
+                      return (
+                        <tr key={`${it.variant_id}-${idx}`}>
+                          <td className="p-2">
+                            <div className="font-medium">
+                              {it.product_name || '—'}
+                            </div>
+                            <div className="text-[10px] text-slate-400 font-mono">
+                              {it.sku}
+                            </div>
+                          </td>
+                          <td className="p-2">
+                            <div className="flex items-center gap-1">
+                              <button
+                                className="p-1 rounded bg-slate-100 hover:bg-slate-200"
+                                onClick={() =>
+                                  update(idx, {
+                                    quantity: Math.max(1, it.quantity - 1),
+                                  })
+                                }
+                              >
+                                <Minus size={12} />
+                              </button>
+                              <input
+                                className="w-16 text-center border rounded text-sm"
+                                type="number"
+                                value={it.quantity}
+                                min={1}
+                                onChange={(e) =>
+                                  update(idx, {
+                                    quantity: Math.max(
+                                      1,
+                                      Number(e.target.value) || 1,
+                                    ),
+                                  })
+                                }
+                              />
+                              <button
+                                className="p-1 rounded bg-slate-100 hover:bg-slate-200"
+                                onClick={() =>
+                                  update(idx, { quantity: it.quantity + 1 })
+                                }
+                              >
+                                <Plus size={12} />
+                              </button>
+                            </div>
+                          </td>
+                          <td className="p-2">
+                            <input
+                              type="number"
+                              step="0.01"
+                              className="w-24 border rounded px-1 py-0.5 text-sm"
+                              value={it.unit_cost}
+                              onChange={(e) =>
+                                update(idx, {
+                                  unit_cost: Number(e.target.value) || 0,
+                                })
+                              }
+                            />
+                          </td>
+                          <td className="p-2">
+                            <input
+                              type="number"
+                              step="0.01"
+                              className="w-20 border rounded px-1 py-0.5 text-sm"
+                              value={it.discount}
+                              onChange={(e) =>
+                                update(idx, {
+                                  discount: Number(e.target.value) || 0,
+                                })
+                              }
+                            />
+                          </td>
+                          <td className="p-2">
+                            <input
+                              type="number"
+                              step="0.01"
+                              className="w-20 border rounded px-1 py-0.5 text-sm"
+                              value={it.tax}
+                              onChange={(e) =>
+                                update(idx, {
+                                  tax: Number(e.target.value) || 0,
+                                })
+                              }
+                            />
+                          </td>
+                          <td className="p-2 font-mono font-bold">
+                            {EGP(total)}
+                          </td>
+                          <td className="p-2">
+                            <button
+                              onClick={() => remove(idx)}
+                              className="icon-btn text-rose-600"
+                              title="حذف"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                    {items.length === 0 && (
+                      <tr>
+                        <td
+                          colSpan={7}
+                          className="p-6 text-center text-slate-400"
+                        >
+                          لا توجد أصناف
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <div>
+                  <label className="text-xs text-slate-600 block mb-1">
+                    شحن
+                  </label>
+                  <input
+                    type="number"
+                    className="input"
+                    value={shippingCost}
+                    onChange={(e) =>
+                      setShippingCost(Number(e.target.value) || 0)
+                    }
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-slate-600 block mb-1">
+                    خصم إجمالي
+                  </label>
+                  <input
+                    type="number"
+                    className="input"
+                    value={discountAmount}
+                    onChange={(e) =>
+                      setDiscountAmount(Number(e.target.value) || 0)
+                    }
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-slate-600 block mb-1">
+                    ضريبة
+                  </label>
+                  <input
+                    type="number"
+                    className="input"
+                    value={taxAmount}
+                    onChange={(e) => setTaxAmount(Number(e.target.value) || 0)}
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-slate-600 block mb-1">
+                    ملاحظات
+                  </label>
+                  <input
+                    className="input"
+                    value={notes}
+                    onChange={(e) => setNotes(e.target.value)}
+                  />
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between bg-slate-50 rounded-lg px-4 py-3">
+                <div className="text-sm text-slate-600">
+                  المجموع الفرعي:{' '}
+                  <span className="font-bold">{EGP(subtotal)}</span>
+                </div>
+                <div className="text-lg font-black text-brand-600">
+                  الإجمالي: {EGP(grand)}
+                </div>
+              </div>
+
+              {!isDraft && (
+                <div>
+                  <label className="text-xs text-slate-600 block mb-1">
+                    سبب التعديل *
+                  </label>
+                  <textarea
+                    rows={2}
+                    className="input"
+                    placeholder="مثال: تصحيح كمية / تعديل تكلفة"
+                    value={reason}
+                    onChange={(e) => setReason(e.target.value)}
+                  />
+                </div>
+              )}
+            </>
+          )}
+        </div>
+
+        <div className="p-4 border-t flex items-center justify-end gap-2">
+          <button onClick={onClose} className="btn-ghost">
+            إلغاء
+          </button>
+          <button
+            onClick={() => save.mutate()}
+            disabled={
+              save.isPending ||
+              items.length === 0 ||
+              isLoading ||
+              (!isDraft && !reason.trim())
+            }
+            className="btn-primary"
+          >
+            {save.isPending
+              ? 'جاري الحفظ...'
+              : isDraft
+                ? 'حفظ التعديل'
+                : 'إصدار فاتورة بديلة'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

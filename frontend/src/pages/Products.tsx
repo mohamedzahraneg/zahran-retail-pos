@@ -27,6 +27,7 @@ import { stockApi } from '@/api/stock.api';
 import { uploadsApi, resolveImageUrl } from '@/api/uploads.api';
 import { settingsApi } from '@/api/settings.api';
 import { compressImage } from '@/utils/compressImage';
+import { useTableSort } from '@/lib/useTableSort';
 
 const EGP = (n: number | string) => `${Number(n || 0).toFixed(0)} EGP`;
 
@@ -42,6 +43,12 @@ export default function Products() {
   const [type, setType] = useState<'all' | 'shoe' | 'bag' | 'accessory'>('all');
   const [q, setQ] = useState('');
   const [categoryFilter, setCategoryFilter] = useState<string>('');
+  const [stockFilter, setStockFilter] = useState<'all' | 'in' | 'low' | 'out'>(
+    'all',
+  );
+  const [activeFilter, setActiveFilter] = useState<'all' | 'active' | 'inactive'>(
+    'active',
+  );
   const [showCreate, setShowCreate] = useState(false);
   const [editTarget, setEditTarget] = useState<Product | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Product | null>(null);
@@ -65,10 +72,26 @@ export default function Products() {
   });
 
   const filteredData = useMemo(() => {
-    const list = data?.data || [];
-    if (!categoryFilter) return list;
-    return list.filter((p) => p.category_id === categoryFilter);
-  }, [data, categoryFilter]);
+    let list = data?.data || [];
+    if (categoryFilter)
+      list = list.filter((p) => p.category_id === categoryFilter);
+    if (activeFilter !== 'all')
+      list = list.filter((p) =>
+        activeFilter === 'active' ? p.is_active : !p.is_active,
+      );
+    if (stockFilter !== 'all') {
+      list = list.filter((p) => {
+        const s = Number(p.total_stock || 0);
+        if (stockFilter === 'out') return s <= 0;
+        if (stockFilter === 'low') return s > 0 && s <= 2;
+        if (stockFilter === 'in') return s > 0;
+        return true;
+      });
+    }
+    return list;
+  }, [data, categoryFilter, activeFilter, stockFilter]);
+
+  const { sorted, thProps, sortIcon } = useTableSort(filteredData, null, 'asc');
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => productsApi.remove(id),
@@ -147,21 +170,67 @@ export default function Products() {
             </option>
           ))}
         </select>
+        <select
+          className="input max-w-[140px]"
+          value={stockFilter}
+          onChange={(e) => setStockFilter(e.target.value as any)}
+          title="فلتر المخزون"
+        >
+          <option value="all">كل المخزون</option>
+          <option value="in">متوفر</option>
+          <option value="low">قارب النفاد</option>
+          <option value="out">نافذ</option>
+        </select>
+        <select
+          className="input max-w-[120px]"
+          value={activeFilter}
+          onChange={(e) => setActiveFilter(e.target.value as any)}
+          title="فلتر الحالة"
+        >
+          <option value="all">الكل</option>
+          <option value="active">مفعّل</option>
+          <option value="inactive">متوقف</option>
+        </select>
+      </div>
+
+      <div className="text-xs text-slate-500">
+        المعروض: <b className="text-slate-800">{sorted.length}</b>{' '}
+        {sorted.length !== (data?.data.length || 0) && (
+          <>
+            من <b>{data?.data.length || 0}</b>
+          </>
+        )}
       </div>
 
       <div className="card overflow-hidden">
         <table className="w-full">
           <thead className="bg-slate-50 border-b border-slate-200">
             <tr className="text-xs text-slate-500 font-bold">
-              <th className="text-right p-3">المنتج</th>
-              <th className="text-right p-3">SKU</th>
-              <th className="text-right p-3">النوع</th>
+              <th {...thProps('name_ar')} className={`text-right p-3 ${thProps('name_ar').className}`}>
+                {sortIcon('name_ar')} المنتج
+              </th>
+              <th {...thProps('sku_root')} className={`text-right p-3 ${thProps('sku_root').className}`}>
+                {sortIcon('sku_root')} SKU
+              </th>
+              <th {...thProps('type')} className={`text-right p-3 ${thProps('type').className}`}>
+                {sortIcon('type')} النوع
+              </th>
               <th className="text-right p-3">المجموعة</th>
-              <th className="text-left p-3">السعر</th>
-              <th className="text-left p-3">التكلفة</th>
-              <th className="text-left p-3">المخزون</th>
-              <th className="text-left p-3">قيمة المخزون</th>
-              <th className="text-left p-3">الحالة</th>
+              <th {...thProps('base_price')} className={`text-left p-3 ${thProps('base_price').className}`}>
+                {sortIcon('base_price')} السعر
+              </th>
+              <th {...thProps('cost_price')} className={`text-left p-3 ${thProps('cost_price').className}`}>
+                {sortIcon('cost_price')} التكلفة
+              </th>
+              <th {...thProps('total_stock')} className={`text-left p-3 ${thProps('total_stock').className}`}>
+                {sortIcon('total_stock')} المخزون
+              </th>
+              <th {...thProps('stock_value')} className={`text-left p-3 ${thProps('stock_value').className}`}>
+                {sortIcon('stock_value')} قيمة المخزون
+              </th>
+              <th {...thProps('is_active')} className={`text-left p-3 ${thProps('is_active').className}`}>
+                {sortIcon('is_active')} الحالة
+              </th>
               <th className="text-left p-3">إجراءات</th>
             </tr>
           </thead>
@@ -173,7 +242,7 @@ export default function Products() {
                 </td>
               </tr>
             )}
-            {filteredData.map((p) => {
+            {sorted.map((p) => {
               const cat = categories.find((c) => c.id === p.category_id);
               return (
                 <tr
@@ -287,7 +356,7 @@ export default function Products() {
                 </tr>
               );
             })}
-            {!isLoading && filteredData.length === 0 && (
+            {!isLoading && sorted.length === 0 && (
               <tr>
                 <td colSpan={10} className="text-center py-12 text-slate-400">
                   <Package className="mx-auto mb-2" size={32} />
@@ -419,10 +488,19 @@ function ProductEditor({
     }
   }, [existing?.id]);
 
+  // Live preview of the auto-generated SKU when the field is blank. Updates
+  // when the user switches product type (shoe/bag/accessory).
+  const { data: skuPreview } = useQuery({
+    queryKey: ['product-next-sku', form.type],
+    queryFn: () => productsApi.nextProductSku(form.type),
+    enabled: !isEdit && !form.sku_root.trim(),
+  });
+
   const saveProduct = useMutation({
     mutationFn: async () => {
       const payload: any = {
-        sku_root: form.sku_root.trim(),
+        // Send empty string as undefined so the backend trigger fires.
+        sku_root: form.sku_root.trim() || undefined,
         name_ar: form.name_ar.trim(),
         name_en: form.name_en.trim() || undefined,
         type: form.type,
@@ -440,11 +518,18 @@ function ProductEditor({
       return productsApi.create(payload);
     },
     onSuccess: (p: any) => {
-      toast.success(isEdit ? 'تم تحديث المنتج' : 'تم حفظ المنتج');
+      toast.success(
+        isEdit
+          ? 'تم تحديث المنتج'
+          : `تم حفظ المنتج — SKU: ${p.sku_root || '—'}`,
+      );
       qc.invalidateQueries({ queryKey: ['products'] });
       qc.invalidateQueries({ queryKey: ['product', p.id] });
       if (!isEdit) {
         setCreatedId(p.id);
+        // Backfill the generated sku_root so the variant editor can build
+        // proper variant SKUs.
+        if (p.sku_root) setForm((f) => ({ ...f, sku_root: p.sku_root }));
         setTab('variants');
       } else {
         onSaved();
@@ -460,8 +545,8 @@ function ProductEditor({
   const currentType = (existing?.type as any) || form.type;
 
   const submitBasic = () => {
-    if (!form.sku_root.trim() || !form.name_ar.trim()) {
-      toast.error('SKU والاسم العربي مطلوبان');
+    if (!form.name_ar.trim()) {
+      toast.error('الاسم العربي مطلوب');
       return;
     }
     if (Number(form.base_price) < 0 || Number(form.cost_price) < 0) {
@@ -496,13 +581,29 @@ function ProductEditor({
       {tab === 'basic' && (
         <div className="space-y-3">
           <div className="grid md:grid-cols-3 gap-3">
-            <Field label="SKU الرئيسي *">
+            <Field
+              label={
+                form.sku_root.trim()
+                  ? 'SKU الرئيسي'
+                  : 'SKU الرئيسي (تلقائي)'
+              }
+            >
               <input
                 className="input"
                 value={form.sku_root}
                 onChange={(e) => setForm({ ...form, sku_root: e.target.value })}
-                placeholder="ZHR-SHO-001"
+                placeholder={
+                  !isEdit && skuPreview?.sku
+                    ? `تلقائي: ${skuPreview.sku}`
+                    : 'مثال: SH-00001'
+                }
               />
+              {!isEdit && !form.sku_root.trim() && skuPreview?.sku && (
+                <div className="text-[11px] text-emerald-600 mt-1">
+                  سيُولَّد تلقائيًا:{' '}
+                  <span className="font-mono font-bold">{skuPreview.sku}</span>
+                </div>
+              )}
             </Field>
             <Field label="النوع *">
               <select

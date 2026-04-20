@@ -7,6 +7,7 @@ import configuration from './config/configuration';
 import { DatabaseModule } from './database/database.module';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { RolesGuard } from './common/guards/roles.guard';
+import { PermissionsGuard } from './common/guards/permissions.guard';
 import { Public } from './common/decorators/roles.decorator';
 
 import { AuthModule } from './auth/auth.module';
@@ -40,6 +41,7 @@ import { SetupModule } from './setup/setup.module';
 import { RecurringExpensesModule } from './recurring-expenses/recurring-expenses.module';
 import { CustomerGroupsModule } from './customer-groups/customer-groups.module';
 import { CategoriesModule } from './categories/categories.module';
+import { AttendanceModule } from './attendance/attendance.module';
 import { ServeStaticModule } from '@nestjs/serve-static';
 import { join } from 'path';
 
@@ -97,6 +99,7 @@ class HealthController {
     PurchasesModule,
     CommissionsModule,
     AuditModule,
+    AttendanceModule,
     LoyaltyModule,
     NotificationsModule,
     SetupModule,
@@ -109,6 +112,7 @@ class HealthController {
     { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: RolesGuard },
+    { provide: APP_GUARD, useClass: PermissionsGuard },
   ],
 })
 export class AppModule {}

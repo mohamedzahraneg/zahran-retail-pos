@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import {
@@ -11,11 +11,21 @@ import {
   DollarSign,
   Activity,
   Undo2,
+  Pencil,
+  Plus,
+  Minus,
+  Trash2,
 } from 'lucide-react';
 import { posApi } from '@/api/pos.api';
 import { usersApi } from '@/api/users.api';
 import { Receipt, ReceiptData } from '@/components/Receipt';
 import { useAuthStore } from '@/stores/auth.store';
+import { useTableSort } from '@/lib/useTableSort';
+import {
+  PeriodSelector,
+  resolvePeriod,
+  type PeriodRange,
+} from '@/components/common/PeriodSelector';
 
 const EGP = (n: number | string) =>
   `${Number(n || 0).toLocaleString('en-US', {
@@ -63,18 +73,33 @@ const STATUS_STYLE: Record<string, string> = {
 
 export default function Invoices() {
   const user = useAuthStore((s) => s.user);
-  const canVoid = user?.role === 'admin' || user?.role === 'manager';
+  const hasPermission = useAuthStore((s) => s.hasPermission);
+  const canVoid =
+    hasPermission('invoices.void') ||
+    user?.role === 'admin' ||
+    user?.role === 'manager';
+  const canEdit =
+    hasPermission('invoices.edit') ||
+    user?.role === 'admin' ||
+    user?.role === 'manager';
 
-  const today = new Date().toISOString().slice(0, 10);
-  const monthStart = today.slice(0, 7) + '-01';
-
+  const [period, setPeriod] = useState<PeriodRange>(() =>
+    resolvePeriod('month'),
+  );
   const [q, setQ] = useState('');
-  const [from, setFrom] = useState(monthStart);
-  const [to, setTo] = useState(today);
+  const from = period.from;
+  const to = period.to;
+  const setFrom = (v: string) =>
+    setPeriod({ ...period, key: 'custom', from: v, label: 'مخصص' });
+  const setTo = (v: string) =>
+    setPeriod({ ...period, key: 'custom', to: v, label: 'مخصص' });
   const [status, setStatus] = useState<Status>('all');
   const [cashierId, setCashierId] = useState<string>('');
+  const [amountMin, setAmountMin] = useState('');
+  const [amountMax, setAmountMax] = useState('');
   const [previewId, setPreviewId] = useState<string | null>(null);
   const [voidTarget, setVoidTarget] = useState<any | null>(null);
+  const [editTarget, setEditTarget] = useState<any | null>(null);
 
   const { data: invoices = [], isLoading } = useQuery({
     queryKey: ['invoices', { q, from, to, status, cashierId }],
@@ -95,13 +120,30 @@ export default function Invoices() {
     staleTime: 5 * 60_000,
   });
 
+  // Amount range is applied client-side (server filters q/date/status).
+  const filtered = useMemo(() => {
+    const min = amountMin ? Number(amountMin) : null;
+    const max = amountMax ? Number(amountMax) : null;
+    return (invoices as any[]).filter((i) => {
+      const g = Number(i.grand_total || 0);
+      if (min != null && g < min) return false;
+      if (max != null && g > max) return false;
+      return true;
+    });
+  }, [invoices, amountMin, amountMax]);
+
+  const { sorted: sortedInvoices, thProps, sortIcon } = useTableSort(
+    filtered,
+    'created_at',
+    'desc',
+  );
+
   const totals = useMemo(() => {
-    const arr = invoices as any[];
     let count = 0;
     let grand = 0;
     let profit = 0;
     let cancelledCount = 0;
-    for (const i of arr) {
+    for (const i of filtered) {
       if (i.status === 'cancelled') {
         cancelledCount++;
         continue;
@@ -110,8 +152,8 @@ export default function Invoices() {
       grand += Number(i.grand_total || 0);
       profit += Number(i.gross_profit || 0);
     }
-    return { count, grand, profit, cancelledCount, total: arr.length };
-  }, [invoices]);
+    return { count, grand, profit, cancelledCount, total: filtered.length };
+  }, [filtered]);
 
   return (
     <div className="space-y-6">
@@ -149,9 +191,9 @@ export default function Invoices() {
         />
         <KpiCard
           icon={Activity}
-          label="الربح"
-          value={EGP(totals.profit)}
-          tone="pink"
+          label={totals.profit < 0 ? 'الخسارة' : 'الربح'}
+          value={EGP(Math.abs(totals.profit))}
+          tone={totals.profit < 0 ? 'rose' : 'pink'}
         />
         <KpiCard
           icon={Ban}
@@ -161,8 +203,14 @@ export default function Invoices() {
         />
       </div>
 
+      {/* Period selector */}
+      <div className="card p-3 flex items-center justify-between flex-wrap gap-3">
+        <div className="text-sm font-bold text-slate-700">الفترة:</div>
+        <PeriodSelector value={period} onChange={setPeriod} />
+      </div>
+
       {/* Filters */}
-      <div className="card p-4 grid grid-cols-1 md:grid-cols-5 gap-3">
+      <div className="card p-4 grid grid-cols-1 md:grid-cols-6 gap-3">
         <div className="relative md:col-span-2">
           <Search
             size={16}
@@ -173,24 +221,6 @@ export default function Invoices() {
             placeholder="بحث برقم الفاتورة / اسم العميل / الهاتف..."
             value={q}
             onChange={(e) => setQ(e.target.value)}
-          />
-        </div>
-        <div>
-          <label className="text-xs text-slate-500 block mb-1">من</label>
-          <input
-            type="date"
-            className="input"
-            value={from}
-            onChange={(e) => setFrom(e.target.value)}
-          />
-        </div>
-        <div>
-          <label className="text-xs text-slate-500 block mb-1">إلى</label>
-          <input
-            type="date"
-            className="input"
-            value={to}
-            onChange={(e) => setTo(e.target.value)}
           />
         </div>
         <div>
@@ -207,6 +237,46 @@ export default function Invoices() {
               </option>
             ))}
           </select>
+        </div>
+        <div>
+          <label className="text-xs text-slate-500 block mb-1">
+            المبلغ من (ج.م)
+          </label>
+          <input
+            type="number"
+            className="input"
+            value={amountMin}
+            onChange={(e) => setAmountMin(e.target.value)}
+            placeholder="0"
+          />
+        </div>
+        <div>
+          <label className="text-xs text-slate-500 block mb-1">
+            المبلغ إلى (ج.م)
+          </label>
+          <input
+            type="number"
+            className="input"
+            value={amountMax}
+            onChange={(e) => setAmountMax(e.target.value)}
+            placeholder="∞"
+          />
+        </div>
+        <div className="flex items-end">
+          <button
+            onClick={() => {
+              setQ('');
+              setCashierId('');
+              setAmountMin('');
+              setAmountMax('');
+              setStatus('all');
+              setPeriod(resolvePeriod('month'));
+            }}
+            className="btn-ghost w-full"
+            title="مسح الفلاتر"
+          >
+            مسح
+          </button>
         </div>
       </div>
 
@@ -240,13 +310,27 @@ export default function Invoices() {
         <table className="w-full">
           <thead className="bg-slate-50 border-b border-slate-200">
             <tr className="text-xs text-slate-500 font-bold">
-              <th className="text-right p-3">رقم الفاتورة</th>
-              <th className="text-right p-3">التاريخ والوقت</th>
-              <th className="text-right p-3">العميل</th>
-              <th className="text-right p-3">الكاشير</th>
-              <th className="text-left p-3">الإجمالي</th>
-              <th className="text-left p-3">الربح</th>
-              <th className="text-center p-3">الحالة</th>
+              <th {...thProps('invoice_no')} className={`text-right p-3 ${thProps('invoice_no').className}`}>
+                {sortIcon('invoice_no')} رقم الفاتورة
+              </th>
+              <th {...thProps('created_at')} className={`text-right p-3 ${thProps('created_at').className}`}>
+                {sortIcon('created_at')} التاريخ والوقت
+              </th>
+              <th {...thProps('customer_name')} className={`text-right p-3 ${thProps('customer_name').className}`}>
+                {sortIcon('customer_name')} العميل
+              </th>
+              <th {...thProps('cashier_name')} className={`text-right p-3 ${thProps('cashier_name').className}`}>
+                {sortIcon('cashier_name')} الكاشير
+              </th>
+              <th {...thProps('grand_total')} className={`text-left p-3 ${thProps('grand_total').className}`}>
+                {sortIcon('grand_total')} الإجمالي
+              </th>
+              <th {...thProps('gross_profit')} className={`text-left p-3 ${thProps('gross_profit').className}`}>
+                {sortIcon('gross_profit')} الربح / الخسارة
+              </th>
+              <th {...thProps('status')} className={`text-center p-3 ${thProps('status').className}`}>
+                {sortIcon('status')} الحالة
+              </th>
               <th className="text-center p-3">إجراءات</th>
             </tr>
           </thead>
@@ -262,7 +346,7 @@ export default function Invoices() {
               </tr>
             )}
             {!isLoading &&
-              (invoices as any[]).map((i) => (
+              sortedInvoices.map((i: any) => (
                 <tr
                   key={i.id}
                   className={`border-b border-slate-100 ${
@@ -326,6 +410,15 @@ export default function Invoices() {
                       >
                         <Printer size={14} />
                       </button>
+                      {canEdit && i.status !== 'cancelled' && (
+                        <button
+                          className="p-1.5 rounded hover:bg-amber-50 text-slate-500 hover:text-amber-600"
+                          onClick={() => setEditTarget(i)}
+                          title="تعديل الفاتورة"
+                        >
+                          <Pencil size={14} />
+                        </button>
+                      )}
                       {canVoid && i.status !== 'cancelled' && (
                         <button
                           className="p-1.5 rounded hover:bg-rose-50 text-slate-500 hover:text-rose-600"
@@ -339,7 +432,7 @@ export default function Invoices() {
                   </td>
                 </tr>
               ))}
-            {!isLoading && !invoices.length && (
+            {!isLoading && !sortedInvoices.length && (
               <tr>
                 <td
                   colSpan={8}
@@ -364,6 +457,13 @@ export default function Invoices() {
         <VoidConfirmModal
           invoice={voidTarget}
           onClose={() => setVoidTarget(null)}
+        />
+      )}
+
+      {editTarget && (
+        <InvoiceEditModal
+          invoiceId={editTarget.id}
+          onClose={() => setEditTarget(null)}
         />
       )}
     </div>
@@ -534,6 +634,344 @@ function VoidConfirmModal({
             disabled={mutation.isPending || !reason.trim()}
           >
             {mutation.isPending ? 'جاري الإلغاء...' : 'تأكيد الإلغاء'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ───────── Invoice edit modal ───────── */
+
+interface EditLine {
+  variant_id: string;
+  product_name: string;
+  sku: string;
+  color_name?: string;
+  size_label?: string;
+  qty: number;
+  unit_price: number;
+  discount: number;
+}
+
+function InvoiceEditModal({
+  invoiceId,
+  onClose,
+}: {
+  invoiceId: string;
+  onClose: () => void;
+}) {
+  const qc = useQueryClient();
+  const [reason, setReason] = useState('');
+  const [lines, setLines] = useState<EditLine[]>([]);
+  const [paymentMethod, setPaymentMethod] = useState<
+    'cash' | 'card' | 'instapay' | 'bank_transfer'
+  >('cash');
+  const [discountTotal, setDiscountTotal] = useState(0);
+  const [notes, setNotes] = useState('');
+
+  const { data, isLoading } = useQuery({
+    queryKey: ['invoice-edit', invoiceId],
+    queryFn: () => posApi.get(invoiceId),
+  });
+
+  // Seed the editor once when the invoice payload lands.
+  useEffect(() => {
+    if (!data) return;
+    const items = (data.items || data.lines || []).map((it: any) => ({
+      variant_id: it.variant_id,
+      product_name: it.product_name_snapshot || it.product_name || '',
+      sku: it.sku_snapshot || it.sku || '',
+      color_name: it.color_name_snapshot || undefined,
+      size_label: it.size_label_snapshot || undefined,
+      qty: Number(it.quantity || 0),
+      unit_price: Number(it.unit_price || 0),
+      discount: Number(it.discount_amount || 0),
+    }));
+    setLines(items);
+    setDiscountTotal(Number(data.invoice_discount || 0));
+    setNotes(data.notes || '');
+    const firstPay = (data.payments || [])[0];
+    if (firstPay?.payment_method) setPaymentMethod(firstPay.payment_method);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data?.id]);
+
+  const subtotal = lines.reduce(
+    (s, l) => s + l.qty * l.unit_price - (l.discount || 0),
+    0,
+  );
+  const grand = Math.max(0, subtotal - discountTotal);
+
+  const updateLine = (idx: number, patch: Partial<EditLine>) =>
+    setLines((prev) =>
+      prev.map((l, i) => (i === idx ? { ...l, ...patch } : l)),
+    );
+  const removeLine = (idx: number) =>
+    setLines((prev) => prev.filter((_, i) => i !== idx));
+
+  const save = useMutation({
+    mutationFn: () => {
+      if (lines.length === 0)
+        return Promise.reject(new Error('يجب وجود صنف واحد على الأقل'));
+      if (!reason.trim())
+        return Promise.reject(new Error('يجب كتابة سبب التعديل'));
+      return posApi.edit(invoiceId, {
+        warehouse_id: data.warehouse_id,
+        customer_id: data.customer_id || undefined,
+        salesperson_id: data.salesperson_id || undefined,
+        notes: notes || undefined,
+        discount_total: discountTotal,
+        edit_reason: reason,
+        lines: lines.map((l) => ({
+          variant_id: l.variant_id,
+          qty: l.qty,
+          unit_price: l.unit_price,
+          discount: l.discount || 0,
+        })),
+        payments: [
+          {
+            payment_method: paymentMethod,
+            amount: grand,
+          },
+        ],
+      });
+    },
+    onSuccess: () => {
+      toast.success('تم إصدار فاتورة جديدة بديلة وإلغاء السابقة');
+      qc.invalidateQueries({ queryKey: ['invoices'] });
+      qc.invalidateQueries({ queryKey: ['dashboard-overview'] });
+      onClose();
+    },
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.message || e?.message || 'فشل التعديل'),
+  });
+
+  return (
+    <div className="fixed inset-0 bg-slate-900/50 z-50 flex items-center justify-center p-4">
+      <div
+        className="bg-white rounded-2xl w-full max-w-4xl shadow-xl max-h-[90vh] overflow-hidden flex flex-col"
+        dir="rtl"
+      >
+        <div className="p-4 border-b flex items-center justify-between">
+          <div>
+            <h3 className="font-black text-slate-800 flex items-center gap-2">
+              <Pencil className="w-5 h-5 text-amber-500" />
+              تعديل فاتورة {data?.invoice_no || ''}
+            </h3>
+            <p className="text-xs text-slate-500 mt-1">
+              سيُصدر فاتورة جديدة بديلة وتُلغى الحالية مع عكس المخزون والخزينة.
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            className="p-2 rounded hover:bg-slate-100"
+            title="إغلاق"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="p-4 overflow-y-auto space-y-4 flex-1">
+          {isLoading ? (
+            <div className="p-10 text-center text-slate-400">جاري التحميل…</div>
+          ) : (
+            <>
+              <div className="border rounded-lg overflow-hidden">
+                <table className="w-full text-sm">
+                  <thead className="bg-slate-50 text-slate-600 text-xs">
+                    <tr>
+                      <th className="p-2 text-right">الصنف</th>
+                      <th className="p-2 text-right">الكمية</th>
+                      <th className="p-2 text-right">سعر الوحدة</th>
+                      <th className="p-2 text-right">خصم</th>
+                      <th className="p-2 text-right">الإجمالي</th>
+                      <th className="p-2"></th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y">
+                    {lines.map((l, idx) => {
+                      const total = l.qty * l.unit_price - (l.discount || 0);
+                      return (
+                        <tr key={`${l.variant_id}-${idx}`}>
+                          <td className="p-2">
+                            <div className="font-medium">{l.product_name}</div>
+                            <div className="text-[10px] text-slate-400 font-mono">
+                              {l.sku}{' '}
+                              {[l.color_name, l.size_label]
+                                .filter(Boolean)
+                                .join(' · ')}
+                            </div>
+                          </td>
+                          <td className="p-2">
+                            <div className="flex items-center gap-1">
+                              <button
+                                className="p-1 rounded bg-slate-100 hover:bg-slate-200"
+                                onClick={() =>
+                                  updateLine(idx, {
+                                    qty: Math.max(1, l.qty - 1),
+                                  })
+                                }
+                              >
+                                <Minus size={12} />
+                              </button>
+                              <input
+                                className="w-14 text-center border rounded"
+                                type="number"
+                                value={l.qty}
+                                min={1}
+                                onChange={(e) =>
+                                  updateLine(idx, {
+                                    qty: Math.max(1, Number(e.target.value) || 1),
+                                  })
+                                }
+                              />
+                              <button
+                                className="p-1 rounded bg-slate-100 hover:bg-slate-200"
+                                onClick={() =>
+                                  updateLine(idx, { qty: l.qty + 1 })
+                                }
+                              >
+                                <Plus size={12} />
+                              </button>
+                            </div>
+                          </td>
+                          <td className="p-2">
+                            <input
+                              type="number"
+                              step="0.01"
+                              className="w-24 border rounded px-1 py-0.5 text-sm"
+                              value={l.unit_price}
+                              onChange={(e) =>
+                                updateLine(idx, {
+                                  unit_price: Number(e.target.value) || 0,
+                                })
+                              }
+                            />
+                          </td>
+                          <td className="p-2">
+                            <input
+                              type="number"
+                              step="0.01"
+                              className="w-20 border rounded px-1 py-0.5 text-sm"
+                              value={l.discount}
+                              onChange={(e) =>
+                                updateLine(idx, {
+                                  discount: Number(e.target.value) || 0,
+                                })
+                              }
+                            />
+                          </td>
+                          <td className="p-2 font-mono font-bold">
+                            {EGP(total)}
+                          </td>
+                          <td className="p-2">
+                            <button
+                              onClick={() => removeLine(idx)}
+                              className="p-1 rounded hover:bg-rose-50 text-rose-600"
+                              title="حذف"
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                    {lines.length === 0 && (
+                      <tr>
+                        <td
+                          colSpan={6}
+                          className="p-6 text-center text-slate-400"
+                        >
+                          لا توجد أصناف
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <div>
+                  <label className="text-xs text-slate-600 block mb-1">
+                    خصم إجمالي
+                  </label>
+                  <input
+                    type="number"
+                    className="input"
+                    value={discountTotal}
+                    onChange={(e) =>
+                      setDiscountTotal(Number(e.target.value) || 0)
+                    }
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-slate-600 block mb-1">
+                    طريقة الدفع
+                  </label>
+                  <select
+                    className="input"
+                    value={paymentMethod}
+                    onChange={(e) => setPaymentMethod(e.target.value as any)}
+                  >
+                    <option value="cash">كاش</option>
+                    <option value="card">بطاقة</option>
+                    <option value="instapay">إنستا باي</option>
+                    <option value="bank_transfer">تحويل بنكي</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs text-slate-600 block mb-1">
+                    ملاحظات
+                  </label>
+                  <input
+                    className="input"
+                    value={notes}
+                    onChange={(e) => setNotes(e.target.value)}
+                  />
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between bg-slate-50 rounded-lg px-4 py-3">
+                <div className="text-sm text-slate-600">
+                  المجموع الفرعي:{' '}
+                  <span className="font-bold">{EGP(subtotal)}</span>
+                </div>
+                <div className="text-lg font-black text-brand-600">
+                  الإجمالي: {EGP(grand)}
+                </div>
+              </div>
+
+              <div>
+                <label className="text-xs text-slate-600 block mb-1">
+                  سبب التعديل *
+                </label>
+                <textarea
+                  rows={2}
+                  className="input"
+                  placeholder="مثال: تصحيح كمية / تعديل سعر / إلخ"
+                  value={reason}
+                  onChange={(e) => setReason(e.target.value)}
+                />
+              </div>
+            </>
+          )}
+        </div>
+
+        <div className="p-4 border-t flex items-center justify-end gap-2">
+          <button onClick={onClose} className="btn-ghost">
+            إلغاء
+          </button>
+          <button
+            onClick={() => save.mutate()}
+            disabled={
+              save.isPending ||
+              !reason.trim() ||
+              lines.length === 0 ||
+              isLoading
+            }
+            className="btn-primary"
+          >
+            {save.isPending ? 'جاري الحفظ...' : 'حفظ التعديل وإصدار فاتورة بديلة'}
           </button>
         </div>
       </div>

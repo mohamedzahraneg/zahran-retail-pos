@@ -110,6 +110,14 @@ export const purchasesApi = {
   cancel: (id: string) =>
     unwrap<{ cancelled: boolean }>(api.patch(`/purchases/${id}/cancel`)),
 
+  edit: (
+    id: string,
+    body: CreatePurchasePayload & { edit_reason?: string },
+  ) =>
+    unwrap<{ edited?: boolean; replaced?: string; purchase: any }>(
+      api.post(`/purchases/${id}/edit`, body),
+    ),
+
   // ───── Purchase Returns (إرجاع للمورد) ─────
   listReturns: (supplier_id?: string) =>
     unwrap<any[]>(

@@ -12,6 +12,7 @@ interface AuthState {
   logout: () => void;
   refresh: () => Promise<string>;
   hasRole: (...roles: string[]) => boolean;
+  hasPermission: (...permissions: string[]) => boolean;
 }
 
 export const useAuthStore = create<AuthState>()(
@@ -32,6 +33,9 @@ export const useAuthStore = create<AuthState>()(
       },
 
       logout: () => {
+        // Fire-and-forget server-side audit record; we clear client state immediately
+        // regardless of whether the request succeeds (offline, expired token, etc.).
+        authApi.logout().catch(() => {});
         set({ accessToken: null, refreshToken: null, user: null });
       },
 
@@ -46,6 +50,20 @@ export const useAuthStore = create<AuthState>()(
       hasRole: (...roles) => {
         const role = get().user?.role;
         return !!role && roles.includes(role);
+      },
+
+      // Returns true when the user has EVERY permission in the list.
+      // Supports wildcards: "*" passes any check; "area.*" matches "area.x".
+      hasPermission: (...permissions) => {
+        if (permissions.length === 0) return true;
+        const userPerms = get().user?.permissions || [];
+        if (userPerms.includes('*')) return true;
+        const check = (code: string) => {
+          if (userPerms.includes(code)) return true;
+          const area = code.split('.')[0];
+          return userPerms.includes(`${area}.*`);
+        };
+        return permissions.every(check);
       },
     }),
     {

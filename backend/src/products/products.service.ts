@@ -183,4 +183,26 @@ export class ProductsService {
          ORDER BY sort_order, size_label`,
     );
   }
+
+  /** Preview the next auto-generated product SKU for a given type. */
+  async previewProductSku(type: string) {
+    const [row] = await this.ds.query(
+      `SELECT fn_next_product_sku($1) AS sku`,
+      [type || 'other'],
+    );
+    return { sku: row?.sku as string };
+  }
+
+  /** Preview the auto-generated variant SKU for a product + color + optional size. */
+  async previewVariantSku(
+    product_id: string,
+    color_id: string,
+    size_id?: string | null,
+  ) {
+    const [row] = await this.ds.query(
+      `SELECT fn_next_variant_sku($1, $2, $3) AS sku`,
+      [product_id, color_id, size_id || null],
+    );
+    return { sku: row?.sku as string };
+  }
 }

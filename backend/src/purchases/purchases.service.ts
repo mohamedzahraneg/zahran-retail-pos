@@ -329,20 +329,114 @@ export class PurchasesService {
     });
   }
 
-  async cancel(id: string) {
+  async cancel(id: string, userId?: string) {
     const [p] = await this.ds.query(
       `SELECT * FROM purchases WHERE id = $1`,
       [id],
     );
     if (!p) throw new NotFoundException(`Purchase ${id} not found`);
-    if (p.status !== 'draft') {
-      throw new BadRequestException('يمكن إلغاء المسودات فقط');
+    if (p.status === 'cancelled') {
+      throw new BadRequestException('الفاتورة ملغاة بالفعل');
     }
-    await this.ds.query(
-      `UPDATE purchases SET status = 'cancelled', updated_at = NOW() WHERE id = $1`,
+    if (p.status === 'draft') {
+      await this.ds.query(
+        `UPDATE purchases SET status = 'cancelled', updated_at = NOW() WHERE id = $1`,
+        [id],
+      );
+      return { cancelled: true };
+    }
+    // Received / paid — go through the reversal SP to put stock back and
+    // reverse any cash payments.
+    await this.ds.query(`SELECT fn_void_purchase($1, $2, $3)`, [
+      id,
+      userId || null,
+      'إلغاء فاتورة مشتريات',
+    ]);
+    return { cancelled: true, reversed: true };
+  }
+
+  /**
+   * Edit a purchase invoice. For draft purchases we update items in place.
+   * For received/paid purchases we cancel-and-recreate via fn_void_purchase
+   * then insert a fresh row, mirroring the sales invoice edit flow. The new
+   * purchase carries a `replaces_purchase_id` trail in its `notes` field.
+   */
+  async edit(
+    id: string,
+    dto: CreatePurchaseDto & { edit_reason?: string },
+    userId: string,
+    reason: string,
+  ) {
+    const [existing] = await this.ds.query(
+      `SELECT * FROM purchases WHERE id = $1`,
       [id],
     );
-    return { cancelled: true };
+    if (!existing) throw new NotFoundException(`Purchase ${id} not found`);
+    if (existing.status === 'cancelled') {
+      throw new BadRequestException('الفاتورة ملغاة — لا يمكن تعديلها');
+    }
+
+    // Draft → in-place edit
+    if (existing.status === 'draft') {
+      return this.ds.transaction(async (em) => {
+        await em.query(
+          `UPDATE purchases
+              SET supplier_id  = $2,
+                  warehouse_id = $3,
+                  notes        = $4,
+                  updated_at   = NOW()
+            WHERE id = $1`,
+          [
+            id,
+            dto.supplier_id ?? existing.supplier_id,
+            dto.warehouse_id ?? existing.warehouse_id,
+            dto.notes ?? existing.notes,
+          ],
+        );
+        await em.query(`DELETE FROM purchase_items WHERE purchase_id = $1`, [id]);
+        for (const line of dto.items || []) {
+          const line_total =
+            line.quantity * line.unit_cost -
+            (line.discount || 0) +
+            (line.tax || 0);
+          await em.query(
+            `INSERT INTO purchase_items
+               (purchase_id, variant_id, quantity, unit_cost,
+                discount, tax, line_total)
+             VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+            [
+              id,
+              line.variant_id,
+              line.quantity,
+              line.unit_cost,
+              line.discount || 0,
+              line.tax || 0,
+              line_total,
+            ],
+          );
+        }
+        const [out] = await em.query(
+          `SELECT * FROM purchases WHERE id = $1`,
+          [id],
+        );
+        return { edited: true, purchase: out };
+      });
+    }
+
+    // Received / paid → void via SP, then create a new purchase
+    await this.ds.query(`SELECT fn_void_purchase($1, $2, $3)`, [
+      id,
+      userId,
+      reason,
+    ]);
+    const tagged = {
+      ...dto,
+      notes: [dto.notes, `تعديل لفاتورة المشتريات رقم ${id}`]
+        .filter(Boolean)
+        .join(' — '),
+    };
+    const created = await this.create(tagged, userId);
+    return { replaced: id, purchase: created };
   }
 
   // --------------------------------------------------------------------------

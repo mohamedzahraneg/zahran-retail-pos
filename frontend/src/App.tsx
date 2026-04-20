@@ -31,6 +31,8 @@ import RecurringExpenses from '@/pages/RecurringExpenses';
 import CustomerGroups from '@/pages/CustomerGroups';
 import Settings from '@/pages/Settings';
 import Users from '@/pages/Users';
+import Loyalty from '@/pages/Loyalty';
+import Attendance from '@/pages/Attendance';
 import SetupWizard from '@/pages/SetupWizard';
 import NotFound from '@/pages/NotFound';
 
@@ -108,6 +110,15 @@ export default function App() {
             </ProtectedRoute>
           }
         />
+        <Route
+          path="loyalty"
+          element={
+            <ProtectedRoute roles={['admin', 'manager', 'accountant']}>
+              <Loyalty />
+            </ProtectedRoute>
+          }
+        />
+        <Route path="attendance" element={<Attendance />} />
         <Route path="settings" element={<Settings />} />
         <Route
           path="users"

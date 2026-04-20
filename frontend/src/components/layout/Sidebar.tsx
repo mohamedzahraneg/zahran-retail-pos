@@ -25,6 +25,8 @@ import {
   Percent,
   History,
   Clock,
+  Gift,
+  UserCheck,
   Calculator,
   Repeat,
   Users2,
@@ -46,7 +48,10 @@ interface NavItem {
   to: string;
   label: string;
   icon: any;
+  /** Legacy: role codes allowed to see this item. Kept as a fallback. */
   roles: string[];
+  /** Preferred: permission(s) required to see this item. ANY match grants access. */
+  permission?: string | string[];
 }
 interface NavGroup {
   title: string;
@@ -57,69 +62,71 @@ const groups: NavGroup[] = [
   {
     title: 'الرئيسية',
     items: [
-      { to: '/', label: 'لوحة التحكم', icon: LayoutDashboard, roles: ['admin', 'manager', 'accountant'] },
+      { to: '/', label: 'لوحة التحكم', icon: LayoutDashboard, roles: ['admin', 'manager', 'accountant'], permission: 'dashboard.view' },
     ],
   },
   {
     title: 'المبيعات',
     items: [
-      { to: '/pos', label: 'نقطة البيع', icon: ShoppingCart, roles: ['admin', 'manager', 'cashier'] },
-      { to: '/invoices', label: 'الفواتير', icon: ReceiptText, roles: ['admin', 'manager', 'accountant', 'cashier'] },
-      { to: '/reservations', label: 'الحجوزات', icon: CalendarClock, roles: ['admin', 'manager', 'cashier'] },
-      { to: '/returns', label: 'المرتجعات', icon: Undo2, roles: ['admin', 'manager', 'cashier'] },
-      { to: '/returns-analytics', label: 'تحليلات المرتجعات', icon: TrendingDown, roles: ['admin', 'manager', 'accountant'] },
-      { to: '/shifts', label: 'الورديات', icon: Clock, roles: ['admin', 'manager', 'cashier'] },
-      { to: '/coupons', label: 'الكوبونات', icon: Ticket, roles: ['admin', 'manager'] },
-      { to: '/commissions', label: 'عمولات المبيعات', icon: Percent, roles: ['admin', 'manager', 'accountant'] },
+      { to: '/pos', label: 'نقطة البيع', icon: ShoppingCart, roles: ['admin', 'manager', 'cashier'], permission: 'pos.sell' },
+      { to: '/invoices', label: 'الفواتير', icon: ReceiptText, roles: ['admin', 'manager', 'accountant', 'cashier'], permission: 'invoices.view' },
+      { to: '/reservations', label: 'الحجوزات', icon: CalendarClock, roles: ['admin', 'manager', 'cashier'], permission: 'reservations.view' },
+      { to: '/returns', label: 'المرتجعات', icon: Undo2, roles: ['admin', 'manager', 'cashier'], permission: 'returns.view' },
+      { to: '/returns-analytics', label: 'تحليلات المرتجعات', icon: TrendingDown, roles: ['admin', 'manager', 'accountant'], permission: 'returns.analytics' },
+      { to: '/shifts', label: 'الورديات', icon: Clock, roles: ['admin', 'manager', 'cashier'], permission: 'shifts.view' },
+      { to: '/coupons', label: 'الكوبونات', icon: Ticket, roles: ['admin', 'manager'], permission: 'coupons.view' },
+      { to: '/commissions', label: 'عمولات المبيعات', icon: Percent, roles: ['admin', 'manager', 'accountant'], permission: 'commissions.view' },
     ],
   },
   {
     title: 'الحسابات والمالية',
     items: [
-      { to: '/accounting', label: 'الحسابات', icon: Calculator, roles: ['admin', 'manager', 'accountant'] },
-      { to: '/cash-desk', label: 'الصندوق', icon: Wallet, roles: ['admin', 'manager', 'accountant'] },
-      { to: '/recurring-expenses', label: 'المصاريف الدورية', icon: Repeat, roles: ['admin', 'manager', 'accountant'] },
+      { to: '/accounting', label: 'الحسابات', icon: Calculator, roles: ['admin', 'manager', 'accountant'], permission: 'accounting.view' },
+      { to: '/cash-desk', label: 'الصندوق', icon: Wallet, roles: ['admin', 'manager', 'accountant'], permission: 'cashdesk.view' },
+      { to: '/recurring-expenses', label: 'المصاريف الدورية', icon: Repeat, roles: ['admin', 'manager', 'accountant'], permission: 'recurring_expenses.manage' },
     ],
   },
   {
     title: 'العملاء',
     items: [
-      { to: '/customers', label: 'العملاء', icon: Users, roles: ['admin', 'manager', 'cashier'] },
-      { to: '/customer-groups', label: 'مجموعات العملاء', icon: Users2, roles: ['admin', 'manager'] },
+      { to: '/customers', label: 'العملاء', icon: Users, roles: ['admin', 'manager', 'cashier'], permission: 'customers.view' },
+      { to: '/customer-groups', label: 'مجموعات العملاء', icon: Users2, roles: ['admin', 'manager'], permission: 'customer_groups.manage' },
+      { to: '/loyalty', label: 'برنامج الولاء', icon: Gift, roles: ['admin', 'manager', 'accountant'], permission: 'loyalty.view' },
     ],
   },
   {
     title: 'المخزون',
     items: [
-      { to: '/products', label: 'المنتجات', icon: Package, roles: ['admin', 'manager', 'inventory'] },
-      { to: '/stock-adjustments', label: 'تعديلات المخزون', icon: PackagePlus, roles: ['admin', 'manager', 'inventory'] },
-      { to: '/stock-transfers', label: 'تحويلات المخازن', icon: Shuffle, roles: ['admin', 'manager', 'inventory'] },
-      { to: '/stock-count', label: 'الجرد الفعلي', icon: ClipboardCheck, roles: ['admin', 'manager', 'inventory'] },
-      { to: '/barcode-labels', label: 'طباعة الباركود', icon: BarcodeIcon, roles: ['admin', 'manager', 'inventory'] },
+      { to: '/products', label: 'المنتجات', icon: Package, roles: ['admin', 'manager', 'inventory'], permission: 'products.view' },
+      { to: '/stock-adjustments', label: 'تعديلات المخزون', icon: PackagePlus, roles: ['admin', 'manager', 'inventory'], permission: 'stock.adjust' },
+      { to: '/stock-transfers', label: 'تحويلات المخازن', icon: Shuffle, roles: ['admin', 'manager', 'inventory'], permission: 'stock.transfer' },
+      { to: '/stock-count', label: 'الجرد الفعلي', icon: ClipboardCheck, roles: ['admin', 'manager', 'inventory'], permission: 'stock.count' },
+      { to: '/barcode-labels', label: 'طباعة الباركود', icon: BarcodeIcon, roles: ['admin', 'manager', 'inventory'], permission: 'products.barcode' },
     ],
   },
   {
     title: 'المشتريات',
     items: [
-      { to: '/purchases', label: 'فواتير المشتريات', icon: FileText, roles: ['admin', 'manager', 'accountant', 'stock_keeper'] },
-      { to: '/suppliers', label: 'الموردون', icon: Truck, roles: ['admin', 'manager', 'accountant'] },
+      { to: '/purchases', label: 'فواتير المشتريات', icon: FileText, roles: ['admin', 'manager', 'accountant', 'stock_keeper'], permission: 'purchases.view' },
+      { to: '/suppliers', label: 'الموردون', icon: Truck, roles: ['admin', 'manager', 'accountant'], permission: 'suppliers.view' },
     ],
   },
   {
     title: 'التقارير',
     items: [
-      { to: '/reports', label: 'التقارير', icon: BarChart3, roles: ['admin', 'manager', 'accountant'] },
-      { to: '/alerts', label: 'التنبيهات', icon: Bell, roles: ['admin', 'manager', 'accountant'] },
+      { to: '/reports', label: 'التقارير', icon: BarChart3, roles: ['admin', 'manager', 'accountant'], permission: 'reports.view' },
+      { to: '/alerts', label: 'التنبيهات', icon: Bell, roles: ['admin', 'manager', 'accountant'], permission: 'alerts.view' },
     ],
   },
   {
     title: 'الإدارة',
     items: [
-      { to: '/users', label: 'المستخدمون', icon: UserCog, roles: ['admin', 'manager'] },
-      { to: '/settings', label: 'الإعدادات', icon: Settings, roles: ['admin'] },
-      { to: '/import', label: 'استيراد Excel', icon: FileUp, roles: ['admin', 'manager'] },
-      { to: '/notifications', label: 'الإشعارات (واتساب)', icon: MessageCircle, roles: ['admin', 'manager'] },
-      { to: '/audit-log', label: 'سجل التدقيق', icon: History, roles: ['admin', 'manager'] },
+      { to: '/users', label: 'المستخدمون', icon: UserCog, roles: ['admin', 'manager'], permission: 'users.view' },
+      { to: '/attendance', label: 'الحضور والانصراف', icon: UserCheck, roles: ['admin', 'manager', 'cashier', 'accountant', 'salesperson', 'inventory'], permission: 'attendance.clock' },
+      { to: '/settings', label: 'الإعدادات', icon: Settings, roles: ['admin'], permission: 'settings.view' },
+      { to: '/import', label: 'استيراد Excel', icon: FileUp, roles: ['admin', 'manager'], permission: 'import.run' },
+      { to: '/notifications', label: 'الإشعارات (واتساب)', icon: MessageCircle, roles: ['admin', 'manager'], permission: 'notifications.manage' },
+      { to: '/audit-log', label: 'سجل التدقيق', icon: History, roles: ['admin', 'manager'], permission: 'audit.view' },
     ],
   },
 ];
@@ -127,14 +134,28 @@ const groups: NavGroup[] = [
 export function Sidebar() {
   const user = useAuthStore((s) => s.user);
   const logout = useAuthStore((s) => s.logout);
+  const hasPermission = useAuthStore((s) => s.hasPermission);
   const role = user?.role || 'guest';
   const collapsed = useLayoutStore((s) => s.collapsed);
   const mobileOpen = useLayoutStore((s) => s.mobileOpen);
   const closeMobile = useLayoutStore((s) => s.closeMobile);
   const toggleCollapsed = useLayoutStore((s) => s.toggleCollapsed);
 
+  // Show an item when the user has its permission, OR (legacy fallback) when
+  // the user's role is listed. This lets us migrate gradually — eventually
+  // every item has a permission and the role fallback can go.
+  const allowed = (it: NavItem) => {
+    const perms = Array.isArray(it.permission)
+      ? it.permission
+      : it.permission
+        ? [it.permission]
+        : [];
+    if (perms.length > 0 && perms.some((p) => hasPermission(p))) return true;
+    return it.roles.includes(role);
+  };
+
   const visibleGroups = groups
-    .map((g) => ({ ...g, items: g.items.filter((it) => it.roles.includes(role)) }))
+    .map((g) => ({ ...g, items: g.items.filter(allowed) }))
     .filter((g) => g.items.length > 0);
 
   const [online, setOnline] = useState<boolean>(

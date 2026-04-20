@@ -11,6 +11,10 @@ export interface LoginResponse {
     email: string;
     role: string;
     role_name: string;
+    /**
+     * Effective permission codes: role permissions ∪ user.extra_permissions
+     * minus user.denied_permissions. A wildcard "*" grants everything.
+     */
     permissions: string[];
     branch_id: string;
   };
@@ -26,4 +30,6 @@ export const authApi = {
     ),
 
   me: () => unwrap<any>(api.get('/auth/me')),
+
+  logout: () => unwrap<{ ok: boolean }>(api.post('/auth/logout', {})),
 };

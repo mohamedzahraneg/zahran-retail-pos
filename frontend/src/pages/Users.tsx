@@ -8,6 +8,8 @@ import {
   KeyRound,
   Power,
   PowerOff,
+  ShieldCheck,
+  X,
 } from 'lucide-react';
 import {
   usersApi,
@@ -16,11 +18,13 @@ import {
   type CreateUserPayload,
   type UpdateUserPayload,
 } from '@/api/users.api';
+import { settingsApi } from '@/api/settings.api';
 
 export default function UsersPage() {
   const [modalMode, setModalMode] = useState<'create' | 'edit' | null>(null);
   const [pwdUserId, setPwdUserId] = useState<string | null>(null);
   const [editUser, setEditUser] = useState<User | null>(null);
+  const [permsUser, setPermsUser] = useState<User | null>(null);
 
   const qc = useQueryClient();
 
@@ -138,6 +142,13 @@ export default function UsersPage() {
                       >
                         <KeyRound className="w-4 h-4" />
                       </button>
+                      <button
+                        title="صلاحيات مخصصة"
+                        onClick={() => setPermsUser(u)}
+                        className="icon-btn text-indigo-400"
+                      >
+                        <ShieldCheck className="w-4 h-4" />
+                      </button>
                       {u.is_active ? (
                         <button
                           title="تعطيل"
@@ -179,7 +190,218 @@ export default function UsersPage() {
           onClose={() => setPwdUserId(null)}
         />
       )}
+
+      {permsUser && (
+        <UserPermissionsModal
+          user={permsUser}
+          role={roleById(permsUser.role_id) || null}
+          onClose={() => setPermsUser(null)}
+        />
+      )}
     </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+
+function UserPermissionsModal({
+  user,
+  role,
+  onClose,
+}: {
+  user: User;
+  role: Role | null;
+  onClose: () => void;
+}) {
+  const qc = useQueryClient();
+  const { data: perms } = useQuery({
+    queryKey: ['permissions-catalog'],
+    queryFn: () => settingsApi.listPermissions(),
+  });
+  const { data: fullUser } = useQuery({
+    queryKey: ['user', user.id],
+    queryFn: () => usersApi.get(user.id),
+  });
+  const { data: fullRole } = useQuery({
+    queryKey: ['role', role?.id],
+    queryFn: async () => {
+      if (!role) return null;
+      const all = await settingsApi.listRoles();
+      return all.find((r: any) => r.id === role.id) || null;
+    },
+    enabled: !!role,
+  });
+
+  const rolePerms: string[] = (fullRole as any)?.permissions || [];
+  const [extra, setExtra] = useState<Set<string>>(
+    new Set(fullUser?.extra_permissions || []),
+  );
+  const [denied, setDenied] = useState<Set<string>>(
+    new Set(fullUser?.denied_permissions || []),
+  );
+
+  // Re-sync when fresh user data arrives
+  useState(() => {
+    if (fullUser) {
+      setExtra(new Set(fullUser.extra_permissions || []));
+      setDenied(new Set(fullUser.denied_permissions || []));
+    }
+  });
+
+  const save = useMutation({
+    mutationFn: () =>
+      usersApi.setPermissions(user.id, {
+        extra_permissions: Array.from(extra),
+        denied_permissions: Array.from(denied),
+      }),
+    onSuccess: () => {
+      toast.success('تم حفظ الصلاحيات');
+      qc.invalidateQueries({ queryKey: ['users'] });
+      qc.invalidateQueries({ queryKey: ['user', user.id] });
+      onClose();
+    },
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.message || 'تعذر الحفظ'),
+  });
+
+  const effectiveState = (code: string): 'granted' | 'denied' | 'inherited' | 'off' => {
+    if (denied.has(code)) return 'denied';
+    if (extra.has(code)) return 'granted';
+    if (rolePerms.includes('*') || rolePerms.includes(code)) return 'inherited';
+    return 'off';
+  };
+
+  const cycleState = (code: string) => {
+    const state = effectiveState(code);
+    const newExtra = new Set(extra);
+    const newDenied = new Set(denied);
+    if (state === 'inherited') {
+      // from role-granted → deny explicitly
+      newDenied.add(code);
+      newExtra.delete(code);
+    } else if (state === 'off') {
+      // not granted at all → add as extra
+      newExtra.add(code);
+      newDenied.delete(code);
+    } else if (state === 'granted') {
+      // extra-granted → remove (back to off)
+      newExtra.delete(code);
+      newDenied.delete(code);
+    } else {
+      // denied → remove denial (back to inherited/off)
+      newDenied.delete(code);
+      newExtra.delete(code);
+    }
+    setExtra(newExtra);
+    setDenied(newDenied);
+  };
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="modal-panel w-full max-w-3xl space-y-4 max-h-[90vh] overflow-y-auto"
+      >
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-lg font-bold flex items-center gap-2">
+              <ShieldCheck className="w-5 h-5 text-indigo-500" />
+              صلاحيات: {user.full_name || user.username}
+            </h2>
+            <p className="text-xs text-slate-500 mt-1">
+              الدور: <b>{role?.name_ar || '—'}</b> — اضغط على الصلاحية للتبديل
+              بين (مورَّث / منح إضافي / حجب).
+            </p>
+          </div>
+          <button onClick={onClose} className="icon-btn">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <div className="flex flex-wrap gap-3 text-xs">
+          <Legend color="emerald" label="مورَّث من الدور" />
+          <Legend color="indigo" label="منح إضافي" />
+          <Legend color="rose" label="محجوب (حتى لو الدور يعطيه)" />
+          <Legend color="slate" label="غير مفعّل" />
+        </div>
+
+        {!perms ? (
+          <div className="p-10 text-center text-slate-400">جاري التحميل…</div>
+        ) : (
+          Object.entries(perms.groups).map(([group, items]) => (
+            <div key={group} className="card p-3">
+              <div className="font-bold text-slate-700 mb-2">{group}</div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                {items.map((p) => {
+                  const s = effectiveState(p.code);
+                  const cls =
+                    s === 'inherited'
+                      ? 'border-emerald-300 bg-emerald-50 text-emerald-800'
+                      : s === 'granted'
+                        ? 'border-indigo-300 bg-indigo-50 text-indigo-800'
+                        : s === 'denied'
+                          ? 'border-rose-300 bg-rose-50 text-rose-800 line-through'
+                          : 'border-slate-200 bg-white text-slate-600';
+                  return (
+                    <button
+                      key={p.code}
+                      type="button"
+                      onClick={() => cycleState(p.code)}
+                      className={`text-right border rounded-lg px-3 py-2 text-sm transition ${cls}`}
+                    >
+                      <div className="font-bold">{p.label}</div>
+                      <div className="text-[10px] font-mono opacity-70">
+                        {p.code}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ))
+        )}
+
+        <div className="flex justify-end gap-2 pt-2">
+          <button onClick={onClose} className="btn-ghost">
+            إلغاء
+          </button>
+          <button
+            onClick={() => save.mutate()}
+            disabled={save.isPending}
+            className="btn-primary"
+          >
+            حفظ
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Legend({ color, label }: { color: string; label: string }) {
+  const cls =
+    color === 'emerald'
+      ? 'border-emerald-300 bg-emerald-50 text-emerald-800'
+      : color === 'indigo'
+        ? 'border-indigo-300 bg-indigo-50 text-indigo-800'
+        : color === 'rose'
+          ? 'border-rose-300 bg-rose-50 text-rose-800'
+          : 'border-slate-200 bg-slate-50 text-slate-600';
+  const dot =
+    color === 'emerald'
+      ? 'bg-emerald-500'
+      : color === 'indigo'
+        ? 'bg-indigo-500'
+        : color === 'rose'
+          ? 'bg-rose-500'
+          : 'bg-slate-400';
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded border text-xs ${cls}`}
+    >
+      <span className={`inline-block w-2 h-2 rounded-full ${dot}`} />
+      {label}
+    </span>
   );
 }
 

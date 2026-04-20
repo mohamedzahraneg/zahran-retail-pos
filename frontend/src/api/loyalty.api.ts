@@ -36,8 +36,26 @@ export interface LoyaltyTransaction {
   full_name?: string | null;
 }
 
+export interface LoyaltyCustomerRow {
+  id: string;
+  full_name: string;
+  phone: string | null;
+  loyalty_points: number;
+  loyalty_tier: string | null;
+  total_spent: number | null;
+  last_visit_at: string | null;
+  visits_count: number | null;
+  redeemable_egp: number;
+}
+
 export const loyaltyApi = {
   config: () => unwrap<LoyaltyConfig>(api.get('/loyalty/config')),
+
+  updateConfig: (patch: Partial<LoyaltyConfig>) =>
+    unwrap<LoyaltyConfig>(api.patch('/loyalty/config', patch)),
+
+  customers: (params?: { q?: string; tier?: string; limit?: number }) =>
+    unwrap<LoyaltyCustomerRow[]>(api.get('/loyalty/customers', { params })),
 
   customer: (id: string) =>
     unwrap<LoyaltyBalance>(api.get(`/loyalty/customer/${id}`)),
@@ -50,5 +68,10 @@ export const loyaltyApi = {
   preview: (id: string, points: number, subtotal: number) =>
     unwrap<LoyaltyPreview>(
       api.post(`/loyalty/customer/${id}/preview`, { points, subtotal }),
+    ),
+
+  adjust: (id: string, body: { delta: number; reason?: string }) =>
+    unwrap<{ previous: number; delta: number; current: number }>(
+      api.post(`/loyalty/customer/${id}/adjust`, body),
     ),
 };

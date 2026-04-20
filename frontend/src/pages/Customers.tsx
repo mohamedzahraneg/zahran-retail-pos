@@ -1,7 +1,7 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
-import { Plus, Search, Phone, Mail, Award, X } from 'lucide-react';
+import { Plus, Search, Phone, Mail, Award, X, ArrowUpDown } from 'lucide-react';
 import { customersApi } from '@/api/customers.api';
 
 const EGP = (n: number) => `${Number(n).toFixed(0)} EGP`;
@@ -20,14 +20,52 @@ const TIER_LABELS: Record<string, string> = {
   platinum: 'بلاتيني',
 };
 
+type CustomerSort =
+  | 'name'
+  | 'points_desc'
+  | 'points_asc'
+  | 'balance_desc'
+  | 'balance_asc'
+  | 'created_desc';
+
 export default function Customers() {
   const [q, setQ] = useState('');
+  const [tier, setTier] = useState<string>('');
+  const [sort, setSort] = useState<CustomerSort>('created_desc');
   const [showCreate, setShowCreate] = useState(false);
 
   const { data, isLoading } = useQuery({
     queryKey: ['customers', q],
     queryFn: () => customersApi.list({ q: q || undefined, limit: 200 }),
   });
+
+  const customers = useMemo(() => {
+    let list = (data?.data || []).slice();
+    if (tier) list = list.filter((c) => c.loyalty_tier === tier);
+    list.sort((a, b) => {
+      switch (sort) {
+        case 'name':
+          return String(a.full_name || '').localeCompare(
+            String(b.full_name || ''),
+            'ar',
+          );
+        case 'points_desc':
+          return Number(b.loyalty_points || 0) - Number(a.loyalty_points || 0);
+        case 'points_asc':
+          return Number(a.loyalty_points || 0) - Number(b.loyalty_points || 0);
+        case 'balance_desc':
+          return Number(b.current_balance || 0) - Number(a.current_balance || 0);
+        case 'balance_asc':
+          return Number(a.current_balance || 0) - Number(b.current_balance || 0);
+        default:
+          return (
+            Date.parse(String((b as any).created_at || 0)) -
+            Date.parse(String((a as any).created_at || 0))
+          );
+      }
+    });
+    return list;
+  }, [data?.data, tier, sort]);
 
   return (
     <div className="space-y-6">
@@ -38,8 +76,8 @@ export default function Customers() {
         </button>
       </div>
 
-      <div className="card p-4">
-        <div className="relative">
+      <div className="card p-4 flex flex-wrap items-center gap-3">
+        <div className="relative flex-1 min-w-[220px]">
           <Search
             size={16}
             className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400"
@@ -51,6 +89,34 @@ export default function Customers() {
             onChange={(e) => setQ(e.target.value)}
           />
         </div>
+        <select
+          className="input max-w-[140px]"
+          value={tier}
+          onChange={(e) => setTier(e.target.value)}
+          title="فلتر حسب التصنيف"
+        >
+          <option value="">كل التصنيفات</option>
+          <option value="bronze">برونزي</option>
+          <option value="silver">فضي</option>
+          <option value="gold">ذهبي</option>
+          <option value="platinum">بلاتيني</option>
+        </select>
+        <select
+          className="input max-w-[180px]"
+          value={sort}
+          onChange={(e) => setSort(e.target.value as CustomerSort)}
+          title="ترتيب"
+        >
+          <option value="created_desc">الأحدث أولاً</option>
+          <option value="name">الاسم (أ-ي)</option>
+          <option value="points_desc">النقاط الأعلى</option>
+          <option value="points_asc">النقاط الأقل</option>
+          <option value="balance_desc">الرصيد الأعلى</option>
+          <option value="balance_asc">الرصيد الأقل</option>
+        </select>
+        <div className="text-xs text-slate-500">
+          المعروض: <b className="text-slate-800">{customers.length}</b>
+        </div>
       </div>
 
       <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -59,7 +125,7 @@ export default function Customers() {
             جارٍ التحميل...
           </div>
         )}
-        {data?.data.map((c) => (
+        {customers.map((c) => (
           <div key={c.id} className="card p-4 hover:shadow-glow transition">
             <div className="flex items-start justify-between mb-3">
               <div>
@@ -103,7 +169,7 @@ export default function Customers() {
           </div>
         ))}
 
-        {!isLoading && !data?.data.length && (
+        {!isLoading && !customers.length && (
           <div className="col-span-full text-center py-12 text-slate-400">
             لا توجد بيانات عملاء
           </div>

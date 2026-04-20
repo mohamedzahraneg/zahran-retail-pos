@@ -127,6 +127,7 @@ export const settingsApi = {
   listPermissions: () =>
     unwrap<{
       groups: Record<string, Array<{ code: string; label: string }>>;
+      all?: string[];
     }>(api.get('/settings/permissions')),
 
   listPaymentMethods: () =>
