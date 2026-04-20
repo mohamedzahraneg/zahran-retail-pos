@@ -164,6 +164,11 @@ export function Receipt({ data, autoPrint = false, onAfterPrint, template }: Pro
     .filter((t) => t.direction === 'out')
     .reduce((s, t) => s + Number(t.points), 0);
 
+  const totalPieces = lines.reduce(
+    (s, l) => s + Number(l.quantity ?? l.qty ?? 0),
+    0,
+  );
+
   // CSS variables + inline width/padding let the template drive layout.
   const rootStyle: React.CSSProperties = {
     ['--rc-font' as any]: tpl.font_family,
@@ -272,6 +277,7 @@ export function Receipt({ data, autoPrint = false, onAfterPrint, template }: Pro
         <table className="receipt-items">
           <thead>
             <tr>
+              <th className="receipt-col-idx">#</th>
               <th className="receipt-col-name">الصنف</th>
               <th className="receipt-col-qty">كمية</th>
               <th className="receipt-col-price">سعر</th>
@@ -294,6 +300,7 @@ export function Receipt({ data, autoPrint = false, onAfterPrint, template }: Pro
                 .join(' · ');
               return (
                 <tr key={l.id || i}>
+                  <td className="receipt-col-idx">{i + 1}</td>
                   <td className="receipt-col-name">
                     <div className="receipt-item-name">{name}</div>
                     {tpl.show_items_sku && sku && (
@@ -330,6 +337,10 @@ export function Receipt({ data, autoPrint = false, onAfterPrint, template }: Pro
 
         {/* Totals */}
         <div className="receipt-totals">
+          <div className="receipt-row">
+            <span>عدد الأصناف:</span>
+            <span>{lines.length} صنف · {totalPieces} قطعة</span>
+          </div>
           <div className="receipt-row">
             <span>المجموع:</span>
             <span>{EGP(Number(inv.subtotal))} ج.م</span>
@@ -557,9 +568,15 @@ export function Receipt({ data, autoPrint = false, onAfterPrint, template }: Pro
           text-align: center;
           border-bottom: 1px dashed #000;
         }
+        .receipt-col-idx {
+          text-align: center;
+          width: 6%;
+          font-weight: bold;
+          color: var(--rc-muted, #555);
+        }
         .receipt-col-name {
           text-align: right;
-          width: 45%;
+          width: 40%;
         }
         .receipt-col-qty,
         .receipt-col-price,
@@ -641,9 +658,14 @@ export function Receipt({ data, autoPrint = false, onAfterPrint, template }: Pro
           max-width: 100%;
         }
         .receipt-qr {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          margin: 6px auto 2px;
           text-align: center;
-          margin: 6px 0 2px;
         }
+        .receipt-qr svg { display: block; margin: 0 auto; }
         .receipt-qr-caption {
           font-size: 9px;
           margin-top: 2px;
