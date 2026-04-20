@@ -1,10 +1,12 @@
-import { IsBoolean, IsOptional, IsString, Length } from 'class-validator';
+import { IsBoolean, IsDefined, IsOptional, IsString, Length } from 'class-validator';
 
 export class UpsertSettingDto {
   @IsString()
   @Length(1, 80)
   key!: string;
 
+  /** jsonb payload — accept any shape (object, array, primitive). */
+  @IsDefined()
   value!: any;
 
   @IsOptional()
