@@ -1013,17 +1013,18 @@ function ReceiptTab() {
   const set = <K extends keyof ReceiptSettings>(key: K, value: ReceiptSettings[K]) =>
     setForm((f) => ({ ...f, [key]: value }));
 
-  const readImage = (key: 'logoUrl' | 'qrImageUrl', file: File, maxKB = 500) => {
-    if (file.size > maxKB * 1024) {
-      toast.error(`حجم الصورة أكبر من ${maxKB}KB — اضغطها أو اختار أصغر`);
+  const MAX_IMAGE_KB = 1024; // 1 MB
+  const readImage = (key: 'logoUrl' | 'qrImageUrl', file: File) => {
+    if (file.size > MAX_IMAGE_KB * 1024) {
+      toast.error(`حجم الصورة أكبر من 1 ميجا — اضغطها أو اختار أصغر`);
       return;
     }
     const reader = new FileReader();
     reader.onload = () => set(key, String(reader.result || ''));
     reader.readAsDataURL(file);
   };
-  const pickLogo = (file: File) => readImage('logoUrl', file, 500);
-  const pickQr = (file: File) => readImage('qrImageUrl', file, 300);
+  const pickLogo = (file: File) => readImage('logoUrl', file);
+  const pickQr = (file: File) => readImage('qrImageUrl', file);
 
   return (
     <div className="max-w-3xl space-y-4">
@@ -1062,7 +1063,7 @@ function ReceiptTab() {
             )}
           </div>
           <div className="text-xs text-slate-500 mt-1">
-            PNG / JPG / SVG — أقصى 500KB — يُحفظ مع الفاتورة مباشرة (data URL)
+            PNG / JPG / SVG — أقصى 1 ميجا — يُحفظ مع الفاتورة مباشرة (data URL)
           </div>
         </div>
       </div>
@@ -1121,7 +1122,7 @@ function ReceiptTab() {
             )}
           </div>
           <div className="text-xs text-slate-500 mt-1">
-            PNG / JPG / SVG — أقصى 300KB. لو رفعت صورة، تجاهل حقل "رابط الـ QR".
+            PNG / JPG / SVG — أقصى 1 ميجا. لو رفعت صورة، تجاهل حقل "رابط الـ QR".
           </div>
         </div>
       </div>
