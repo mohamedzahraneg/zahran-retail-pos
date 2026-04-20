@@ -160,7 +160,7 @@ export class DashboardService {
       `
       SELECT COALESCE(SUM(amount), 0)::numeric(14,2) AS expenses
       FROM expenses
-      WHERE (incurred_at AT TIME ZONE 'Africa/Cairo')::date BETWEEN $1::date AND $2::date
+      WHERE expense_date BETWEEN $1::date AND $2::date
       `,
       [fromDate, toDate],
     );
