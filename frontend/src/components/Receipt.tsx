@@ -740,47 +740,46 @@ export function Receipt({ data, autoPrint = false, onAfterPrint, template }: Pro
             size: ${tpl.paper_width_mm}mm ${tpl.paper_height_mm ? `${tpl.paper_height_mm}mm` : 'auto'};
             margin: 0;
           }
-          html, body {
-            margin: 0 !important;
-            padding: 0 !important;
-            width: ${tpl.paper_width_mm}mm !important;
-            min-height: 0 !important;
+          /* Every ancestor on the path from <body> down to the receipt
+             must grow freely so the receipt isn't clipped by any
+             overflow:hidden or fixed height on the page (e.g. POS
+             100vh container or the full-receipt modal with max-h 92vh).
+             We use position:static here (NOT absolute) so the browser
+             can paginate content across multiple 80mm "pages". */
+          html, body, #root,
+          .receipt-print-root,
+          .receipt-print-root * {
+            margin: 0;
+            padding: 0;
+            overflow: visible !important;
+            max-height: none !important;
             height: auto !important;
+            min-height: 0 !important;
+            position: static !important;
+            transform: none !important;
             background: #fff !important;
+          }
+          html, body {
+            width: ${tpl.paper_width_mm}mm !important;
             -webkit-print-color-adjust: exact !important;
             print-color-adjust: exact !important;
           }
-          /* Hide everything on the page via visibility (preserves layout),
-             then reveal the receipt subtree. This is safe whether the
-             receipt is a direct child of body or nested inside #root. */
-          body * {
-            visibility: hidden !important;
-          }
-          .receipt-print-root,
-          .receipt-print-root * {
-            visibility: visible !important;
+          /* Hide every element that isn't either the receipt root
+             itself or one of its ancestors. An ancestor check lets us
+             skip over #root, layout wrappers, and the invoice modal
+             without having to know their exact structure. */
+          body *:not(:has(.receipt-print-root)):not(.receipt-print-root):not(.receipt-print-root *) {
+            display: none !important;
           }
           .receipt-print-root {
-            position: absolute !important;
-            top: 0 !important;
-            left: 0 !important;
-            right: 0 !important;
+            display: block !important;
             width: ${tpl.paper_width_mm}mm !important;
-            margin: 0 !important;
-            padding: 0 !important;
-            height: auto !important;
-            max-height: none !important;
-            overflow: visible !important;
           }
           .receipt-80mm {
             width: ${tpl.paper_width_mm}mm !important;
-            min-height: 0 !important;
-            height: auto !important;
-            max-height: none !important;
             box-sizing: border-box;
             page-break-inside: auto;
             break-inside: auto;
-            overflow: visible !important;
           }
           .receipt-80mm img,
           .receipt-80mm svg {
