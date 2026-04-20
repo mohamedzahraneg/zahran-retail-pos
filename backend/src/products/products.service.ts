@@ -35,14 +35,26 @@ export class ProductsService {
     const where: any = {};
     if (filters.type) where.type = filters.type;
     if (filters.active !== undefined) where.is_active = filters.active;
-    if (filters.q) where.name_ar = ILike(`%${filters.q}%`);
-
-    const [data, total] = await this.repo.findAndCount({
-      where,
-      order: { created_at: 'DESC' },
-      skip: (page - 1) * limit,
-      take: limit,
-    });
+    const q = filters.q?.trim();
+    let queryBuilder = this.repo
+      .createQueryBuilder('p')
+      .orderBy('p.created_at', 'DESC')
+      .skip((page - 1) * limit)
+      .take(limit);
+    if (filters.type) queryBuilder = queryBuilder.andWhere('p.type = :type', { type: filters.type });
+    if (filters.active !== undefined)
+      queryBuilder = queryBuilder.andWhere('p.is_active = :active', { active: filters.active });
+    if (q) {
+      queryBuilder = queryBuilder.andWhere(
+        `(p.name_ar ILIKE :q OR p.sku_root ILIKE :q OR EXISTS (
+           SELECT 1 FROM product_variants pv
+            WHERE pv.product_id = p.id
+              AND (pv.sku ILIKE :q OR pv.barcode ILIKE :q)
+         ))`,
+        { q: `%${q}%` },
+      );
+    }
+    const [data, total] = await queryBuilder.getManyAndCount();
 
     // Attach aggregated stock qty + stock value to each product.
     let enriched: any[] = data;
