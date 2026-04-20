@@ -32,6 +32,7 @@ export class ProductsController {
   @ApiQuery({ name: 'page', required: false, type: Number })
   @ApiQuery({ name: 'limit', required: false, type: Number })
   @ApiQuery({ name: 'warehouse_id', required: false })
+  @ApiQuery({ name: 'category_id', required: false })
   list(
     @Query('type') type?: 'shoe' | 'bag' | 'accessory',
     @Query('q') q?: string,
@@ -39,6 +40,7 @@ export class ProductsController {
     @Query('page') page?: string,
     @Query('limit') limit?: string,
     @Query('warehouse_id') warehouse_id?: string,
+    @Query('category_id') category_id?: string,
   ) {
     return this.products.findAll({
       type,
@@ -47,6 +49,7 @@ export class ProductsController {
       page: page ? parseInt(page, 10) : undefined,
       limit: limit ? parseInt(limit, 10) : undefined,
       warehouse_id,
+      category_id,
     });
   }
 

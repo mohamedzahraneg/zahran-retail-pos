@@ -17,6 +17,7 @@ export interface ProductFilters {
   page?: number;
   limit?: number;
   warehouse_id?: string;
+  category_id?: string;
 }
 
 @Injectable()
@@ -44,6 +45,8 @@ export class ProductsService {
     if (filters.type) queryBuilder = queryBuilder.andWhere('p.type = :type', { type: filters.type });
     if (filters.active !== undefined)
       queryBuilder = queryBuilder.andWhere('p.is_active = :active', { active: filters.active });
+    if (filters.category_id)
+      queryBuilder = queryBuilder.andWhere('p.category_id = :cid', { cid: filters.category_id });
     if (q) {
       queryBuilder = queryBuilder.andWhere(
         `(p.name_ar ILIKE :q OR p.sku_root ILIKE :q OR EXISTS (

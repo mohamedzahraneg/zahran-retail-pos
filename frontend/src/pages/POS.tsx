@@ -27,6 +27,7 @@ import {
   TrendingUp,
 } from 'lucide-react';
 import { productsApi, Product, Variant } from '@/api/products.api';
+import { categoriesApi } from '@/api/categories.api';
 import { stockApi, VariantStockRow } from '@/api/stock.api';
 import { posApi } from '@/api/pos.api';
 import { couponsApi } from '@/api/coupons.api';
@@ -51,6 +52,8 @@ export default function POS() {
   const cart = useCartStore();
   const user = useAuthStore((s) => s.user);
   const [category, setCategory] = useState<'all' | 'shoe' | 'bag' | 'accessory'>('all');
+  const [stockFilter, setStockFilter] = useState<'all' | 'available' | 'out'>('all');
+  const [selectedCategoryId, setSelectedCategoryId] = useState<string>('');
   const [search, setSearch] = useState('');
   const [payOpen, setPayOpen] = useState(false);
   const [receiptInvoiceId, setReceiptInvoiceId] = useState<string | null>(null);
@@ -73,16 +76,32 @@ export default function POS() {
   });
 
   const { data: products = { data: [], meta: {} as any } } = useQuery({
-    queryKey: ['products', category, search, cart.warehouse?.id],
+    queryKey: ['products', category, selectedCategoryId, search, cart.warehouse?.id],
     queryFn: () =>
       productsApi.list({
         type: category === 'all' ? undefined : category,
         q: search || undefined,
         limit: 500,
         warehouse_id: cart.warehouse?.id,
+        category_id: selectedCategoryId || undefined,
+        active: true,
       }),
     enabled: !!cart.warehouse?.id || true,
   });
+
+  const { data: categoriesList = [] } = useQuery({
+    queryKey: ['categories', 'pos'],
+    queryFn: () => categoriesApi.list(),
+    staleTime: 60_000,
+  });
+
+  const filteredProducts = useMemo(() => {
+    if (stockFilter === 'all') return products.data;
+    return products.data.filter((p) => {
+      const s = p.total_stock ?? 0;
+      return stockFilter === 'available' ? s > 0 : s === 0;
+    });
+  }, [products.data, stockFilter]);
 
   const [variantPickerProduct, setVariantPickerProduct] =
     useState<null | (typeof products.data)[number]>(null);
@@ -339,10 +358,16 @@ export default function POS() {
           posProductsOpen ? 'lg:grid-cols-[520px_1fr]' : 'lg:grid-cols-[1fr]'
         }`}
       >
-        {/* ═══ Cart (right in RTL) — mobile: shown only when mobileView='cart' ═══ */}
+        {/* ═══ Cart (right in RTL) ═══
+         * When the products panel is hidden on desktop, the cart would stretch
+         * to the full window width. Cap it with max-w to keep the UI balanced. */}
         <div
-          className={`border-l border-white/10 bg-slate-950/30 flex flex-col overflow-hidden lg:flex ${
+          className={`border-l border-white/10 bg-slate-950/30 flex-col overflow-hidden lg:flex ${
             mobileView === 'cart' ? 'flex' : 'hidden'
+          } ${
+            !posProductsOpen
+              ? 'lg:max-w-[640px] lg:mx-auto lg:w-full lg:border-x lg:border-white/10'
+              : ''
           }`}
         >
           {/* Cart header */}
@@ -736,36 +761,104 @@ export default function POS() {
 
           {/* Category tabs — hidden when products panel is collapsed */}
           {posProductsOpen && (
-          <div className="flex items-center justify-end gap-2 flex-wrap">
-            {(['all', 'shoe', 'bag', 'accessory'] as const).map((c) => {
-              const labels: Record<string, string> = {
-                all: 'الكل',
-                shoe: '👠 أحذية',
-                bag: '👜 حقائب',
-                accessory: '💍 إكسسوارات',
-              };
-              return (
+          <div className="space-y-2">
+            <div className="flex items-center justify-end gap-2 flex-wrap">
+              {(['all', 'shoe', 'bag', 'accessory'] as const).map((c) => {
+                const labels: Record<string, string> = {
+                  all: 'الكل',
+                  shoe: '👠 أحذية',
+                  bag: '👜 حقائب',
+                  accessory: '💍 إكسسوارات',
+                };
+                return (
+                  <button
+                    key={c}
+                    onClick={() => setCategory(c)}
+                    className={`px-4 py-1.5 rounded-full text-sm font-bold transition ${
+                      category === c
+                        ? 'bg-rose-500 text-white shadow-lg shadow-rose-500/30'
+                        : 'bg-white/5 text-slate-300 border border-white/10 hover:bg-white/10'
+                    }`}
+                  >
+                    {labels[c]}
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Stock availability filter */}
+            <div className="flex items-center justify-end gap-2 flex-wrap">
+              {(
+                [
+                  { k: 'all', label: 'كل الحالات' },
+                  { k: 'available', label: '✔ المتاح' },
+                  { k: 'out', label: '✖ النافذ' },
+                ] as const
+              ).map((s) => (
                 <button
-                  key={c}
-                  onClick={() => setCategory(c)}
-                  className={`px-4 py-1.5 rounded-full text-sm font-bold transition ${
-                    category === c
-                      ? 'bg-rose-500 text-white shadow-lg shadow-rose-500/30'
+                  key={s.k}
+                  onClick={() => setStockFilter(s.k as any)}
+                  className={`px-3 py-1 rounded-full text-xs font-bold transition ${
+                    stockFilter === s.k
+                      ? 'bg-emerald-500/90 text-white shadow shadow-emerald-500/30'
                       : 'bg-white/5 text-slate-300 border border-white/10 hover:bg-white/10'
                   }`}
                 >
-                  {labels[c]}
+                  {s.label}
                 </button>
-              );
-            })}
+              ))}
+            </div>
+
+            {/* Category groups from Products page */}
+            {categoriesList.length > 0 && (
+              <div className="flex items-center justify-end gap-2 flex-wrap">
+                <button
+                  onClick={() => setSelectedCategoryId('')}
+                  className={`px-3 py-1 rounded-full text-xs font-bold transition ${
+                    selectedCategoryId === ''
+                      ? 'bg-indigo-500 text-white shadow shadow-indigo-500/30'
+                      : 'bg-white/5 text-slate-300 border border-white/10 hover:bg-white/10'
+                  }`}
+                >
+                  كل المجموعات
+                </button>
+                {categoriesList
+                  .filter((c) => c.is_active !== false)
+                  .map((c) => (
+                    <button
+                      key={c.id}
+                      onClick={() => setSelectedCategoryId(c.id)}
+                      className={`px-3 py-1 rounded-full text-xs font-bold transition ${
+                        selectedCategoryId === c.id
+                          ? 'bg-indigo-500 text-white shadow shadow-indigo-500/30'
+                          : 'bg-white/5 text-slate-300 border border-white/10 hover:bg-white/10'
+                      }`}
+                      title={c.name_ar}
+                    >
+                      {c.icon ? `${c.icon} ` : ''}
+                      {c.name_ar}
+                      {typeof c.products_count === 'number' ? (
+                        <span className="mr-1 text-[10px] opacity-70">
+                          ({c.products_count})
+                        </span>
+                      ) : null}
+                    </button>
+                  ))}
+              </div>
+            )}
           </div>
           )}
 
           {/* Products grid — hidden when panel is collapsed; search box stays */}
           {posProductsOpen && (
           <div className="flex-1 overflow-y-auto">
+            {filteredProducts.length === 0 && (
+              <div className="text-center py-8 text-slate-400 text-sm">
+                لا توجد منتجات تطابق الفلتر الحالي
+              </div>
+            )}
             <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3">
-              {products.data.map((p) => {
+              {filteredProducts.map((p) => {
                 const stock = p.total_stock ?? 0;
                 const outOfStock = stock === 0;
                 return (
@@ -837,12 +930,16 @@ export default function POS() {
           <div className="mt-2 px-4 py-2 rounded-xl bg-white/5 border border-white/10 flex items-center justify-between text-xs text-slate-300 flex-wrap gap-2">
             <div className="flex items-center gap-4 flex-wrap">
               <span>
-                المنتجات: <b className="text-white">{products.data.length}</b>
+                المعروض:{' '}
+                <b className="text-white">{filteredProducts.length}</b>
+                {filteredProducts.length !== products.data.length && (
+                  <span className="text-slate-500"> / {products.data.length}</span>
+                )}
               </span>
               <span>
                 الأصناف المتاحة:{' '}
                 <b className="text-emerald-300">
-                  {products.data.reduce(
+                  {filteredProducts.reduce(
                     (s, p) => s + (Number(p.variants_count) || 0),
                     0,
                   )}
@@ -851,7 +948,7 @@ export default function POS() {
               <span>
                 إجمالي الكميات:{' '}
                 <b className="text-white">
-                  {products.data.reduce(
+                  {filteredProducts.reduce(
                     (s, p) => s + (Number(p.total_stock) || 0),
                     0,
                   )}

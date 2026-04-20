@@ -120,48 +120,78 @@ export class AuditService {
    * Summary stats for the dashboard — most-active users and most-changed tables
    */
   async stats(params: { from?: string; to?: string }) {
-    const fromClause = params.from
+    // Combined date clause for activity_logs (uses a.created_at) and audit_logs (uses ad.changed_at).
+    const actFrom = params.from
       ? `AND a.created_at >= '${params.from}'::date`
       : `AND a.created_at >= NOW() - INTERVAL '30 days'`;
-    const toClause = params.to
+    const actTo = params.to
       ? `AND a.created_at <= '${params.to}'::date + INTERVAL '1 day'`
       : '';
+    const audFrom = params.from
+      ? `AND ad.changed_at >= '${params.from}'::date`
+      : `AND ad.changed_at >= NOW() - INTERVAL '30 days'`;
+    const audTo = params.to
+      ? `AND ad.changed_at <= '${params.to}'::date + INTERVAL '1 day'`
+      : '';
 
-    const [totals] = await this.ds.query(
-      `
+    const [totals] = await this.ds.query(`
       SELECT
-        (SELECT COUNT(*) FROM activity_logs a WHERE 1=1 ${fromClause} ${toClause}) AS activity_count,
-        (SELECT COUNT(*) FROM audit_logs   ad WHERE 1=1
-           ${params.from ? `AND ad.changed_at >= '${params.from}'::date` : `AND ad.changed_at >= NOW() - INTERVAL '30 days'`}
-           ${params.to   ? `AND ad.changed_at <= '${params.to}'::date + INTERVAL '1 day'` : ''}) AS audit_count
-      `,
-    );
+        (SELECT COUNT(*) FROM activity_logs a WHERE 1=1 ${actFrom} ${actTo}) AS activity_count,
+        (SELECT COUNT(*) FROM audit_logs ad WHERE 1=1 ${audFrom} ${audTo}) AS audit_count
+    `);
 
-    const topUsers = await this.ds.query(
-      `
-      SELECT a.user_id, u.username, u.full_name, COUNT(*)::int AS events
-        FROM activity_logs a
-        LEFT JOIN users u ON u.id = a.user_id
-       WHERE a.user_id IS NOT NULL ${fromClause} ${toClause}
-       GROUP BY a.user_id, u.username, u.full_name
+    /**
+     * Top users — union of activity_logs and audit_logs. audit_logs is the
+     * reliable source (DB triggers populate it); activity_logs is only written
+     * by application-level hooks which aren't wired everywhere.
+     */
+    const topUsers = await this.ds.query(`
+      WITH combined AS (
+        SELECT a.user_id FROM activity_logs a
+         WHERE a.user_id IS NOT NULL ${actFrom} ${actTo}
+        UNION ALL
+        SELECT ad.changed_by AS user_id FROM audit_logs ad
+         WHERE ad.changed_by IS NOT NULL ${audFrom} ${audTo}
+      )
+      SELECT c.user_id, u.username, u.full_name, COUNT(*)::int AS events
+        FROM combined c
+        LEFT JOIN users u ON u.id = c.user_id
+       GROUP BY c.user_id, u.username, u.full_name
        ORDER BY events DESC
        LIMIT 10
-      `,
-    );
+    `);
 
-    const topActions = await this.ds.query(
-      `
-      SELECT a.action, COUNT(*)::int AS events
-        FROM activity_logs a
-       WHERE 1=1 ${fromClause} ${toClause}
-       GROUP BY a.action
+    /**
+     * Top actions — combine both tables. In activity_logs we have `action`
+     * (e.g. "user.login"); in audit_logs we synthesize it as "{op} {table}"
+     * (e.g. "تعديل invoices").
+     */
+    const topActions = await this.ds.query(`
+      WITH combined AS (
+        SELECT a.action::text AS action FROM activity_logs a
+         WHERE a.action IS NOT NULL ${actFrom} ${actTo}
+        UNION ALL
+        SELECT (
+          CASE ad.operation
+            WHEN 'I' THEN 'إضافة'
+            WHEN 'U' THEN 'تعديل'
+            WHEN 'D' THEN 'حذف'
+            ELSE ad.operation::text
+          END || ' ' || ad.table_name
+        )::text AS action
+          FROM audit_logs ad
+         WHERE 1=1 ${audFrom} ${audTo}
+      )
+      SELECT c.action, COUNT(*)::int AS events
+        FROM combined c
+       GROUP BY c.action
        ORDER BY events DESC
        LIMIT 10
-      `,
-    );
+    `);
 
     return {
-      activity_count: Number(totals.activity_count || 0),
+      activity_count:
+        Number(totals.activity_count || 0) + Number(totals.audit_count || 0),
       audit_count: Number(totals.audit_count || 0),
       top_users: topUsers,
       top_actions: topActions,

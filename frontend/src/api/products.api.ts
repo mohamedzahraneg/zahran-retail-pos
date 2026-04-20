@@ -58,6 +58,8 @@ export const productsApi = {
     page?: number;
     limit?: number;
     warehouse_id?: string;
+    category_id?: string;
+    active?: boolean;
   }) => unwrap<{ data: Product[]; meta: any }>(api.get('/products', { params })),
 
   get: (id: string) => unwrap<Product & { variants: Variant[] }>(api.get(`/products/${id}`)),
