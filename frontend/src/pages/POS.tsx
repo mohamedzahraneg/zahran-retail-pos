@@ -63,6 +63,8 @@ export default function POS() {
   const searchRef = useRef<HTMLInputElement>(null);
   const posProductsOpen = useLayoutStore((s) => s.posProductsOpen);
   const togglePosProducts = useLayoutStore((s) => s.togglePosProducts);
+  // Mobile-only view switcher. On desktop both panels are visible side-by-side.
+  const [mobileView, setMobileView] = useState<'cart' | 'products'>('cart');
 
   const { data: shift } = useQuery({
     queryKey: ['current-shift'],
@@ -76,7 +78,7 @@ export default function POS() {
       productsApi.list({
         type: category === 'all' ? undefined : category,
         q: search || undefined,
-        limit: 50,
+        limit: 500,
         warehouse_id: cart.warehouse?.id,
       }),
     enabled: !!cart.warehouse?.id || true,
@@ -302,28 +304,69 @@ export default function POS() {
         </div>
       </div>
 
+      {/* ─────────── Mobile view switcher (hidden on desktop) ─────────── */}
+      <div className="lg:hidden flex gap-2 px-3 py-2 border-b border-white/10 bg-slate-950/40">
+        <button
+          onClick={() => setMobileView('cart')}
+          className={`flex-1 py-2 rounded-lg text-sm font-bold flex items-center justify-center gap-2 ${
+            mobileView === 'cart'
+              ? 'bg-rose-500 text-white shadow-lg shadow-rose-500/30'
+              : 'bg-white/5 text-slate-300 border border-white/10'
+          }`}
+        >
+          🛒 السلة
+          {cart.items.length > 0 && (
+            <span className="chip bg-white/20 text-white text-[10px]">
+              {cart.items.length}
+            </span>
+          )}
+        </button>
+        <button
+          onClick={() => setMobileView('products')}
+          className={`flex-1 py-2 rounded-lg text-sm font-bold ${
+            mobileView === 'products'
+              ? 'bg-rose-500 text-white shadow-lg shadow-rose-500/30'
+              : 'bg-white/5 text-slate-300 border border-white/10'
+          }`}
+        >
+          👠 المنتجات
+        </button>
+      </div>
+
       {/* ─────────── Body ─────────── */}
       <div
         className={`flex-1 grid grid-cols-1 min-h-0 ${
           posProductsOpen ? 'lg:grid-cols-[520px_1fr]' : 'lg:grid-cols-[1fr]'
         }`}
       >
-        {/* ═══ Cart (right in RTL) ═══ */}
-        <div className="border-l border-white/10 bg-slate-950/30 flex flex-col overflow-hidden">
+        {/* ═══ Cart (right in RTL) — mobile: shown only when mobileView='cart' ═══ */}
+        <div
+          className={`border-l border-white/10 bg-slate-950/30 flex flex-col overflow-hidden lg:flex ${
+            mobileView === 'cart' ? 'flex' : 'hidden'
+          }`}
+        >
           {/* Cart header */}
-          <div className="p-4 border-b border-white/10 flex items-center justify-between">
-            <div>
-              <div className="font-black text-white text-lg">فاتورة جديدة</div>
-              <div className="text-xs text-slate-400 font-mono mt-0.5">
+          <div className="p-3 md:p-4 border-b border-white/10 flex items-center justify-between gap-2">
+            <div className="min-w-0">
+              <div className="font-black text-white text-base md:text-lg flex items-center gap-2">
+                فاتورة جديدة
+                {cart.items.length > 0 && (
+                  <span className="chip bg-rose-500/20 text-rose-300 border border-rose-500/30 text-[11px] font-bold">
+                    {cart.items.length} صنف ·{' '}
+                    {cart.items.reduce((s, i) => s + i.qty, 0)} قطعة
+                  </span>
+                )}
+              </div>
+              <div className="text-xs text-slate-400 font-mono mt-0.5 truncate">
                 {draftInvoiceNo}
               </div>
             </div>
             <button
               onClick={cart.clear}
-              className="flex items-center gap-1 text-xs text-slate-400 hover:text-rose-400"
+              className="flex items-center gap-1 text-xs text-slate-400 hover:text-rose-400 shrink-0"
               title="مسح الكل"
             >
-              <Trash2 size={14} /> مسح الكل
+              <Trash2 size={14} /> مسح
             </button>
           </div>
 
@@ -402,8 +445,8 @@ export default function POS() {
             )}
           </div>
 
-          {/* Items */}
-          <div className="flex-1 overflow-y-auto p-3 space-y-2 min-h-0">
+          {/* Items — keeps a minimum visible height so the sold items are always seen */}
+          <div className="flex-1 overflow-y-auto p-3 space-y-2 min-h-[220px]">
             {cart.items.length === 0 && (
               <div className="h-full flex flex-col items-center justify-center text-center text-slate-400 gap-2 py-10">
                 <div className="text-5xl">🛒</div>
@@ -633,8 +676,12 @@ export default function POS() {
           </div>
         </div>
 
-        {/* ═══ Products grid (left in RTL) ═══ */}
-        <div className="flex flex-col overflow-hidden p-4 gap-3">
+        {/* ═══ Products grid (left in RTL) — mobile: shown only when mobileView='products' ═══ */}
+        <div
+          className={`flex-col overflow-hidden p-3 md:p-4 gap-3 lg:flex ${
+            mobileView === 'products' ? 'flex' : 'hidden'
+          }`}
+        >
           {/* Search bar — always visible */}
           <div className="flex items-center gap-2">
             <div className="relative flex-1">
