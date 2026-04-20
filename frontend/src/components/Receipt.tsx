@@ -3,6 +3,7 @@ import { QRCodeSVG } from 'qrcode.react';
 import { Barcode } from './Barcode';
 import type { ReceiptTemplate } from '@/types/receipt-template';
 import { DEFAULT_TEMPLATES } from '@/types/receipt-template';
+import { printReceiptIframe } from '@/lib/printReceiptIframe';
 
 export interface ReceiptData {
   invoice: {
@@ -137,6 +138,7 @@ interface Props {
  */
 export function Receipt({ data, autoPrint = false, onAfterPrint, template }: Props) {
   const printedRef = useRef(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const tpl: ReceiptTemplate =
     template || data.shop?.active_template || DEFAULT_TEMPLATES[0];
 
@@ -144,11 +146,15 @@ export function Receipt({ data, autoPrint = false, onAfterPrint, template }: Pro
     if (!autoPrint || printedRef.current) return;
     printedRef.current = true;
     const t = setTimeout(() => {
-      window.print();
+      if (rootRef.current) {
+        printReceiptIframe(rootRef.current, tpl.paper_width_mm);
+      } else {
+        window.print();
+      }
       onAfterPrint?.();
     }, 250);
     return () => clearTimeout(t);
-  }, [autoPrint, onAfterPrint]);
+  }, [autoPrint, onAfterPrint, tpl.paper_width_mm]);
 
   const { invoice: inv, lines, payments, shop, loyalty = [] } = data;
 
@@ -203,7 +209,7 @@ export function Receipt({ data, autoPrint = false, onAfterPrint, template }: Pro
   const doubleLine = (tpl.dashed_divider ? '═' : '━').repeat(Math.max(20, Math.round(tpl.paper_width_mm / 2)));
 
   return (
-    <div className="receipt-print-root">
+    <div className="receipt-print-root" ref={rootRef}>
       <div className="receipt-80mm" style={rootStyle}>
         {/* Header */}
         <div className="receipt-header">

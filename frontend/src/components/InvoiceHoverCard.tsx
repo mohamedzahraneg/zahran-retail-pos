@@ -5,6 +5,7 @@ import { ExternalLink, X, Printer } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { posApi } from '@/api/pos.api';
 import { Receipt, ReceiptData } from './Receipt';
+import { printReceiptIframe } from '@/lib/printReceiptIframe';
 
 interface Props {
   /** Invoice UUID (required to fetch full details). */
@@ -145,6 +146,7 @@ function FullReceiptModal({
   data,
   onClose,
 }: { data: ReceiptData; onClose: () => void }) {
+  const receiptRootRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
     window.addEventListener('keydown', onKey);
@@ -154,6 +156,16 @@ function FullReceiptModal({
       document.body.style.overflow = '';
     };
   }, [onClose]);
+
+  const triggerPrint = () => {
+    const root = receiptRootRef.current?.querySelector<HTMLElement>(
+      '.receipt-print-root',
+    );
+    const width =
+      (data.shop as any)?.active_template?.paper_width_mm || 80;
+    if (root) printReceiptIframe(root, width);
+    else window.print();
+  };
 
   return (
     <div
@@ -171,7 +183,7 @@ function FullReceiptModal({
           </div>
           <div className="flex items-center gap-2">
             <button
-              onClick={() => window.print()}
+              onClick={triggerPrint}
               className="inline-flex items-center gap-1 text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-1.5 rounded-lg"
             >
               <Printer size={14} /> طباعة
@@ -185,7 +197,7 @@ function FullReceiptModal({
             </button>
           </div>
         </div>
-        <div className="p-4 flex justify-center">
+        <div className="p-4 flex justify-center" ref={receiptRootRef}>
           <div className="bg-white shadow-xl">
             <Receipt data={data} />
           </div>
