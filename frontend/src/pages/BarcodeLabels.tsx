@@ -159,6 +159,16 @@ export default function BarcodeLabels() {
     );
   };
 
+  const updatePrice = (variantId: string, price: number) => {
+    setRows((prev) =>
+      prev.map((r) => (r.variantId === variantId ? { ...r, price: price < 0 ? 0 : price } : r)),
+    );
+  };
+
+  const applyPriceToAll = (price: number) => {
+    setRows((prev) => prev.map((r) => ({ ...r, price })));
+  };
+
   const removeRow = (variantId: string) => {
     setRows((prev) => prev.filter((r) => r.variantId !== variantId));
   };
@@ -319,6 +329,30 @@ export default function BarcodeLabels() {
             </div>
           </div>
 
+          {rows.length > 0 && (
+            <div className="px-4 py-2 bg-amber-50 border-b border-amber-100 flex items-center gap-2 text-xs">
+              <span className="font-bold text-amber-900">تعديل السعر للكل:</span>
+              <input
+                type="number"
+                min={0}
+                step="0.01"
+                placeholder="سعر موحد"
+                className="input py-1 w-24 text-xs"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    const v = parseFloat((e.target as HTMLInputElement).value);
+                    if (Number.isFinite(v) && v >= 0) {
+                      applyPriceToAll(v);
+                      (e.target as HTMLInputElement).value = '';
+                      toast.success('تم تحديث السعر لكل الأصناف');
+                    }
+                  }
+                }}
+              />
+              <span className="text-amber-700">اضغط Enter للتطبيق على كل الأصناف</span>
+            </div>
+          )}
+
           <div className="flex-1 overflow-y-auto">
             {rows.length === 0 && (
               <div className="p-12 text-center text-slate-400">
@@ -339,28 +373,44 @@ export default function BarcodeLabels() {
                     {r.stockQty > 0 && <span className="text-emerald-600">رصيد: {r.stockQty}</span>}
                   </div>
                 </div>
-                <div className="flex items-center gap-1">
-                  <button
-                    onClick={() => updateQty(r.variantId, r.qty - 1)}
-                    className="w-7 h-7 rounded bg-slate-100 hover:bg-slate-200"
-                  >
-                    <Minus size={14} className="mx-auto" />
-                  </button>
-                  <input
-                    type="number"
-                    min={0}
-                    value={r.qty}
-                    onChange={(e) =>
-                      updateQty(r.variantId, parseInt(e.target.value, 10) || 0)
-                    }
-                    className="w-14 text-center font-bold input py-1"
-                  />
-                  <button
-                    onClick={() => updateQty(r.variantId, r.qty + 1)}
-                    className="w-7 h-7 rounded bg-slate-100 hover:bg-slate-200"
-                  >
-                    <Plus size={14} className="mx-auto" />
-                  </button>
+                <div className="flex flex-col items-end gap-1">
+                  <div className="flex items-center gap-1">
+                    <label className="text-[10px] text-slate-500">سعر:</label>
+                    <input
+                      type="number"
+                      min={0}
+                      step="0.01"
+                      value={r.price}
+                      onChange={(e) =>
+                        updatePrice(r.variantId, parseFloat(e.target.value) || 0)
+                      }
+                      className="w-20 text-center font-bold input py-1 text-xs"
+                    />
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <label className="text-[10px] text-slate-500">عدد:</label>
+                    <button
+                      onClick={() => updateQty(r.variantId, r.qty - 1)}
+                      className="w-6 h-6 rounded bg-slate-100 hover:bg-slate-200"
+                    >
+                      <Minus size={12} className="mx-auto" />
+                    </button>
+                    <input
+                      type="number"
+                      min={0}
+                      value={r.qty}
+                      onChange={(e) =>
+                        updateQty(r.variantId, parseInt(e.target.value, 10) || 0)
+                      }
+                      className="w-14 text-center font-bold input py-1 text-xs"
+                    />
+                    <button
+                      onClick={() => updateQty(r.variantId, r.qty + 1)}
+                      className="w-6 h-6 rounded bg-slate-100 hover:bg-slate-200"
+                    >
+                      <Plus size={12} className="mx-auto" />
+                    </button>
+                  </div>
                 </div>
                 <button
                   onClick={() => removeRow(r.variantId)}
