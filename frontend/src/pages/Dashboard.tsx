@@ -238,6 +238,7 @@ export default function Dashboard() {
   const revenue = data?.revenue30 || [];
   const mix = data?.paymentMix || [];
   const cashiers = data?.cashierPerf || [];
+  const salespeople = data?.salespersonPerf || [];
   const products = data?.topProducts || [];
 
   const now = new Date();
@@ -430,17 +431,25 @@ export default function Dashboard() {
             <Doughnut
               data={{
                 labels: mix.map((m: any) => {
+                  const key = m.payment_method || m.method;
                   const ar: Record<string, string> = {
                     cash: 'كاش',
                     card: 'كارت',
+                    card_visa: 'فيزا',
+                    card_mastercard: 'ماستركارد',
+                    card_meeza: 'ميزة',
                     instapay: 'إنستاباي',
-                    bank_transfer: 'تحويل',
+                    vodafone_cash: 'فودافون كاش',
+                    orange_cash: 'أورانج كاش',
+                    bank_transfer: 'تحويل بنكي',
+                    credit: 'آجل',
+                    other: 'أخرى',
                   };
-                  return ar[m.method] || m.method;
+                  return ar[key] || key;
                 }),
                 datasets: [
                   {
-                    data: mix.map((m: any) => Number(m.total || 0)),
+                    data: mix.map((m: any) => Number(m.total_amount ?? m.total ?? 0)),
                     backgroundColor: [
                       '#10b981',
                       '#6366f1',
@@ -525,8 +534,10 @@ export default function Dashboard() {
                 ),
                 datasets: [
                   {
-                    label: 'إيراد',
-                    data: cashiers.map((c: any) => Number(c.revenue || 0)),
+                    label: 'إيراد الأسبوع',
+                    data: cashiers.map((c: any) =>
+                      Number(c.revenue_week ?? c.revenue ?? 0),
+                    ),
                     backgroundColor: '#6366f1',
                     borderRadius: 6,
                   },
@@ -550,6 +561,52 @@ export default function Dashboard() {
             </div>
           )}
         </div>
+      </div>
+
+      {/* ═════ Salesperson performance ═════ */}
+      <div className="card p-5">
+        <h3 className="font-black text-slate-800 flex items-center gap-2 mb-4">
+          <Award size={18} className="text-emerald-500" />
+          أداء البائعين — آخر 30 يوم
+        </h3>
+        {salespeople.length > 0 ? (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 text-slate-600">
+                <tr>
+                  <th className="p-2 text-right">#</th>
+                  <th className="p-2 text-right">البائع</th>
+                  <th className="p-2 text-center">عدد الفواتير</th>
+                  <th className="p-2 text-left">الإيراد</th>
+                  <th className="p-2 text-left">الربح</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {salespeople.map((s: any, i: number) => (
+                  <tr key={s.user_id || i} className="hover:bg-slate-50">
+                    <td className="p-2 text-slate-400 font-bold">{i + 1}</td>
+                    <td className="p-2 font-semibold text-slate-800">
+                      {s.full_name || s.username || '—'}
+                    </td>
+                    <td className="p-2 text-center text-slate-600">
+                      {NUM(Number(s.invoices || 0))}
+                    </td>
+                    <td className="p-2 text-left font-bold text-brand-700">
+                      {EGP.format(Number(s.revenue || 0))}
+                    </td>
+                    <td className="p-2 text-left font-bold text-emerald-600">
+                      {EGP.format(Number(s.profit || 0))}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="text-center text-slate-400 py-8 text-sm">
+            لا توجد بيانات البائعين بعد
+          </div>
+        )}
       </div>
 
       {/* ═════ Returns widget ═════ */}

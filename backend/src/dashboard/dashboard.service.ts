@@ -28,6 +28,27 @@ export class DashboardService {
     const cashierPerf = await this.ds.query(
       `SELECT * FROM v_dashboard_cashier_performance`,
     );
+    // Salesperson performance — last 30d sales attributed to a salesperson.
+    const salespersonPerf = await this.ds.query(`
+      SELECT sp.id          AS user_id,
+             sp.full_name   AS full_name,
+             sp.username    AS username,
+             COUNT(DISTINCT i.id)::int       AS invoices,
+             COALESCE(SUM(i.grand_total), 0) AS revenue,
+             COALESCE(SUM(i.gross_profit), 0) AS profit
+      FROM users sp
+      LEFT JOIN invoices i
+             ON i.salesperson_id = sp.id
+            AND i.status IN ('paid','completed')
+            AND i.completed_at >= NOW() - INTERVAL '30 days'
+      WHERE EXISTS (
+              SELECT 1 FROM invoices i2 WHERE i2.salesperson_id = sp.id
+            )
+         OR sp.role_id IN (SELECT id FROM roles WHERE code = 'salesperson')
+      GROUP BY sp.id, sp.full_name, sp.username
+      ORDER BY revenue DESC
+      LIMIT 10
+    `);
     const lowStock = await this.ds.query(
       `SELECT * FROM v_dashboard_low_stock LIMIT 20`,
     );
@@ -72,6 +93,7 @@ export class DashboardService {
       topProducts,
       topCustomers,
       cashierPerf,
+      salespersonPerf,
       lowStock,
       reservations,
       alerts,
