@@ -11,6 +11,7 @@ import {
   Edit3,
   Check,
   X,
+  Printer,
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import {
@@ -22,10 +23,11 @@ import {
   Role,
 } from '@/api/settings.api';
 
-type TabKey = 'company' | 'warehouses' | 'cashboxes' | 'payments' | 'roles';
+type TabKey = 'company' | 'receipt' | 'warehouses' | 'cashboxes' | 'payments' | 'roles';
 
 const TABS: { key: TabKey; label: string; icon: any }[] = [
   { key: 'company', label: 'بيانات المحل', icon: Building2 },
+  { key: 'receipt', label: 'إعدادات الفاتورة', icon: Printer },
   { key: 'warehouses', label: 'المخازن', icon: WarehouseIcon },
   { key: 'cashboxes', label: 'الخزائن', icon: Wallet },
   { key: 'payments', label: 'طرق الدفع', icon: CreditCard },
@@ -60,6 +62,7 @@ export default function Settings() {
 
         <div className="p-6">
           {tab === 'company' && <CompanyTab />}
+          {tab === 'receipt' && <ReceiptTab />}
           {tab === 'warehouses' && <WarehousesTab />}
           {tab === 'cashboxes' && <CashboxesTab />}
           {tab === 'payments' && <PaymentsTab />}
@@ -908,6 +911,181 @@ function Toggle({
         className="rounded text-indigo-600 focus:ring-indigo-500"
       />
       <span className="text-slate-700">{label}</span>
+    </label>
+  );
+}
+
+/* ────────────────────────────────────────────────────────────────────
+ *  Receipt settings tab — edits shop.info + shop.receipt JSON in the
+ *  key/value settings table so admins can customise the printed receipt.
+ * ──────────────────────────────────────────────────────────────────── */
+interface ReceiptSettings {
+  shopName: string;
+  address: string;
+  phone: string;
+  taxId: string;
+  logoUrl: string;
+  footerNote: string;
+  headerNote: string;
+  qrUrl: string;
+  qrCaption: string;
+  website: string;
+  terms: string;
+}
+
+const EMPTY_RECEIPT: ReceiptSettings = {
+  shopName: '', address: '', phone: '', taxId: '', logoUrl: '', footerNote: '',
+  headerNote: '', qrUrl: '', qrCaption: '', website: '', terms: '',
+};
+
+function ReceiptTab() {
+  const qc = useQueryClient();
+  const [form, setForm] = useState<ReceiptSettings>(EMPTY_RECEIPT);
+
+  const infoQuery = useQuery({
+    queryKey: ['settings', 'shop.info'],
+    queryFn: () => settingsApi.get('shop.info').catch(() => null),
+  });
+  const receiptQuery = useQuery({
+    queryKey: ['settings', 'shop.receipt'],
+    queryFn: () => settingsApi.get('shop.receipt').catch(() => null),
+  });
+
+  useEffect(() => {
+    const info = (infoQuery.data?.value as any) || {};
+    const receipt = (receiptQuery.data?.value as any) || {};
+    setForm({
+      shopName: info.name || '',
+      address: info.address || '',
+      phone: info.phone || '',
+      taxId: info.tax_id || info.vat_number || '',
+      logoUrl: info.logo_url || '',
+      footerNote: info.footer_note || receipt.footer_note || '',
+      headerNote: receipt.header_note || '',
+      qrUrl: receipt.qr_url || '',
+      qrCaption: receipt.qr_caption || '',
+      website: receipt.website || '',
+      terms: receipt.terms || '',
+    });
+  }, [infoQuery.data, receiptQuery.data]);
+
+  const save = useMutation({
+    mutationFn: async () => {
+      await settingsApi.upsert({
+        key: 'shop.info',
+        group_name: 'shop',
+        is_public: true,
+        value: {
+          name: form.shopName,
+          address: form.address,
+          phone: form.phone,
+          tax_id: form.taxId,
+          logo_url: form.logoUrl,
+          footer_note: form.footerNote,
+        } as any,
+      });
+      await settingsApi.upsert({
+        key: 'shop.receipt',
+        group_name: 'shop',
+        is_public: true,
+        value: {
+          header_note: form.headerNote,
+          qr_url: form.qrUrl,
+          qr_caption: form.qrCaption,
+          website: form.website,
+          terms: form.terms,
+        } as any,
+      });
+    },
+    onSuccess: () => {
+      toast.success('تم الحفظ');
+      qc.invalidateQueries({ queryKey: ['settings'] });
+    },
+    onError: (e: any) => toast.error(e?.response?.data?.message || 'فشل الحفظ'),
+  });
+
+  const set = <K extends keyof ReceiptSettings>(key: K, value: ReceiptSettings[K]) =>
+    setForm((f) => ({ ...f, [key]: value }));
+
+  return (
+    <div className="max-w-3xl space-y-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <Field label="اسم المحل" value={form.shopName} onChange={(v) => set('shopName', v)} />
+        <Field label="الهاتف" value={form.phone} onChange={(v) => set('phone', v)} />
+        <Field label="العنوان" value={form.address} onChange={(v) => set('address', v)} />
+        <Field label="الرقم الضريبي" value={form.taxId} onChange={(v) => set('taxId', v)} />
+        <Field label="رابط الشعار (URL)" value={form.logoUrl} onChange={(v) => set('logoUrl', v)} />
+        <Field label="الموقع الإلكتروني" value={form.website} onChange={(v) => set('website', v)} />
+        <Field label="رابط الـ QR" value={form.qrUrl} onChange={(v) => set('qrUrl', v)}
+          hint="الرابط اللي هيفتح لما الزبون يمسح الـ QR (موقعك، انستجرام، تقييم...)" />
+        <Field label="تعليق تحت الـ QR" value={form.qrCaption} onChange={(v) => set('qrCaption', v)} />
+      </div>
+
+      <Textarea
+        label="رسالة أعلى الفاتورة (Header)"
+        value={form.headerNote}
+        rows={2}
+        onChange={(v) => set('headerNote', v)}
+        hint="مثال: «عرض الموسم» أو شعار المحل الترويجي"
+      />
+      <Textarea
+        label="رسالة الشكر أسفل الفاتورة (Footer)"
+        value={form.footerNote}
+        rows={2}
+        onChange={(v) => set('footerNote', v)}
+      />
+      <Textarea
+        label="الشروط والأحكام"
+        value={form.terms}
+        rows={6}
+        onChange={(v) => set('terms', v)}
+        hint="سطر لكل بند — هتظهر قبل الـ QR في الفاتورة المطبوعة"
+      />
+
+      <div className="pt-2">
+        <button
+          onClick={() => save.mutate()}
+          disabled={save.isPending}
+          className="inline-flex items-center gap-2 bg-indigo-600 text-white px-5 py-2.5 rounded-lg font-bold hover:bg-indigo-700 disabled:opacity-50"
+        >
+          <Save className="w-4 h-4" />
+          {save.isPending ? 'جارٍ الحفظ…' : 'حفظ إعدادات الفاتورة'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function Field({
+  label, value, onChange, hint,
+}: { label: string; value: string; onChange: (v: string) => void; hint?: string }) {
+  return (
+    <label className="block">
+      <div className="text-sm font-semibold text-slate-700 mb-1">{label}</div>
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="w-full rounded-lg border border-slate-300 px-3 py-2 focus:border-indigo-500 focus:outline-none"
+      />
+      {hint && <div className="text-xs text-slate-500 mt-1">{hint}</div>}
+    </label>
+  );
+}
+
+function Textarea({
+  label, value, onChange, rows = 3, hint,
+}: { label: string; value: string; onChange: (v: string) => void; rows?: number; hint?: string }) {
+  return (
+    <label className="block">
+      <div className="text-sm font-semibold text-slate-700 mb-1">{label}</div>
+      <textarea
+        value={value}
+        rows={rows}
+        onChange={(e) => onChange(e.target.value)}
+        className="w-full rounded-lg border border-slate-300 px-3 py-2 focus:border-indigo-500 focus:outline-none"
+      />
+      {hint && <div className="text-xs text-slate-500 mt-1">{hint}</div>}
     </label>
   );
 }

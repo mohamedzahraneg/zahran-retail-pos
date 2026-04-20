@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react';
+import { QRCodeSVG } from 'qrcode.react';
 import { Barcode } from './Barcode';
 
 export interface ReceiptData {
@@ -10,8 +11,15 @@ export interface ReceiptData {
     doc_no?: string;
     subtotal: number;
     invoice_discount?: number;
+    /** If invoice_discount was applied as a percentage, its raw % value. */
+    invoice_discount_type?: 'fixed' | 'percentage' | null;
+    invoice_discount_value?: number;
+    items_discount_total?: number;
     /** Legacy alias */
     discount_total?: number;
+    /** Coupon applied on the invoice (EGP off) */
+    coupon_discount?: number;
+    coupon_code?: string | null;
     grand_total: number;
     paid_amount?: number;
     paid_total?: number;
@@ -63,6 +71,17 @@ export interface ReceiptData {
     vat_number?: string;
     logo_url?: string;
     footer_note?: string;
+    /** Text printed above the items — e.g. branch motto or offer banner */
+    header_note?: string;
+    /** Content encoded into the QR code at the bottom of the receipt.
+     *  Use a short URL (website, Google review, Instagram, etc.). */
+    qr_url?: string;
+    /** Caption below the QR, e.g. "تابعنا على إنستجرام" */
+    qr_caption?: string;
+    /** Multi-line terms & conditions (admin-editable) */
+    terms?: string;
+    /** Website / social handle shown in the footer block */
+    website?: string;
   };
   loyalty?: Array<{
     direction: 'in' | 'out';
@@ -80,10 +99,18 @@ const METHOD_LABELS: Record<string, string> = {
 
 const EGP = (n: number) => `${Number(n).toFixed(2)}`;
 
-function fmtDate(iso: string) {
+const WEEKDAYS_AR = [
+  'الأحد', 'الإثنين', 'الثلاثاء', 'الأربعاء',
+  'الخميس', 'الجمعة', 'السبت',
+];
+
+function fmtDateTime(iso: string) {
   const d = new Date(iso);
   const pad = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const day = WEEKDAYS_AR[d.getDay()];
+  const date = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const time = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  return { day, date, time };
 }
 
 interface Props {
@@ -112,9 +139,12 @@ export function Receipt({ data, autoPrint = false, onAfterPrint }: Props) {
   const { invoice: inv, lines, payments, shop, loyalty = [] } = data;
 
   const invoiceNo = inv.invoice_no || inv.doc_no || '';
-  const discountTotal = Number(inv.invoice_discount ?? inv.discount_total ?? 0);
+  const invoiceDiscount = Number(inv.invoice_discount ?? inv.discount_total ?? 0);
+  const itemsDiscount = Number(inv.items_discount_total ?? 0);
+  const couponDiscount = Number(inv.coupon_discount ?? 0);
   const paidTotal = Number(inv.paid_amount ?? inv.paid_total ?? 0);
   const changeAmount = Number(inv.change_amount ?? inv.change_given ?? 0);
+  const { day, date, time } = fmtDateTime(inv.completed_at || inv.created_at);
 
   const earnedPoints = loyalty
     .filter((t) => t.direction === 'in')
@@ -151,7 +181,11 @@ export function Receipt({ data, autoPrint = false, onAfterPrint }: Props) {
           )}
         </div>
 
-        <div className="receipt-divider">================================</div>
+        {shop.header_note && (
+          <div className="receipt-header-note">{shop.header_note}</div>
+        )}
+
+        <div className="receipt-divider">════════════════════════════════</div>
 
         {/* Meta */}
         <div className="receipt-meta">
@@ -160,8 +194,16 @@ export function Receipt({ data, autoPrint = false, onAfterPrint }: Props) {
             <strong>{invoiceNo}</strong>
           </div>
           <div className="receipt-row">
+            <span>اليوم:</span>
+            <span>{day}</span>
+          </div>
+          <div className="receipt-row">
             <span>التاريخ:</span>
-            <span>{fmtDate(inv.completed_at || inv.created_at)}</span>
+            <span>{date}</span>
+          </div>
+          <div className="receipt-row">
+            <span>الوقت:</span>
+            <span>{time}</span>
           </div>
           {inv.cashier_name && (
             <div className="receipt-row">
@@ -258,10 +300,31 @@ export function Receipt({ data, autoPrint = false, onAfterPrint }: Props) {
             <span>المجموع:</span>
             <span>{EGP(Number(inv.subtotal))} ج.م</span>
           </div>
-          {discountTotal > 0 && (
+          {itemsDiscount > 0 && (
             <div className="receipt-row">
-              <span>الخصم:</span>
-              <span>- {EGP(discountTotal)} ج.م</span>
+              <span>خصم الأصناف:</span>
+              <span>- {EGP(itemsDiscount)} ج.م</span>
+            </div>
+          )}
+          {invoiceDiscount > 0 && (
+            <div className="receipt-row">
+              <span>
+                خصم الفاتورة
+                {inv.invoice_discount_type === 'percentage' &&
+                  inv.invoice_discount_value != null && (
+                    <> ({Number(inv.invoice_discount_value)}%)</>
+                  )}
+                :
+              </span>
+              <span>- {EGP(invoiceDiscount)} ج.م</span>
+            </div>
+          )}
+          {couponDiscount > 0 && (
+            <div className="receipt-row">
+              <span>
+                كوبون{inv.coupon_code ? ` (${inv.coupon_code})` : ''}:
+              </span>
+              <span>- {EGP(couponDiscount)} ج.م</span>
             </div>
           )}
           {Number(inv.tax_amount) > 0 && (
@@ -344,7 +407,17 @@ export function Receipt({ data, autoPrint = false, onAfterPrint }: Props) {
           </>
         )}
 
-        <div className="receipt-divider">================================</div>
+        {shop.terms && (
+          <>
+            <div className="receipt-divider">--------------------------------</div>
+            <div className="receipt-terms">
+              <div className="receipt-terms-title">الشروط والأحكام</div>
+              <div className="receipt-terms-body">{shop.terms}</div>
+            </div>
+          </>
+        )}
+
+        <div className="receipt-divider">════════════════════════════════</div>
 
         {/* Barcode of invoice_no for easy return lookup */}
         {invoiceNo && (
@@ -359,10 +432,29 @@ export function Receipt({ data, autoPrint = false, onAfterPrint }: Props) {
           </div>
         )}
 
+        {shop.qr_url && (
+          <div className="receipt-qr">
+            <QRCodeSVG
+              value={shop.qr_url}
+              size={96}
+              level="M"
+              includeMargin={false}
+            />
+            {shop.qr_caption && (
+              <div className="receipt-qr-caption">{shop.qr_caption}</div>
+            )}
+          </div>
+        )}
+
         <div className="receipt-footer">
-          <div>{shop.footer_note || 'شكراً لتعاملكم معنا'}</div>
+          <div className="receipt-thanks">
+            {shop.footer_note || 'شكراً لتعاملكم معنا 💖'}
+          </div>
+          {shop.website && (
+            <div className="receipt-website">{shop.website}</div>
+          )}
           <div className="receipt-tiny">
-            {new Date().toLocaleString('en-US')}
+            طُبعت: {new Date().toLocaleString('en-GB')}
           </div>
         </div>
       </div>
@@ -465,6 +557,27 @@ export function Receipt({ data, autoPrint = false, onAfterPrint }: Props) {
         .receipt-notes-title {
           font-weight: bold;
         }
+        .receipt-header-note {
+          text-align: center;
+          font-size: 10px;
+          font-style: italic;
+          color: #333;
+          margin: 2px 0;
+        }
+        .receipt-terms {
+          font-size: 9px;
+          line-height: 1.3;
+          color: #333;
+          margin: 2px 0;
+        }
+        .receipt-terms-title {
+          font-weight: bold;
+          text-align: center;
+          margin-bottom: 2px;
+        }
+        .receipt-terms-body {
+          white-space: pre-line;
+        }
         .receipt-barcode {
           text-align: center;
           margin: 6px 0 4px;
@@ -472,10 +585,29 @@ export function Receipt({ data, autoPrint = false, onAfterPrint }: Props) {
         .receipt-barcode svg {
           max-width: 100%;
         }
+        .receipt-qr {
+          text-align: center;
+          margin: 6px 0 2px;
+        }
+        .receipt-qr-caption {
+          font-size: 9px;
+          margin-top: 2px;
+          color: #333;
+        }
         .receipt-footer {
           text-align: center;
           margin-top: 4px;
           font-size: 10px;
+        }
+        .receipt-thanks {
+          font-size: 12px;
+          font-weight: bold;
+          margin-bottom: 2px;
+        }
+        .receipt-website {
+          font-size: 10px;
+          color: #222;
+          margin-bottom: 2px;
         }
         .receipt-tiny {
           font-size: 8px;

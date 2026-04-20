@@ -402,10 +402,15 @@ export class PosService {
       [id],
     );
 
-    const [shopRow] = await this.ds.query(
-      `SELECT value FROM settings WHERE key = 'shop.info'`,
-    );
-    const shop = shopRow?.value ?? {};
+    const [shopRow, receiptRow] = await Promise.all([
+      this.ds
+        .query(`SELECT value FROM settings WHERE key = 'shop.info'`)
+        .then((r) => r[0]),
+      this.ds
+        .query(`SELECT value FROM settings WHERE key = 'shop.receipt'`)
+        .then((r) => r[0]),
+    ]);
+    const shop = { ...(shopRow?.value ?? {}), ...(receiptRow?.value ?? {}) };
 
     const loyaltyTx = await this.ds.query(
       `
