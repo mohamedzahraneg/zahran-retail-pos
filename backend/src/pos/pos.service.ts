@@ -402,15 +402,34 @@ export class PosService {
       [id],
     );
 
-    const [shopRow, receiptRow] = await Promise.all([
+    const [shopRow, receiptRow, templatesRow, activeRow] = await Promise.all([
       this.ds
         .query(`SELECT value FROM settings WHERE key = 'shop.info'`)
         .then((r) => r[0]),
       this.ds
         .query(`SELECT value FROM settings WHERE key = 'shop.receipt'`)
         .then((r) => r[0]),
+      this.ds
+        .query(`SELECT value FROM settings WHERE key = 'shop.receipt_templates'`)
+        .then((r) => r[0]),
+      this.ds
+        .query(`SELECT value FROM settings WHERE key = 'shop.receipt_active_template'`)
+        .then((r) => r[0]),
     ]);
-    const shop = { ...(shopRow?.value ?? {}), ...(receiptRow?.value ?? {}) };
+    const templates: any[] = Array.isArray(templatesRow?.value)
+      ? templatesRow!.value
+      : [];
+    const activeId: string | undefined =
+      typeof activeRow?.value === 'string'
+        ? activeRow.value
+        : activeRow?.value?.id;
+    const active_template =
+      templates.find((t) => t.id === activeId) || templates[0] || null;
+    const shop = {
+      ...(shopRow?.value ?? {}),
+      ...(receiptRow?.value ?? {}),
+      active_template,
+    };
 
     const loyaltyTx = await this.ds.query(
       `
@@ -491,5 +510,46 @@ export class PosService {
       payload: { invoice_id: id, reason, voided_by: userId },
     });
     return { voided: true };
+  }
+
+  /**
+   * Edit a previously-issued invoice. Because invoices are immutable once
+   * posted (stock moved, cash received, loyalty accrued), the "edit" here is
+   * void-and-recreate: we reverse the original via fn_void_invoice and then
+   * create a new invoice with the modified lines/payments. The new invoice
+   * gets a `replaces_invoice_id` note in the `notes` field so auditors can
+   * trace the relationship.
+   */
+  async editInvoice(
+    id: string,
+    dto: any,
+    userId: string,
+    reason: string,
+  ) {
+    // Void first (outside our create transaction — fn_void_invoice runs in its
+    // own autonomous commit via plpgsql). If this throws, no new invoice is
+    // created and the original stays intact.
+    await this.ds.query(`SELECT fn_void_invoice($1, $2, $3)`, [
+      id,
+      userId,
+      reason,
+    ]);
+    const tagged = {
+      ...dto,
+      notes: [dto.notes, `تعديل للفاتورة رقم ${id}`]
+        .filter(Boolean)
+        .join(' — '),
+    };
+    const created = await this.createInvoice(tagged, userId);
+    this.realtime?.emitPosEvent({
+      type: 'invoice.created',
+      payload: {
+        original_invoice_id: id,
+        new_invoice_id: (created as any)?.id,
+        edited_by: userId,
+        edited: true,
+      },
+    });
+    return { replaced: id, invoice: created };
   }
 }

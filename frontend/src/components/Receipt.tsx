@@ -1,6 +1,8 @@
 import { useEffect, useRef } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import { Barcode } from './Barcode';
+import type { ReceiptTemplate } from '@/types/receipt-template';
+import { DEFAULT_TEMPLATES } from '@/types/receipt-template';
 
 export interface ReceiptData {
   invoice: {
@@ -84,6 +86,8 @@ export interface ReceiptData {
     terms?: string;
     /** Website / social handle shown in the footer block */
     website?: string;
+    /** Admin-selected layout template (size/fonts/colors/sections). */
+    active_template?: ReceiptTemplate | null;
   };
   loyalty?: Array<{
     direction: 'in' | 'out';
@@ -119,14 +123,19 @@ interface Props {
   data: ReceiptData;
   autoPrint?: boolean;
   onAfterPrint?: () => void;
+  /** Admin-selected template; falls back to the built-in compact 80mm. */
+  template?: ReceiptTemplate;
 }
 
 /**
- * Receipt — renders an 80mm thermal-style receipt.
+ * Receipt — renders a receipt using an admin-configurable template
+ * (paper size, fonts, colors, visible sections, logo position, …).
  * On mount, if autoPrint is true, it triggers window.print().
  */
-export function Receipt({ data, autoPrint = false, onAfterPrint }: Props) {
+export function Receipt({ data, autoPrint = false, onAfterPrint, template }: Props) {
   const printedRef = useRef(false);
+  const tpl: ReceiptTemplate =
+    template || data.shop?.active_template || DEFAULT_TEMPLATES[0];
 
   useEffect(() => {
     if (!autoPrint || printedRef.current) return;
@@ -155,12 +164,33 @@ export function Receipt({ data, autoPrint = false, onAfterPrint }: Props) {
     .filter((t) => t.direction === 'out')
     .reduce((s, t) => s + Number(t.points), 0);
 
+  // CSS variables + inline width/padding let the template drive layout.
+  const rootStyle: React.CSSProperties = {
+    ['--rc-font' as any]: tpl.font_family,
+    ['--rc-fs' as any]: `${tpl.font_size_base}px`,
+    ['--rc-fs-title' as any]: `${tpl.font_size_title}px`,
+    ['--rc-lh' as any]: String(tpl.line_height),
+    ['--rc-text' as any]: tpl.color_text,
+    ['--rc-muted' as any]: tpl.color_muted,
+    ['--rc-primary' as any]: tpl.color_primary,
+    ['--rc-accent' as any]: tpl.color_accent,
+    ['--rc-divider' as any]: tpl.color_divider,
+    ['--rc-logo-size' as any]: `${tpl.logo_size_mm}mm`,
+    ['--rc-logo-align' as any]: tpl.logo_align,
+    width: `${tpl.paper_width_mm}mm`,
+    minHeight: tpl.paper_height_mm ? `${tpl.paper_height_mm}mm` : undefined,
+    padding: `${tpl.padding_mm}mm`,
+  };
+  const dividerChar = tpl.dashed_divider ? '─' : '━';
+  const dividerLine = dividerChar.repeat(Math.max(20, Math.round(tpl.paper_width_mm / 2)));
+  const doubleLine = (tpl.dashed_divider ? '═' : '━').repeat(Math.max(20, Math.round(tpl.paper_width_mm / 2)));
+
   return (
     <div className="receipt-print-root">
-      <div className="receipt-80mm">
+      <div className="receipt-80mm" style={rootStyle}>
         {/* Header */}
         <div className="receipt-header">
-          {shop.logo_url && (
+          {tpl.show_logo && shop.logo_url && (
             <img
               src={shop.logo_url}
               alt="logo"
@@ -183,11 +213,11 @@ export function Receipt({ data, autoPrint = false, onAfterPrint }: Props) {
           )}
         </div>
 
-        {shop.header_note && (
+        {tpl.show_header_note && shop.header_note && (
           <div className="receipt-header-note">{shop.header_note}</div>
         )}
 
-        <div className="receipt-divider">════════════════════════════════</div>
+        <div className="receipt-divider">{doubleLine}</div>
 
         {/* Meta */}
         <div className="receipt-meta">
@@ -213,19 +243,19 @@ export function Receipt({ data, autoPrint = false, onAfterPrint }: Props) {
               <span>{inv.cashier_name}</span>
             </div>
           )}
-          {inv.salesperson_name && (
+          {tpl.show_salesperson && inv.salesperson_name && (
             <div className="receipt-row">
               <span>البائع:</span>
               <span>{inv.salesperson_name}</span>
             </div>
           )}
-          {inv.warehouse_name && (
+          {tpl.show_warehouse && inv.warehouse_name && (
             <div className="receipt-row">
               <span>الفرع:</span>
               <span>{inv.warehouse_name}</span>
             </div>
           )}
-          {inv.customer_name && (
+          {tpl.show_customer && inv.customer_name && (
             <div className="receipt-row">
               <span>العميل:</span>
               <span>
@@ -236,7 +266,7 @@ export function Receipt({ data, autoPrint = false, onAfterPrint }: Props) {
           )}
         </div>
 
-        <div className="receipt-divider">--------------------------------</div>
+        <div className="receipt-divider">{dividerLine}</div>
 
         {/* Items */}
         <table className="receipt-items">
@@ -266,8 +296,10 @@ export function Receipt({ data, autoPrint = false, onAfterPrint }: Props) {
                 <tr key={l.id || i}>
                   <td className="receipt-col-name">
                     <div className="receipt-item-name">{name}</div>
-                    {sku && <div className="receipt-item-sku">{sku}</div>}
-                    {variantMeta && (
+                    {tpl.show_items_sku && sku && (
+                      <div className="receipt-item-sku">{sku}</div>
+                    )}
+                    {tpl.show_items_variant && variantMeta && (
                       <div className="receipt-item-sku">{variantMeta}</div>
                     )}
                     {disc > 0 && (
@@ -275,7 +307,7 @@ export function Receipt({ data, autoPrint = false, onAfterPrint }: Props) {
                         خصم: {EGP(disc)}
                       </div>
                     )}
-                    {l.salesperson_name && (
+                    {tpl.show_salesperson && l.salesperson_name && (
                       <div className="receipt-item-sku">
                         بائع: {l.salesperson_name}
                       </div>
@@ -294,7 +326,7 @@ export function Receipt({ data, autoPrint = false, onAfterPrint }: Props) {
           </tbody>
         </table>
 
-        <div className="receipt-divider">--------------------------------</div>
+        <div className="receipt-divider">{dividerLine}</div>
 
         {/* Totals */}
         <div className="receipt-totals">
@@ -335,11 +367,11 @@ export function Receipt({ data, autoPrint = false, onAfterPrint }: Props) {
               <span>+ {EGP(Number(inv.tax_amount))} ج.م</span>
             </div>
           )}
-          <div className="receipt-row receipt-grand">
+          <div className={`receipt-row receipt-grand ${tpl.grand_total_boxed ? 'receipt-grand-boxed' : ''}`}>
             <span>الإجمالي:</span>
             <strong>{EGP(Number(inv.grand_total))} ج.م</strong>
           </div>
-          {Number(inv.gross_profit) > 0 && (
+          {tpl.show_profit && Number(inv.gross_profit) > 0 && (
             <div className="receipt-row receipt-profit">
               <span>ربح الفاتورة:</span>
               <strong>{EGP(Number(inv.gross_profit))} ج.م</strong>
@@ -347,7 +379,7 @@ export function Receipt({ data, autoPrint = false, onAfterPrint }: Props) {
           )}
         </div>
 
-        <div className="receipt-divider">--------------------------------</div>
+        <div className="receipt-divider">{dividerLine}</div>
 
         {/* Payments */}
         <div className="receipt-payments">
@@ -372,7 +404,8 @@ export function Receipt({ data, autoPrint = false, onAfterPrint }: Props) {
         </div>
 
         {/* Loyalty */}
-        {(earnedPoints > 0 ||
+        {tpl.show_loyalty &&
+          (earnedPoints > 0 ||
           redeemedPoints > 0 ||
           inv.customer_loyalty_points != null) && (
           <>
@@ -403,11 +436,9 @@ export function Receipt({ data, autoPrint = false, onAfterPrint }: Props) {
           </>
         )}
 
-        {inv.notes && (
+        {tpl.show_notes && inv.notes && (
           <>
-            <div className="receipt-divider">
-              --------------------------------
-            </div>
+            <div className="receipt-divider">{dividerLine}</div>
             <div className="receipt-notes">
               <div className="receipt-notes-title">ملاحظات:</div>
               <div>{inv.notes}</div>
@@ -415,9 +446,9 @@ export function Receipt({ data, autoPrint = false, onAfterPrint }: Props) {
           </>
         )}
 
-        {shop.terms && (
+        {tpl.show_terms && shop.terms && (
           <>
-            <div className="receipt-divider">--------------------------------</div>
+            <div className="receipt-divider">{dividerLine}</div>
             <div className="receipt-terms">
               <div className="receipt-terms-title">الشروط والأحكام</div>
               <div className="receipt-terms-body">{shop.terms}</div>
@@ -425,10 +456,9 @@ export function Receipt({ data, autoPrint = false, onAfterPrint }: Props) {
           </>
         )}
 
-        <div className="receipt-divider">════════════════════════════════</div>
+        <div className="receipt-divider">{doubleLine}</div>
 
-        {/* Barcode of invoice_no for easy return lookup */}
-        {invoiceNo && (
+        {tpl.show_barcode && invoiceNo && (
           <div className="receipt-barcode">
             <Barcode
               value={invoiceNo}
@@ -440,7 +470,7 @@ export function Receipt({ data, autoPrint = false, onAfterPrint }: Props) {
           </div>
         )}
 
-        {shop.qr_url && (
+        {tpl.show_qr && shop.qr_url && (
           <div className="receipt-qr">
             <QRCodeSVG
               value={shop.qr_url}
@@ -461,47 +491,51 @@ export function Receipt({ data, autoPrint = false, onAfterPrint }: Props) {
           {shop.website && (
             <div className="receipt-website">{shop.website}</div>
           )}
-          <div className="receipt-tiny">
-            طُبعت: {new Date().toLocaleString('en-GB')}
-          </div>
+          {tpl.show_print_stamp && (
+            <div className="receipt-tiny">
+              طُبعت: {new Date().toLocaleString('en-GB')}
+            </div>
+          )}
         </div>
       </div>
 
       <style>{`
         .receipt-80mm {
-          width: 80mm;
-          padding: 2mm 3mm;
-          font-family: 'Courier New', 'Cairo', monospace;
-          font-size: 11px;
-          color: #000;
-          line-height: 1.35;
+          font-family: var(--rc-font, 'Cairo', 'Courier New', monospace);
+          font-size: var(--rc-fs, 11px);
+          color: var(--rc-text, #000);
+          line-height: var(--rc-lh, 1.35);
           direction: rtl;
           background: #fff;
+          box-sizing: border-box;
         }
         .receipt-header {
-          text-align: center;
+          text-align: var(--rc-logo-align, center);
           margin-bottom: 4px;
         }
         .receipt-logo {
-          max-width: 60mm;
-          max-height: 20mm;
+          max-width: calc(var(--rc-logo-size, 20mm) * 2);
+          max-height: var(--rc-logo-size, 20mm);
           margin: 0 auto 4px;
           display: block;
           object-fit: contain;
         }
         .receipt-shop-name {
           font-weight: 900;
-          font-size: 14px;
+          font-size: var(--rc-fs-title, 14px);
           margin-bottom: 2px;
+          color: var(--rc-primary, #000);
         }
         .receipt-line {
-          font-size: 10px;
+          font-size: calc(var(--rc-fs, 11px) - 1px);
+          color: var(--rc-muted, #555);
         }
         .receipt-divider {
           text-align: center;
           font-size: 10px;
           letter-spacing: -1px;
           margin: 3px 0;
+          color: var(--rc-divider, #000);
         }
         .receipt-row {
           display: flex;
@@ -551,15 +585,23 @@ export function Receipt({ data, autoPrint = false, onAfterPrint }: Props) {
           font-size: 11px;
         }
         .receipt-grand {
-          font-size: 13px;
+          font-size: calc(var(--rc-fs, 11px) + 2px);
           font-weight: 900;
-          border-top: 1px dashed #000;
+          border-top: 1px dashed var(--rc-divider, #000);
           padding-top: 3px;
           margin-top: 2px;
+          color: var(--rc-accent, #be185d);
+        }
+        .receipt-grand-boxed {
+          border: 2px solid var(--rc-accent, #be185d);
+          border-radius: 4px;
+          padding: 4px 6px !important;
+          margin: 4px 0;
+          background: color-mix(in srgb, var(--rc-accent, #be185d) 8%, transparent);
         }
         .receipt-profit {
           font-size: 10px;
-          color: #333;
+          color: var(--rc-muted, #333);
           font-style: italic;
         }
         .receipt-loyalty-title {

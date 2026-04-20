@@ -22,12 +22,14 @@ import {
   PaymentMethod,
   Role,
 } from '@/api/settings.api';
+import { ReceiptTemplatesTab } from './ReceiptTemplatesTab';
 
-type TabKey = 'company' | 'receipt' | 'warehouses' | 'cashboxes' | 'payments' | 'roles';
+type TabKey = 'company' | 'receipt' | 'templates' | 'warehouses' | 'cashboxes' | 'payments' | 'roles';
 
 const TABS: { key: TabKey; label: string; icon: any }[] = [
   { key: 'company', label: 'بيانات المحل', icon: Building2 },
   { key: 'receipt', label: 'إعدادات الفاتورة', icon: Printer },
+  { key: 'templates', label: 'قوالب الفاتورة', icon: Printer },
   { key: 'warehouses', label: 'المخازن', icon: WarehouseIcon },
   { key: 'cashboxes', label: 'الخزائن', icon: Wallet },
   { key: 'payments', label: 'طرق الدفع', icon: CreditCard },
@@ -63,6 +65,7 @@ export default function Settings() {
         <div className="p-6">
           {tab === 'company' && <CompanyTab />}
           {tab === 'receipt' && <ReceiptTab />}
+          {tab === 'templates' && <ReceiptTemplatesTab />}
           {tab === 'warehouses' && <WarehousesTab />}
           {tab === 'cashboxes' && <CashboxesTab />}
           {tab === 'payments' && <PaymentsTab />}
