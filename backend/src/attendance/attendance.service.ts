@@ -55,7 +55,7 @@ export class AttendanceService {
             SET clock_in = now(), clock_out = NULL,
                 ip_in = NULLIF($2,'')::inet, device_in = $3::jsonb,
                 ip_out = NULL, device_out = NULL,
-                note = COALESCE($4, note)
+                note = COALESCE($4::text, note)
           WHERE id = $1
           RETURNING *`,
         [existing[0].id, ctx.ip || '', deviceJson, note || null],
@@ -65,7 +65,7 @@ export class AttendanceService {
     const [row] = await this.ds.query(
       `INSERT INTO attendance_records
          (user_id, work_date, clock_in, ip_in, device_in, note)
-       VALUES ($1, $2, now(), NULLIF($3,'')::inet, $4::jsonb, $5)
+       VALUES ($1, $2, now(), NULLIF($3,'')::inet, $4::jsonb, $5::text)
        RETURNING *`,
       [userId, today, ctx.ip || '', deviceJson, note || null],
     );
@@ -87,7 +87,7 @@ export class AttendanceService {
       `UPDATE attendance_records
           SET clock_out = now(),
               ip_out = NULLIF($2,'')::inet, device_out = $3::jsonb,
-              note = CASE WHEN $4 IS NOT NULL THEN COALESCE(note || E'\n', '') || $4 ELSE note END
+              note = CASE WHEN $4::text IS NOT NULL THEN COALESCE(note || E'\n', '') || $4::text ELSE note END
         WHERE id = $1
         RETURNING *`,
       [row.id, ctx.ip || '', deviceJson, note || null],
@@ -178,7 +178,7 @@ export class AttendanceService {
       `UPDATE attendance_records
           SET clock_in  = COALESCE($2::timestamptz, clock_in),
               clock_out = COALESCE($3::timestamptz, clock_out),
-              note      = COALESCE($4, note)
+              note      = COALESCE($4::text, note)
         WHERE id = $1
         RETURNING *`,
       [id, dto.clock_in || null, dto.clock_out || null, dto.note || null],
