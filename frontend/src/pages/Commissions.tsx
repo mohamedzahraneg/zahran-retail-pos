@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
+import { InvoiceHoverCard } from '@/components/InvoiceHoverCard';
 import {
   Percent,
   TrendingUp,
@@ -357,7 +358,11 @@ function DetailModal({
                 {data.map((d) => (
                   <tr key={d.invoice_id}>
                     <td className="p-2 font-mono text-brand-600">
-                      {d.invoice_no}
+                      <InvoiceHoverCard
+                        invoiceId={d.invoice_id}
+                        label={d.invoice_no}
+                        className="font-mono text-brand-600 hover:underline"
+                      />
                     </td>
                     <td className="p-2 text-xs">
                       {new Date(d.completed_at).toLocaleString('en-US')}

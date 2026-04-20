@@ -19,6 +19,7 @@ import {
 import { posApi } from '@/api/pos.api';
 import { usersApi } from '@/api/users.api';
 import { Receipt, ReceiptData } from '@/components/Receipt';
+import { InvoiceHoverCard } from '@/components/InvoiceHoverCard';
 import { useAuthStore } from '@/stores/auth.store';
 import { useTableSort } from '@/lib/useTableSort';
 import {
@@ -356,7 +357,11 @@ export default function Invoices() {
                   }`}
                 >
                   <td className="p-3 font-mono text-sm font-bold text-brand-700">
-                    {i.invoice_no || i.doc_no}
+                    <InvoiceHoverCard
+                      invoiceId={i.id}
+                      label={i.invoice_no || i.doc_no}
+                      className="font-mono font-bold text-brand-700 hover:text-brand-900 hover:underline cursor-pointer"
+                    />
                   </td>
                   <td className="p-3 text-xs text-slate-600">
                     {fmtDateTime(i.completed_at || i.created_at)}

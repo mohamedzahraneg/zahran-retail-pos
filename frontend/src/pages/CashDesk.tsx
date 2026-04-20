@@ -1,6 +1,7 @@
 import { useState, useMemo, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
+import { InvoiceHoverCard } from '@/components/InvoiceHoverCard';
 import {
   Wallet,
   ArrowDownCircle,
@@ -750,7 +751,13 @@ function ReceiptModal({
                   className="grid grid-cols-[1fr_100px_120px] gap-2 items-center text-sm"
                 >
                   <div>
-                    <div className="font-mono font-bold text-xs">{inv.invoice_no}</div>
+                    <div className="font-mono font-bold text-xs">
+                      <InvoiceHoverCard
+                        invoiceId={inv.id}
+                        label={inv.invoice_no}
+                        className="font-mono font-bold text-xs text-slate-800 hover:text-indigo-700 hover:underline"
+                      />
+                    </div>
                     <div className="text-[11px] text-slate-500">
                       {new Date(inv.completed_at).toLocaleDateString('en-US')}
                     </div>
