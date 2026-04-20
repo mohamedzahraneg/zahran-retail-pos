@@ -201,7 +201,9 @@ export default function Dashboard() {
   const { data, isLoading } = useQuery({
     queryKey: ['dashboard-overview'],
     queryFn: () => dashboardApi.overview(),
-    refetchInterval: 60_000,
+    refetchInterval: 15_000,
+    refetchOnWindowFocus: true,
+    refetchOnReconnect: true,
   });
 
   const [period, setPeriod] = useState<PeriodRange>(() =>
@@ -215,13 +217,17 @@ export default function Dashboard() {
         from: period.from,
         to: period.to,
       }),
-    refetchInterval: 120_000,
+    refetchInterval: 20_000,
+    refetchOnWindowFocus: true,
+    refetchOnReconnect: true,
   });
 
   const { data: analytics } = useQuery({
     queryKey: ['dashboard-analytics', period.from, period.to],
     queryFn: () => dashboardApi.analytics(period.from, period.to),
-    refetchInterval: 120_000,
+    refetchInterval: 20_000,
+    refetchOnWindowFocus: true,
+    refetchOnReconnect: true,
   });
 
   const periodNoun = {

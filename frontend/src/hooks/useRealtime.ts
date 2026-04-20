@@ -75,27 +75,36 @@ export function useRealtime() {
       });
     });
 
+    const bumpDashboard = () => {
+      qc.invalidateQueries({ queryKey: ['dashboard-overview'] });
+      qc.invalidateQueries({ queryKey: ['dashboard-pl'] });
+      qc.invalidateQueries({ queryKey: ['dashboard-analytics'] });
+      qc.invalidateQueries({ queryKey: ['dashboard-kpis'] });
+    };
+
     // ─── POS events ────────────────────────────────────────────────────
     socket.on('pos:invoice.created', (payload: any) => {
-      qc.invalidateQueries({ queryKey: ['dashboard-kpis'] });
+      bumpDashboard();
       qc.invalidateQueries({ queryKey: ['recent-invoices'] });
+      qc.invalidateQueries({ queryKey: ['invoices'] });
       qc.invalidateQueries({ queryKey: ['shifts'] });
-      // Silent — too noisy to toast every invoice
       void payload;
     });
 
     socket.on('pos:invoice.voided', () => {
-      qc.invalidateQueries({ queryKey: ['dashboard-kpis'] });
+      bumpDashboard();
       qc.invalidateQueries({ queryKey: ['recent-invoices'] });
+      qc.invalidateQueries({ queryKey: ['invoices'] });
     });
 
     socket.on('pos:return.created', () => {
+      bumpDashboard();
       qc.invalidateQueries({ queryKey: ['returns'] });
-      qc.invalidateQueries({ queryKey: ['dashboard-kpis'] });
     });
 
     // ─── Inventory events ──────────────────────────────────────────────
     socket.on('inventory:low_stock', () => {
+      bumpDashboard();
       qc.invalidateQueries({ queryKey: ['stock'] });
       qc.invalidateQueries({ queryKey: ['low-stock'] });
     });

@@ -90,8 +90,9 @@ export class RealtimeGateway
     type: 'invoice.created' | 'invoice.voided' | 'return.created';
     payload: any;
   }) {
-    this.server.to('role:admin').emit(`pos:${event.type}`, event.payload);
-    this.server.to('role:manager').emit(`pos:${event.type}`, event.payload);
+    // Broadcast to every connected client so dashboards update live
+    // regardless of role (admins, managers, cashiers watching reports).
+    this.server.to('broadcast').emit(`pos:${event.type}`, event.payload);
   }
 
   /** Broadcast inventory events */
