@@ -326,9 +326,9 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* ═════ Period analytics hero — revenue / profit / expenses / returns ═════ */}
+      {/* ═════ Period analytics hero — revenue / profit / expenses / returns / discounts ═════ */}
       {analytics?.totals && (
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+        <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
           <AnalyticsCell
             label={`إيرادات ${periodNoun}`}
             value={EGP.format(Number(analytics.totals.revenue || 0))}
@@ -351,6 +351,17 @@ export default function Dashboard() {
             value={EGP.format(Number(analytics.totals.returns_amount || 0))}
             tone="rose"
             hint={`${Number(analytics.totals.returns_count || 0)} عملية`}
+          />
+          <AnalyticsCell
+            label="إجمالي الخصومات"
+            value={EGP.format(Number(analytics.totals.discounts || 0))}
+            tone="violet"
+          />
+          <AnalyticsCell
+            label="فواتير الخصم"
+            value={NUM(Number(analytics.totals.discount_invoices || 0))}
+            tone="violet"
+            hint="عدد الفواتير بخصم"
           />
         </div>
       )}
@@ -713,12 +724,13 @@ function RecommendationCard({ rec }: { rec: any }) {
 /* ─── small helpers for the period analytics section ─────────────────── */
 function AnalyticsCell({
   label, value, hint, tone,
-}: { label: string; value: string; hint?: string; tone: 'indigo' | 'emerald' | 'amber' | 'rose' }) {
+}: { label: string; value: string; hint?: string; tone: 'indigo' | 'emerald' | 'amber' | 'rose' | 'violet' }) {
   const bg = {
     indigo: 'bg-indigo-50 border-indigo-200 text-indigo-700',
     emerald: 'bg-emerald-50 border-emerald-200 text-emerald-700',
     amber: 'bg-amber-50 border-amber-200 text-amber-700',
     rose: 'bg-rose-50 border-rose-200 text-rose-700',
+    violet: 'bg-violet-50 border-violet-200 text-violet-700',
   }[tone];
   return (
     <div className={`rounded-xl border p-3 ${bg}`}>

@@ -18,13 +18,40 @@ const LABELS: Record<PeriodKey, string> = {
   custom: 'مخصص',
 };
 
+/**
+ * Format a Date as YYYY-MM-DD in Cairo time. We cannot use toISOString()
+ * here because it converts to UTC — if the user is past midnight in Cairo
+ * but still in the previous UTC day, today's invoices would vanish from
+ * the dashboard.
+ */
 function toISO(d: Date) {
-  return d.toISOString().slice(0, 10);
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Africa/Cairo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(d);
+  const y = parts.find((p) => p.type === 'year')?.value;
+  const m = parts.find((p) => p.type === 'month')?.value;
+  const day = parts.find((p) => p.type === 'day')?.value;
+  return `${y}-${m}-${day}`;
+}
+
+/** Day-of-week (0=Sun..6=Sat) in Cairo time. */
+function cairoDow(d: Date): number {
+  const s = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Africa/Cairo',
+    weekday: 'short',
+  }).format(d);
+  return { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }[
+    s as 'Sun' | 'Mon' | 'Tue' | 'Wed' | 'Thu' | 'Fri' | 'Sat'
+  ]!;
 }
 
 /**
  * Resolve a period key to a concrete from/to date range anchored to today.
- * Week starts on Saturday to match local retail convention.
+ * Week starts on Saturday to match local retail convention. All dates are
+ * resolved in Africa/Cairo time to match the backend filters.
  */
 export function resolvePeriod(
   key: PeriodKey,
@@ -36,8 +63,7 @@ export function resolvePeriod(
   if (key === 'day') {
     from = to;
   } else if (key === 'week') {
-    const day = today.getDay(); // Sun=0..Sat=6
-    // Saturday = start of our week
+    const day = cairoDow(today); // Sun=0..Sat=6 in Cairo
     const back = (day + 1) % 7; // distance to previous Saturday
     const start = new Date(today);
     start.setDate(today.getDate() - back);

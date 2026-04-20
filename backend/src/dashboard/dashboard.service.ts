@@ -148,7 +148,10 @@ export class DashboardService {
         COALESCE(SUM(grand_total), 0)::numeric(14,2)  AS revenue,
         COALESCE(SUM(cogs_total), 0)::numeric(14,2)   AS cogs,
         COALESCE(SUM(gross_profit), 0)::numeric(14,2) AS profit,
-        COALESCE(SUM(invoice_discount + items_discount_total + coupon_discount), 0)::numeric(14,2) AS discounts
+        COALESCE(SUM(invoice_discount + items_discount_total + coupon_discount), 0)::numeric(14,2) AS discounts,
+        COUNT(*) FILTER (
+          WHERE (invoice_discount + items_discount_total + coupon_discount) > 0
+        )::int                                        AS discount_invoices
       FROM invoices
       WHERE status IN ('paid','completed','partially_paid')
         AND (COALESCE(completed_at, created_at) AT TIME ZONE 'Africa/Cairo')::date
@@ -252,6 +255,7 @@ export class DashboardService {
         profit,
         margin_pct: Math.round(margin * 100) / 100,
         discounts: Number(totals.discounts),
+        discount_invoices: Number(totals.discount_invoices),
         expenses,
         returns_count: Number(returnsRow.returns_count),
         returns_amount: returnsAmount,
