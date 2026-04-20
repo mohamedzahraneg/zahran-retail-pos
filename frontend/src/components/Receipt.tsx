@@ -21,6 +21,8 @@ export interface ReceiptData {
     coupon_discount?: number;
     coupon_code?: string | null;
     grand_total: number;
+    cogs_total?: number;
+    gross_profit?: number;
     paid_amount?: number;
     paid_total?: number;
     change_amount?: number;
@@ -337,6 +339,12 @@ export function Receipt({ data, autoPrint = false, onAfterPrint }: Props) {
             <span>الإجمالي:</span>
             <strong>{EGP(Number(inv.grand_total))} ج.م</strong>
           </div>
+          {Number(inv.gross_profit) > 0 && (
+            <div className="receipt-row receipt-profit">
+              <span>ربح الفاتورة:</span>
+              <strong>{EGP(Number(inv.gross_profit))} ج.م</strong>
+            </div>
+          )}
         </div>
 
         <div className="receipt-divider">--------------------------------</div>
@@ -548,6 +556,11 @@ export function Receipt({ data, autoPrint = false, onAfterPrint }: Props) {
           border-top: 1px dashed #000;
           padding-top: 3px;
           margin-top: 2px;
+        }
+        .receipt-profit {
+          font-size: 10px;
+          color: #333;
+          font-style: italic;
         }
         .receipt-loyalty-title {
           text-align: center;
