@@ -36,4 +36,16 @@ export class DashboardController {
   alerts(@Query('limit') limit?: string) {
     return this.dashboard.alerts(limit ? parseInt(limit, 10) : 50);
   }
+
+  /**
+   * Aggregate for a picked period — today / week / month / custom.
+   * Returns revenue, cogs, profit, margin, expenses, returns, net, and
+   * best/worst/losing products inside the same window.
+   */
+  @Get('analytics')
+  @ApiQuery({ name: 'from', required: false, type: String })
+  @ApiQuery({ name: 'to', required: false, type: String })
+  analytics(@Query('from') from?: string, @Query('to') to?: string) {
+    return this.dashboard.analytics(from, to);
+  }
 }

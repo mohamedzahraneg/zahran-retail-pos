@@ -118,13 +118,25 @@ export class PosService {
 
     return this.ds.transaction(async (em) => {
       // Resolve current open shift + cashbox for cashbox auto-updates.
-      const [shift] = await em.query(
+      // Prefer a shift opened for THIS warehouse, but fall back to any open
+      // shift the cashier has — a mismatch between the POS warehouse and the
+      // shift warehouse shouldn't silently orphan the invoice.
+      const primaryShift = await em.query(
         `SELECT id, cashbox_id FROM shifts
            WHERE opened_by = $1 AND status = 'open'
              AND warehouse_id = $2
            ORDER BY opened_at DESC LIMIT 1`,
         [userId, dto.warehouse_id],
       );
+      const fallbackShift = primaryShift.length
+        ? primaryShift
+        : await em.query(
+            `SELECT id, cashbox_id FROM shifts
+               WHERE opened_by = $1 AND status = 'open'
+               ORDER BY opened_at DESC LIMIT 1`,
+            [userId],
+          );
+      const shift = fallbackShift[0];
       let cashboxId: string | null = shift?.cashbox_id ?? null;
       if (!cashboxId) {
         const [cb] = await em.query(

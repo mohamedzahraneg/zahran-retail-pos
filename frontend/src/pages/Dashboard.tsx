@@ -218,6 +218,12 @@ export default function Dashboard() {
     refetchInterval: 120_000,
   });
 
+  const { data: analytics } = useQuery({
+    queryKey: ['dashboard-analytics', period.from, period.to],
+    queryFn: () => dashboardApi.analytics(period.from, period.to),
+    refetchInterval: 120_000,
+  });
+
   const periodNoun = {
     day: 'اليوم',
     week: 'الأسبوع',
@@ -313,6 +319,41 @@ export default function Dashboard() {
           />
         </div>
       </div>
+
+      {/* ═════ Period analytics hero — revenue / profit / expenses / returns ═════ */}
+      {analytics?.totals && (
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+          <AnalyticsCell
+            label={`إيرادات ${periodNoun}`}
+            value={EGP.format(Number(analytics.totals.revenue || 0))}
+            tone="indigo"
+            hint={`${Number(analytics.totals.invoices || 0)} فاتورة`}
+          />
+          <AnalyticsCell
+            label="ربح إجمالي"
+            value={EGP.format(Number(analytics.totals.profit || 0))}
+            tone="emerald"
+            hint={`هامش ${Number(analytics.totals.margin_pct || 0).toFixed(1)}%`}
+          />
+          <AnalyticsCell
+            label="مصاريف"
+            value={EGP.format(Number(analytics.totals.expenses || 0))}
+            tone="amber"
+          />
+          <AnalyticsCell
+            label="مرتجعات"
+            value={EGP.format(Number(analytics.totals.returns_amount || 0))}
+            tone="rose"
+            hint={`${Number(analytics.totals.returns_count || 0)} عملية`}
+          />
+          <AnalyticsCell
+            label="الصافي"
+            value={EGP.format(Number(analytics.totals.net || 0))}
+            tone={Number(analytics.totals.net) < 0 ? 'rose' : 'emerald'}
+            hint="ربح − مصاريف − مرتجعات"
+          />
+        </div>
+      )}
 
       {/* ═════ KPIs ═════ */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -609,6 +650,31 @@ export default function Dashboard() {
         )}
       </div>
 
+      {/* ═════ Best / worst / losing products — based on period ═════ */}
+      {analytics && (analytics.topProducts?.length > 0 || analytics.losingProducts?.length > 0) && (
+        <div className="grid lg:grid-cols-3 gap-4">
+          <ProductPerfPanel
+            title="الأفضل ربحاً"
+            accent="emerald"
+            icon={Award}
+            rows={analytics.topProducts || []}
+          />
+          <ProductPerfPanel
+            title="الأدنى ربحاً"
+            accent="amber"
+            icon={Activity}
+            rows={analytics.worstProducts || []}
+          />
+          <ProductPerfPanel
+            title="منتجات خاسرة"
+            accent="rose"
+            icon={Activity}
+            rows={analytics.losingProducts || []}
+            emptyText="لا توجد منتجات خاسرة 🎉"
+          />
+        </div>
+      )}
+
       {/* ═════ Returns widget ═════ */}
       <ReturnsWidget />
     </div>
@@ -694,6 +760,92 @@ function RecommendationCard({ rec }: { rec: any }) {
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+/* ─── small helpers for the period analytics section ─────────────────── */
+function AnalyticsCell({
+  label, value, hint, tone,
+}: { label: string; value: string; hint?: string; tone: 'indigo' | 'emerald' | 'amber' | 'rose' }) {
+  const bg = {
+    indigo: 'bg-indigo-50 border-indigo-200 text-indigo-700',
+    emerald: 'bg-emerald-50 border-emerald-200 text-emerald-700',
+    amber: 'bg-amber-50 border-amber-200 text-amber-700',
+    rose: 'bg-rose-50 border-rose-200 text-rose-700',
+  }[tone];
+  return (
+    <div className={`rounded-xl border p-3 ${bg}`}>
+      <div className="text-[11px] font-bold opacity-80">{label}</div>
+      <div className="text-xl font-black mt-1 truncate">{value}</div>
+      {hint && <div className="text-[10px] opacity-70 mt-0.5">{hint}</div>}
+    </div>
+  );
+}
+
+function ProductPerfPanel({
+  title, accent, icon: Icon, rows, emptyText,
+}: {
+  title: string;
+  accent: 'emerald' | 'amber' | 'rose';
+  icon: any;
+  rows: any[];
+  emptyText?: string;
+}) {
+  const accentCls = {
+    emerald: 'text-emerald-600',
+    amber: 'text-amber-600',
+    rose: 'text-rose-600',
+  }[accent];
+  return (
+    <div className="card p-5">
+      <h3 className="font-black text-slate-800 flex items-center gap-2 mb-4">
+        <Icon size={18} className={accentCls} />
+        {title}
+      </h3>
+      {rows.length > 0 ? (
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead className="text-slate-500">
+              <tr>
+                <th className="text-right p-1">#</th>
+                <th className="text-right p-1">المنتج</th>
+                <th className="text-center p-1">باع</th>
+                <th className="text-left p-1">الربح</th>
+                <th className="text-left p-1">هامش%</th>
+                <th className="text-left p-1">% من الإجمالي</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {rows.map((p, i) => {
+                const profit = Number(p.profit || 0);
+                const margin = Number(p.margin_pct || 0);
+                const share = Number(p.profit_share_pct || 0);
+                return (
+                  <tr key={p.product_id || i} className="hover:bg-slate-50">
+                    <td className="p-1 text-slate-400 font-bold">{i + 1}</td>
+                    <td className="p-1 font-semibold text-slate-800 max-w-[160px] truncate">
+                      {p.name_ar || '—'}
+                    </td>
+                    <td className="p-1 text-center">{p.units_sold}</td>
+                    <td className={`p-1 text-left font-bold ${profit < 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
+                      {EGP.format(profit)}
+                    </td>
+                    <td className={`p-1 text-left ${margin < 0 ? 'text-rose-500' : ''}`}>
+                      {margin.toFixed(1)}%
+                    </td>
+                    <td className="p-1 text-left text-slate-500">{share.toFixed(2)}%</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="text-center text-slate-400 py-6 text-sm">
+          {emptyText || 'لا توجد بيانات للفترة المختارة'}
+        </div>
+      )}
     </div>
   );
 }
