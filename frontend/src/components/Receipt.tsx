@@ -326,11 +326,13 @@ export function Receipt({ data, autoPrint = false, onAfterPrint, template }: Pro
                         خصم: {EGP(disc)}
                       </div>
                     )}
-                    {tpl.show_salesperson && l.salesperson_name && (
-                      <div className="receipt-item-sku">
-                        بائع: {l.salesperson_name}
-                      </div>
-                    )}
+                    {tpl.show_salesperson &&
+                      l.salesperson_name &&
+                      l.salesperson_name !== inv.salesperson_name && (
+                        <div className="receipt-item-sku">
+                          بائع: {l.salesperson_name}
+                        </div>
+                      )}
                   </td>
                   <td className="receipt-col-qty">{qty}</td>
                   <td className="receipt-col-price">
@@ -742,28 +744,39 @@ export function Receipt({ data, autoPrint = false, onAfterPrint, template }: Pro
             margin: 0 !important;
             padding: 0 !important;
             width: ${tpl.paper_width_mm}mm !important;
+            min-height: 0 !important;
+            height: auto !important;
             background: #fff !important;
             -webkit-print-color-adjust: exact !important;
             print-color-adjust: exact !important;
           }
-          body * {
-            visibility: hidden !important;
-          }
-          .receipt-print-root,
-          .receipt-print-root * {
-            visibility: visible !important;
+          body > :not(.receipt-print-root) {
+            display: none !important;
           }
           .receipt-print-root {
-            position: absolute !important;
-            top: 0;
-            left: 0;
-            right: 0;
+            /* static, top-of-page, no viewport clipping */
+            position: static !important;
+            display: block !important;
             width: ${tpl.paper_width_mm}mm !important;
+            margin: 0 !important;
+            padding: 0 !important;
           }
           .receipt-80mm {
             width: ${tpl.paper_width_mm}mm !important;
+            min-height: 0 !important;
+            height: auto !important;
+            max-height: none !important;
             box-sizing: border-box;
+            /* Don't force the receipt onto one page — thermal rolls are
+               continuous, and the browser was clipping when we did. */
+            page-break-inside: auto;
+            break-inside: auto;
+            overflow: visible !important;
+          }
+          .receipt-80mm img,
+          .receipt-80mm svg {
             page-break-inside: avoid;
+            break-inside: avoid;
           }
         }
       `}</style>
