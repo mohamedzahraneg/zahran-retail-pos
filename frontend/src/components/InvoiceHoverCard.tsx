@@ -1,9 +1,10 @@
 import { useState, useRef, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { createPortal } from 'react-dom';
-import { ExternalLink } from 'lucide-react';
+import { ExternalLink, X, Printer } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { posApi } from '@/api/pos.api';
+import { Receipt, ReceiptData } from './Receipt';
 
 interface Props {
   /** Invoice UUID (required to fetch full details). */
@@ -22,27 +23,47 @@ const EGP = (n: any) => `${Number(n || 0).toFixed(2)}`;
  * hovers the invoice number. Fetches details lazily on first hover and
  * caches them via react-query. Click opens the full invoices page.
  */
+const CARD_WIDTH = 360;
+const CARD_HEIGHT_EST = 480;
+
 export function InvoiceHoverCard({ invoiceId, label, to, className }: Props) {
   const [open, setOpen] = useState(false);
   const [hovered, setHovered] = useState(false);
+  const [fullOpen, setFullOpen] = useState(false);
   const anchorRef = useRef<HTMLAnchorElement | null>(null);
-  const [pos, setPos] = useState<{ top: number; left: number }>({ top: 0, left: 0 });
+  const [pos, setPos] = useState<{ top: number; left: number; flipUp: boolean }>({
+    top: 0,
+    left: 0,
+    flipUp: false,
+  });
 
   // Lazy fetch once the user has hovered for the first time.
   const { data, isLoading } = useQuery({
     queryKey: ['invoice-preview', invoiceId],
     queryFn: () => posApi.receipt(invoiceId),
-    enabled: hovered && !!invoiceId,
+    enabled: (hovered || fullOpen) && !!invoiceId,
     staleTime: 60_000,
   });
 
   useEffect(() => {
     if (!open || !anchorRef.current) return;
     const r = anchorRef.current.getBoundingClientRect();
-    const cardWidth = 360;
-    let left = r.right + window.scrollX - cardWidth;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const spaceBelow = vh - r.bottom;
+    const spaceAbove = r.top;
+    const flipUp = spaceBelow < CARD_HEIGHT_EST && spaceAbove > spaceBelow;
+
+    // Horizontal: try to right-align with anchor, but clamp within viewport.
+    let left = r.right + window.scrollX - CARD_WIDTH;
     if (left < 12) left = 12;
-    setPos({ top: r.bottom + window.scrollY + 6, left });
+    if (left + CARD_WIDTH > vw - 12) left = vw - CARD_WIDTH - 12;
+
+    const top = flipUp
+      ? r.top + window.scrollY - 6 // card sits above anchor (translateY -100%)
+      : r.bottom + window.scrollY + 6;
+
+    setPos({ top, left, flipUp });
   }, [open]);
 
   const href = to || `/invoices?id=${invoiceId}`;
@@ -79,7 +100,10 @@ export function InvoiceHoverCard({ invoiceId, label, to, className }: Props) {
               position: 'absolute',
               top: pos.top,
               left: pos.left,
-              width: 360,
+              width: CARD_WIDTH,
+              maxHeight: `calc(100vh - 48px)`,
+              overflowY: 'auto',
+              transform: pos.flipUp ? 'translateY(-100%)' : undefined,
               zIndex: 9999,
             }}
             className="bg-white rounded-xl shadow-2xl border border-slate-200 text-sm"
@@ -90,21 +114,95 @@ export function InvoiceHoverCard({ invoiceId, label, to, className }: Props) {
             {isLoading || !data ? (
               <div className="p-4 text-slate-500">جارٍ التحميل…</div>
             ) : (
-              <InvoiceCardBody data={data} invoiceId={invoiceId} />
+              <InvoiceCardBody
+                data={data}
+                invoiceId={invoiceId}
+                onOpenFull={() => {
+                  setFullOpen(true);
+                  setOpen(false);
+                }}
+              />
             )}
           </div>,
+          document.body,
+        )}
+
+      {/* Full receipt modal — opens without leaving the current page */}
+      {fullOpen &&
+        data &&
+        createPortal(
+          <FullReceiptModal
+            data={data as ReceiptData}
+            onClose={() => setFullOpen(false)}
+          />,
           document.body,
         )}
     </>
   );
 }
 
+function FullReceiptModal({
+  data,
+  onClose,
+}: { data: ReceiptData; onClose: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
+    window.addEventListener('keydown', onKey);
+    document.body.style.overflow = 'hidden';
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      document.body.style.overflow = '';
+    };
+  }, [onClose]);
+
+  return (
+    <div
+      className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[9999] flex items-center justify-center p-4"
+      onClick={onClose}
+      dir="rtl"
+    >
+      <div
+        className="bg-slate-100 rounded-xl shadow-2xl max-h-[92vh] overflow-auto relative"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="sticky top-0 bg-white/95 backdrop-blur border-b border-slate-200 px-4 py-2 flex items-center justify-between gap-3">
+          <div className="font-black text-slate-800">
+            {data.invoice?.invoice_no || 'الفاتورة'}
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => window.print()}
+              className="inline-flex items-center gap-1 text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-1.5 rounded-lg"
+            >
+              <Printer size={14} /> طباعة
+            </button>
+            <button
+              onClick={onClose}
+              className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-600"
+              aria-label="إغلاق"
+            >
+              <X size={18} />
+            </button>
+          </div>
+        </div>
+        <div className="p-4 flex justify-center">
+          <div className="bg-white shadow-xl">
+            <Receipt data={data} />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function InvoiceCardBody({
   data,
   invoiceId,
+  onOpenFull,
 }: {
   data: any;
   invoiceId: string;
+  onOpenFull?: () => void;
 }) {
   const inv = data.invoice || {};
   const lines: any[] = data.lines || [];
@@ -216,13 +314,17 @@ function InvoiceCardBody({
         )}
       </div>
 
-      {/* Open full invoice */}
-      <Link
-        to={`/invoices?id=${invoiceId}`}
-        className="flex items-center justify-center gap-1 text-xs text-indigo-600 hover:text-indigo-800 pt-1 border-t border-slate-100"
+      {/* Open full invoice — opens an in-page modal, no route change */}
+      <button
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          onOpenFull?.();
+        }}
+        className="w-full flex items-center justify-center gap-1 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg py-2 mt-1"
       >
         <ExternalLink size={12} /> فتح الفاتورة الكاملة
-      </Link>
+      </button>
     </div>
   );
 }
