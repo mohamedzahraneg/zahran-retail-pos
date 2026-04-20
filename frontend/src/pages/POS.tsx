@@ -260,70 +260,31 @@ export default function POS() {
           'radial-gradient(900px 500px at 90% -10%, rgba(236,72,153,.12), transparent 60%), radial-gradient(900px 500px at -10% 110%, rgba(99,102,241,.12), transparent 60%), linear-gradient(180deg, #0b1020 0%, #0a0f1e 100%)',
       }}
     >
-      {/* ─────────── Header ─────────── */}
-      <div className="px-3 md:px-5 py-2 md:py-3 border-b border-white/10 bg-slate-950/40 backdrop-blur flex items-center justify-between gap-3 flex-wrap">
-        <div className="flex items-center gap-2 md:gap-3 min-w-0">
-          <div className="w-9 h-9 md:w-11 md:h-11 rounded-xl bg-gradient-to-br from-orange-500 to-pink-600 flex items-center justify-center text-white font-black text-lg md:text-xl shadow-lg shadow-orange-500/30 shrink-0">
-            ز
-          </div>
-          <div className="min-w-0">
-            <div className="font-black text-white text-base md:text-lg">زهران POS</div>
-            <div className="text-[10px] md:text-xs text-slate-400 flex items-center gap-1 truncate">
-              <Store size={12} />
-              {cart.warehouse?.name_ar || '—'}
-              {cart.warehouse?.code && (
-                <span className="font-mono opacity-60 hidden sm:inline">
-                  · {cart.warehouse.code}
-                </span>
-              )}
-            </div>
-          </div>
+      {/* Compact status strip — logo/title removed to maximise grid area */}
+      <div className="px-3 md:px-4 py-1.5 border-b border-white/10 bg-slate-950/40 backdrop-blur flex items-center gap-4 text-xs text-slate-300 flex-wrap">
+        <div className="flex items-center gap-1.5">
+          <Store size={12} className="text-slate-400" />
+          <span className="truncate max-w-[140px]">{cart.warehouse?.name_ar || '—'}</span>
         </div>
-
-        <div className="flex items-center gap-3 md:gap-5 text-xs md:text-sm text-slate-300 flex-wrap">
-          <div className="flex items-center gap-2">
-            {online ? (
-              <>
-                <Wifi size={14} className="text-emerald-400" />
-                <span className="text-emerald-400 font-semibold">متصل</span>
-              </>
-            ) : (
-              <>
-                <WifiOff size={14} className="text-rose-400" />
-                <span className="text-rose-400 font-semibold">غير متصل</span>
-              </>
-            )}
+        {shift && (
+          <div className="hidden sm:block">
+            وردية <span className="font-mono text-white">{shift.shift_no}</span>
           </div>
-          {shift && (
-            <div>
-              وردية{' '}
-              <span className="font-mono text-white">
-                {shift.shift_no}
-              </span>
-            </div>
-          )}
-          <div className="flex items-center gap-2 text-white">
-            <span className="text-rose-300 font-bold">
-              {now.toLocaleDateString('ar-EG-u-ca-gregory', {
-                weekday: 'long',
-              })}
-            </span>
-            <span className="font-mono">
-              {now.toLocaleDateString('en-GB')}
-            </span>
-            <span className="font-mono">
-              {now.toLocaleTimeString('en-US', {
-                hour: '2-digit',
-                minute: '2-digit',
-              })}
-            </span>
-          </div>
-          {user && (
-            <div>
-              كاشير: <span className="text-white font-bold">{user.full_name}</span>
-            </div>
-          )}
+        )}
+        <div className="flex items-center gap-1.5 mr-auto">
+          <span className="text-rose-300 font-bold">
+            {now.toLocaleDateString('ar-EG-u-ca-gregory', { weekday: 'long' })}
+          </span>
+          <span className="font-mono">{now.toLocaleDateString('en-GB')}</span>
+          <span className="font-mono">
+            {now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}
+          </span>
         </div>
+        {user && (
+          <div className="hidden md:block">
+            <span className="text-white font-bold">{user.full_name}</span>
+          </div>
+        )}
       </div>
 
       {/* ─────────── Mobile view switcher (hidden on desktop) ─────────── */}

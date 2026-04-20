@@ -1,4 +1,6 @@
-import { NavLink } from 'react-router-dom';
+import { NavLink, useNavigate } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
+import { alertsApi } from '@/api/alerts.api';
 import {
   LayoutDashboard,
   ShoppingCart,
@@ -32,7 +34,10 @@ import {
   ChevronsRight,
   ChevronsLeft,
   X as XIcon,
+  Wifi,
+  WifiOff,
 } from 'lucide-react';
+import { useEffect, useState } from 'react';
 import clsx from 'clsx';
 import { useAuthStore } from '@/stores/auth.store';
 import { useLayoutStore } from '@/stores/layout.store';
@@ -132,6 +137,28 @@ export function Sidebar() {
     .map((g) => ({ ...g, items: g.items.filter((it) => it.roles.includes(role)) }))
     .filter((g) => g.items.length > 0);
 
+  const [online, setOnline] = useState<boolean>(
+    typeof navigator !== 'undefined' ? navigator.onLine : true,
+  );
+  useEffect(() => {
+    const up = () => setOnline(true);
+    const down = () => setOnline(false);
+    window.addEventListener('online', up);
+    window.addEventListener('offline', down);
+    return () => {
+      window.removeEventListener('online', up);
+      window.removeEventListener('offline', down);
+    };
+  }, []);
+  const navigate = useNavigate();
+  const { data: alertCounts } = useQuery({
+    queryKey: ['alerts-counts'],
+    queryFn: alertsApi.counts,
+    refetchInterval: 30_000,
+  });
+  const unread = alertCounts?.unread ?? 0;
+  const critical = alertCounts?.critical ?? 0;
+
   return (
     <>
       {/* Backdrop (mobile only) */}
@@ -230,6 +257,52 @@ export function Sidebar() {
 
         {/* User + logout + collapse toggle */}
         <div className="p-2 border-t border-slate-100 space-y-1">
+          {/* Connection + notifications row */}
+          <div
+            className={clsx(
+              'flex gap-1',
+              collapsed && !mobileOpen && 'lg:flex-col',
+            )}
+          >
+            <div
+              title={online ? 'متصل بالإنترنت' : 'غير متصل'}
+              className={clsx(
+                'flex items-center rounded-lg px-3 py-1.5 text-xs font-bold flex-1',
+                online
+                  ? 'bg-emerald-50 text-emerald-700'
+                  : 'bg-rose-50 text-rose-700',
+                collapsed && !mobileOpen && 'lg:justify-center lg:px-2',
+              )}
+            >
+              {online ? <Wifi size={14} /> : <WifiOff size={14} />}
+              <span className={clsx('mr-2', collapsed && !mobileOpen && 'lg:hidden')}>
+                {online ? 'متصل' : 'غير متصل'}
+              </span>
+            </div>
+            <button
+              onClick={() => {
+                navigate('/alerts');
+                closeMobile();
+              }}
+              title="التنبيهات"
+              className={clsx(
+                'relative flex items-center justify-center rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5',
+                collapsed && !mobileOpen && 'lg:px-2',
+              )}
+            >
+              <Bell size={14} />
+              {unread > 0 && (
+                <span
+                  className={clsx(
+                    'absolute -top-1 -right-1 min-w-[16px] h-[16px] rounded-full text-[9px] font-bold text-white flex items-center justify-center px-1',
+                    critical > 0 ? 'bg-rose-500' : 'bg-amber-500',
+                  )}
+                >
+                  {unread > 99 ? '99+' : unread}
+                </span>
+              )}
+            </button>
+          </div>
           {(!collapsed || mobileOpen) && (
             <div className="px-3 py-1 text-sm">
               <div className="font-semibold text-slate-800 truncate">
