@@ -270,12 +270,12 @@ BEGIN
     SELECT wh_id INTO v_wh_id FROM _ref;
     SELECT admin_id INTO v_admin_id FROM _ref;
 
-    SELECT array_agg(id) INTO v_cashier_ids
+    SELECT array_agg(u.id) INTO v_cashier_ids
     FROM users u JOIN roles r ON r.id = u.role_id
     WHERE r.code = 'cashier';
     IF v_cashier_ids IS NULL THEN v_cashier_ids := ARRAY[v_admin_id]; END IF;
 
-    SELECT array_agg(id) INTO v_sales_ids
+    SELECT array_agg(u.id) INTO v_sales_ids
     FROM users u JOIN roles r ON r.id = u.role_id
     WHERE r.code = 'salesperson';
 

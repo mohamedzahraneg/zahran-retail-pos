@@ -21,8 +21,8 @@ export function useRealtime() {
   useEffect(() => {
     if (!isHydrated || !accessToken) return;
 
-    const baseURL =
-      (import.meta.env.VITE_API_URL as string) || 'http://localhost:3000';
+    const envApiUrl = import.meta.env.VITE_API_URL as string | undefined;
+    const baseURL = envApiUrl ?? 'http://localhost:3000';
 
     const socket = io(`${baseURL}/realtime`, {
       auth: { token: accessToken },

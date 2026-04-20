@@ -269,7 +269,12 @@ LEFT JOIN sales_30 sd ON sd.variant_id = v.id
 WHERE (s.quantity_on_hand - s.quantity_reserved) <= s.reorder_point
   AND p.is_active = TRUE
 ORDER BY
-    CASE priority WHEN 'urgent' THEN 1 WHEN 'soon' THEN 2 ELSE 3 END,
+    CASE
+        WHEN (s.quantity_on_hand - s.quantity_reserved) <= 0 THEN 1
+        WHEN (s.quantity_on_hand - s.quantity_reserved) <=
+             COALESCE(sd.avg_daily_sales,0) * 3 THEN 2
+        ELSE 3
+    END,
     days_of_stock_left ASC NULLS LAST;
 
 -- ---------------------------------------------------------------------------

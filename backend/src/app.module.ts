@@ -39,7 +39,6 @@ import { NotificationsModule } from './notifications/notifications.module';
 import { SetupModule } from './setup/setup.module';
 import { RecurringExpensesModule } from './recurring-expenses/recurring-expenses.module';
 import { CustomerGroupsModule } from './customer-groups/customer-groups.module';
-import { UploadsModule } from './uploads/uploads.module';
 import { CategoriesModule } from './categories/categories.module';
 import { ServeStaticModule } from '@nestjs/serve-static';
 import { join } from 'path';
@@ -103,7 +102,6 @@ class HealthController {
     SetupModule,
     RecurringExpensesModule,
     CustomerGroupsModule,
-    UploadsModule,
     CategoriesModule,
   ],
   controllers: [HealthController],
