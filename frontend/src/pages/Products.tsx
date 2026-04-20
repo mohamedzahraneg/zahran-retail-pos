@@ -190,11 +190,7 @@ export default function Products() {
                         />
                       ) : (
                         <div className="w-10 h-10 rounded-lg bg-slate-100 flex items-center justify-center text-xl">
-                          {p.type === 'shoe'
-                            ? '👠'
-                            : p.type === 'bag'
-                              ? '👜'
-                              : '💍'}
+                          {/(^|\s)(شنط|شنطة|حقيبة|حقائب|كلاتش|ظهر)/i.test(p.name_ar || '') ? '👜' : '👠'}
                         </div>
                       )}
                       <div>
