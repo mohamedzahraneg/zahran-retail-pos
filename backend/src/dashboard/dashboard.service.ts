@@ -150,8 +150,9 @@ export class DashboardService {
         COALESCE(SUM(gross_profit), 0)::numeric(14,2) AS profit,
         COALESCE(SUM(invoice_discount + items_discount_total + coupon_discount), 0)::numeric(14,2) AS discounts
       FROM invoices
-      WHERE status IN ('paid','completed')
-        AND (completed_at AT TIME ZONE 'Africa/Cairo')::date BETWEEN $1::date AND $2::date
+      WHERE status IN ('paid','completed','partially_paid')
+        AND (COALESCE(completed_at, created_at) AT TIME ZONE 'Africa/Cairo')::date
+            BETWEEN $1::date AND $2::date
       `,
       [fromDate, toDate],
     );
@@ -202,8 +203,9 @@ export class DashboardService {
       JOIN invoices i       ON i.id = ii.invoice_id
       JOIN product_variants v ON v.id = ii.variant_id
       JOIN products p       ON p.id = v.product_id
-      WHERE i.status IN ('paid','completed')
-        AND (i.completed_at AT TIME ZONE 'Africa/Cairo')::date BETWEEN $1::date AND $2::date
+      WHERE i.status IN ('paid','completed','partially_paid')
+        AND (COALESCE(i.completed_at, i.created_at) AT TIME ZONE 'Africa/Cairo')::date
+            BETWEEN $1::date AND $2::date
       GROUP BY p.id, p.name_ar
       HAVING SUM(ii.quantity) > 0
       `,
@@ -213,13 +215,17 @@ export class DashboardService {
     const sortedByProfit = [...productPerf].sort(
       (a: any, b: any) => Number(b.profit) - Number(a.profit),
     );
-    const topProducts = sortedByProfit.slice(0, 10);
+    // "الأفضل ربحاً" must only include products that actually made a profit.
+    // A loss-making item showing up here was misleading the user.
+    const topProducts = sortedByProfit
+      .filter((p: any) => Number(p.profit) > 0)
+      .slice(0, 10);
     const losingProducts = productPerf
       .filter((p: any) => Number(p.profit) < 0)
       .sort((a: any, b: any) => Number(a.profit) - Number(b.profit))
       .slice(0, 10);
     const worstProducts = sortedByProfit
-      .filter((p: any) => Number(p.profit) >= 0)
+      .filter((p: any) => Number(p.profit) > 0)
       .slice(-10)
       .reverse();
 
