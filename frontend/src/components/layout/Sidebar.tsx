@@ -36,14 +36,11 @@ import {
   X as XIcon,
   Wifi,
   WifiOff,
-  Sun,
-  Moon,
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import clsx from 'clsx';
 import { useAuthStore } from '@/stores/auth.store';
 import { useLayoutStore } from '@/stores/layout.store';
-import { useTheme } from '@/hooks/useTheme';
 
 interface NavItem {
   to: string;
@@ -162,7 +159,11 @@ export function Sidebar() {
   const unread = alertCounts?.unread ?? 0;
   const critical = alertCounts?.critical ?? 0;
 
-  const [theme, setTheme] = useTheme();
+  // Make sure no stale 'dark' class leftover from the removed toggle lingers on <html>.
+  useEffect(() => {
+    document.documentElement.classList.remove('dark');
+    try { localStorage.removeItem('theme'); } catch {}
+  }, []);
 
   return (
     <>
@@ -250,13 +251,6 @@ export function Sidebar() {
                   {unread > 99 ? '99+' : unread}
                 </span>
               )}
-            </button>
-            <button
-              onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
-              title={theme === 'light' ? 'الوضع الليلي' : 'الوضع النهاري'}
-              className="flex items-center justify-center rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 w-8 h-7"
-            >
-              {theme === 'light' ? <Moon size={14} /> : <Sun size={14} />}
             </button>
           </div>
         </div>
