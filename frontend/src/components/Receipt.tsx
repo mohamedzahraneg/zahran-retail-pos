@@ -548,13 +548,18 @@ export function Receipt({ data, autoPrint = false, onAfterPrint, template }: Pro
           box-sizing: border-box;
         }
         .receipt-header {
-          text-align: var(--rc-logo-align, center);
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          text-align: center;
           margin-bottom: 4px;
+          width: 100%;
         }
         .receipt-logo {
           max-width: calc(var(--rc-logo-size, 20mm) * 2);
           max-height: var(--rc-logo-size, 20mm);
-          margin: 0 auto 4px;
+          margin-left: auto !important;
+          margin-right: auto !important;
           display: block;
           object-fit: contain;
         }

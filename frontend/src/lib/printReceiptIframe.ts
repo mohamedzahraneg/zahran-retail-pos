@@ -69,6 +69,21 @@ export function printReceiptIframe(root: HTMLElement, widthMm: number) {
           ${styleCss}
           /* Neutralise ancestor-level rules that don't make sense here. */
           .receipt-80mm { margin: 0 auto; }
+          /* Belt-and-suspenders: force logo + header dead-centre on paper
+             regardless of the template's logo_align setting. The thermal
+             driver was printing the logo drifted to the edge before. */
+          .receipt-header {
+            display: flex !important;
+            flex-direction: column !important;
+            align-items: center !important;
+            text-align: center !important;
+            width: 100% !important;
+          }
+          .receipt-logo {
+            display: block !important;
+            margin-left: auto !important;
+            margin-right: auto !important;
+          }
         </style>
       </head>
       <body>
