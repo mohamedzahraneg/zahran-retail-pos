@@ -52,8 +52,9 @@ export default function POS() {
   const cart = useCartStore();
   const user = useAuthStore((s) => s.user);
   const [category, setCategory] = useState<'all' | 'shoe' | 'bag' | 'accessory'>('all');
-  const [stockFilter, setStockFilter] = useState<'all' | 'available' | 'out'>('all');
+  const [stockFilter, setStockFilter] = useState<'all' | 'available' | 'out'>('available');
   const [selectedCategoryId, setSelectedCategoryId] = useState<string>('');
+  const [moreFiltersOpen, setMoreFiltersOpen] = useState(false);
   const [search, setSearch] = useState('');
   const [payOpen, setPayOpen] = useState(false);
   const [receiptInvoiceId, setReceiptInvoiceId] = useState<string | null>(null);
@@ -759,38 +760,13 @@ export default function POS() {
             </button>
           </div>
 
-          {/* Category tabs — hidden when products panel is collapsed */}
+          {/* Filters — only stock availability is visible by default; the rest (type + category groups) are hidden behind a toggle */}
           {posProductsOpen && (
           <div className="space-y-2">
-            <div className="flex items-center justify-end gap-2 flex-wrap">
-              {(['all', 'shoe', 'bag', 'accessory'] as const).map((c) => {
-                const labels: Record<string, string> = {
-                  all: 'الكل',
-                  shoe: '👠 أحذية',
-                  bag: '👜 حقائب',
-                  accessory: '💍 إكسسوارات',
-                };
-                return (
-                  <button
-                    key={c}
-                    onClick={() => setCategory(c)}
-                    className={`px-4 py-1.5 rounded-full text-sm font-bold transition ${
-                      category === c
-                        ? 'bg-rose-500 text-white shadow-lg shadow-rose-500/30'
-                        : 'bg-white/5 text-slate-300 border border-white/10 hover:bg-white/10'
-                    }`}
-                  >
-                    {labels[c]}
-                  </button>
-                );
-              })}
-            </div>
-
-            {/* Stock availability filter */}
+            {/* Stock availability filter (always visible) + toggle */}
             <div className="flex items-center justify-end gap-2 flex-wrap">
               {(
                 [
-                  { k: 'all', label: 'كل الحالات' },
                   { k: 'available', label: '✔ المتاح' },
                   { k: 'out', label: '✖ النافذ' },
                 ] as const
@@ -807,44 +783,88 @@ export default function POS() {
                   {s.label}
                 </button>
               ))}
+              <button
+                onClick={() => setMoreFiltersOpen((v) => !v)}
+                className="px-3 py-1 rounded-full text-xs font-bold bg-white/5 text-slate-300 border border-white/10 hover:bg-white/10"
+              >
+                {moreFiltersOpen ? '▲ إخفاء الفلاتر' : '▼ فلاتر متقدمة'}
+              </button>
             </div>
 
-            {/* Category groups from Products page */}
-            {categoriesList.length > 0 && (
-              <div className="flex items-center justify-end gap-2 flex-wrap">
-                <button
-                  onClick={() => setSelectedCategoryId('')}
-                  className={`px-3 py-1 rounded-full text-xs font-bold transition ${
-                    selectedCategoryId === ''
-                      ? 'bg-indigo-500 text-white shadow shadow-indigo-500/30'
-                      : 'bg-white/5 text-slate-300 border border-white/10 hover:bg-white/10'
-                  }`}
-                >
-                  كل المجموعات
-                </button>
-                {categoriesList
-                  .filter((c) => c.is_active !== false)
-                  .map((c) => (
+            {/* Hidden filters: type tabs + category groups */}
+            {moreFiltersOpen && (
+              <>
+                <div className="flex items-center justify-end gap-2 flex-wrap">
+                  {(['all', 'shoe', 'bag', 'accessory'] as const).map((c) => {
+                    const labels: Record<string, string> = {
+                      all: 'الكل',
+                      shoe: '👠 أحذية',
+                      bag: '👜 حقائب',
+                      accessory: '💍 إكسسوارات',
+                    };
+                    return (
+                      <button
+                        key={c}
+                        onClick={() => setCategory(c)}
+                        className={`px-4 py-1.5 rounded-full text-sm font-bold transition ${
+                          category === c
+                            ? 'bg-rose-500 text-white shadow-lg shadow-rose-500/30'
+                            : 'bg-white/5 text-slate-300 border border-white/10 hover:bg-white/10'
+                        }`}
+                      >
+                        {labels[c]}
+                      </button>
+                    );
+                  })}
+                  <button
+                    onClick={() => setStockFilter('all')}
+                    className={`px-3 py-1 rounded-full text-xs font-bold transition ${
+                      stockFilter === 'all'
+                        ? 'bg-emerald-500/90 text-white'
+                        : 'bg-white/5 text-slate-300 border border-white/10 hover:bg-white/10'
+                    }`}
+                  >
+                    كل الحالات
+                  </button>
+                </div>
+
+                {categoriesList.length > 0 && (
+                  <div className="flex items-center justify-end gap-2 flex-wrap">
                     <button
-                      key={c.id}
-                      onClick={() => setSelectedCategoryId(c.id)}
+                      onClick={() => setSelectedCategoryId('')}
                       className={`px-3 py-1 rounded-full text-xs font-bold transition ${
-                        selectedCategoryId === c.id
+                        selectedCategoryId === ''
                           ? 'bg-indigo-500 text-white shadow shadow-indigo-500/30'
                           : 'bg-white/5 text-slate-300 border border-white/10 hover:bg-white/10'
                       }`}
-                      title={c.name_ar}
                     >
-                      {c.icon ? `${c.icon} ` : ''}
-                      {c.name_ar}
-                      {typeof c.products_count === 'number' ? (
-                        <span className="mr-1 text-[10px] opacity-70">
-                          ({c.products_count})
-                        </span>
-                      ) : null}
+                      كل المجموعات
                     </button>
-                  ))}
-              </div>
+                    {categoriesList
+                      .filter((c) => c.is_active !== false)
+                      .map((c) => (
+                        <button
+                          key={c.id}
+                          onClick={() => setSelectedCategoryId(c.id)}
+                          className={`px-3 py-1 rounded-full text-xs font-bold transition ${
+                            selectedCategoryId === c.id
+                              ? 'bg-indigo-500 text-white shadow shadow-indigo-500/30'
+                              : 'bg-white/5 text-slate-300 border border-white/10 hover:bg-white/10'
+                          }`}
+                          title={c.name_ar}
+                        >
+                          {c.icon ? `${c.icon} ` : ''}
+                          {c.name_ar}
+                          {typeof c.products_count === 'number' ? (
+                            <span className="mr-1 text-[10px] opacity-70">
+                              ({c.products_count})
+                            </span>
+                          ) : null}
+                        </button>
+                      ))}
+                  </div>
+                )}
+              </>
             )}
           </div>
           )}
