@@ -2307,7 +2307,7 @@ SELECT
   'مدير النظام',
   'admin',
   'admin@zahran.eg',
-  '$2a$10$zMnRhYvBg0lA/MeIE7H7buI9qLK0iF1/1KjG7tB9dPqmFdU9UzJW2',
+  '$2b$10$6wVSN0EH9s2ULd82SuW2e.Ed3wlz3z6H2BiOet4II.tMxcZ6SkY1y',
   r.id,
   TRUE,
   TRUE,
@@ -3141,7 +3141,12 @@ LEFT JOIN sales_30 sd ON sd.variant_id = v.id
 WHERE (s.quantity_on_hand - s.quantity_reserved) <= s.reorder_point
   AND p.is_active = TRUE
 ORDER BY
-    CASE priority WHEN 'urgent' THEN 1 WHEN 'soon' THEN 2 ELSE 3 END,
+    CASE
+        WHEN (s.quantity_on_hand - s.quantity_reserved) <= 0 THEN 1
+        WHEN (s.quantity_on_hand - s.quantity_reserved) <=
+             COALESCE(sd.avg_daily_sales,0) * 3 THEN 2
+        ELSE 3
+    END,
     days_of_stock_left ASC NULLS LAST;
 
 -- ---------------------------------------------------------------------------
@@ -3552,12 +3557,12 @@ BEGIN
     SELECT wh_id INTO v_wh_id FROM _ref;
     SELECT admin_id INTO v_admin_id FROM _ref;
 
-    SELECT array_agg(id) INTO v_cashier_ids
+    SELECT array_agg(u.id) INTO v_cashier_ids
     FROM users u JOIN roles r ON r.id = u.role_id
     WHERE r.code = 'cashier';
     IF v_cashier_ids IS NULL THEN v_cashier_ids := ARRAY[v_admin_id]; END IF;
 
-    SELECT array_agg(id) INTO v_sales_ids
+    SELECT array_agg(u.id) INTO v_sales_ids
     FROM users u JOIN roles r ON r.id = u.role_id
     WHERE r.code = 'salesperson';
 

@@ -2325,7 +2325,7 @@ SELECT
   'مدير النظام',
   'admin',
   'admin@zahran.eg',
-  '$2a$10$zMnRhYvBg0lA/MeIE7H7buI9qLK0iF1/1KjG7tB9dPqmFdU9UzJW2',
+  '$2b$10$6wVSN0EH9s2ULd82SuW2e.Ed3wlz3z6H2BiOet4II.tMxcZ6SkY1y',
   r.id,
   TRUE,
   TRUE,

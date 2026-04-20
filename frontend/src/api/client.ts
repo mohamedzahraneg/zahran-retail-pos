@@ -2,8 +2,8 @@ import axios, { AxiosError, AxiosInstance, AxiosResponse } from 'axios';
 import toast from 'react-hot-toast';
 import { useAuthStore } from '@/stores/auth.store';
 
-const baseURL =
-  (import.meta.env.VITE_API_URL as string) || 'http://localhost:3000';
+const envApiUrl = import.meta.env.VITE_API_URL as string | undefined;
+const baseURL = envApiUrl ?? 'http://localhost:3000';
 
 export const api: AxiosInstance = axios.create({
   baseURL: `${baseURL}/api/v1`,
