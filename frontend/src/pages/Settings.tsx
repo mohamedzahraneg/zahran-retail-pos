@@ -1007,18 +1007,69 @@ function ReceiptTab() {
   const set = <K extends keyof ReceiptSettings>(key: K, value: ReceiptSettings[K]) =>
     setForm((f) => ({ ...f, [key]: value }));
 
+  const pickLogo = (file: File) => {
+    if (file.size > 500 * 1024) {
+      toast.error('حجم الصورة أكبر من 500KB — اضغطها أو اختار أصغر');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => set('logoUrl', String(reader.result || ''));
+    reader.readAsDataURL(file);
+  };
+
   return (
     <div className="max-w-3xl space-y-4">
+      {/* Logo uploader — lives at the top of the receipt */}
+      <div className="rounded-xl border border-slate-200 p-4 flex items-center gap-4">
+        <div className="w-20 h-20 rounded-lg bg-slate-50 border border-dashed border-slate-300 flex items-center justify-center overflow-hidden shrink-0">
+          {form.logoUrl ? (
+            <img src={form.logoUrl} alt="logo" className="w-full h-full object-contain" />
+          ) : (
+            <span className="text-xs text-slate-400">بدون شعار</span>
+          )}
+        </div>
+        <div className="flex-1">
+          <div className="text-sm font-bold text-slate-700 mb-1">شعار المحل (يظهر أعلى الفاتورة)</div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <label className="inline-flex items-center gap-2 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 px-3 py-1.5 rounded-lg text-sm font-semibold cursor-pointer">
+              رفع صورة
+              <input
+                type="file"
+                accept="image/png,image/jpeg,image/svg+xml,image/webp"
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) pickLogo(f);
+                  e.currentTarget.value = '';
+                }}
+              />
+            </label>
+            {form.logoUrl && (
+              <button
+                onClick={() => set('logoUrl', '')}
+                className="text-xs text-rose-600 hover:text-rose-700 px-2 py-1"
+              >
+                حذف الشعار
+              </button>
+            )}
+          </div>
+          <div className="text-xs text-slate-500 mt-1">
+            PNG / JPG / SVG — أقصى 500KB — يُحفظ مع الفاتورة مباشرة (data URL)
+          </div>
+        </div>
+      </div>
+
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <Field label="اسم المحل" value={form.shopName} onChange={(v) => set('shopName', v)} />
         <Field label="الهاتف" value={form.phone} onChange={(v) => set('phone', v)} />
         <Field label="العنوان" value={form.address} onChange={(v) => set('address', v)} />
         <Field label="الرقم الضريبي" value={form.taxId} onChange={(v) => set('taxId', v)} />
-        <Field label="رابط الشعار (URL)" value={form.logoUrl} onChange={(v) => set('logoUrl', v)} />
         <Field label="الموقع الإلكتروني" value={form.website} onChange={(v) => set('website', v)} />
         <Field label="رابط الـ QR" value={form.qrUrl} onChange={(v) => set('qrUrl', v)}
           hint="الرابط اللي هيفتح لما الزبون يمسح الـ QR (موقعك، انستجرام، تقييم...)" />
         <Field label="تعليق تحت الـ QR" value={form.qrCaption} onChange={(v) => set('qrCaption', v)} />
+        <Field label="رابط الشعار (اختياري — لو مرفوع خارجياً)" value={form.logoUrl} onChange={(v) => set('logoUrl', v)}
+          hint="اتركه فاضي لو رافع الصورة أعلاه" />
       </div>
 
       <Textarea
