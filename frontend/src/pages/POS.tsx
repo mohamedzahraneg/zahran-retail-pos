@@ -97,12 +97,14 @@ export default function POS() {
   });
 
   const filteredProducts = useMemo(() => {
+    // When the user is actively searching, show all matches regardless of stock filter.
+    if (search.trim()) return products.data;
     if (stockFilter === 'all') return products.data;
     return products.data.filter((p) => {
       const s = p.total_stock ?? 0;
       return stockFilter === 'available' ? s > 0 : s === 0;
     });
-  }, [products.data, stockFilter]);
+  }, [products.data, stockFilter, search]);
 
   const [variantPickerProduct, setVariantPickerProduct] =
     useState<null | (typeof products.data)[number]>(null);
