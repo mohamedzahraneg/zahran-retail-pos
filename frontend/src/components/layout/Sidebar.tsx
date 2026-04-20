@@ -43,6 +43,7 @@ import { useEffect, useState } from 'react';
 import clsx from 'clsx';
 import { useAuthStore } from '@/stores/auth.store';
 import { useLayoutStore } from '@/stores/layout.store';
+import { useTheme } from '@/hooks/useTheme';
 
 interface NavItem {
   to: string;
@@ -161,14 +162,7 @@ export function Sidebar() {
   const unread = alertCounts?.unread ?? 0;
   const critical = alertCounts?.critical ?? 0;
 
-  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
-    if (typeof window === 'undefined') return 'light';
-    return (localStorage.getItem('theme') as 'light' | 'dark') || 'light';
-  });
-  useEffect(() => {
-    document.documentElement.classList.toggle('dark', theme === 'dark');
-    localStorage.setItem('theme', theme);
-  }, [theme]);
+  const [theme, setTheme] = useTheme();
 
   return (
     <>
@@ -185,13 +179,13 @@ export function Sidebar() {
 
       <aside
         className={clsx(
-          'bg-white border-l border-slate-200 h-screen flex flex-col transition-all duration-200 z-50',
-          // Desktop: sticky, width changes
-          'lg:sticky lg:top-0',
+          'bg-white border-l border-slate-200 h-screen flex flex-col transition-all duration-200',
+          // Mobile: fixed drawer that slides in/out
+          'fixed top-0 right-0 w-64 max-w-[80vw] z-50',
+          mobileOpen ? 'translate-x-0' : 'translate-x-full',
+          // Desktop: in-flow sticky column, no transform, always visible
+          'lg:sticky lg:top-0 lg:z-auto lg:translate-x-0',
           collapsed ? 'lg:w-16' : 'lg:w-64',
-          // Mobile: fixed drawer, hidden/shown
-          'fixed top-0 right-0 w-64 max-w-[80vw]',
-          mobileOpen ? 'translate-x-0' : 'translate-x-full lg:translate-x-0',
         )}
       >
         <div
@@ -258,7 +252,7 @@ export function Sidebar() {
               )}
             </button>
             <button
-              onClick={() => setTheme((t) => (t === 'light' ? 'dark' : 'light'))}
+              onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
               title={theme === 'light' ? 'الوضع الليلي' : 'الوضع النهاري'}
               className="flex items-center justify-center rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 w-8 h-7"
             >

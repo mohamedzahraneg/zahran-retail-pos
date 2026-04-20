@@ -26,6 +26,7 @@ import {
   Calendar,
   TrendingUp,
 } from 'lucide-react';
+import { useTheme } from '@/hooks/useTheme';
 import { productsApi, Product, Variant } from '@/api/products.api';
 import { categoriesApi } from '@/api/categories.api';
 import { stockApi, VariantStockRow } from '@/api/stock.api';
@@ -51,6 +52,7 @@ const WAREHOUSE_ID = import.meta.env.VITE_DEFAULT_WAREHOUSE_ID || '';
 export default function POS() {
   const cart = useCartStore();
   const user = useAuthStore((s) => s.user);
+  const [theme] = useTheme();
   const [category, setCategory] = useState<'all' | 'shoe' | 'bag' | 'accessory'>('all');
   const [stockFilter, setStockFilter] = useState<'all' | 'available' | 'out'>('available');
   const [selectedCategoryId, setSelectedCategoryId] = useState<string>('');
@@ -251,13 +253,16 @@ export default function POS() {
 
   return (
     <div
-      className="text-slate-100 flex flex-col overflow-hidden rounded-2xl border border-white/5 shadow-2xl -m-3 md:-m-6"
+      className="flex flex-col overflow-hidden text-slate-800 dark:text-slate-100 bg-slate-50 dark:bg-transparent"
       dir="rtl"
       style={{
-        // POS owns the full viewport; the AppLayout hides the top navbar on /pos.
+        // POS owns the full viewport; AppLayout hides the top navbar and
+        // inner padding on /pos, so this element can fill it exactly.
         height: '100vh',
-        background:
-          'radial-gradient(900px 500px at 90% -10%, rgba(236,72,153,.12), transparent 60%), radial-gradient(900px 500px at -10% 110%, rgba(99,102,241,.12), transparent 60%), linear-gradient(180deg, #0b1020 0%, #0a0f1e 100%)',
+        width: '100%',
+        backgroundImage: theme === 'dark'
+          ? 'radial-gradient(900px 500px at 90% -10%, rgba(236,72,153,.12), transparent 60%), radial-gradient(900px 500px at -10% 110%, rgba(99,102,241,.12), transparent 60%), linear-gradient(180deg, #0b1020 0%, #0a0f1e 100%)'
+          : 'radial-gradient(900px 500px at 90% -10%, rgba(236,72,153,.08), transparent 60%), radial-gradient(900px 500px at -10% 110%, rgba(99,102,241,.08), transparent 60%), linear-gradient(180deg, #f8fafc 0%, #eef2f7 100%)',
       }}
     >
       {/* Compact status strip — logo/title removed to maximise grid area */}
