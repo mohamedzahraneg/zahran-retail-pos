@@ -3,7 +3,7 @@
 # =============================================================================
 
 # ---- Stage 1: dependencies & build ----
-FROM node:20-alpine AS builder
+FROM node:25-alpine AS builder
 
 WORKDIR /app
 
@@ -21,7 +21,7 @@ RUN npm run build && npm prune --production
 
 
 # ---- Stage 2: runtime ----
-FROM node:20-alpine AS runtime
+FROM node:25-alpine AS runtime
 
 ENV NODE_ENV=production \
     TZ=Africa/Cairo \
