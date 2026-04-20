@@ -16,6 +16,9 @@ export interface CartItem {
   discount: number;
   notes: string;
   image?: string;
+  /** Cashier overrode the price manually — group-pricing resolver
+   *  must not reset it. */
+  priceLocked?: boolean;
 }
 
 export type ManualDiscountType = 'percent' | 'value';
@@ -151,7 +154,13 @@ export const useCartStore = create<CartState>((set, get) => ({
     set((state) => ({
       items: state.items.map((i) =>
         i.variantId === variantId
-          ? { ...i, unitPrice: Math.max(0, Number(unitPrice) || 0) }
+          ? {
+              ...i,
+              unitPrice: Math.max(0, Number(unitPrice) || 0),
+              // Lock this line from being overwritten by later group-price
+              // resolves or item re-adds — cashier set the price manually.
+              priceLocked: true,
+            }
           : i,
       ),
     })),
@@ -188,7 +197,9 @@ export const useCartStore = create<CartState>((set, get) => ({
   applyGroupPrices: (prices) =>
     set((state) => ({
       items: state.items.map((i) =>
-        prices[i.variantId] !== undefined && prices[i.variantId] !== null
+        prices[i.variantId] !== undefined &&
+        prices[i.variantId] !== null &&
+        !i.priceLocked
           ? { ...i, unitPrice: Number(prices[i.variantId]) }
           : i,
       ),
