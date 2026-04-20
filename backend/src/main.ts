@@ -19,7 +19,16 @@ async function bootstrap() {
   });
 
   // ── Security ──────────────────────────────────────────────────────────────
+  // Behind a reverse proxy (caddy/nginx) — trust X-Forwarded-For so req.ip
+  // reports the real client IP instead of the proxy IP.
+  const http = app.getHttpAdapter().getInstance();
+  if (http && typeof http.set === 'function') http.set('trust proxy', true);
   app.use(helmet({ contentSecurityPolicy: false }));
+  // Allow embedding logo/QR images as base64 in JSON settings payloads
+  // (a 1 MB image ≈ 1.4 MB base64, so we need clear headroom).
+  const { json, urlencoded } = await import('express');
+  app.use(json({ limit: '10mb' }));
+  app.use(urlencoded({ limit: '10mb', extended: true }));
   app.enableCors({
     origin: (process.env.CORS_ORIGIN || '*').split(','),
     credentials: true,
