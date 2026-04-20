@@ -36,6 +36,8 @@ import {
   X as XIcon,
   Wifi,
   WifiOff,
+  Sun,
+  Moon,
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import clsx from 'clsx';
@@ -159,6 +161,15 @@ export function Sidebar() {
   const unread = alertCounts?.unread ?? 0;
   const critical = alertCounts?.critical ?? 0;
 
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
+    if (typeof window === 'undefined') return 'light';
+    return (localStorage.getItem('theme') as 'light' | 'dark') || 'light';
+  });
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', theme === 'dark');
+    localStorage.setItem('theme', theme);
+  }, [theme]);
+
   return (
     <>
       {/* Backdrop (mobile only) */}
@@ -185,27 +196,75 @@ export function Sidebar() {
       >
         <div
           className={clsx(
-            'p-4 border-b border-slate-100 flex items-center gap-3',
-            collapsed && 'lg:justify-center lg:p-3',
+            'p-4 border-b border-slate-100 flex flex-col gap-2',
+            collapsed && 'lg:p-3',
           )}
         >
-          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-brand-500 to-purple-600 flex items-center justify-center text-white font-black text-xl shadow-glow shrink-0">
-            ز
-          </div>
-          {(!collapsed || mobileOpen) && (
-            <div className="lg:block">
-              <div className="font-black text-slate-800">زهران</div>
-              <div className="text-xs text-slate-500">v1.0 · POS</div>
+          <div className={clsx('flex items-center gap-3', collapsed && 'lg:justify-center')}>
+            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-brand-500 to-purple-600 flex items-center justify-center text-white font-black text-xl shadow-glow shrink-0">
+              ز
             </div>
-          )}
-          {/* Close button (mobile only) */}
-          <button
-            onClick={closeMobile}
-            className="mr-auto p-1 rounded hover:bg-slate-100 lg:hidden"
-            aria-label="إغلاق"
-          >
-            <XIcon size={18} />
-          </button>
+            {(!collapsed || mobileOpen) && (
+              <div className="lg:block">
+                <div className="font-black text-slate-800">زهران</div>
+                <div className="text-xs text-slate-500">v1.0 · POS</div>
+              </div>
+            )}
+            {/* Close button (mobile only) */}
+            <button
+              onClick={closeMobile}
+              className="mr-auto p-1 rounded hover:bg-slate-100 lg:hidden"
+              aria-label="إغلاق"
+            >
+              <XIcon size={18} />
+            </button>
+          </div>
+
+          {/* Connection · notifications · theme toggle — under the brand */}
+          <div className={clsx('flex items-center gap-1', collapsed && !mobileOpen && 'lg:flex-col')}>
+            <div
+              title={online ? 'متصل' : 'غير متصل'}
+              className={clsx(
+                'flex items-center gap-1.5 rounded-lg px-2 py-1 text-[11px] font-bold flex-1',
+                online
+                  ? 'bg-emerald-50 text-emerald-700'
+                  : 'bg-rose-50 text-rose-700',
+                collapsed && !mobileOpen && 'lg:justify-center lg:flex-none lg:w-full',
+              )}
+            >
+              {online ? <Wifi size={12} /> : <WifiOff size={12} />}
+              <span className={clsx(collapsed && !mobileOpen && 'lg:hidden')}>
+                {online ? 'متصل' : 'غير متصل'}
+              </span>
+            </div>
+            <button
+              onClick={() => {
+                navigate('/alerts');
+                closeMobile();
+              }}
+              title="التنبيهات"
+              className="relative flex items-center justify-center rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 w-8 h-7"
+            >
+              <Bell size={14} />
+              {unread > 0 && (
+                <span
+                  className={clsx(
+                    'absolute -top-1 -right-1 min-w-[15px] h-[15px] rounded-full text-[9px] font-bold text-white flex items-center justify-center px-1',
+                    critical > 0 ? 'bg-rose-500' : 'bg-amber-500',
+                  )}
+                >
+                  {unread > 99 ? '99+' : unread}
+                </span>
+              )}
+            </button>
+            <button
+              onClick={() => setTheme((t) => (t === 'light' ? 'dark' : 'light'))}
+              title={theme === 'light' ? 'الوضع الليلي' : 'الوضع النهاري'}
+              className="flex items-center justify-center rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 w-8 h-7"
+            >
+              {theme === 'light' ? <Moon size={14} /> : <Sun size={14} />}
+            </button>
+          </div>
         </div>
 
         <nav className="flex-1 p-2 space-y-3 overflow-y-auto">
@@ -257,52 +316,6 @@ export function Sidebar() {
 
         {/* User + logout + collapse toggle */}
         <div className="p-2 border-t border-slate-100 space-y-1">
-          {/* Connection + notifications row */}
-          <div
-            className={clsx(
-              'flex gap-1',
-              collapsed && !mobileOpen && 'lg:flex-col',
-            )}
-          >
-            <div
-              title={online ? 'متصل بالإنترنت' : 'غير متصل'}
-              className={clsx(
-                'flex items-center rounded-lg px-3 py-1.5 text-xs font-bold flex-1',
-                online
-                  ? 'bg-emerald-50 text-emerald-700'
-                  : 'bg-rose-50 text-rose-700',
-                collapsed && !mobileOpen && 'lg:justify-center lg:px-2',
-              )}
-            >
-              {online ? <Wifi size={14} /> : <WifiOff size={14} />}
-              <span className={clsx('mr-2', collapsed && !mobileOpen && 'lg:hidden')}>
-                {online ? 'متصل' : 'غير متصل'}
-              </span>
-            </div>
-            <button
-              onClick={() => {
-                navigate('/alerts');
-                closeMobile();
-              }}
-              title="التنبيهات"
-              className={clsx(
-                'relative flex items-center justify-center rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5',
-                collapsed && !mobileOpen && 'lg:px-2',
-              )}
-            >
-              <Bell size={14} />
-              {unread > 0 && (
-                <span
-                  className={clsx(
-                    'absolute -top-1 -right-1 min-w-[16px] h-[16px] rounded-full text-[9px] font-bold text-white flex items-center justify-center px-1',
-                    critical > 0 ? 'bg-rose-500' : 'bg-amber-500',
-                  )}
-                >
-                  {unread > 99 ? '99+' : unread}
-                </span>
-              )}
-            </button>
-          </div>
           {(!collapsed || mobileOpen) && (
             <div className="px-3 py-1 text-sm">
               <div className="font-semibold text-slate-800 truncate">

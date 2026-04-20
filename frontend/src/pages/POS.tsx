@@ -254,8 +254,8 @@ export default function POS() {
       className="text-slate-100 flex flex-col overflow-hidden rounded-2xl border border-white/5 shadow-2xl -m-3 md:-m-6"
       dir="rtl"
       style={{
-        // Mobile header is 56px, desktop 64px. Using the smaller value is safe.
-        height: 'calc(100vh - 56px)',
+        // POS owns the full viewport; the AppLayout hides the top navbar on /pos.
+        height: '100vh',
         background:
           'radial-gradient(900px 500px at 90% -10%, rgba(236,72,153,.12), transparent 60%), radial-gradient(900px 500px at -10% 110%, rgba(99,102,241,.12), transparent 60%), linear-gradient(180deg, #0b1020 0%, #0a0f1e 100%)',
       }}
