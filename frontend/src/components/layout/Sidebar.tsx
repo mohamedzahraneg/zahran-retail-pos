@@ -37,35 +37,86 @@ import clsx from 'clsx';
 import { useAuthStore } from '@/stores/auth.store';
 import { useLayoutStore } from '@/stores/layout.store';
 
-const items = [
-  { to: '/', label: 'لوحة التحكم', icon: LayoutDashboard, roles: ['admin', 'manager', 'accountant'] },
-  { to: '/pos', label: 'نقطة البيع', icon: ShoppingCart, roles: ['admin', 'manager', 'cashier'] },
-  { to: '/invoices', label: 'الفواتير', icon: ReceiptText, roles: ['admin', 'manager', 'accountant', 'cashier'] },
-  { to: '/products', label: 'المنتجات', icon: Package, roles: ['admin', 'manager', 'inventory'] },
-  { to: '/stock-adjustments', label: 'تعديلات المخزون', icon: PackagePlus, roles: ['admin', 'manager', 'inventory'] },
-  { to: '/barcode-labels', label: 'طباعة الباركود', icon: BarcodeIcon, roles: ['admin', 'manager', 'inventory'] },
-  { to: '/stock-transfers', label: 'تحويلات المخازن', icon: Shuffle, roles: ['admin', 'manager', 'inventory'] },
-  { to: '/stock-count', label: 'الجرد الفعلي', icon: ClipboardCheck, roles: ['admin', 'manager', 'inventory'] },
-  { to: '/purchases', label: 'فواتير المشتريات', icon: FileText, roles: ['admin', 'manager', 'accountant', 'stock_keeper'] },
-  { to: '/customers', label: 'العملاء', icon: Users, roles: ['admin', 'manager', 'cashier'] },
-  { to: '/customer-groups', label: 'مجموعات العملاء', icon: Users2, roles: ['admin', 'manager'] },
-  { to: '/suppliers', label: 'الموردون', icon: Truck, roles: ['admin', 'manager', 'accountant'] },
-  { to: '/cash-desk', label: 'الصندوق', icon: Wallet, roles: ['admin', 'manager', 'accountant'] },
-  { to: '/accounting', label: 'الحسابات', icon: Calculator, roles: ['admin', 'manager', 'accountant'] },
-  { to: '/recurring-expenses', label: 'المصاريف الدورية', icon: Repeat, roles: ['admin', 'manager', 'accountant'] },
-  { to: '/commissions', label: 'عمولات المبيعات', icon: Percent, roles: ['admin', 'manager', 'accountant'] },
-  { to: '/shifts', label: 'الورديات', icon: Clock, roles: ['admin', 'manager', 'cashier'] },
-  { to: '/reservations', label: 'الحجوزات', icon: CalendarClock, roles: ['admin', 'manager', 'cashier'] },
-  { to: '/returns', label: 'المرتجعات', icon: Undo2, roles: ['admin', 'manager', 'cashier'] },
-  { to: '/returns-analytics', label: 'تحليلات المرتجعات', icon: TrendingDown, roles: ['admin', 'manager', 'accountant'] },
-  { to: '/coupons', label: 'الكوبونات', icon: Ticket, roles: ['admin', 'manager'] },
-  { to: '/alerts', label: 'التنبيهات', icon: Bell, roles: ['admin', 'manager', 'accountant'] },
-  { to: '/reports', label: 'التقارير', icon: BarChart3, roles: ['admin', 'manager', 'accountant'] },
-  { to: '/import', label: 'استيراد Excel', icon: FileUp, roles: ['admin', 'manager'] },
-  { to: '/users', label: 'المستخدمون', icon: UserCog, roles: ['admin', 'manager'] },
-  { to: '/audit-log', label: 'سجل التدقيق', icon: History, roles: ['admin', 'manager'] },
-  { to: '/notifications', label: 'الإشعارات (واتساب)', icon: MessageCircle, roles: ['admin', 'manager'] },
-  { to: '/settings', label: 'الإعدادات', icon: Settings, roles: ['admin'] },
+interface NavItem {
+  to: string;
+  label: string;
+  icon: any;
+  roles: string[];
+}
+interface NavGroup {
+  title: string;
+  items: NavItem[];
+}
+
+const groups: NavGroup[] = [
+  {
+    title: 'الرئيسية',
+    items: [
+      { to: '/', label: 'لوحة التحكم', icon: LayoutDashboard, roles: ['admin', 'manager', 'accountant'] },
+    ],
+  },
+  {
+    title: 'المبيعات',
+    items: [
+      { to: '/pos', label: 'نقطة البيع', icon: ShoppingCart, roles: ['admin', 'manager', 'cashier'] },
+      { to: '/invoices', label: 'الفواتير', icon: ReceiptText, roles: ['admin', 'manager', 'accountant', 'cashier'] },
+      { to: '/reservations', label: 'الحجوزات', icon: CalendarClock, roles: ['admin', 'manager', 'cashier'] },
+      { to: '/returns', label: 'المرتجعات', icon: Undo2, roles: ['admin', 'manager', 'cashier'] },
+      { to: '/returns-analytics', label: 'تحليلات المرتجعات', icon: TrendingDown, roles: ['admin', 'manager', 'accountant'] },
+      { to: '/shifts', label: 'الورديات', icon: Clock, roles: ['admin', 'manager', 'cashier'] },
+      { to: '/coupons', label: 'الكوبونات', icon: Ticket, roles: ['admin', 'manager'] },
+      { to: '/commissions', label: 'عمولات المبيعات', icon: Percent, roles: ['admin', 'manager', 'accountant'] },
+    ],
+  },
+  {
+    title: 'الحسابات والمالية',
+    items: [
+      { to: '/accounting', label: 'الحسابات', icon: Calculator, roles: ['admin', 'manager', 'accountant'] },
+      { to: '/cash-desk', label: 'الصندوق', icon: Wallet, roles: ['admin', 'manager', 'accountant'] },
+      { to: '/recurring-expenses', label: 'المصاريف الدورية', icon: Repeat, roles: ['admin', 'manager', 'accountant'] },
+    ],
+  },
+  {
+    title: 'العملاء',
+    items: [
+      { to: '/customers', label: 'العملاء', icon: Users, roles: ['admin', 'manager', 'cashier'] },
+      { to: '/customer-groups', label: 'مجموعات العملاء', icon: Users2, roles: ['admin', 'manager'] },
+    ],
+  },
+  {
+    title: 'المخزون',
+    items: [
+      { to: '/products', label: 'المنتجات', icon: Package, roles: ['admin', 'manager', 'inventory'] },
+      { to: '/stock-adjustments', label: 'تعديلات المخزون', icon: PackagePlus, roles: ['admin', 'manager', 'inventory'] },
+      { to: '/stock-transfers', label: 'تحويلات المخازن', icon: Shuffle, roles: ['admin', 'manager', 'inventory'] },
+      { to: '/stock-count', label: 'الجرد الفعلي', icon: ClipboardCheck, roles: ['admin', 'manager', 'inventory'] },
+      { to: '/barcode-labels', label: 'طباعة الباركود', icon: BarcodeIcon, roles: ['admin', 'manager', 'inventory'] },
+    ],
+  },
+  {
+    title: 'المشتريات',
+    items: [
+      { to: '/purchases', label: 'فواتير المشتريات', icon: FileText, roles: ['admin', 'manager', 'accountant', 'stock_keeper'] },
+      { to: '/suppliers', label: 'الموردون', icon: Truck, roles: ['admin', 'manager', 'accountant'] },
+    ],
+  },
+  {
+    title: 'التقارير',
+    items: [
+      { to: '/reports', label: 'التقارير', icon: BarChart3, roles: ['admin', 'manager', 'accountant'] },
+      { to: '/alerts', label: 'التنبيهات', icon: Bell, roles: ['admin', 'manager', 'accountant'] },
+    ],
+  },
+  {
+    title: 'الإدارة',
+    items: [
+      { to: '/users', label: 'المستخدمون', icon: UserCog, roles: ['admin', 'manager'] },
+      { to: '/settings', label: 'الإعدادات', icon: Settings, roles: ['admin'] },
+      { to: '/import', label: 'استيراد Excel', icon: FileUp, roles: ['admin', 'manager'] },
+      { to: '/notifications', label: 'الإشعارات (واتساب)', icon: MessageCircle, roles: ['admin', 'manager'] },
+      { to: '/audit-log', label: 'سجل التدقيق', icon: History, roles: ['admin', 'manager'] },
+    ],
+  },
 ];
 
 export function Sidebar() {
@@ -77,7 +128,9 @@ export function Sidebar() {
   const closeMobile = useLayoutStore((s) => s.closeMobile);
   const toggleCollapsed = useLayoutStore((s) => s.toggleCollapsed);
 
-  const visibleItems = items.filter((it) => it.roles.includes(role));
+  const visibleGroups = groups
+    .map((g) => ({ ...g, items: g.items.filter((it) => it.roles.includes(role)) }))
+    .filter((g) => g.items.length > 0);
 
   return (
     <>
@@ -128,36 +181,50 @@ export function Sidebar() {
           </button>
         </div>
 
-        <nav className="flex-1 p-2 space-y-0.5 overflow-y-auto">
-          {visibleItems.map(({ to, label, icon: Icon }) => (
-            <NavLink
-              key={to}
-              to={to}
-              end={to === '/'}
-              onClick={closeMobile}
-              title={collapsed ? label : undefined}
-              className={({ isActive }) =>
-                clsx(
-                  'flex items-center gap-3 rounded-lg font-semibold transition',
-                  collapsed && !mobileOpen
-                    ? 'lg:justify-center lg:px-2 lg:py-2.5 px-3 py-2.5'
-                    : 'px-3 py-2.5',
-                  isActive
-                    ? 'bg-brand-50 text-brand-700'
-                    : 'text-slate-600 hover:bg-slate-50',
-                )
-              }
-            >
-              <Icon size={20} className="shrink-0" />
-              <span
-                className={clsx(
-                  'truncate',
-                  collapsed && !mobileOpen && 'lg:hidden',
-                )}
-              >
-                {label}
-              </span>
-            </NavLink>
+        <nav className="flex-1 p-2 space-y-3 overflow-y-auto">
+          {visibleGroups.map((group) => (
+            <div key={group.title}>
+              {(!collapsed || mobileOpen) && (
+                <div className="px-3 pt-2 pb-1 text-[11px] font-black tracking-wide text-slate-400 uppercase lg:text-[11px]">
+                  {group.title}
+                </div>
+              )}
+              {collapsed && !mobileOpen && (
+                <div className="mx-2 my-2 border-t border-slate-200 lg:block hidden" />
+              )}
+              <div className="space-y-0.5">
+                {group.items.map(({ to, label, icon: Icon }) => (
+                  <NavLink
+                    key={to}
+                    to={to}
+                    end={to === '/'}
+                    onClick={closeMobile}
+                    title={collapsed ? label : undefined}
+                    className={({ isActive }) =>
+                      clsx(
+                        'flex items-center gap-3 rounded-lg font-semibold transition',
+                        collapsed && !mobileOpen
+                          ? 'lg:justify-center lg:px-2 lg:py-2.5 px-3 py-2.5'
+                          : 'px-3 py-2.5',
+                        isActive
+                          ? 'bg-brand-50 text-brand-700'
+                          : 'text-slate-600 hover:bg-slate-50',
+                      )
+                    }
+                  >
+                    <Icon size={20} className="shrink-0" />
+                    <span
+                      className={clsx(
+                        'truncate',
+                        collapsed && !mobileOpen && 'lg:hidden',
+                      )}
+                    >
+                      {label}
+                    </span>
+                  </NavLink>
+                ))}
+              </div>
+            </div>
           ))}
         </nav>
 
