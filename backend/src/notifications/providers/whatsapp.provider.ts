@@ -13,7 +13,14 @@ export interface WhatsAppSendResult {
 }
 
 export interface WhatsAppConfig {
-  provider?: 'meta_cloud' | 'twilio' | 'generic_http';
+  /**
+   * meta_cloud / twilio / generic_http send via a real API.
+   * click_to_chat short-circuits: no API call — the provider returns a
+   * wa.me URL so the frontend opens WhatsApp with the body pre-filled
+   * and the agent presses Send manually. Useful when you don't have
+   * (or don't want) API credentials.
+   */
+  provider?: 'meta_cloud' | 'twilio' | 'generic_http' | 'click_to_chat';
   api_url?: string;
   token?: string;
   phone_id?: string;
@@ -33,14 +40,23 @@ export class WhatsAppProvider {
     params: WhatsAppSendParams,
     config: WhatsAppConfig,
   ): Promise<WhatsAppSendResult> {
-    if (!config?.enabled) {
-      this.logger.warn(
-        `WhatsApp disabled — simulating send to ${params.recipient}`,
-      );
-      return { provider: 'simulated', provider_msg_id: `sim-${Date.now()}` };
+    const provider = config?.provider || 'meta_cloud';
+
+    // click_to_chat doesn't care if enabled=false — just returns the URL.
+    if (provider === 'click_to_chat') {
+      const digits = params.recipient.replace(/[^\d]/g, '');
+      const url = `https://wa.me/${digits}?text=${encodeURIComponent(params.body)}`;
+      this.logger.log(`WhatsApp click-to-chat URL: ${url}`);
+      return { provider: 'click_to_chat', provider_msg_id: url, raw: { url } };
     }
 
-    const provider = config.provider || 'meta_cloud';
+    if (!config?.enabled) {
+      // Previously silently simulated — now fail loudly so the UI surfaces
+      // the fact that WhatsApp isn't configured.
+      throw new Error(
+        'WhatsApp غير مُفعّل — اذهب إلى الإشعارات → إعدادات واختر مزوّداً (click_to_chat للاستخدام بدون API)',
+      );
+    }
 
     if (provider === 'meta_cloud') {
       return this.sendMetaCloud(params, config);

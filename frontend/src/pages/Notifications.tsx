@@ -116,8 +116,16 @@ export default function Notifications() {
 
   const sendNowM = useMutation({
     mutationFn: notificationsApi.sendNow,
-    onSuccess: () => {
-      toast.success('تم الإرسال');
+    onSuccess: (res: any) => {
+      // click_to_chat mode: backend stores the wa.me URL as provider_msg_id
+      // so we open it here and the agent hits Send in WhatsApp.
+      const url = res?.provider_msg_id || res?.provider_msg_id;
+      if (res?.provider === 'click_to_chat' && typeof url === 'string' && url.startsWith('https://wa.me/')) {
+        window.open(url, '_blank', 'noopener,noreferrer');
+        toast.success('فُتح واتساب — اضغط إرسال لإكمال الرسالة');
+      } else {
+        toast.success('تم الإرسال');
+      }
       qc.invalidateQueries({ queryKey: ['notifications'] });
     },
     onError: (e: any) =>

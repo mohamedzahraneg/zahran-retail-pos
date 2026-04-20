@@ -253,7 +253,12 @@ export class NotificationsService {
         `,
         [n.id, result.provider, result.provider_msg_id ?? null],
       );
-      return { id: n.id, status: 'sent', provider: result.provider };
+      return {
+        id: n.id,
+        status: 'sent',
+        provider: result.provider,
+        provider_msg_id: result.provider_msg_id ?? null,
+      };
     } catch (err: any) {
       const msg = err?.message || String(err);
       this.logger.error(`Notification ${n.id} failed: ${msg}`);
