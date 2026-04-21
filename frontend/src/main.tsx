@@ -12,6 +12,19 @@ import { startAutoSync } from '@/lib/offline-queue';
 // Kick off background sync of pending offline invoices
 startAutoSync();
 
+// When a new service worker takes control of this page (autoUpdate +
+// skipWaiting + clientsClaim), reload once so the fresh index.html
+// boots the new JS bundle. Prevents the "white screen until I clear
+// cache" symptom that showed up after deploys.
+if ('serviceWorker' in navigator) {
+  let reloaded = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (reloaded) return;
+    reloaded = true;
+    window.location.reload();
+  });
+}
+
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {

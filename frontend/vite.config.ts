@@ -56,12 +56,27 @@ export default defineConfig(({ mode }) => {
           ],
         },
         workbox: {
-          globPatterns: ['**/*.{js,css,html,svg,png,ico,woff2}'],
+          globPatterns: ['**/*.{js,css,svg,png,ico,woff2}'],
+          // Precache everything EXCEPT index.html — the HTML file is
+          // fetched fresh (NetworkFirst) so new deploys never serve a
+          // stale reference to a deleted hashed bundle.
+          globIgnores: ['**/index.html'],
           navigateFallback: '/index.html',
+          navigateFallbackDenylist: [/^\/api\//, /^\/assets\//],
           skipWaiting: true,
           clientsClaim: true,
           cleanupOutdatedCaches: true,
           runtimeCaching: [
+            {
+              // Always try network for the index document first; fall
+              // back to cache if offline. Keeps new bundle hashes live.
+              urlPattern: ({ request }) => request.mode === 'navigate',
+              handler: 'NetworkFirst',
+              options: {
+                cacheName: 'html-shell',
+                networkTimeoutSeconds: 3,
+              },
+            },
             {
               urlPattern: /^https:\/\/fonts\.(googleapis|gstatic)\.com/,
               handler: 'CacheFirst',
