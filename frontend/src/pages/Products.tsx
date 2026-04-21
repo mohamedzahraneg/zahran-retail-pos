@@ -61,7 +61,10 @@ export default function Products() {
       productsApi.list({
         type: type === 'all' ? undefined : type,
         q: q || undefined,
-        limit: 200,
+        // Load all products (server limit is 200 by default). We set a
+        // generous cap so the full 1k+ catalog renders without a
+        // pagination UI — the list is virtualised / lightweight.
+        limit: 2000,
       }),
   });
 

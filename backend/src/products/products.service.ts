@@ -32,7 +32,9 @@ export class ProductsService {
 
   async findAll(filters: ProductFilters = {}) {
     const page = Math.max(1, filters.page || 1);
-    const limit = Math.min(200, filters.limit || 50);
+    // Catalog can easily exceed 200 rows; keep a generous ceiling
+    // so the admin Products page can render everything at once.
+    const limit = Math.min(5000, filters.limit || 200);
     const where: any = {};
     if (filters.type) where.type = filters.type;
     if (filters.active !== undefined) where.is_active = filters.active;
@@ -120,9 +122,41 @@ export class ProductsService {
     return { ...product, variants };
   }
 
-  async findByBarcode(barcode: string) {
-    const variant = await this.variants.findOne({ where: { barcode } });
-    if (!variant) throw new NotFoundException(`Barcode ${barcode} not found`);
+  /**
+   * Find a single product/variant by any of:
+   *   • an exact variant.barcode match
+   *   • an exact variant.sku match
+   *   • an exact product.sku_root match (pick any active variant)
+   * Used by the POS scan-and-enter flow so typing a product code and
+   * hitting Enter adds the product immediately without a search list.
+   */
+  async findByBarcode(code: string) {
+    // 1) Try variant barcode
+    let variant = await this.variants.findOne({ where: { barcode: code } });
+    // 2) Try variant SKU
+    if (!variant) {
+      variant = await this.variants.findOne({ where: { sku: code } });
+    }
+    // 3) Try product sku_root — pick the first active variant.
+    if (!variant) {
+      const product = await this.repo.findOne({
+        where: { sku_root: code },
+      });
+      if (product) {
+        variant = await this.variants.findOne({
+          where: { product_id: product.id, is_active: true },
+        });
+        if (!variant) {
+          throw new NotFoundException(
+            `لا يوجد متغير نشط للمنتج بالكود ${code}`,
+          );
+        }
+        return { product, variant };
+      }
+    }
+    if (!variant) {
+      throw new NotFoundException(`الكود ${code} غير موجود`);
+    }
     const product = await this.repo.findOne({
       where: { id: variant.product_id },
     });

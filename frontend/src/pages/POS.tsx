@@ -772,9 +772,19 @@ export default function POS() {
               <input
                 ref={searchRef}
                 className="w-full bg-white/5 border border-rose-500/30 rounded-xl px-10 py-3 text-white placeholder:text-slate-500 focus:border-rose-500/60 focus:outline-none"
-                placeholder="ابحث بالاسم أو امسح الباركود..."
+                placeholder="ابحث بالاسم أو امسح الباركود (اكتب الكود واضغط Enter)"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key !== 'Enter') return;
+                  const code = search.trim();
+                  if (!code) return;
+                  // Try exact barcode / SKU / sku_root first — adds the
+                  // product immediately when it matches.
+                  scanBarcode.mutate(code, {
+                    onSuccess: () => setSearch(''),
+                  });
+                }}
               />
               <kbd className="absolute left-3 top-1/2 -translate-y-1/2 text-xs bg-white/10 px-2 py-0.5 rounded font-mono text-slate-400 hidden md:block">
                 Ctrl+K
