@@ -320,6 +320,8 @@ export class SettingsService {
         { code: 'invoices.export',          label: 'تصدير الفواتير' },
         { code: 'invoices.history',         label: 'عرض سجل تعديلات الفاتورة' },
         { code: 'invoices.reprint',         label: 'إعادة طباعة الفاتورة' },
+        { code: 'invoices.edit_request',    label: 'تقديم طلب تعديل فاتورة (ينتظر الموافقة)' },
+        { code: 'invoices.edit_approve',    label: 'اعتماد/رفض طلبات تعديل الفواتير' },
       ],
       'الحجوزات': [
         { code: 'reservations.view',        label: 'عرض الحجوزات' },

@@ -92,4 +92,51 @@ export class PosController {
   editHistory(@Param('id', ParseUUIDPipe) id: string) {
     return this.pos.editHistory(id);
   }
+
+  // ── Edit-approval workflow ───────────────────────────────────────────
+  @Post('invoices/:id/edit-request')
+  @Permissions('invoices.edit_request')
+  submitEditRequest(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: EditInvoiceDto,
+    @CurrentUser() user: JwtUser,
+  ) {
+    return this.pos.submitEditRequest(
+      id,
+      dto,
+      user.userId,
+      dto.edit_reason || 'طلب تعديل فاتورة',
+    );
+  }
+
+  @Get('invoices/:id/edit-requests')
+  editRequests(@Param('id', ParseUUIDPipe) id: string) {
+    return this.pos.listEditRequests(id);
+  }
+
+  @Get('edit-requests/pending')
+  @Permissions('invoices.edit_approve')
+  pendingEditRequests() {
+    return this.pos.listPendingEditRequests();
+  }
+
+  @Post('edit-requests/:id/approve')
+  @Permissions('invoices.edit_approve')
+  approveEditRequest(
+    @Param('id') id: string,
+    @Body() dto: { note?: string },
+    @CurrentUser() user: JwtUser,
+  ) {
+    return this.pos.approveEditRequest(id, user.userId, dto?.note);
+  }
+
+  @Post('edit-requests/:id/reject')
+  @Permissions('invoices.edit_approve')
+  rejectEditRequest(
+    @Param('id') id: string,
+    @Body() dto: VoidInvoiceDto,
+    @CurrentUser() user: JwtUser,
+  ) {
+    return this.pos.rejectEditRequest(id, user.userId, dto.reason);
+  }
 }

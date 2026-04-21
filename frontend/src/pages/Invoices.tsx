@@ -80,7 +80,11 @@ export default function Invoices() {
   // void buttons to managers who hadn't been granted the permission;
   // hasPermission('*') handles system admins via the wildcard.
   const canVoid = hasPermission('invoices.void');
-  const canEdit = hasPermission('invoices.edit');
+  // Users with invoices.edit apply changes directly; users with
+  // invoices.edit_request submit a pending request for approval.
+  // Either permission reveals the edit button.
+  const canEdit =
+    hasPermission('invoices.edit') || hasPermission('invoices.edit_request');
 
   const [period, setPeriod] = useState<PeriodRange>(() =>
     resolvePeriod('day'),
@@ -355,11 +359,24 @@ export default function Invoices() {
                   }`}
                 >
                   <td className="p-3 font-mono text-sm font-bold text-brand-700">
-                    <InvoiceHoverCard
-                      invoiceId={i.id}
-                      label={i.invoice_no || i.doc_no}
-                      className="font-mono font-bold text-brand-700 hover:text-brand-900 hover:underline cursor-pointer"
-                    />
+                    <div className="flex items-center gap-1.5">
+                      <InvoiceHoverCard
+                        invoiceId={i.id}
+                        label={i.invoice_no || i.doc_no}
+                        className="font-mono font-bold text-brand-700 hover:text-brand-900 hover:underline cursor-pointer"
+                      />
+                      {Number(i.edit_count || 0) > 0 && (
+                        <span
+                          className="chip bg-amber-100 text-amber-700 border-amber-200 text-[10px] font-bold"
+                          title={`تم تعديلها ${i.edit_count} مرة — آخر تعديل ${fmtDateTime(
+                            i.last_edited_at || i.updated_at,
+                          )}`}
+                        >
+                          <Pencil size={10} />
+                          {Number(i.edit_count)}
+                        </span>
+                      )}
+                    </div>
                   </td>
                   <td className="p-3 text-xs text-slate-600">
                     {fmtDateTime(i.completed_at || i.created_at)}
@@ -519,56 +536,276 @@ function ReceiptPreviewModal({
   invoiceId: string;
   onClose: () => void;
 }) {
+  const [tab, setTab] = useState<'receipt' | 'history'>('receipt');
   const { data, isLoading } = useQuery({
     queryKey: ['receipt', invoiceId],
     queryFn: () => posApi.receipt(invoiceId),
   });
+  const { data: history = [] } = useQuery({
+    queryKey: ['invoice-edit-history', invoiceId],
+    queryFn: () => posApi.editHistory(invoiceId),
+    enabled: tab === 'history',
+  });
+  const { data: requests = [] } = useQuery({
+    queryKey: ['invoice-edit-requests', invoiceId],
+    queryFn: () => posApi.editRequests(invoiceId),
+    enabled: tab === 'history',
+  });
 
   return (
     <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 print:bg-transparent print:p-0">
-      <div className="bg-white rounded-2xl max-w-md w-full max-h-[90vh] overflow-hidden flex flex-col print:rounded-none print:max-w-none print:w-auto print:max-h-none">
+      <div
+        className={`bg-white rounded-2xl w-full max-h-[90vh] overflow-hidden flex flex-col print:rounded-none print:max-w-none print:w-auto print:max-h-none ${
+          tab === 'history' ? 'max-w-3xl' : 'max-w-md'
+        }`}
+      >
         <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between print:hidden">
-          <h3 className="font-black text-slate-800">معاينة الإيصال</h3>
+          <div className="inline-flex rounded-lg bg-slate-100 p-1 text-xs">
+            <button
+              className={`px-3 py-1.5 rounded-md font-bold transition ${
+                tab === 'receipt'
+                  ? 'bg-white text-indigo-700 shadow-sm'
+                  : 'text-slate-600'
+              }`}
+              onClick={() => setTab('receipt')}
+            >
+              معاينة الإيصال
+            </button>
+            <button
+              className={`px-3 py-1.5 rounded-md font-bold transition ${
+                tab === 'history'
+                  ? 'bg-white text-indigo-700 shadow-sm'
+                  : 'text-slate-600'
+              }`}
+              onClick={() => setTab('history')}
+            >
+              سجل التعديلات
+            </button>
+          </div>
           <div className="flex gap-2">
-            <button
-              className="btn-primary text-xs bg-emerald-600 hover:bg-emerald-700"
-              onClick={() => {
-                printInvoiceThermal(invoiceId).catch((err) =>
-                  toast.error(
-                    err?.response?.data?.message || 'فشل الطباعة الحرارية',
-                  ),
-                );
-              }}
-              disabled={isLoading}
-              title="طباعة حرارية 80mm"
-            >
-              🧾 طباعة حرارية
-            </button>
-            <button
-              className="btn-ghost text-xs border border-slate-300"
-              onClick={() => window.print()}
-              disabled={isLoading}
-              title="طباعة بحجم A4"
-            >
-              <Printer size={14} /> طباعة A4
-            </button>
-            <button
-              className="btn-ghost text-xs"
-              onClick={onClose}
-            >
+            {tab === 'receipt' && (
+              <>
+                <button
+                  className="btn-primary text-xs bg-emerald-600 hover:bg-emerald-700"
+                  onClick={() => {
+                    printInvoiceThermal(invoiceId).catch((err) =>
+                      toast.error(
+                        err?.response?.data?.message || 'فشل الطباعة الحرارية',
+                      ),
+                    );
+                  }}
+                  disabled={isLoading}
+                  title="طباعة حرارية 80mm"
+                >
+                  🧾 طباعة حرارية
+                </button>
+                <button
+                  className="btn-ghost text-xs border border-slate-300"
+                  onClick={() => window.print()}
+                  disabled={isLoading}
+                  title="طباعة بحجم A4"
+                >
+                  <Printer size={14} /> طباعة A4
+                </button>
+              </>
+            )}
+            <button className="btn-ghost text-xs" onClick={onClose}>
               <X size={14} />
             </button>
           </div>
         </div>
-        <div className="overflow-y-auto print:overflow-visible">
-          {isLoading && (
-            <div className="p-12 text-center text-slate-400 print:hidden">
-              جارٍ التحميل...
-            </div>
-          )}
-          {data && <Receipt data={data as ReceiptData} />}
-        </div>
+        {tab === 'receipt' ? (
+          <div className="overflow-y-auto print:overflow-visible">
+            {isLoading && (
+              <div className="p-12 text-center text-slate-400 print:hidden">
+                جارٍ التحميل...
+              </div>
+            )}
+            {data && <Receipt data={data as ReceiptData} />}
+          </div>
+        ) : (
+          <EditHistoryTab history={history} requests={requests} />
+        )}
       </div>
+    </div>
+  );
+}
+
+/* ───────── Edit history tab ───────── */
+
+function fmtWhen(s: string) {
+  if (!s) return '';
+  const d = new Date(s);
+  return d.toLocaleString('ar-EG', {
+    timeZone: 'Africa/Cairo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true,
+  });
+}
+
+function lineSummary(items: any[] | undefined | null): string {
+  if (!items || !items.length) return 'لا بنود';
+  return items
+    .map((it) => {
+      const name = it.product_name_snapshot || it.product_name || '—';
+      return `${name} × ${it.quantity || 0}`;
+    })
+    .join(' · ');
+}
+
+function EditHistoryTab({
+  history,
+  requests,
+}: {
+  history: any[];
+  requests: any[];
+}) {
+  const approved = history || [];
+  const pending = (requests || []).filter((r) => r.status === 'pending');
+  const rejected = (requests || []).filter((r) => r.status === 'rejected');
+
+  if (approved.length === 0 && pending.length === 0 && rejected.length === 0) {
+    return (
+      <div className="p-10 text-center text-slate-400 text-sm">
+        لا توجد تعديلات على هذه الفاتورة.
+      </div>
+    );
+  }
+
+  return (
+    <div className="overflow-y-auto p-4 space-y-4">
+      {pending.length > 0 && (
+        <div className="space-y-2">
+          <div className="text-xs font-black text-amber-700">
+            طلبات تنتظر الموافقة ({pending.length})
+          </div>
+          {pending.map((r) => (
+            <div
+              key={`pend-${r.id}`}
+              className="border border-amber-300 bg-amber-50 rounded-lg p-3 text-xs"
+            >
+              <div className="flex items-center justify-between mb-1">
+                <div className="font-bold text-amber-800">
+                  {r.requested_by_name || r.requested_by_username || '—'}
+                </div>
+                <div className="text-slate-500 tabular-nums">
+                  {fmtWhen(r.requested_at)}
+                </div>
+              </div>
+              {r.reason && (
+                <div className="text-slate-700 mb-1">السبب: {r.reason}</div>
+              )}
+              <div className="text-slate-600">
+                التغيير المقترح:{' '}
+                {lineSummary(r.proposed_changes?.lines)}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {approved.length > 0 && (
+        <div className="space-y-2">
+          <div className="text-xs font-black text-emerald-700">
+            تعديلات مُطبَّقة ({approved.length})
+          </div>
+          {approved.map((h) => {
+            const before = h.before_snapshot || {};
+            const after = h.after_summary || {};
+            const beforeTotal = Number(before?.invoice?.grand_total || 0);
+            const afterTotal = Number(after?.grand_total || 0);
+            const delta = afterTotal - beforeTotal;
+            return (
+              <div
+                key={`hist-${h.id}`}
+                className="border border-emerald-200 bg-emerald-50/60 rounded-lg p-3 text-xs"
+              >
+                <div className="flex items-center justify-between mb-1">
+                  <div className="font-bold text-emerald-800">
+                    {h.edited_by_name || h.edited_by_username || '—'}
+                  </div>
+                  <div className="text-slate-500 tabular-nums">
+                    {fmtWhen(h.edited_at)}
+                  </div>
+                </div>
+                {h.reason && (
+                  <div className="text-slate-700 mb-2">السبب: {h.reason}</div>
+                )}
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="bg-white rounded border border-slate-200 p-2">
+                    <div className="text-[10px] font-bold text-slate-500 mb-1">
+                      قبل التعديل
+                    </div>
+                    <div className="text-slate-700">
+                      {lineSummary(before.items)}
+                    </div>
+                    <div className="text-slate-500 mt-1 tabular-nums">
+                      الإجمالي: {beforeTotal.toLocaleString('en-US')} ج.م
+                    </div>
+                  </div>
+                  <div className="bg-white rounded border border-slate-200 p-2">
+                    <div className="text-[10px] font-bold text-slate-500 mb-1">
+                      بعد التعديل
+                    </div>
+                    <div className="text-slate-700">
+                      {Number(after.items_count || 0)} بند
+                    </div>
+                    <div className="text-slate-500 mt-1 tabular-nums">
+                      الإجمالي: {afterTotal.toLocaleString('en-US')} ج.م
+                      {delta !== 0 && (
+                        <span
+                          className={`mr-2 ${
+                            delta > 0 ? 'text-emerald-700' : 'text-rose-700'
+                          }`}
+                        >
+                          ({delta > 0 ? '+' : ''}
+                          {delta.toLocaleString('en-US')})
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {rejected.length > 0 && (
+        <div className="space-y-2">
+          <div className="text-xs font-black text-rose-700">
+            طلبات مرفوضة ({rejected.length})
+          </div>
+          {rejected.map((r) => (
+            <div
+              key={`rej-${r.id}`}
+              className="border border-rose-200 bg-rose-50/60 rounded-lg p-3 text-xs"
+            >
+              <div className="flex items-center justify-between mb-1">
+                <div className="font-bold text-rose-800">
+                  {r.requested_by_name || r.requested_by_username || '—'}
+                </div>
+                <div className="text-slate-500 tabular-nums">
+                  {fmtWhen(r.requested_at)}
+                </div>
+              </div>
+              {r.reason && (
+                <div className="text-slate-700 mb-1">السبب: {r.reason}</div>
+              )}
+              {r.decision_reason && (
+                <div className="text-rose-700">
+                  سبب الرفض: {r.decision_reason}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -727,13 +964,18 @@ function InvoiceEditModal({
   const removeLine = (idx: number) =>
     setLines((prev) => prev.filter((_, i) => i !== idx));
 
-  const save = useMutation({
+  const hasPermission = useAuthStore((s) => s.hasPermission);
+  const canApplyDirect = hasPermission('invoices.edit');
+  const canSubmitRequest =
+    !canApplyDirect && hasPermission('invoices.edit_request');
+
+  const save = useMutation<unknown>({
     mutationFn: () => {
       if (lines.length === 0)
         return Promise.reject(new Error('يجب وجود صنف واحد على الأقل'));
       if (!reason.trim())
         return Promise.reject(new Error('يجب كتابة سبب التعديل'));
-      return posApi.edit(invoiceId, {
+      const payload = {
         warehouse_id: data.warehouse_id,
         customer_id: data.customer_id || undefined,
         salesperson_id: data.salesperson_id || undefined,
@@ -752,13 +994,24 @@ function InvoiceEditModal({
             amount: grand,
           },
         ],
-      });
+      };
+      if (canApplyDirect) return posApi.edit(invoiceId, payload);
+      if (canSubmitRequest) return posApi.submitEditRequest(invoiceId, payload);
+      return Promise.reject(new Error('لا تملك صلاحية طلب تعديل الفاتورة'));
     },
     onSuccess: () => {
-      toast.success('تم حفظ التعديل على نفس الفاتورة');
+      if (canApplyDirect) {
+        toast.success('تم حفظ التعديل على نفس الفاتورة');
+      } else {
+        toast.success(
+          'أُرسل طلب التعديل لمدير النظام — سيُنفّذ بعد الموافقة',
+        );
+      }
       qc.invalidateQueries({ queryKey: ['invoices'] });
       qc.invalidateQueries({ queryKey: ['dashboard-overview'] });
       qc.invalidateQueries({ queryKey: ['invoice-edit-history', invoiceId] });
+      qc.invalidateQueries({ queryKey: ['invoice-edit-requests', invoiceId] });
+      qc.invalidateQueries({ queryKey: ['pending-edit-requests'] });
       onClose();
     },
     onError: (e: any) =>
@@ -778,8 +1031,9 @@ function InvoiceEditModal({
               تعديل فاتورة {data?.invoice_no || ''}
             </h3>
             <p className="text-xs text-slate-500 mt-1">
-              التعديل يتم على نفس الفاتورة. البنود والدفعات السابقة تُحفظ
-              في سجل التعديلات مع اسم المعدِّل والتاريخ والوقت.
+              {canApplyDirect
+                ? 'التعديل يتم على نفس الفاتورة. البنود والدفعات السابقة تُحفظ في سجل التعديلات مع اسم المعدِّل والتاريخ والوقت.'
+                : 'ليس لديك صلاحية تنفيذ التعديل مباشرة — طلبك سيُرسل لمدير النظام لاعتماده. بعد الموافقة تُطبَّق التعديلات على نفس الفاتورة.'}
             </p>
           </div>
           <button
@@ -991,7 +1245,11 @@ function InvoiceEditModal({
             }
             className="btn-primary"
           >
-            {save.isPending ? 'جاري الحفظ...' : 'حفظ التعديل على نفس الفاتورة'}
+            {save.isPending
+              ? 'جاري الحفظ...'
+              : canApplyDirect
+                ? 'حفظ التعديل على نفس الفاتورة'
+                : 'إرسال طلب تعديل للموافقة'}
           </button>
         </div>
       </div>

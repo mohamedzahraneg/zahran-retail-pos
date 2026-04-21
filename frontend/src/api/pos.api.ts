@@ -73,7 +73,31 @@ export const posApi = {
     unwrap<{ voided: boolean }>(api.post(`/pos/invoices/${id}/void`, { reason })),
 
   edit: (id: string, body: CreateInvoicePayload & { edit_reason?: string }) =>
-    unwrap<{ replaced: string; invoice: any }>(
+    unwrap<{ invoice: any; edited: boolean }>(
       api.post(`/pos/invoices/${id}/edit`, body),
     ),
+
+  // ── Approval workflow ──────────────────────────────────────────────
+  /** Submit a pending edit; decides nothing until an approver acts. */
+  submitEditRequest: (
+    id: string,
+    body: CreateInvoicePayload & { edit_reason?: string },
+  ) =>
+    unwrap<{ id: number; invoice_id: string; status: string }>(
+      api.post(`/pos/invoices/${id}/edit-request`, body),
+    ),
+
+  /** Applied + pending + rejected edit history + requests for an invoice. */
+  editHistory: (id: string) =>
+    unwrap<any[]>(api.get(`/pos/invoices/${id}/edit-history`)),
+  editRequests: (id: string) =>
+    unwrap<any[]>(api.get(`/pos/invoices/${id}/edit-requests`)),
+
+  /** Admin approval inbox. */
+  pendingEditRequests: () =>
+    unwrap<any[]>(api.get('/pos/edit-requests/pending')),
+  approveEditRequest: (id: string | number, note?: string) =>
+    unwrap<any>(api.post(`/pos/edit-requests/${id}/approve`, { note })),
+  rejectEditRequest: (id: string | number, reason: string) =>
+    unwrap<any>(api.post(`/pos/edit-requests/${id}/reject`, { reason })),
 };

@@ -848,4 +848,124 @@ export class PosService {
       [invoiceId],
     );
   }
+
+  // ─── Approval workflow ──────────────────────────────────────────────
+  /**
+   * Store an edit payload for later approval. Used by staff who don't
+   * hold invoices.edit but do hold invoices.edit_request.
+   */
+  async submitEditRequest(
+    invoiceId: string,
+    dto: any,
+    userId: string,
+    reason: string,
+  ) {
+    if (!dto?.lines?.length) {
+      throw new BadRequestException('Invoice must have at least one line');
+    }
+    const [inv] = await this.ds.query(
+      `SELECT id, status FROM invoices WHERE id = $1`,
+      [invoiceId],
+    );
+    if (!inv) throw new BadRequestException('الفاتورة غير موجودة');
+    if (inv.status === 'cancelled') {
+      throw new BadRequestException('لا يمكن طلب تعديل على فاتورة ملغاة');
+    }
+    const [row] = await this.ds.query(
+      `INSERT INTO invoice_edit_requests
+         (invoice_id, requested_by, reason, proposed_changes, status)
+       VALUES ($1, $2, $3, $4::jsonb, 'pending')
+       RETURNING *`,
+      [invoiceId, userId, reason, JSON.stringify(dto)],
+    );
+    this.realtime?.emitAlert({
+      title: 'طلب تعديل فاتورة جديد',
+      body: `فاتورة ${invoiceId} — في انتظار موافقة مدير النظام`,
+      severity: 'info',
+      kind: 'invoice_edit_request',
+    });
+    return row;
+  }
+
+  listEditRequests(invoiceId: string) {
+    return this.ds.query(
+      `SELECT r.*,
+              ru.full_name  AS requested_by_name,
+              ru.username   AS requested_by_username,
+              du.full_name  AS decided_by_name,
+              du.username   AS decided_by_username
+         FROM invoice_edit_requests r
+         LEFT JOIN users ru ON ru.id = r.requested_by
+         LEFT JOIN users du ON du.id = r.decided_by
+        WHERE r.invoice_id = $1
+        ORDER BY r.requested_at DESC`,
+      [invoiceId],
+    );
+  }
+
+  listPendingEditRequests() {
+    return this.ds.query(
+      `SELECT r.id, r.invoice_id, r.requested_at, r.reason, r.proposed_changes,
+              i.invoice_no, i.grand_total, i.status AS invoice_status,
+              ru.full_name AS requested_by_name, ru.username AS requested_by_username
+         FROM invoice_edit_requests r
+         JOIN invoices i  ON i.id = r.invoice_id
+         LEFT JOIN users ru ON ru.id = r.requested_by
+        WHERE r.status = 'pending'
+        ORDER BY r.requested_at DESC`,
+    );
+  }
+
+  async approveEditRequest(requestId: string, userId: string, note?: string) {
+    const [req] = await this.ds.query(
+      `SELECT * FROM invoice_edit_requests WHERE id = $1 FOR UPDATE`,
+      [requestId],
+    );
+    if (!req) throw new BadRequestException('الطلب غير موجود');
+    if (req.status !== 'pending') {
+      throw new BadRequestException('الطلب تم البت فيه مسبقًا');
+    }
+    // Apply the edit using the existing in-place flow. Requester's reason
+    // propagates into invoice_edit_history.
+    const result = await this.editInvoice(
+      req.invoice_id,
+      req.proposed_changes,
+      userId,
+      `موافقة على طلب تعديل: ${req.reason || ''}`.trim(),
+    );
+    await this.ds.query(
+      `UPDATE invoice_edit_requests
+          SET status          = 'approved',
+              decided_by      = $2,
+              decided_at      = NOW(),
+              decision_reason = $3
+        WHERE id = $1`,
+      [requestId, userId, note || null],
+    );
+    return { approved: true, ...result };
+  }
+
+  async rejectEditRequest(requestId: string, userId: string, reason: string) {
+    if (!reason?.trim()) {
+      throw new BadRequestException('يجب كتابة سبب الرفض');
+    }
+    const [req] = await this.ds.query(
+      `SELECT status FROM invoice_edit_requests WHERE id = $1 FOR UPDATE`,
+      [requestId],
+    );
+    if (!req) throw new BadRequestException('الطلب غير موجود');
+    if (req.status !== 'pending') {
+      throw new BadRequestException('الطلب تم البت فيه مسبقًا');
+    }
+    await this.ds.query(
+      `UPDATE invoice_edit_requests
+          SET status          = 'rejected',
+              decided_by      = $2,
+              decided_at      = NOW(),
+              decision_reason = $3
+        WHERE id = $1`,
+      [requestId, userId, reason],
+    );
+    return { rejected: true };
+  }
 }
