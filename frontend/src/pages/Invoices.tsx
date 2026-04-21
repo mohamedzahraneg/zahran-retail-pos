@@ -625,7 +625,11 @@ function ReceiptPreviewModal({
             {data && <Receipt data={data as ReceiptData} />}
           </div>
         ) : (
-          <EditHistoryTab history={history} requests={requests} />
+          <EditHistoryTab
+            invoiceId={invoiceId}
+            history={history}
+            requests={requests}
+          />
         )}
       </div>
     </div>
@@ -660,12 +664,48 @@ function lineSummary(items: any[] | undefined | null): string {
 }
 
 function EditHistoryTab({
+  invoiceId,
   history,
   requests,
 }: {
+  invoiceId: string;
   history: any[];
   requests: any[];
 }) {
+  const qc = useQueryClient();
+  const hasPermission = useAuthStore((s) => s.hasPermission);
+  const canDecide = hasPermission('invoices.edit_approve');
+  const [rejectTarget, setRejectTarget] = useState<any | null>(null);
+  const [rejectReason, setRejectReason] = useState('');
+
+  const approve = useMutation({
+    mutationFn: (id: number | string) => posApi.approveEditRequest(id),
+    onSuccess: () => {
+      toast.success('تم اعتماد التعديل وتطبيقه على الفاتورة');
+      qc.invalidateQueries({ queryKey: ['invoice-edit-history', invoiceId] });
+      qc.invalidateQueries({ queryKey: ['invoice-edit-requests', invoiceId] });
+      qc.invalidateQueries({ queryKey: ['invoices'] });
+      qc.invalidateQueries({ queryKey: ['pending-edit-requests'] });
+      qc.invalidateQueries({ queryKey: ['receipt', invoiceId] });
+    },
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.message || 'فشل اعتماد التعديل'),
+  });
+
+  const reject = useMutation({
+    mutationFn: ({ id, reason }: { id: number | string; reason: string }) =>
+      posApi.rejectEditRequest(id, reason),
+    onSuccess: () => {
+      toast.success('تم رفض طلب التعديل');
+      setRejectTarget(null);
+      setRejectReason('');
+      qc.invalidateQueries({ queryKey: ['invoice-edit-requests', invoiceId] });
+      qc.invalidateQueries({ queryKey: ['pending-edit-requests'] });
+    },
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.message || 'فشل رفض الطلب'),
+  });
+
   const approved = history || [];
   const pending = (requests || []).filter((r) => r.status === 'pending');
   const rejected = (requests || []).filter((r) => r.status === 'rejected');
@@ -688,9 +728,9 @@ function EditHistoryTab({
           {pending.map((r) => (
             <div
               key={`pend-${r.id}`}
-              className="border border-amber-300 bg-amber-50 rounded-lg p-3 text-xs"
+              className="border border-amber-300 bg-amber-50 rounded-lg p-3 text-xs space-y-2"
             >
-              <div className="flex items-center justify-between mb-1">
+              <div className="flex items-center justify-between">
                 <div className="font-bold text-amber-800">
                   {r.requested_by_name || r.requested_by_username || '—'}
                 </div>
@@ -699,14 +739,97 @@ function EditHistoryTab({
                 </div>
               </div>
               {r.reason && (
-                <div className="text-slate-700 mb-1">السبب: {r.reason}</div>
+                <div className="text-slate-700">السبب: {r.reason}</div>
               )}
               <div className="text-slate-600">
-                التغيير المقترح:{' '}
-                {lineSummary(r.proposed_changes?.lines)}
+                التغيير المقترح: {lineSummary(r.proposed_changes?.lines)}
               </div>
+              {canDecide && (
+                <div className="flex items-center gap-2 pt-1">
+                  <button
+                    type="button"
+                    className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[11px]"
+                    onClick={() => approve.mutate(r.id)}
+                    disabled={approve.isPending || reject.isPending}
+                  >
+                    {approve.isPending && approve.variables === r.id
+                      ? 'جاري الاعتماد…'
+                      : 'اعتماد التعديل'}
+                  </button>
+                  <button
+                    type="button"
+                    className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold text-[11px]"
+                    onClick={() => {
+                      setRejectTarget(r);
+                      setRejectReason('');
+                    }}
+                    disabled={approve.isPending || reject.isPending}
+                  >
+                    رفض
+                  </button>
+                </div>
+              )}
             </div>
           ))}
+        </div>
+      )}
+
+      {canDecide && rejectTarget && (
+        <div
+          className="fixed inset-0 bg-black/40 z-[60] flex items-center justify-center p-4"
+          onClick={() => {
+            if (!reject.isPending) {
+              setRejectTarget(null);
+              setRejectReason('');
+            }
+          }}
+        >
+          <div
+            className="bg-white rounded-2xl max-w-md w-full p-5"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h4 className="font-black text-slate-800 mb-2">رفض طلب التعديل</h4>
+            <p className="text-xs text-slate-500 mb-3">
+              اكتب سبباً واضحاً — سيظهر لصاحب الطلب.
+            </p>
+            <textarea
+              autoFocus
+              rows={3}
+              className="input w-full"
+              placeholder="مثال: البند لا يحتاج تعديل / السعر غير صحيح / إلخ"
+              value={rejectReason}
+              onChange={(e) => setRejectReason(e.target.value)}
+              disabled={reject.isPending}
+            />
+            <div className="flex justify-end gap-2 mt-3">
+              <button
+                className="btn-ghost"
+                onClick={() => {
+                  setRejectTarget(null);
+                  setRejectReason('');
+                }}
+                disabled={reject.isPending}
+              >
+                إلغاء
+              </button>
+              <button
+                className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold text-sm"
+                disabled={reject.isPending}
+                onClick={() => {
+                  if (!rejectReason.trim()) {
+                    toast.error('يجب كتابة سبب الرفض');
+                    return;
+                  }
+                  reject.mutate({
+                    id: rejectTarget.id,
+                    reason: rejectReason.trim(),
+                  });
+                }}
+              >
+                {reject.isPending ? 'جاري الرفض…' : 'تأكيد الرفض'}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
