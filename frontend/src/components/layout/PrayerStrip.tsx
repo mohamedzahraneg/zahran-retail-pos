@@ -141,13 +141,32 @@ export function PrayerStrip() {
     nextTime = tomorrow.fajr;
   }
 
-  const untilMs = nextTime ? nextTime.getTime() - now.getTime() : 0;
-  const hh = Math.max(0, Math.floor(untilMs / 3_600_000));
-  const mm = Math.max(0, Math.floor((untilMs % 3_600_000) / 60_000));
-  const countdown = untilMs > 0 ? `${hh}:${String(mm).padStart(2, '0')}` : '—';
+  const fmtCountdown = (ms: number) => {
+    if (ms <= 0) return '—';
+    const total = Math.floor(ms / 1000);
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(
+      s,
+    ).padStart(2, '0')}`;
+  };
+
+  // All remaining prayers today (plus tomorrow's fajr if all of today's have passed).
+  const remaining = (() => {
+    const list = ORDER.map((p) => ({
+      label: p.label,
+      at: today[p.key] as Date,
+    })).filter((p) => p.at && p.at.getTime() > now.getTime());
+    if (list.length) return list;
+    const t = new Date(now);
+    t.setDate(t.getDate() + 1);
+    const tomorrow = new PrayerTimes(CAIRO, t, PARAMS);
+    return [{ label: 'الفجر', at: tomorrow.fajr }];
+  })();
 
   return (
-    <div className="hidden md:flex items-center gap-3 text-xs text-slate-600">
+    <div className="hidden md:flex items-center gap-3 text-xs text-slate-600 flex-wrap">
       <div className="flex items-center gap-1.5 font-bold text-slate-800">
         <Clock size={14} className="text-indigo-500" />
         <span className="tabular-nums">{fmtClock(now)}</span>
@@ -157,16 +176,34 @@ export function PrayerStrip() {
         <MoonStar size={13} />
         <span>{fmtHijri(now)}</span>
       </div>
-      {nextLabel && nextTime && (
+      {/* Per-prayer countdown — updates every second */}
+      {nextLabel && (
         <div
-          className="hidden md:flex items-center gap-1 bg-emerald-50 border border-emerald-200 rounded-lg px-2 py-1 text-emerald-700"
+          className="hidden md:flex items-center gap-1.5 flex-wrap"
           title={ORDER.map(
             (p) => `${p.label} ${fmtTime(today[p.key] as Date)}`,
           ).join(' · ')}
         >
-          <span className="font-bold">{nextLabel}</span>
-          <span className="tabular-nums">{fmtTime(nextTime)}</span>
-          <span className="text-[10px] opacity-70">({countdown})</span>
+          {remaining.map((p, idx) => {
+            const isNext = idx === 0;
+            const diff = p.at.getTime() - now.getTime();
+            return (
+              <span
+                key={p.label}
+                className={`flex items-center gap-1 rounded-lg px-2 py-1 border ${
+                  isNext
+                    ? 'bg-emerald-50 border-emerald-300 text-emerald-700 font-bold'
+                    : 'bg-slate-50 border-slate-200 text-slate-600'
+                }`}
+              >
+                <span>{p.label}</span>
+                <span className="tabular-nums">{fmtTime(p.at)}</span>
+                <span className="text-[10px] opacity-80 tabular-nums">
+                  {fmtCountdown(diff)}
+                </span>
+              </span>
+            );
+          })}
         </div>
       )}
     </div>
