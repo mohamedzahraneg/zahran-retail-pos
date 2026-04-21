@@ -103,6 +103,10 @@ services:
       db:    { condition: service_healthy }
       redis: { condition: service_started }
       minio: { condition: service_started }
+    volumes:
+      # Expose SQL migrations so the startup runner can apply any files
+      # added to database/migrations/ without rebuilding the image.
+      - ./database/migrations:/app/database/migrations:ro
     ports:
       - "${API_PORT:-3000}:3000"
     healthcheck:

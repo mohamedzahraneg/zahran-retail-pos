@@ -1,6 +1,7 @@
 import { Module, Global, Logger } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { MigrationsService } from './migrations.service';
 
 @Global()
 @Module({
@@ -27,5 +28,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
       },
     }),
   ],
+  providers: [MigrationsService],
+  exports: [MigrationsService],
 })
 export class DatabaseModule {}

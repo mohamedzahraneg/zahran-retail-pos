@@ -151,18 +151,65 @@ export class CashDeskService {
     );
   }
 
+  /**
+   * Today's in/out per cashbox, computed inline so the old
+   * `v_dashboard_cashflow_today` view (which only returned
+   * `cash_in_today`/`cash_out_today`) can't silently zero the KPIs out
+   * on legacy DBs. Exposes both new and legacy column names.
+   */
   cashflowToday() {
-    return this.ds.query(
-      `SELECT * FROM v_dashboard_cashflow_today`,
-    );
+    return this.ds.query(`
+      SELECT
+        cb.id                                  AS cashbox_id,
+        cb.name_ar                             AS cashbox_name,
+        cb.current_balance,
+        COALESCE(SUM(ct.amount) FILTER (
+          WHERE ct.direction = 'in'
+            AND DATE(ct.created_at AT TIME ZONE 'Africa/Cairo') = CURRENT_DATE
+        ), 0)::numeric(14,2)                   AS cash_in_today,
+        COALESCE(SUM(ct.amount) FILTER (
+          WHERE ct.direction = 'out'
+            AND DATE(ct.created_at AT TIME ZONE 'Africa/Cairo') = CURRENT_DATE
+        ), 0)::numeric(14,2)                   AS cash_out_today,
+        COALESCE(SUM(ct.amount) FILTER (
+          WHERE ct.direction = 'in'
+            AND DATE(ct.created_at AT TIME ZONE 'Africa/Cairo') = CURRENT_DATE
+        ), 0)::numeric(14,2)                   AS inflows_total,
+        COALESCE(SUM(ct.amount) FILTER (
+          WHERE ct.direction = 'out'
+            AND DATE(ct.created_at AT TIME ZONE 'Africa/Cairo') = CURRENT_DATE
+        ), 0)::numeric(14,2)                   AS outflows_total,
+        COUNT(*) FILTER (
+          WHERE DATE(ct.created_at AT TIME ZONE 'Africa/Cairo') = CURRENT_DATE
+        )::int                                 AS transactions_today
+      FROM cashboxes cb
+      LEFT JOIN cashbox_transactions ct ON ct.cashbox_id = cb.id
+      WHERE cb.is_active = TRUE
+      GROUP BY cb.id, cb.name_ar, cb.current_balance
+      ORDER BY cb.name_ar
+    `);
   }
 
   /**
    * Net/gross shift variance totals across every closed shift.
    * Powers the "فوارق الورديات" tile next to the cashbox KPIs.
+   *
+   * Computed inline (not from a view) so the endpoint keeps working on
+   * DBs where migration 046 hasn't been applied yet.
    */
   async shiftVariances() {
-    const [row] = await this.ds.query(`SELECT * FROM v_shift_variances`);
+    const [row] = await this.ds.query(`
+      SELECT
+        COALESCE(SUM(actual_closing - expected_closing), 0)::numeric(14,2) AS net_variance,
+        COALESCE(SUM(GREATEST(actual_closing - expected_closing, 0)), 0)::numeric(14,2) AS total_surplus,
+        COALESCE(SUM(GREATEST(expected_closing - actual_closing, 0)), 0)::numeric(14,2) AS total_deficit,
+        COUNT(*) FILTER (WHERE actual_closing - expected_closing > 0.01)::int AS surplus_count,
+        COUNT(*) FILTER (WHERE expected_closing - actual_closing > 0.01)::int AS deficit_count,
+        COUNT(*) FILTER (WHERE ABS(actual_closing - expected_closing) <= 0.01)::int AS matched_count
+      FROM shifts
+      WHERE status = 'closed'
+        AND actual_closing IS NOT NULL
+    `);
     return (
       row || {
         net_variance: 0,
@@ -219,11 +266,69 @@ export class CashDeskService {
     const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
     args.push(Math.min(Number(params.limit ?? 200), 1000));
     args.push(Math.max(Number(params.offset ?? 0), 0));
+
+    // Inline query — equivalent to v_cashbox_movements but works even
+    // on DBs where migration 046 hasn't been applied yet. The view
+    // stays around as a convenience for direct SQL consumers.
+    const whereOnT = where
+      ? where.replace(/cashbox_id/g, 't.cashbox_id')
+             .replace(/direction/g, 't.direction')
+             .replace(/category/g, 't.category')
+             .replace(/created_at/g, 't.created_at')
+      : '';
     return this.ds.query(
-      `SELECT * FROM v_cashbox_movements
-       ${where}
-       ORDER BY created_at DESC
-       LIMIT $${args.length - 1} OFFSET $${args.length}`,
+      `
+      SELECT
+        t.id, t.cashbox_id, cb.name_ar AS cashbox_name,
+        t.direction::text AS direction,
+        t.amount::numeric(14,2) AS amount,
+        t.category::text AS category,
+        t.reference_type::text AS reference_type,
+        t.reference_id,
+        t.balance_after::numeric(14,2) AS balance_after,
+        t.notes, t.user_id, u.full_name AS user_name, t.created_at,
+        CASE t.category
+          WHEN 'customer_receipt' THEN 'قبض من عميل'
+          WHEN 'supplier_payment' THEN 'صرف لمورد'
+          WHEN 'expense'          THEN 'مصروف'
+          WHEN 'invoice_cash'     THEN 'مبيعات كاش'
+          WHEN 'invoice_refund'   THEN 'مرتجع'
+          WHEN 'opening_balance'  THEN 'رصيد افتتاحي'
+          WHEN 'owner_topup'      THEN 'تمويل من المالك'
+          WHEN 'bank_deposit'     THEN 'إيداع بنكي'
+          WHEN 'manual_deposit'   THEN 'إيداع يدوي'
+          WHEN 'manual_withdraw'  THEN 'سحب يدوي'
+          WHEN 'adjustment'       THEN 'تسوية'
+          WHEN 'payment'          THEN 'دفعة'
+          WHEN 'receipt'          THEN 'سند قبض'
+          WHEN 'purchase'         THEN 'شراء'
+          ELSE COALESCE(t.category, 'أخرى')
+        END AS kind_ar,
+        COALESCE(
+          (SELECT i.invoice_no FROM invoices i WHERE i.id = t.reference_id),
+          (SELECT e.expense_no FROM expenses e WHERE e.id = t.reference_id),
+          (SELECT cp.payment_no FROM customer_payments cp WHERE cp.id = t.reference_id),
+          (SELECT sp.payment_no FROM supplier_payments sp WHERE sp.id = t.reference_id),
+          (SELECT p.purchase_no FROM purchases p WHERE p.id = t.reference_id)
+        ) AS reference_no,
+        COALESCE(
+          (SELECT c.full_name FROM customers c
+             JOIN customer_payments cp ON cp.customer_id = c.id
+            WHERE cp.id = t.reference_id),
+          (SELECT s.name FROM suppliers s
+             JOIN supplier_payments sp ON sp.supplier_id = s.id
+            WHERE sp.id = t.reference_id),
+          (SELECT s.name FROM suppliers s
+             JOIN purchases p ON p.supplier_id = s.id
+            WHERE p.id = t.reference_id)
+        ) AS counterparty_name
+      FROM cashbox_transactions t
+      LEFT JOIN cashboxes cb ON cb.id = t.cashbox_id
+      LEFT JOIN users     u  ON u.id  = t.user_id
+      ${whereOnT}
+      ORDER BY t.created_at DESC
+      LIMIT $${args.length - 1} OFFSET $${args.length}
+      `,
       args,
     );
   }
