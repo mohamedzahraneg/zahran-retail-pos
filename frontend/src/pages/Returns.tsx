@@ -24,6 +24,8 @@ import {
   ReturnDetails,
   ItemCondition,
 } from '@/api/returns.api';
+import { productsApi } from '@/api/products.api';
+import { Trash2 } from 'lucide-react';
 
 const EGP = (n: number | string) => `${Number(n).toFixed(0)} ج.م`;
 
@@ -562,8 +564,14 @@ function ReturnDetailsPanel({
 // ============================================================================
 function CreateReturnModal({ onClose }: { onClose: () => void }) {
   const qc = useQueryClient();
+  const [mode, setMode] = useState<'by_invoice' | 'standalone'>('by_invoice');
   const [invoiceNo, setInvoiceNo] = useState('');
   const [lookup, setLookup] = useState<InvoiceLookup | null>(null);
+  // Walk-in (standalone) return — list of {variant_id, product_name,
+  // sku, quantity, unit_price, condition, back_to_stock}.
+  const [walkinItems, setWalkinItems] = useState<any[]>([]);
+  const [productQ, setProductQ] = useState('');
+  const [variantPick, setVariantPick] = useState<any | null>(null);
   const [selectedItems, setSelectedItems] = useState<
     Record<
       string,
@@ -611,9 +619,36 @@ function CreateReturnModal({ onClose }: { onClose: () => void }) {
   const total = selectedLines.reduce((s, l) => s + l.refund_amount, 0);
   const net = Math.max(0, total - restockingFee);
 
+  const walkinTotal = walkinItems.reduce(
+    (s, i) => s + Number(i.quantity || 0) * Number(i.unit_price || 0),
+    0,
+  );
+  const walkinNet = Math.max(0, walkinTotal - restockingFee);
+
   const createMut = useMutation({
-    mutationFn: () =>
-      returnsApi.createReturn({
+    mutationFn: () => {
+      if (mode === 'standalone') {
+        if (walkinItems.length === 0)
+          return Promise.reject(new Error('أضف صنف واحد على الأقل'));
+        return returnsApi.createReturn({
+          original_invoice_id: undefined as any,
+          items: walkinItems.map((i) => ({
+            variant_id: i.variant_id,
+            quantity: Number(i.quantity || 1),
+            unit_price: Number(i.unit_price || 0),
+            refund_amount:
+              Number(i.quantity || 1) * Number(i.unit_price || 0),
+            condition: i.condition || 'resellable',
+            back_to_stock: i.back_to_stock ?? true,
+          })) as any,
+          reason,
+          reason_details: reasonDetails || undefined,
+          restocking_fee: restockingFee,
+          refund_method: refundMethod,
+          notes: notes || undefined,
+        } as any);
+      }
+      return returnsApi.createReturn({
         original_invoice_id: lookup!.invoice.id,
         items: selectedLines.map((l) => ({
           original_invoice_item_id: l.invoice_item_id,
@@ -629,28 +664,62 @@ function CreateReturnModal({ onClose }: { onClose: () => void }) {
         restocking_fee: restockingFee,
         refund_method: refundMethod,
         notes: notes || undefined,
-      }),
+      });
+    },
     onSuccess: (r) => {
       toast.success(`تم إنشاء المرتجع ${r.return_no}`);
       qc.invalidateQueries({ queryKey: ['returns'] });
       onClose();
     },
     onError: (e: any) =>
-      toast.error(e?.response?.data?.message || 'فشل إنشاء المرتجع'),
+      toast.error(e?.response?.data?.message || e?.message || 'فشل إنشاء المرتجع'),
   });
 
   return (
     <Modal title="مرتجع جديد" onClose={onClose} size="xl">
+      {/* Mode switch — from invoice vs standalone walk-in */}
+      <div className="inline-flex rounded-lg bg-slate-100 p-1 mb-4 text-xs">
+        <button
+          type="button"
+          className={`px-3 py-1.5 rounded-md font-bold ${
+            mode === 'by_invoice'
+              ? 'bg-white text-indigo-700 shadow-sm'
+              : 'text-slate-600'
+          }`}
+          onClick={() => setMode('by_invoice')}
+        >
+          مرتجع من فاتورة
+        </button>
+        <button
+          type="button"
+          className={`px-3 py-1.5 rounded-md font-bold ${
+            mode === 'standalone'
+              ? 'bg-white text-indigo-700 shadow-sm'
+              : 'text-slate-600'
+          }`}
+          onClick={() => setMode('standalone')}
+        >
+          مرتجع مباشر (بدون فاتورة)
+        </button>
+      </div>
+
       {/* Step 1: Invoice lookup */}
-      {!lookup && (
+      {mode === 'by_invoice' && !lookup && (
         <div>
-          <Field label="رقم الفاتورة">
+          <Field label="رقم الفاتورة — اكتب الرقم واضغط Enter">
             <div className="flex gap-2">
               <input
                 value={invoiceNo}
                 onChange={(e) => setInvoiceNo(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && invoiceNo.trim()) {
+                    e.preventDefault();
+                    lookupMut.mutate();
+                  }
+                }}
                 placeholder="مثال: INV-2026-0000001"
                 className="input flex-1 font-mono"
+                autoFocus
               />
               <button
                 onClick={() => lookupMut.mutate()}
@@ -669,8 +738,34 @@ function CreateReturnModal({ onClose }: { onClose: () => void }) {
         </div>
       )}
 
+      {/* Standalone walk-in return — no invoice needed */}
+      {mode === 'standalone' && (
+        <WalkinReturnForm
+          items={walkinItems}
+          setItems={setWalkinItems}
+          productQ={productQ}
+          setProductQ={setProductQ}
+          variantPick={variantPick}
+          setVariantPick={setVariantPick}
+          reason={reason}
+          setReason={setReason}
+          reasonDetails={reasonDetails}
+          setReasonDetails={setReasonDetails}
+          restockingFee={restockingFee}
+          setRestockingFee={setRestockingFee}
+          refundMethod={refundMethod}
+          setRefundMethod={setRefundMethod}
+          notes={notes}
+          setNotes={setNotes}
+          total={walkinTotal}
+          net={walkinNet}
+          onSubmit={() => createMut.mutate()}
+          submitting={createMut.isPending}
+        />
+      )}
+
       {/* Step 2: Select items */}
-      {lookup && (
+      {mode === 'by_invoice' && lookup && (
         <>
           <div className="p-4 bg-brand-50 border border-brand-200 rounded-lg flex items-center justify-between mb-4">
             <div>
@@ -1233,6 +1328,398 @@ function Modal({
         </div>
         <div className="p-6">{children}</div>
       </div>
+    </div>
+  );
+}
+
+/* ───────── Walk-in (standalone) return form ───────── */
+
+function WalkinReturnForm(props: {
+  items: any[];
+  setItems: (v: any[] | ((prev: any[]) => any[])) => void;
+  productQ: string;
+  setProductQ: (s: string) => void;
+  variantPick: any;
+  setVariantPick: (v: any) => void;
+  reason: ReturnReason;
+  setReason: (r: ReturnReason) => void;
+  reasonDetails: string;
+  setReasonDetails: (s: string) => void;
+  restockingFee: number;
+  setRestockingFee: (n: number) => void;
+  refundMethod: PaymentMethod;
+  setRefundMethod: (m: PaymentMethod) => void;
+  notes: string;
+  setNotes: (s: string) => void;
+  total: number;
+  net: number;
+  onSubmit: () => void;
+  submitting: boolean;
+}) {
+  const { data: products } = useQuery({
+    queryKey: ['products-for-returns', props.productQ],
+    queryFn: () =>
+      productsApi.list({ q: props.productQ || undefined, limit: 500 }),
+    enabled: props.productQ.length >= 1,
+  });
+
+  const pushItem = (p: any, v: any) => {
+    if (props.items.find((i) => i.variant_id === v.id)) {
+      toast.error('الصنف مضاف بالفعل');
+      return;
+    }
+    props.setItems((prev) => [
+      ...prev,
+      {
+        variant_id: v.id,
+        product_name: p.name_ar,
+        sku: v.sku || '',
+        color: v.color,
+        size: v.size,
+        quantity: 1,
+        unit_price: Number(v.selling_price ?? v.price_override ?? p.base_price ?? 0),
+        condition: 'resellable' as ItemCondition,
+        back_to_stock: true,
+      },
+    ]);
+    props.setProductQ('');
+    props.setVariantPick(null);
+  };
+
+  const onEnter = async () => {
+    const code = props.productQ.trim();
+    if (!code) return;
+    try {
+      const { product, variant } = await productsApi.byBarcode(code);
+      pushItem(product, variant);
+    } catch {
+      toast.error(`الكود ${code} غير موجود`);
+    }
+  };
+
+  const pickProduct = async (p: any) => {
+    try {
+      const full = await productsApi.get(p.id);
+      const vs = (full.variants || []).filter((v: any) => v.is_active !== false);
+      if (vs.length === 0) return toast.error('المنتج بدون متغيرات نشطة');
+      if (vs.length === 1) return pushItem(full, vs[0]);
+      props.setVariantPick({ product: full, variants: vs });
+    } catch {
+      toast.error('فشل تحميل المتغيرات');
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-900">
+        <AlertCircle className="inline ml-2" size={16} />
+        مرتجع بدون فاتورة — اختر الأصناف مباشرة. الصنف سيعود للمخزون لو
+        "قابل لإعادة البيع".
+      </div>
+
+      {/* Search */}
+      <div className="relative">
+        <input
+          type="search"
+          value={props.productQ}
+          onChange={(e) => props.setProductQ(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              onEnter();
+            }
+          }}
+          placeholder="اكتب كود المنتج واضغط Enter أو ابحث بالاسم"
+          className="input w-full"
+        />
+        {products && products.data?.length > 0 && (
+          <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-slate-200 rounded-lg shadow-lg z-50 max-h-60 overflow-auto">
+            {(() => {
+              const q = props.productQ.trim().toLowerCase();
+              const exact = q
+                ? products.data.find(
+                    (p: any) => (p.sku_root || '').toLowerCase() === q,
+                  )
+                : null;
+              const rest = exact
+                ? products.data.filter((p: any) => p.id !== exact.id)
+                : products.data;
+              return (
+                <>
+                  {exact && (
+                    <button
+                      onClick={() => pickProduct(exact)}
+                      className="w-full text-right p-2.5 bg-emerald-50 hover:bg-emerald-100 border-b border-emerald-200 flex justify-between"
+                    >
+                      <div>
+                        <div className="font-black">
+                          ✓ {exact.name_ar}
+                        </div>
+                        <div className="text-[11px] text-emerald-700 font-mono">
+                          مطابقة تامة · {exact.sku_root}
+                        </div>
+                      </div>
+                      <div className="font-bold text-emerald-700">
+                        {EGP(exact.base_price)}
+                      </div>
+                    </button>
+                  )}
+                  {rest.map((p: any) => (
+                    <button
+                      key={p.id}
+                      onClick={() => pickProduct(p)}
+                      className="w-full text-right p-2.5 hover:bg-brand-50 border-b last:border-b-0 border-slate-100 flex justify-between"
+                    >
+                      <div>
+                        <div className="font-medium">{p.name_ar}</div>
+                        <div className="text-xs text-slate-500 font-mono">
+                          {p.sku_root}
+                        </div>
+                      </div>
+                      <div className="font-bold text-brand-600">
+                        {EGP(p.base_price)}
+                      </div>
+                    </button>
+                  ))}
+                </>
+              );
+            })()}
+          </div>
+        )}
+      </div>
+
+      {props.variantPick && (
+        <div className="p-3 border-2 border-indigo-200 bg-indigo-50/60 rounded-lg">
+          <div className="flex items-center justify-between mb-2">
+            <div className="text-sm font-black text-indigo-800">
+              اختر اللون والمقاس — {props.variantPick.product.name_ar}
+            </div>
+            <button
+              onClick={() => props.setVariantPick(null)}
+              className="p-1 hover:bg-indigo-100 rounded text-indigo-700"
+            >
+              ✕
+            </button>
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {props.variantPick.variants.map((v: any) => (
+              <button
+                key={v.id}
+                onClick={() => pushItem(props.variantPick.product, v)}
+                className="px-2 py-1.5 rounded-lg bg-white border border-indigo-200 hover:border-indigo-400 text-xs flex items-center gap-1.5"
+              >
+                <span className="font-bold">
+                  {[v.color, v.size].filter(Boolean).join(' · ') || v.sku || '—'}
+                </span>
+                <span className="text-[10px] text-slate-400">
+                  {EGP(
+                    v.selling_price ??
+                      v.price_override ??
+                      props.variantPick.product.base_price ??
+                      0,
+                  )}
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Items table */}
+      {props.items.length > 0 && (
+        <div className="border border-slate-200 rounded-lg overflow-hidden">
+          <table className="w-full text-sm">
+            <thead className="bg-slate-50 text-xs">
+              <tr>
+                <th className="p-2 text-right">الصنف</th>
+                <th className="p-2 text-center">الكمية</th>
+                <th className="p-2 text-center">السعر</th>
+                <th className="p-2 text-center">الحالة</th>
+                <th className="p-2 text-center">إعادة للمخزون</th>
+                <th className="p-2 text-left">الإجمالي</th>
+                <th className="p-2"></th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {props.items.map((it, idx) => (
+                <tr key={it.variant_id}>
+                  <td className="p-2">
+                    <div className="font-bold">{it.product_name}</div>
+                    <div className="text-[10px] font-mono text-slate-400">
+                      {it.sku}
+                      {[it.color, it.size].filter(Boolean).length > 0 &&
+                        ` · ${[it.color, it.size].filter(Boolean).join(' · ')}`}
+                    </div>
+                  </td>
+                  <td className="p-2 text-center">
+                    <input
+                      type="number"
+                      min={1}
+                      value={it.quantity}
+                      onChange={(e) => {
+                        const n = Math.max(1, Number(e.target.value) || 1);
+                        props.setItems((prev) =>
+                          prev.map((x, i) =>
+                            i === idx ? { ...x, quantity: n } : x,
+                          ),
+                        );
+                      }}
+                      className="input w-16 text-center py-1"
+                    />
+                  </td>
+                  <td className="p-2 text-center">
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={it.unit_price}
+                      onChange={(e) => {
+                        const n = Number(e.target.value) || 0;
+                        props.setItems((prev) =>
+                          prev.map((x, i) =>
+                            i === idx ? { ...x, unit_price: n } : x,
+                          ),
+                        );
+                      }}
+                      className="input w-20 text-center py-1"
+                    />
+                  </td>
+                  <td className="p-2 text-center">
+                    <select
+                      value={it.condition}
+                      onChange={(e) =>
+                        props.setItems((prev) =>
+                          prev.map((x, i) =>
+                            i === idx ? { ...x, condition: e.target.value } : x,
+                          ),
+                        )
+                      }
+                      className="input py-1 text-xs"
+                    >
+                      <option value="resellable">قابل للبيع</option>
+                      <option value="damaged">تالف</option>
+                      <option value="defective">معيب</option>
+                    </select>
+                  </td>
+                  <td className="p-2 text-center">
+                    <input
+                      type="checkbox"
+                      checked={!!it.back_to_stock}
+                      onChange={(e) =>
+                        props.setItems((prev) =>
+                          prev.map((x, i) =>
+                            i === idx
+                              ? { ...x, back_to_stock: e.target.checked }
+                              : x,
+                          ),
+                        )
+                      }
+                    />
+                  </td>
+                  <td className="p-2 text-left font-bold">
+                    {EGP(it.quantity * it.unit_price)}
+                  </td>
+                  <td className="p-2">
+                    <button
+                      onClick={() =>
+                        props.setItems((prev) => prev.filter((_, i) => i !== idx))
+                      }
+                      className="p-1 text-rose-600 hover:bg-rose-50 rounded"
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Refund details */}
+      <div className="grid md:grid-cols-2 gap-3">
+        <Field label="السبب">
+          <select
+            value={props.reason}
+            onChange={(e) => props.setReason(e.target.value as ReturnReason)}
+            className="input"
+          >
+            {Object.entries(REASON_LABELS).map(([v, label]) => (
+              <option key={v} value={v}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="طريقة الصرف">
+          <select
+            value={props.refundMethod}
+            onChange={(e) =>
+              props.setRefundMethod(e.target.value as PaymentMethod)
+            }
+            className="input"
+          >
+            {Object.entries(METHOD_LABELS).map(([v, label]) => (
+              <option key={v} value={v}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="تفاصيل السبب">
+          <input
+            value={props.reasonDetails}
+            onChange={(e) => props.setReasonDetails(e.target.value)}
+            className="input"
+          />
+        </Field>
+        <Field label="رسوم إعادة (خصم)">
+          <input
+            type="number"
+            min="0"
+            step="0.01"
+            value={props.restockingFee}
+            onChange={(e) =>
+              props.setRestockingFee(Number(e.target.value) || 0)
+            }
+            className="input"
+          />
+        </Field>
+        <Field label="ملاحظات">
+          <input
+            value={props.notes}
+            onChange={(e) => props.setNotes(e.target.value)}
+            className="input"
+          />
+        </Field>
+      </div>
+
+      {/* Totals */}
+      <div className="grid grid-cols-2 gap-3 p-4 bg-slate-50 rounded-lg">
+        <div>
+          <div className="text-xs text-slate-500">إجمالي الأصناف</div>
+          <div className="font-black text-xl tabular-nums">
+            {EGP(props.total)}
+          </div>
+        </div>
+        <div>
+          <div className="text-xs text-slate-500">الصافي المسترد</div>
+          <div
+            className={`font-black text-xl tabular-nums ${
+              props.net > 0 ? 'text-emerald-700' : 'text-slate-400'
+            }`}
+          >
+            {EGP(props.net)}
+          </div>
+        </div>
+      </div>
+
+      <button
+        onClick={props.onSubmit}
+        disabled={props.submitting || props.items.length === 0}
+        className="btn-primary w-full"
+      >
+        {props.submitting ? 'جاري الإنشاء...' : 'إنشاء المرتجع المباشر'}
+      </button>
     </div>
   );
 }

@@ -35,50 +35,79 @@ export class ReturnsService {
    *   - No stock movement yet — that happens on approve/refund.
    */
   async createReturn(dto: CreateReturnDto, userId: string) {
-    const [invoice] = await this.ds.query(
-      `SELECT * FROM invoices WHERE id = $1`,
-      [dto.original_invoice_id],
-    );
-    if (!invoice) {
-      throw new NotFoundException('الفاتورة غير موجودة');
-    }
-    if (invoice.status !== 'completed' && invoice.status !== 'paid') {
-      throw new BadRequestException(
-        `لا يمكن عمل مرتجع لفاتورة بحالة "${invoice.status}"`,
-      );
-    }
+    // Walk-in / lost-receipt flow: no original_invoice_id. Skip all
+    // the per-line invoice validation and just require a warehouse
+    // + variants to know where stock lands.
+    const standalone = !dto.original_invoice_id;
 
-    // Validate each line: qty must be <= (sold - previously returned)
-    for (const it of dto.items) {
-      const [orig] = await this.ds.query(
-        `SELECT quantity, variant_id FROM invoice_items WHERE id = $1 AND invoice_id = $2`,
-        [it.original_invoice_item_id, dto.original_invoice_id],
+    let invoice: any = null;
+    if (!standalone) {
+      const [inv] = await this.ds.query(
+        `SELECT * FROM invoices WHERE id = $1`,
+        [dto.original_invoice_id],
       );
-      if (!orig) {
+      if (!inv) throw new NotFoundException('الفاتورة غير موجودة');
+      if (inv.status !== 'completed' && inv.status !== 'paid') {
         throw new BadRequestException(
-          `العنصر ${it.original_invoice_item_id} ليس من هذه الفاتورة`,
+          `لا يمكن عمل مرتجع لفاتورة بحالة "${inv.status}"`,
         );
       }
-      if (orig.variant_id !== it.variant_id) {
-        throw new BadRequestException('variant_id لا يطابق السطر الأصلي');
-      }
+      invoice = inv;
 
-      const [{ already_returned }] = await this.ds.query(
-        `
-        SELECT COALESCE(SUM(ri.quantity),0)::int AS already_returned
-          FROM return_items ri
-          JOIN returns r ON r.id = ri.return_id
-         WHERE ri.original_invoice_item_id = $1
-           AND r.status IN ('approved','refunded')
-        `,
-        [it.original_invoice_item_id],
-      );
-
-      const remaining = Number(orig.quantity) - Number(already_returned);
-      if (it.quantity > remaining) {
-        throw new BadRequestException(
-          `لا يمكن إرجاع ${it.quantity} — الكمية المتاحة للإرجاع ${remaining}`,
+      for (const it of dto.items) {
+        if (!it.original_invoice_item_id) {
+          throw new BadRequestException(
+            'يجب اختيار السطر الأصلي لكل صنف عند ارجاع من فاتورة',
+          );
+        }
+        const [orig] = await this.ds.query(
+          `SELECT quantity, variant_id FROM invoice_items
+            WHERE id = $1 AND invoice_id = $2`,
+          [it.original_invoice_item_id, dto.original_invoice_id],
         );
+        if (!orig) {
+          throw new BadRequestException(
+            `العنصر ${it.original_invoice_item_id} ليس من هذه الفاتورة`,
+          );
+        }
+        if (orig.variant_id !== it.variant_id) {
+          throw new BadRequestException('variant_id لا يطابق السطر الأصلي');
+        }
+
+        const [{ already_returned }] = await this.ds.query(
+          `
+          SELECT COALESCE(SUM(ri.quantity),0)::int AS already_returned
+            FROM return_items ri
+            JOIN returns r ON r.id = ri.return_id
+           WHERE ri.original_invoice_item_id = $1
+             AND r.status IN ('approved','refunded')
+          `,
+          [it.original_invoice_item_id],
+        );
+
+        const remaining = Number(orig.quantity) - Number(already_returned);
+        if (it.quantity > remaining) {
+          throw new BadRequestException(
+            `لا يمكن إرجاع ${it.quantity} — الكمية المتاحة للإرجاع ${remaining}`,
+          );
+        }
+      }
+    } else {
+      // Standalone — ensure every line has a variant_id and a
+      // warehouse was provided (fallback to the default if missing).
+      if (!dto.warehouse_id) {
+        const [w] = await this.ds.query(
+          `SELECT id FROM warehouses WHERE is_active = TRUE ORDER BY created_at LIMIT 1`,
+        );
+        if (!w) {
+          throw new BadRequestException('لا يوجد مخزن افتراضي للمرتجعات');
+        }
+        dto.warehouse_id = w.id;
+      }
+      for (const it of dto.items) {
+        if (!it.variant_id) {
+          throw new BadRequestException('كل صنف لازم يحدد variant_id');
+        }
       }
     }
 
@@ -98,9 +127,9 @@ export class ReturnsService {
         RETURNING *
         `,
         [
-          dto.original_invoice_id,
-          invoice.customer_id,
-          invoice.warehouse_id,
+          dto.original_invoice_id ?? null,
+          dto.customer_id ?? invoice?.customer_id ?? null,
+          invoice?.warehouse_id ?? dto.warehouse_id,
           dto.reason ?? 'other',
           dto.reason_details ?? null,
           total_refund,
@@ -122,7 +151,7 @@ export class ReturnsService {
           `,
           [
             ret.id,
-            it.original_invoice_item_id,
+            it.original_invoice_item_id ?? null,
             it.variant_id,
             it.quantity,
             it.unit_price,

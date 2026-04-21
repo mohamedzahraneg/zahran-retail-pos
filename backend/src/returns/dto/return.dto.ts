@@ -39,11 +39,13 @@ export type PaymentMethod = (typeof PAYMENT_METHODS)[number];
 // ---- Return items ----------------------------------------------------------
 
 export class ReturnItemDto {
-  @ApiProperty({
-    description: 'The invoice_items row being returned (source of truth)',
+  @ApiPropertyOptional({
+    description:
+      'Invoice_items row being returned (optional — absent on standalone/walk-in refunds).',
   })
+  @IsOptional()
   @IsUUID()
-  original_invoice_item_id: string;
+  original_invoice_item_id?: string;
 
   @ApiProperty() @IsUUID() variant_id: string;
 
@@ -73,7 +75,16 @@ export class ReturnItemDto {
 // ---- Create return ---------------------------------------------------------
 
 export class CreateReturnDto {
-  @ApiProperty() @IsUUID() original_invoice_id: string;
+  /**
+   * Original invoice is optional — walk-in refunds can be accepted
+   * without a receipt (goodwill / replacement / lost receipt). When
+   * absent, items are registered against a NULL invoice and stock is
+   * restored by variant_id only.
+   */
+  @ApiPropertyOptional() @IsOptional() @IsUUID() original_invoice_id?: string;
+
+  @ApiPropertyOptional() @IsOptional() @IsUUID() customer_id?: string;
+  @ApiPropertyOptional() @IsOptional() @IsUUID() warehouse_id?: string;
 
   @ApiProperty({ type: [ReturnItemDto] })
   @IsArray()
