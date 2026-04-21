@@ -79,25 +79,15 @@ export default function POS() {
     refetchInterval: 30_000,
   });
 
-  // Shift is mandatory for POS — if the query has resolved and there's
-  // no open shift, bounce to /shifts with a toast so the cashier opens
-  // one first. The redirect only fires after the first fetch (otherwise
-  // we'd bounce on page refresh before the answer came back).
+  // Shift is mandatory for POS — surface a toast the first time we
+  // know there's no open shift. Actual redirect / loading-screen
+  // return statements live at the bottom of this component, AFTER
+  // every other hook call, to satisfy the rules of hooks.
   useEffect(() => {
     if (shiftFetched && !shift) {
       toast.error('لا يمكن فتح نقطة البيع قبل فتح وردية', { id: 'pos-no-shift' });
     }
   }, [shiftFetched, shift]);
-  if (shiftFetched && !shift) {
-    return <Navigate to="/shifts?open=1" replace />;
-  }
-  if (loadingShift && !shiftFetched) {
-    return (
-      <div className="h-screen w-full flex items-center justify-center text-slate-400">
-        جارٍ التحقق من الوردية…
-      </div>
-    );
-  }
 
   const { data: products = { data: [], meta: {} as any } } = useQuery({
     queryKey: ['products', category, selectedCategoryId, search, cart.warehouse?.id],
@@ -318,6 +308,20 @@ export default function POS() {
     const m = String(now.getMonth() + 1).padStart(2, '0');
     return `INV-${y}${m}${d}-***`;
   }, [now]);
+
+  // Shift gate — placed AFTER every hook so the rules of hooks are
+  // honoured. If the user has no open shift we either show a loader
+  // while the first fetch resolves, or bounce them to /shifts.
+  if (loadingShift && !shiftFetched) {
+    return (
+      <div className="h-screen w-full flex items-center justify-center text-slate-400">
+        جارٍ التحقق من الوردية…
+      </div>
+    );
+  }
+  if (shiftFetched && !shift) {
+    return <Navigate to="/shifts?open=1" replace />;
+  }
 
   return (
     <div
