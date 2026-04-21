@@ -42,6 +42,7 @@ import { RecurringExpensesModule } from './recurring-expenses/recurring-expenses
 import { CustomerGroupsModule } from './customer-groups/customer-groups.module';
 import { CategoriesModule } from './categories/categories.module';
 import { AttendanceModule } from './attendance/attendance.module';
+import { EmployeesModule } from './employees/employees.module';
 import { ServeStaticModule } from '@nestjs/serve-static';
 import { join } from 'path';
 
@@ -100,6 +101,7 @@ class HealthController {
     CommissionsModule,
     AuditModule,
     AttendanceModule,
+    EmployeesModule,
     LoyaltyModule,
     NotificationsModule,
     SetupModule,

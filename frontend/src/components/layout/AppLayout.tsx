@@ -3,6 +3,7 @@ import { Sidebar } from './Sidebar';
 import { Topbar } from './Topbar';
 import { useRealtime } from '@/hooks/useRealtime';
 import { useShiftGate } from '@/hooks/useShiftGate';
+import { EmployeeTaskPopup } from '@/components/EmployeeTaskPopup';
 
 interface Props {
   title: string;
@@ -27,6 +28,10 @@ export function AppLayout({ title }: Props) {
           <Outlet />
         </div>
       </main>
+      {/* Global task popups for signed-in employees. Renders a blocking
+          modal for unacknowledged tasks and a corner reminder chip for
+          acknowledged-but-incomplete ones — persists across all pages. */}
+      <EmployeeTaskPopup />
     </div>
   );
 }

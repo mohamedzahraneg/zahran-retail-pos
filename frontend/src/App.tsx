@@ -33,6 +33,7 @@ import Settings from '@/pages/Settings';
 import Users from '@/pages/Users';
 import Loyalty from '@/pages/Loyalty';
 import Attendance from '@/pages/Attendance';
+import EmployeeProfile from '@/pages/EmployeeProfile';
 import SetupWizard from '@/pages/SetupWizard';
 import NotFound from '@/pages/NotFound';
 
@@ -140,6 +141,14 @@ export default function App() {
           }
         />
         <Route path="attendance" element={<Attendance />} />
+        <Route
+          path="me"
+          element={
+            <ProtectedRoute permissions={['employee.dashboard.view']}>
+              <EmployeeProfile />
+            </ProtectedRoute>
+          }
+        />
         <Route path="settings" element={<Settings />} />
         <Route
           path="users"
