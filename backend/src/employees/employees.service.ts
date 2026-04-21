@@ -25,6 +25,7 @@ export class EmployeesService {
       `SELECT u.id, u.username, u.full_name, u.employee_no, u.job_title,
               u.hire_date, u.salary_amount, u.salary_frequency,
               u.target_hours_day, u.target_hours_week, u.overtime_rate,
+              u.shift_start_time, u.shift_end_time, u.late_grace_min,
               r.name_ar AS role_name, r.code AS role_code
          FROM users u
          LEFT JOIN roles r ON r.id = u.role_id
@@ -182,12 +183,120 @@ export class EmployeesService {
       Number(deduct.amount || 0) -
       Number(adv.amount || 0);
     const debtWarning = net < 0;
+    const outstandingDebt = debtWarning ? Math.abs(net) : 0;
+
+    // ─── Timing warnings (late / early leave) ─────────────────────
+    const warnings: Array<{ kind: string; message: string }> = [];
+    const shiftStart = profile.shift_start_time as string | null;
+    const shiftEnd = profile.shift_end_time as string | null;
+    const graceMin = Number(profile.late_grace_min || 10);
+
+    let lateMinutes = 0;
+    let earlyLeaveMinutes = 0;
+    let expectedEndUtc: string | null = null;
+
+    if (todayAtt?.clock_in && shiftStart) {
+      const [sh, sm] = (shiftStart as string).split(':').map(Number);
+      const clockInCairo = new Date(todayAtt.clock_in);
+      // Interpret clock-in timestamp in Cairo, compute expected minute
+      const inHour = Number(
+        new Intl.DateTimeFormat('en-GB', {
+          timeZone: 'Africa/Cairo',
+          hour: '2-digit',
+          hour12: false,
+        }).format(clockInCairo),
+      );
+      const inMin = Number(
+        new Intl.DateTimeFormat('en-GB', {
+          timeZone: 'Africa/Cairo',
+          minute: '2-digit',
+        }).format(clockInCairo),
+      );
+      lateMinutes = Math.max(0, inHour * 60 + inMin - (sh * 60 + sm) - graceMin);
+      if (lateMinutes > 0) {
+        warnings.push({
+          kind: 'late_arrival',
+          message: `تأخرت ${lateMinutes} دقيقة عن موعد الحضور الرسمي.`,
+        });
+      }
+    }
+    if (todayAtt?.clock_out && shiftEnd) {
+      const [eh, em] = (shiftEnd as string).split(':').map(Number);
+      const out = new Date(todayAtt.clock_out);
+      const outHour = Number(
+        new Intl.DateTimeFormat('en-GB', {
+          timeZone: 'Africa/Cairo',
+          hour: '2-digit',
+          hour12: false,
+        }).format(out),
+      );
+      const outMin = Number(
+        new Intl.DateTimeFormat('en-GB', {
+          timeZone: 'Africa/Cairo',
+          minute: '2-digit',
+        }).format(out),
+      );
+      earlyLeaveMinutes = Math.max(0, eh * 60 + em - (outHour * 60 + outMin));
+      if (earlyLeaveMinutes > 0) {
+        warnings.push({
+          kind: 'early_leave',
+          message: `سجّلت انصراف قبل نهاية الوردية بـ ${earlyLeaveMinutes} دقيقة.`,
+        });
+      }
+    }
+    // Compute expected end for the live countdown on the client
+    if (todayAtt?.clock_in && !todayAtt?.clock_out) {
+      const inStamp = new Date(todayAtt.clock_in);
+      expectedEndUtc = new Date(
+        inStamp.getTime() + Number(profile.target_hours_day || 8) * 3600 * 1000,
+      ).toISOString();
+    }
+
+    // ─── Smart recommendations ─────────────────────────────────────
+    const recommendations: string[] = [];
+    if (debtWarning) {
+      recommendations.push(
+        `مديونيتك الحالية ${outstandingDebt.toFixed(2)} ج.م — تجاوزت رصيد الراتب.`,
+      );
+      // Suggest how many extra hours at overtime rate would clear it.
+      const rate =
+        freq === 'daily'
+          ? salaryAmount / Number(profile.target_hours_day || 8)
+          : freq === 'weekly'
+            ? salaryAmount / Number(profile.target_hours_week || 48)
+            : salaryAmount /
+              (Number(profile.target_hours_week || 48) * 4);
+      const overtimeMultiplier = Number(profile.overtime_rate || 1.5);
+      if (rate > 0 && overtimeMultiplier > 0) {
+        const extraHours = Math.ceil(
+          outstandingDebt / (rate * overtimeMultiplier),
+        );
+        recommendations.push(
+          `${extraHours} ساعة إضافية بمعدل ×${overtimeMultiplier} كفيلة بتغطية المديونية.`,
+        );
+      }
+      recommendations.push(
+        'اطلب تمديد ساعات إضافية من الإدارة، أو قلّل السلف الشهر القادم.',
+      );
+    } else if (net > 0 && Number(bonus.amount || 0) === 0) {
+      recommendations.push(
+        'أنت على المسار الصحيح — اطلب ساعات إضافية لرفع الدخل هذا الشهر.',
+      );
+    }
+    if (lateMinutes > 30) {
+      recommendations.push(
+        'التأخر المتكرر قد يُخصم من راتبك — حافظ على موعد الحضور.',
+      );
+    }
 
     return {
       profile,
       period: { month: { from: mFrom, to: mTo }, week: { from: wFrom, to: wTo } },
       attendance: {
         today: todayAtt || null,
+        today_late_minutes: lateMinutes,
+        today_early_leave_minutes: earlyLeaveMinutes,
+        expected_end_utc: expectedEndUtc,
         week: {
           minutes: Number(weekAgg.minutes || 0),
           days: Number(weekAgg.days || 0),
@@ -208,16 +317,13 @@ export class EmployeesService {
         advances_month: Number(adv.amount || 0),
         advances_lifetime: Number(advLifetime.amount || 0),
         net: Math.round(net * 100) / 100,
+        outstanding_debt: Math.round(outstandingDebt * 100) / 100,
         debt_warning: debtWarning,
       },
       tasks,
       requests,
-      recommendations: debtWarning
-        ? [
-            'مديونيتك تجاوزت رصيد الراتب الحالي.',
-            'قلّل من السلف الشهر القادم أو اطلب تمديد ساعات إضافية لزيادة الدخل.',
-          ]
-        : [],
+      warnings,
+      recommendations,
     };
   }
 
@@ -450,6 +556,9 @@ export class EmployeesService {
       target_hours_day?: number;
       target_hours_week?: number;
       overtime_rate?: number;
+      shift_start_time?: string;
+      shift_end_time?: string;
+      late_grace_min?: number;
     },
   ) {
     const [row] = await this.ds.query(
@@ -461,11 +570,15 @@ export class EmployeesService {
               salary_frequency  = COALESCE($6, salary_frequency),
               target_hours_day  = COALESCE($7, target_hours_day),
               target_hours_week = COALESCE($8, target_hours_week),
-              overtime_rate     = COALESCE($9, overtime_rate)
+              overtime_rate     = COALESCE($9, overtime_rate),
+              shift_start_time  = COALESCE($10::time, shift_start_time),
+              shift_end_time    = COALESCE($11::time, shift_end_time),
+              late_grace_min    = COALESCE($12, late_grace_min)
         WHERE id = $1
         RETURNING id, employee_no, job_title, hire_date, salary_amount,
                   salary_frequency, target_hours_day, target_hours_week,
-                  overtime_rate`,
+                  overtime_rate, shift_start_time, shift_end_time,
+                  late_grace_min`,
       [
         userId,
         dto.employee_no ?? null,
@@ -476,6 +589,9 @@ export class EmployeesService {
         dto.target_hours_day ?? null,
         dto.target_hours_week ?? null,
         dto.overtime_rate ?? null,
+        dto.shift_start_time ?? null,
+        dto.shift_end_time ?? null,
+        dto.late_grace_min ?? null,
       ],
     );
     if (!row) throw new NotFoundException('المستخدم غير موجود');

@@ -44,14 +44,21 @@ export interface EmployeeDashboard {
     target_hours_day: number | string;
     target_hours_week: number | string;
     overtime_rate: number | string;
+    shift_start_time?: string | null;
+    shift_end_time?: string | null;
+    late_grace_min?: number | string;
     role_name?: string;
     role_code?: string;
   };
   attendance: {
     today: any | null;
+    today_late_minutes: number;
+    today_early_leave_minutes: number;
+    expected_end_utc: string | null;
     week: { minutes: number; days: number; target_hours: number };
     month: { minutes: number; days: number };
   };
+  warnings: Array<{ kind: string; message: string }>;
   salary: {
     amount: number;
     frequency: 'daily' | 'weekly' | 'monthly';
@@ -128,6 +135,9 @@ export const employeesApi = {
       target_hours_day: number;
       target_hours_week: number;
       overtime_rate: number;
+      shift_start_time: string;
+      shift_end_time: string;
+      late_grace_min: number;
     }>,
   ) => unwrap<any>(api.patch(`/employees/${id}/profile`, body)),
 

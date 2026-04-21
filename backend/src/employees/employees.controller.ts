@@ -80,6 +80,9 @@ class ProfileDto {
   @IsOptional() @IsNumber() @Min(0) target_hours_day?: number;
   @IsOptional() @IsNumber() @Min(0) target_hours_week?: number;
   @IsOptional() @IsNumber() @Min(0) overtime_rate?: number;
+  @IsOptional() @IsString() shift_start_time?: string;   // "HH:MM"
+  @IsOptional() @IsString() shift_end_time?: string;
+  @IsOptional() @IsNumber() @Min(0) late_grace_min?: number;
 }
 
 @ApiBearerAuth()

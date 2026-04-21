@@ -75,6 +75,49 @@ function LiveElapsed({ since }: { since: string | null | undefined }) {
   );
 }
 
+/**
+ * Smart countdown to the expected end-of-shift. Shows:
+ *   • Time remaining until the target is reached (green)
+ *   • If past target: overtime accrued so far (amber) with a + sign
+ * Ticks every second. No-op if no clock-in.
+ */
+function ShiftCountdown({
+  clockIn,
+  expectedEnd,
+}: {
+  clockIn: string | null;
+  expectedEnd: string | null;
+}) {
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    if (!clockIn || !expectedEnd) return;
+    const t = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(t);
+  }, [clockIn, expectedEnd]);
+  if (!clockIn || !expectedEnd) return null;
+
+  const endMs = new Date(expectedEnd).getTime();
+  const diffMs = endMs - now.getTime();
+  const past = diffMs < 0;
+  const abs = Math.abs(diffMs);
+  const s = Math.floor(abs / 1000);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  const fmt = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+
+  return (
+    <div
+      className={`text-xs flex items-center gap-1.5 font-bold ${
+        past ? 'text-amber-700' : 'text-emerald-700'
+      }`}
+    >
+      {past ? '🟡 ساعات إضافية' : '🟢 متبقي للهدف'}
+      <span className="tabular-nums">{past ? '+' : ''}{fmt}</span>
+    </div>
+  );
+}
+
 export default function EmployeeProfile() {
   const qc = useQueryClient();
   const authUser = useAuthStore((s) => s.user);
@@ -121,6 +164,8 @@ function EmployeeDashboardBody({ data }: { data: EmployeeDashboard }) {
   const clockInAt = attendance.today?.clock_in || null;
   const clockOutAt = attendance.today?.clock_out || null;
   const isClockedIn = clockInAt && !clockOutAt;
+  const lateMin = Number(attendance.today_late_minutes || 0);
+  const earlyMin = Number(attendance.today_early_leave_minutes || 0);
 
   // Target minutes for today
   const targetDayMin = Math.round(
@@ -166,8 +211,16 @@ function EmployeeDashboardBody({ data }: { data: EmployeeDashboard }) {
                   : 'لم تسجّل حضورك'}
             </div>
             {isClockedIn ? (
-              <div className="text-3xl">
-                <LiveElapsed since={clockInAt} />
+              <div>
+                <div className="text-3xl">
+                  <LiveElapsed since={clockInAt} />
+                </div>
+                {attendance.expected_end_utc && (
+                  <ShiftCountdown
+                    clockIn={clockInAt}
+                    expectedEnd={attendance.expected_end_utc}
+                  />
+                )}
               </div>
             ) : (
               <div className="text-xl font-bold">
@@ -197,6 +250,28 @@ function EmployeeDashboardBody({ data }: { data: EmployeeDashboard }) {
           </div>
         </div>
       </div>
+
+      {/* ─── Shift-timing warnings ─── */}
+      {(lateMin > 0 || earlyMin > 0 || (data.warnings?.length || 0) > 0) && (
+        <div className="card p-4 border-2 border-rose-200 bg-rose-50">
+          <div className="flex items-start gap-2">
+            <AlertTriangle
+              className="text-rose-600 flex-shrink-0 mt-0.5"
+              size={18}
+            />
+            <div className="flex-1">
+              <div className="font-black text-rose-800 text-sm mb-1">
+                تنبيهات مواعيد اليوم
+              </div>
+              <ul className="space-y-1 text-xs text-rose-900">
+                {(data.warnings || []).map((w, i) => (
+                  <li key={i}>• {w.message}</li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ─── Recommendations + warnings ─── */}
       {recommendations.length > 0 && (

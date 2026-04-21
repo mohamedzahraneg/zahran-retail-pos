@@ -606,6 +606,15 @@ function ProfileForm({
   const [overtimeRate, setOvertimeRate] = useState(
     String(p?.overtime_rate ?? ''),
   );
+  const [shiftStart, setShiftStart] = useState(
+    (p?.shift_start_time as string) || '',
+  );
+  const [shiftEnd, setShiftEnd] = useState(
+    (p?.shift_end_time as string) || '',
+  );
+  const [lateGrace, setLateGrace] = useState(
+    String(p?.late_grace_min ?? ''),
+  );
 
   const save = useMutation({
     mutationFn: () =>
@@ -618,6 +627,9 @@ function ProfileForm({
         target_hours_day: targetDay ? Number(targetDay) : undefined,
         target_hours_week: targetWeek ? Number(targetWeek) : undefined,
         overtime_rate: overtimeRate ? Number(overtimeRate) : undefined,
+        shift_start_time: shiftStart ? shiftStart.slice(0, 5) : undefined,
+        shift_end_time: shiftEnd ? shiftEnd.slice(0, 5) : undefined,
+        late_grace_min: lateGrace ? Number(lateGrace) : undefined,
       }),
     onSuccess: () => {
       toast.success('تم حفظ الملف');
@@ -698,6 +710,31 @@ function ProfileForm({
             className="input w-full"
             value={overtimeRate}
             onChange={(e) => setOvertimeRate(e.target.value)}
+          />
+        </Field>
+        <Field label="بداية الوردية">
+          <input
+            type="time"
+            className="input w-full"
+            value={shiftStart}
+            onChange={(e) => setShiftStart(e.target.value)}
+          />
+        </Field>
+        <Field label="نهاية الوردية">
+          <input
+            type="time"
+            className="input w-full"
+            value={shiftEnd}
+            onChange={(e) => setShiftEnd(e.target.value)}
+          />
+        </Field>
+        <Field label="سماحة التأخير (بالدقائق)">
+          <input
+            type="number"
+            min="0"
+            className="input w-full"
+            value={lateGrace}
+            onChange={(e) => setLateGrace(e.target.value)}
           />
         </Field>
       </div>
