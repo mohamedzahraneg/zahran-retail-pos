@@ -143,7 +143,23 @@ async function networkFirstWithCache(req, timeoutMs = 4000) {
   } catch {
     const cached = await cacheMatch(req);
     if (cached) return cached;
-    throw new Error('offline and not cached');
+    // No network, no cache — return a soft offline envelope so the
+    // client sees a real HTTP response instead of a fetch crash.
+    const url = new URL(req.url);
+    const isApi = url.pathname.startsWith('/api/');
+    const body = isApi
+      ? JSON.stringify({ offline: true, data: null, message: 'offline' })
+      : 'offline';
+    return new Response(body, {
+      status: 503,
+      statusText: 'Offline',
+      headers: {
+        'Content-Type': isApi
+          ? 'application/json; charset=utf-8'
+          : 'text/plain; charset=utf-8',
+        'X-Offline': '1',
+      },
+    });
   }
 }
 

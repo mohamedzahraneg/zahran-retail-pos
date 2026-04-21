@@ -30,7 +30,17 @@ const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       staleTime: 60_000,
-      retry: 2,
+      // Don't retry when the browser has no network — every attempt
+      // just adds another ERR_INTERNET_DISCONNECTED to the console.
+      retry: (failureCount, _error) => {
+        if (!navigator.onLine) return false;
+        return failureCount < 2;
+      },
+      // Pause polling while offline so the console stays quiet and
+      // the battery isn't drained by hopeless retries. Resumes
+      // automatically when the browser reconnects.
+      refetchIntervalInBackground: false,
+      networkMode: 'offlineFirst',
       refetchOnWindowFocus: false,
     },
   },
