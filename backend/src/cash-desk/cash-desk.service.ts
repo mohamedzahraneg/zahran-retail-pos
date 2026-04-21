@@ -156,4 +156,77 @@ export class CashDeskService {
       `SELECT * FROM v_dashboard_cashflow_today`,
     );
   }
+
+  /**
+   * Manually deposit or withdraw cash from a cashbox. Used for opening
+   * balances, owner top-ups, bank deposits, etc. Accepts an optional
+   * `txn_date` so backdated adjustments can be recorded (e.g. "this was
+   * yesterday's opening float"). The balance update still happens now —
+   * only the transaction timestamp is backdated, which is what reports
+   * and cashflow views read.
+   */
+  async deposit(
+    dto: {
+      cashbox_id: string;
+      direction: 'in' | 'out';
+      amount: number;
+      category?: string;
+      notes?: string;
+      txn_date?: string; // YYYY-MM-DD
+    },
+    userId: string,
+  ) {
+    if (!dto.amount || Number(dto.amount) <= 0) {
+      throw new Error('amount must be positive');
+    }
+    if (dto.direction !== 'in' && dto.direction !== 'out') {
+      throw new Error('direction must be in or out');
+    }
+    return this.ds.transaction(async (em) => {
+      const [box] = await em.query(
+        `SELECT current_balance FROM cashboxes WHERE id = $1 FOR UPDATE`,
+        [dto.cashbox_id],
+      );
+      if (!box) throw new Error('cashbox not found');
+      const delta = dto.direction === 'in' ? Number(dto.amount) : -Number(dto.amount);
+      const newBalance = Number(box.current_balance || 0) + delta;
+
+      // created_at: use supplied date at 10:00 Cairo, else now().
+      const createdExpr = dto.txn_date
+        ? `(($1::date) + TIME '10:00') AT TIME ZONE 'Africa/Cairo'`
+        : `now()`;
+      const createdParams = dto.txn_date ? [dto.txn_date] : [];
+
+      const [txn] = await em.query(
+        `
+        INSERT INTO cashbox_transactions
+          (cashbox_id, direction, amount, category,
+           reference_type, balance_after, user_id, notes, created_at)
+        VALUES ($${createdParams.length + 1}, $${createdParams.length + 2}::txn_direction,
+                $${createdParams.length + 3}, $${createdParams.length + 4},
+                'cashbox'::entity_type, $${createdParams.length + 5},
+                $${createdParams.length + 6}, $${createdParams.length + 7},
+                ${createdExpr})
+        RETURNING id, amount, balance_after, created_at
+        `,
+        [
+          ...createdParams,
+          dto.cashbox_id,
+          dto.direction,
+          dto.amount,
+          dto.category || (dto.direction === 'in' ? 'manual_deposit' : 'manual_withdraw'),
+          newBalance,
+          userId,
+          dto.notes || null,
+        ],
+      );
+
+      await em.query(
+        `UPDATE cashboxes SET current_balance = $2, updated_at = now() WHERE id = $1`,
+        [dto.cashbox_id, newBalance],
+      );
+
+      return { ...txn, new_balance: newBalance };
+    });
+  }
 }

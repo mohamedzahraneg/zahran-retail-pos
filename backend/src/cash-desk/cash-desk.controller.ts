@@ -8,7 +8,16 @@ import {
   Query,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
-import { IsString, MinLength } from 'class-validator';
+import {
+  IsDateString,
+  IsIn,
+  IsNumber,
+  IsOptional,
+  IsString,
+  IsUUID,
+  MinLength,
+  Min,
+} from 'class-validator';
 import { CashDeskService } from './cash-desk.service';
 import {
   CreateCustomerPaymentDto,
@@ -22,6 +31,15 @@ import {
 
 class VoidPaymentDto {
   @IsString() @MinLength(3) reason: string;
+}
+
+class CashDepositDto {
+  @IsUUID() cashbox_id: string;
+  @IsIn(['in', 'out']) direction: 'in' | 'out';
+  @IsNumber() @Min(0.01) amount: number;
+  @IsOptional() @IsString() category?: string;
+  @IsOptional() @IsString() notes?: string;
+  @IsOptional() @IsDateString() txn_date?: string;
 }
 
 @ApiBearerAuth()
@@ -78,5 +96,12 @@ export class CashDeskController {
   @Get('supplier-payments')
   listSupplier(@Query('supplier_id') supplierId?: string) {
     return this.svc.listSupplierPayments(supplierId);
+  }
+
+  // ── Manual cashbox deposits / withdrawals (opening balance, top-ups) ──
+  @Post('deposit')
+  @Roles('admin', 'manager', 'accountant')
+  deposit(@Body() dto: CashDepositDto, @CurrentUser() user: JwtUser) {
+    return this.svc.deposit(dto, user.userId);
   }
 }

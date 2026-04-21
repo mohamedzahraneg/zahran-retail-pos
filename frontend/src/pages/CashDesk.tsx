@@ -50,6 +50,7 @@ export default function CashDesk() {
   const [tab, setTab] = useState<Tab>('receipts');
   const [showReceipt, setShowReceipt] = useState(false);
   const [showSupplierPay, setShowSupplierPay] = useState(false);
+  const [showDeposit, setShowDeposit] = useState(false);
   const [voidTarget, setVoidTarget] = useState<CustomerPayment | null>(null);
   const [q, setQ] = useState('');
 
@@ -130,6 +131,13 @@ export default function CashDesk() {
             onClick={() => setShowSupplierPay(true)}
           >
             <ArrowUpCircle size={18} /> دفع لمورد
+          </button>
+          <button
+            className="btn-secondary"
+            onClick={() => setShowDeposit(true)}
+            title="إيداع يدوي — رصيد افتتاحي أو تمويل"
+          >
+            <Plus size={18} /> إيداع/رصيد افتتاحي
           </button>
         </div>
       </div>
@@ -258,6 +266,18 @@ export default function CashDesk() {
           onSuccess={() => {
             setVoidTarget(null);
             qc.invalidateQueries({ queryKey: ['customer-payments'] });
+            qc.invalidateQueries({ queryKey: ['cashflow-today'] });
+          }}
+        />
+      )}
+
+      {showDeposit && (
+        <DepositModal
+          cashboxes={cashboxes}
+          onClose={() => setShowDeposit(false)}
+          onSuccess={() => {
+            setShowDeposit(false);
+            qc.invalidateQueries({ queryKey: ['cashboxes'] });
             qc.invalidateQueries({ queryKey: ['cashflow-today'] });
           }}
         />
@@ -1054,5 +1074,170 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <span className="text-xs font-bold text-slate-600 mb-1 block">{label}</span>
       {children}
     </label>
+  );
+}
+
+function DepositModal({
+  cashboxes,
+  onClose,
+  onSuccess,
+}: {
+  cashboxes: Cashbox[];
+  onClose: () => void;
+  onSuccess: () => void;
+}) {
+  const [cashboxId, setCashboxId] = useState(cashboxes[0]?.id ?? '');
+  const [direction, setDirection] = useState<'in' | 'out'>('in');
+  const [amount, setAmount] = useState('');
+  const [txnDate, setTxnDate] = useState(() => {
+    // today in Cairo
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Africa/Cairo',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(new Date());
+    const y = parts.find((p) => p.type === 'year')?.value;
+    const m = parts.find((p) => p.type === 'month')?.value;
+    const d = parts.find((p) => p.type === 'day')?.value;
+    return `${y}-${m}-${d}`;
+  });
+  const [category, setCategory] = useState('opening_balance');
+  const [notes, setNotes] = useState('');
+
+  const submit = useMutation({
+    mutationFn: () =>
+      cashDeskApi.deposit({
+        cashbox_id: cashboxId,
+        direction,
+        amount: Number(amount),
+        category,
+        notes: notes || undefined,
+        txn_date: txnDate,
+      }),
+    onSuccess: (r) => {
+      toast.success(
+        `تم — الرصيد الجديد ${Number(r.new_balance).toLocaleString('en-US', {
+          minimumFractionDigits: 2,
+        })} ج.م`,
+      );
+      onSuccess();
+    },
+    onError: (e: any) => {
+      toast.error(e?.response?.data?.message || e.message || 'فشل الإيداع');
+    },
+  });
+
+  const disabled =
+    !cashboxId || !amount || Number(amount) <= 0 || submit.isPending;
+
+  return (
+    <Modal title="إيداع / رصيد افتتاحي" onClose={onClose}>
+      <div className="space-y-3">
+        <Field label="الخزينة">
+          <select
+            className="input w-full"
+            value={cashboxId}
+            onChange={(e) => setCashboxId(e.target.value)}
+          >
+            {cashboxes.map((cb) => (
+              <option key={cb.id} value={cb.id}>
+                {cb.name} — رصيد {EGP(cb.current_balance)}
+              </option>
+            ))}
+          </select>
+        </Field>
+
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="النوع">
+            <div className="flex gap-2">
+              <button
+                type="button"
+                className={`flex-1 py-2 rounded-lg text-sm font-bold border ${
+                  direction === 'in'
+                    ? 'bg-emerald-50 border-emerald-300 text-emerald-700'
+                    : 'bg-white border-slate-200 text-slate-600'
+                }`}
+                onClick={() => setDirection('in')}
+              >
+                إيداع +
+              </button>
+              <button
+                type="button"
+                className={`flex-1 py-2 rounded-lg text-sm font-bold border ${
+                  direction === 'out'
+                    ? 'bg-rose-50 border-rose-300 text-rose-700'
+                    : 'bg-white border-slate-200 text-slate-600'
+                }`}
+                onClick={() => setDirection('out')}
+              >
+                سحب −
+              </button>
+            </div>
+          </Field>
+
+          <Field label="المبلغ (ج.م)">
+            <input
+              type="number"
+              inputMode="decimal"
+              min="0"
+              step="0.01"
+              className="input w-full"
+              value={amount}
+              onChange={(e) => setAmount(e.target.value)}
+              placeholder="0.00"
+              autoFocus
+            />
+          </Field>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="التاريخ">
+            <input
+              type="date"
+              className="input w-full"
+              value={txnDate}
+              onChange={(e) => setTxnDate(e.target.value)}
+            />
+          </Field>
+          <Field label="التصنيف">
+            <select
+              className="input w-full"
+              value={category}
+              onChange={(e) => setCategory(e.target.value)}
+            >
+              <option value="opening_balance">رصيد افتتاحي</option>
+              <option value="owner_topup">تمويل من المالك</option>
+              <option value="bank_deposit">إيداع بنكي</option>
+              <option value="adjustment">تسوية يدوية</option>
+              <option value="other">أخرى</option>
+            </select>
+          </Field>
+        </div>
+
+        <Field label="ملاحظات">
+          <input
+            type="text"
+            className="input w-full"
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            placeholder="اختياري"
+          />
+        </Field>
+
+        <div className="flex justify-end gap-2 pt-2">
+          <button className="btn-ghost" onClick={onClose} disabled={submit.isPending}>
+            إلغاء
+          </button>
+          <button
+            className="btn-primary"
+            onClick={() => submit.mutate()}
+            disabled={disabled}
+          >
+            {submit.isPending ? 'جارٍ الحفظ…' : 'تأكيد'}
+          </button>
+        </div>
+      </div>
+    </Modal>
   );
 }

@@ -112,4 +112,17 @@ export const cashDeskApi = {
         params: supplier_id ? { supplier_id } : undefined,
       }),
     ),
+
+  // Manual deposit / withdrawal (opening balance, owner top-up, etc.)
+  deposit: (payload: {
+    cashbox_id: string;
+    direction: 'in' | 'out';
+    amount: number;
+    category?: string;
+    notes?: string;
+    txn_date?: string; // YYYY-MM-DD
+  }) =>
+    unwrap<{ id: number; amount: string; balance_after: string; new_balance: number }>(
+      api.post('/cash-desk/deposit', payload),
+    ),
 };
