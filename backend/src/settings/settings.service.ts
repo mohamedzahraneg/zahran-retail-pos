@@ -346,6 +346,7 @@ export class SettingsService {
         { code: 'products.import',          label: 'استيراد Excel للمنتجات' },
         { code: 'products.barcode',         label: 'طباعة الباركود' },
         { code: 'products.cost',            label: 'عرض سعر التكلفة' },
+        { code: 'products.value_view',      label: 'عرض إجمالي قيمة المخزون' },
         { code: 'products.price_change',    label: 'تعديل سعر البيع من شاشة المنتجات' },
         { code: 'categories.view',          label: 'عرض الفئات' },
         { code: 'categories.manage',        label: 'إدارة المجموعات والفئات' },

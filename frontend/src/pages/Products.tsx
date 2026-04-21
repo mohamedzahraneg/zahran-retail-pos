@@ -26,6 +26,7 @@ import { suppliersApi, Supplier } from '@/api/suppliers.api';
 import { stockApi } from '@/api/stock.api';
 import { uploadsApi, resolveImageUrl } from '@/api/uploads.api';
 import { settingsApi } from '@/api/settings.api';
+import { useAuthStore } from '@/stores/auth.store';
 import { compressImage } from '@/utils/compressImage';
 import { useTableSort } from '@/lib/useTableSort';
 
@@ -60,6 +61,9 @@ export default function Products() {
   const [colPrice, setColPrice] = useState('');
   const [colStock, setColStock] = useState('');
   const [colVariant, setColVariant] = useState('');
+  const canSeeStockValue = useAuthStore((s) =>
+    s.hasPermission('products.value_view'),
+  );
   const [showGroups, setShowGroups] = useState(false);
   const qc = useQueryClient();
 
@@ -157,7 +161,11 @@ export default function Products() {
       (s, p) => s + Number((p as any).total_stock || 0),
       0,
     );
-    return { products, variants, units };
+    const value = all.reduce(
+      (s, p) => s + Number((p as any).stock_value || 0),
+      0,
+    );
+    return { products, variants, units, value };
   }, [data]);
 
   const { sorted, thProps, sortIcon } = useTableSort(filteredData, null, 'asc');
@@ -642,6 +650,14 @@ export default function Products() {
                 {catalogTotals.units.toLocaleString('en-US')}
               </span>
             </div>
+            {canSeeStockValue && (
+              <div className="flex items-center gap-1 border-r border-slate-700 pr-4">
+                <span className="text-slate-400">قيمة المخزون:</span>
+                <span className="font-black tabular-nums text-amber-300">
+                  {EGP(catalogTotals.value)}
+                </span>
+              </div>
+            )}
           </div>
         </div>
       </div>
