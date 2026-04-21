@@ -45,7 +45,7 @@ export default function App() {
       <Route
         element={
           <ProtectedRoute>
-            <AppLayout title="زهران — نظام البيع" />
+            <AppLayout title="" />
           </ProtectedRoute>
         }
       >

@@ -32,6 +32,7 @@ import {
 } from 'lucide-react';
 import { dashboardApi } from '@/api/dashboard.api';
 import { accountingApi } from '@/api/accounting.api';
+import { useAuthStore } from '@/stores/auth.store';
 import { ReturnsWidget } from '@/components/dashboard/ReturnsWidget';
 import {
   PeriodSelector,
@@ -255,11 +256,30 @@ export default function Dashboard() {
   const salespeople = analytics?.salespersonPerf ?? data?.salespersonPerf ?? [];
   const products = data?.topProducts || [];
 
+  const authUser = useAuthStore((s) => s.user);
+  const displayName =
+    authUser?.full_name || authUser?.username || 'بك';
+
   const now = new Date();
   const dayStr = now.toLocaleDateString('ar-EG-u-ca-gregory', {
     weekday: 'long',
   });
   const dateStr = now.toLocaleDateString('en-GB');
+
+  // Cairo hour for time-of-day greeting.
+  const cairoHour = Number(
+    new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Africa/Cairo',
+      hour: '2-digit',
+      hour12: false,
+    }).format(now),
+  );
+  const greeting =
+    cairoHour >= 4 && cairoHour < 12
+      ? 'صباح الخير'
+      : cairoHour >= 12 && cairoHour < 18
+        ? 'مساء الخير'
+        : 'مساء الخير';
 
   return (
     <div className="space-y-6">
@@ -280,7 +300,9 @@ export default function Dashboard() {
             <div className="text-xs uppercase tracking-widest opacity-80">
               لوحة التحكم
             </div>
-            <div className="text-3xl font-black mt-1">أهلاً بك 👋</div>
+            <div className="text-3xl font-black mt-1">
+              {greeting} {displayName} 👋
+            </div>
             <div className="text-sm opacity-90 mt-1">
               {dayStr} · {dateStr}
             </div>

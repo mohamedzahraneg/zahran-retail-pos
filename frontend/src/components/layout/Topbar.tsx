@@ -4,8 +4,9 @@ import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { alertsApi } from '@/api/alerts.api';
 import { useLayoutStore } from '@/stores/layout.store';
+import { PrayerStrip } from './PrayerStrip';
 
-export function Topbar({ title }: { title: string }) {
+export function Topbar({ title: _title }: { title: string }) {
   const [online, setOnline] = useState(navigator.onLine);
   const navigate = useNavigate();
   const openMobile = useLayoutStore((s) => s.openMobile);
@@ -32,7 +33,7 @@ export function Topbar({ title }: { title: string }) {
 
   return (
     <header className="h-14 md:h-16 bg-white border-b border-slate-200 px-3 md:px-6 flex items-center justify-between sticky top-0 z-30">
-      <div className="flex items-center gap-2 md:gap-3 min-w-0">
+      <div className="flex items-center gap-2 md:gap-4 min-w-0 flex-1">
         <button
           onClick={openMobile}
           className="p-2 rounded-lg hover:bg-slate-100 text-slate-600 lg:hidden"
@@ -40,9 +41,7 @@ export function Topbar({ title }: { title: string }) {
         >
           <Menu size={22} />
         </button>
-        <h1 className="text-base md:text-xl font-black text-slate-800 truncate">
-          {title}
-        </h1>
+        <PrayerStrip />
       </div>
       <div className="flex items-center gap-2 md:gap-4">
         <div
