@@ -677,21 +677,28 @@ export class AccountingService {
         WHERE expense_date BETWEEN $1::date AND $2::date`,
       [from, to],
     );
+    // Payments: money ACTUALLY received in the period — use the payment
+    // timestamp, not the invoice completion timestamp. Counting by
+    // invoice date double-dipped deposits and missed receipts that
+    // settled old invoices.
     const [payments] = await this.ds.query(
-      `SELECT COALESCE(SUM(ip.amount), 0)::numeric(14,2) AS today_payments,
-              COUNT(*)::int                               AS payments_count
-         FROM invoice_payments ip
-         JOIN invoices i ON i.id = ip.invoice_id
-        WHERE (COALESCE(i.completed_at, i.created_at) AT TIME ZONE 'Africa/Cairo')::date
+      `SELECT COALESCE(SUM(amount), 0)::numeric(14,2) AS today_payments,
+              COUNT(*)::int                            AS payments_count
+         FROM invoice_payments
+        WHERE (created_at AT TIME ZONE 'Africa/Cairo')::date
               BETWEEN $1::date AND $2::date`,
       [from, to],
     );
-    // Shifts OPENED in range — remaining = expected - actual
+    // Shift variance across every CLOSED shift in the range.
+    // variance = actual - expected   →   +surplus / −deficit
+    // Open/pending shifts are excluded — they have no variance yet.
     const [shift] = await this.ds.query(
-      `SELECT COALESCE(SUM(expected_closing - COALESCE(actual_closing, 0)), 0)
-                ::numeric(14,2) AS remaining
+      `SELECT COALESCE(SUM(COALESCE(actual_closing, 0) - expected_closing), 0)
+                ::numeric(14,2) AS variance
          FROM shifts
-        WHERE (opened_at AT TIME ZONE 'Africa/Cairo')::date
+        WHERE status = 'closed'
+          AND actual_closing IS NOT NULL
+          AND (opened_at AT TIME ZONE 'Africa/Cairo')::date
               BETWEEN $1::date AND $2::date`,
       [from, to],
     );
@@ -706,7 +713,10 @@ export class AccountingService {
       today_expense_count: Number(expCount?.n || 0),
       today_payments: Number(payments?.today_payments || 0),
       today_payments_count: Number(payments?.payments_count || 0),
-      today_shift_remaining: Number(shift?.remaining || 0),
+      // Variance semantics: positive = surplus, negative = deficit.
+      // `today_shift_remaining` is kept for backwards compat — same value.
+      today_shift_variance: Number(shift?.variance || 0),
+      today_shift_remaining: Number(shift?.variance || 0),
       pending_expenses: pendingRow.pending_expenses,
       pending_amount: Number(pendingRow.pending_amount),
     };

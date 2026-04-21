@@ -2,6 +2,7 @@ import { Module, Controller, Get } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD } from '@nestjs/core';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
+import { ScheduleModule } from '@nestjs/schedule';
 
 import configuration from './config/configuration';
 import { DatabaseModule } from './database/database.module';
@@ -69,6 +70,7 @@ class HealthController {
       envFilePath: ['.env', '.env.local'],
     }),
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 120 }]),
+    ScheduleModule.forRoot(),
     ServeStaticModule.forRoot({
       rootPath: join(process.cwd(), process.env.UPLOAD_DIR || 'uploads'),
       serveRoot: '/uploads',

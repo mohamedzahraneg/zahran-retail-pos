@@ -103,7 +103,10 @@ export default function Accounting() {
         const expCount = Number(k?.today_expense_count ?? 0);
         const payAmt = Number(k?.today_payments ?? 0);
         const payCount = Number(k?.today_payments_count ?? 0);
-        const shiftRem = Number(k?.today_shift_remaining ?? 0);
+        // Shift variance: +surplus / −deficit (matches shift detail modal).
+        const shiftVar = Number(
+          k?.today_shift_variance ?? k?.today_shift_remaining ?? 0,
+        );
         const profitP = profitLabel(todayProfit, `أرباح ${periodNoun}`);
         return (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
@@ -150,14 +153,24 @@ export default function Accounting() {
               }`}
             />
             <KpiCard
-              title={`الباقي من ورديات ${periodNoun}`}
-              value={EGP(shiftRem)}
+              title={`فروق ورديات ${periodNoun}`}
+              value={
+                Math.abs(shiftVar) < 0.01
+                  ? EGP(0)
+                  : `${shiftVar > 0 ? '+' : '−'}${EGP(Math.abs(shiftVar))}`
+              }
               icon={AlertCircle}
-              color={shiftRem < 0 ? 'rose' : 'emerald'}
+              color={
+                shiftVar > 0.01
+                  ? 'emerald'
+                  : shiftVar < -0.01
+                    ? 'rose'
+                    : 'indigo'
+              }
               subtitle={
-                shiftRem > 0
-                  ? 'مستحق في الخزينة'
-                  : shiftRem < 0
+                shiftVar > 0.01
+                  ? 'زيادة في الخزينة'
+                  : shiftVar < -0.01
                     ? 'عجز في الخزينة'
                     : 'مطابقة تامة'
               }
