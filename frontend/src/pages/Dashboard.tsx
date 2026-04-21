@@ -240,6 +240,9 @@ export default function Dashboard() {
   }[period.key];
 
   const recs = useRecommendations(data, pl, periodNoun);
+  const authUser = useAuthStore((s) => s.user);
+  const displayName =
+    authUser?.full_name || authUser?.username || 'بك';
 
   if (isLoading) {
     return (
@@ -255,10 +258,6 @@ export default function Dashboard() {
   const cashiers = analytics?.cashierPerf ?? data?.cashierPerf ?? [];
   const salespeople = analytics?.salespersonPerf ?? data?.salespersonPerf ?? [];
   const products = data?.topProducts || [];
-
-  const authUser = useAuthStore((s) => s.user);
-  const displayName =
-    authUser?.full_name || authUser?.username || 'بك';
 
   const now = new Date();
   const dayStr = now.toLocaleDateString('ar-EG-u-ca-gregory', {
