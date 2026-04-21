@@ -134,12 +134,15 @@ export default function Suppliers() {
   }, [outstanding]);
 
   const totals = useMemo(() => {
+    // current_balance already *includes* the opening balance (it's
+    // seeded at create-time and reconciled on updates), so the
+    // "total" is just the sum of current_balance. Opening is shown
+    // as a breakdown hint for transparency, not added again.
     const due = outstanding.reduce((s, o) => s + Number(o.current_balance || 0), 0);
     const overdue = outstanding.reduce(
       (s, o) => s + Number(o.overdue_amount || 0),
       0,
     );
-    // include opening balances in the total payable overview
     const opening = suppliers.reduce(
       (s, x) => s + Number(x.opening_balance || 0),
       0,
@@ -148,7 +151,7 @@ export default function Suppliers() {
       due,
       overdue,
       opening,
-      total: due + opening,
+      total: due, // opening is embedded in due
       count: outstanding.length,
     };
   }, [outstanding, suppliers]);
@@ -177,7 +180,9 @@ export default function Suppliers() {
           value={EGP(totals.total)}
           color="bg-amber-50"
           icon={<CreditCard className="text-amber-600" />}
-          hint={`جاري ${EGP(totals.due)} · افتتاحي ${EGP(totals.opening)}`}
+          hint={`جاري ${EGP(
+            Math.max(0, totals.due - totals.opening),
+          )} · افتتاحي ${EGP(totals.opening)}`}
         />
         <Kpi
           title="المدفوعات — آخر 30 يوم"
@@ -483,7 +488,10 @@ function SuppliersTotalsBar({
   paid30: number;
   paidCount30: number;
 }) {
-  const total = outstanding + opening;
+  // outstanding already contains opening — use it directly, break it
+  // out on the right for transparency.
+  const total = outstanding;
+  const running = Math.max(0, outstanding - opening);
   return (
     <div className="sticky bottom-0 -mx-3 md:-mx-6 mt-6 bg-gradient-to-l from-slate-900 via-slate-800 to-slate-900 text-white px-4 py-3 shadow-2xl border-t border-slate-700 z-40">
       <div className="flex items-center justify-between gap-4 flex-wrap text-xs">
@@ -495,7 +503,7 @@ function SuppliersTotalsBar({
           />
           <TotalPill
             label="جاري"
-            value={EGP(outstanding)}
+            value={EGP(running)}
             accent="text-indigo-300"
           />
           <TotalPill
@@ -839,7 +847,6 @@ const TYPE_TONE: Record<string, string> = {
 
 function SuppliersAnalytics({ analytics }: { analytics: any }) {
   const outstandingTotal = Number(analytics.totals.outstanding_total || 0);
-  const openingTotal = Number(analytics.totals.opening_total || 0);
   return (
     <div className="grid lg:grid-cols-3 gap-4">
       <div className="card p-5">
@@ -849,11 +856,9 @@ function SuppliersAnalytics({ analytics }: { analytics: any }) {
         </div>
         <div className="space-y-2">
           {analytics.byType.map((t: any) => {
-            const amount = Number(t.outstanding || 0) + Number(t.opening || 0);
-            const pct =
-              outstandingTotal + openingTotal > 0
-                ? (amount / (outstandingTotal + openingTotal)) * 100
-                : 0;
+            // outstanding already embeds opening — don't add it twice.
+            const amount = Number(t.outstanding || 0);
+            const pct = outstandingTotal > 0 ? (amount / outstandingTotal) * 100 : 0;
             return (
               <div key={t.supplier_type}>
                 <div className="flex items-center justify-between text-xs mb-1">
