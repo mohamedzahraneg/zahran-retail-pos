@@ -411,14 +411,48 @@ function EmployeeDashboardBody({ data }: { data: EmployeeDashboard }) {
       </div>
 
       {/* ─── Daily history ─── */}
-      <HistoryCard />
+      <HistoryCard userId={profile.id} />
     </div>
   );
 }
 
 /* ───────── History card ───────── */
 
-function HistoryCard() {
+/** Day cell: weekday (Arabic) + dd/mm/yyyy (English digits). */
+function fmtDayHeader(iso: string) {
+  const d = new Date(iso);
+  const dow = d.toLocaleDateString('ar-EG', {
+    timeZone: 'Africa/Cairo',
+    weekday: 'long',
+  });
+  const date = d.toLocaleDateString('en-GB', {
+    timeZone: 'Africa/Cairo',
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+  });
+  return { dow, date };
+}
+
+/** HH:MM:SS AM/PM — digits in English, AM/PM in Arabic (ص/م). */
+function fmtClockAr(iso: string | null) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  const t = d.toLocaleTimeString('en-GB', {
+    timeZone: 'Africa/Cairo',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true,
+  });
+  // en-GB hour12 output ends with " AM" / " PM" — swap for ص/م.
+  return t.replace(/\s?AM\s*$/i, ' ص').replace(/\s?PM\s*$/i, ' م');
+}
+
+function HistoryCard({ userId }: { userId?: string }) {
+  const qc = useQueryClient();
+  const hasPermission = useAuthStore((s) => s.hasPermission);
+  const canGrantFullDay = hasPermission('employee.bonuses.manage');
   const [range, setRange] = useState<'week' | 'month'>('month');
   const now = new Date();
   const to = now.toISOString().slice(0, 10);
@@ -436,6 +470,27 @@ function HistoryCard() {
 
   const days = data?.days || [];
   const targetDayHr = data?.target_hours_day || 8;
+  const hourly = data?.hourly_rate || 0;
+  const fullDayWage = data?.full_day_wage || 0;
+
+  const payFullDay = useMutation({
+    mutationFn: (row: any) => {
+      const shortfall = Math.max(0, fullDayWage - Number(row.earned_hours_based || 0));
+      return employeesApi.addBonus(userId || (row as any).user_id || '', {
+        amount: Math.round(shortfall * 100) / 100,
+        kind: 'bonus',
+        bonus_date: row.day.slice(0, 10),
+        note: 'صرف يومية كاملة رغم التأخير/النقص',
+      });
+    },
+    onSuccess: () => {
+      toast.success('تم صرف اليومية الكاملة كمكافأة');
+      qc.invalidateQueries({ queryKey: ['employee-history-mine'] });
+      qc.invalidateQueries({ queryKey: ['employee-dashboard'] });
+    },
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.message || 'فشل صرف اليومية'),
+  });
 
   return (
     <div className="card p-5">
@@ -444,7 +499,7 @@ function HistoryCard() {
           <Clock size={18} className="text-indigo-600" />
           <h3 className="font-black text-slate-800">سجل الأيام</h3>
           <span className="text-[11px] text-slate-500">
-            الهدف {targetDayHr} س/يوم
+            الهدف {targetDayHr}س · قيمة الساعة {EGP(hourly)} · يومية كاملة {EGP(fullDayWage)}
           </span>
         </div>
         <div className="inline-flex rounded-lg bg-slate-100 p-1 text-xs">
@@ -480,62 +535,106 @@ function HistoryCard() {
               <th className="p-2 text-center">ساعات فعلية</th>
               <th className="p-2 text-center">إضافي</th>
               <th className="p-2 text-center">تأخير/نقص</th>
+              <th className="p-2 text-center">المستحق</th>
               <th className="p-2 text-center">حوافز</th>
               <th className="p-2 text-center">خصم</th>
               <th className="p-2 text-center">سلف</th>
+              {canGrantFullDay && <th className="p-2"></th>}
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {days.map((d) => (
-              <tr key={d.day}>
-                <td className="p-2 tabular-nums font-medium text-slate-700">
-                  {d.day}
-                </td>
-                <td className="p-2 text-center tabular-nums text-slate-600">
-                  {d.first_in
-                    ? new Date(d.first_in).toLocaleTimeString('ar-EG', {
-                        timeZone: 'Africa/Cairo',
-                        hour: '2-digit',
-                        minute: '2-digit',
-                        hour12: true,
-                      })
-                    : '—'}
-                </td>
-                <td className="p-2 text-center tabular-nums text-slate-600">
-                  {d.last_out
-                    ? new Date(d.last_out).toLocaleTimeString('ar-EG', {
-                        timeZone: 'Africa/Cairo',
-                        hour: '2-digit',
-                        minute: '2-digit',
-                        hour12: true,
-                      })
-                    : '—'}
-                </td>
-                <td className="p-2 text-center tabular-nums font-bold">
-                  {d.minutes ? fmtMinutes(d.minutes) : '—'}
-                </td>
-                <td className="p-2 text-center tabular-nums text-emerald-700 font-bold">
-                  {d.overtime_min ? `+${fmtMinutes(d.overtime_min)}` : '—'}
-                </td>
-                <td className="p-2 text-center tabular-nums text-rose-700 font-bold">
-                  {d.undertime_min && d.minutes
-                    ? `-${fmtMinutes(d.undertime_min)}`
-                    : '—'}
-                </td>
-                <td className="p-2 text-center tabular-nums text-indigo-700">
-                  {Number(d.bonuses) > 0 ? EGP(d.bonuses) : '—'}
-                </td>
-                <td className="p-2 text-center tabular-nums text-rose-700">
-                  {Number(d.deductions) > 0 ? EGP(d.deductions) : '—'}
-                </td>
-                <td className="p-2 text-center tabular-nums text-amber-700">
-                  {Number(d.advances) > 0 ? EGP(d.advances) : '—'}
-                </td>
-              </tr>
-            ))}
+            {days.map((d) => {
+              const h = fmtDayHeader(d.day);
+              const earned = Number((d as any).earned_hours_based || 0);
+              const earnedOt = Number((d as any).earned_overtime || 0);
+              const canShowFullDay =
+                canGrantFullDay &&
+                Number(d.minutes || 0) > 0 &&
+                earned < fullDayWage - 0.01;
+              return (
+                <tr key={d.day}>
+                  <td className="p-2 font-medium text-slate-700">
+                    <div>{h.dow}</div>
+                    <div className="text-[10px] font-mono text-slate-400 tabular-nums">
+                      {h.date}
+                    </div>
+                  </td>
+                  <td className="p-2 text-center text-slate-700">
+                    <span className="tabular-nums font-mono">
+                      {fmtClockAr(d.first_in)}
+                    </span>
+                  </td>
+                  <td className="p-2 text-center text-slate-700">
+                    <span className="tabular-nums font-mono">
+                      {fmtClockAr(d.last_out)}
+                    </span>
+                  </td>
+                  <td className="p-2 text-center tabular-nums font-bold">
+                    {d.minutes ? fmtMinutes(d.minutes) : '—'}
+                  </td>
+                  <td className="p-2 text-center tabular-nums text-emerald-700 font-bold">
+                    {d.overtime_min
+                      ? `+${fmtMinutes(d.overtime_min)}`
+                      : '—'}
+                    {earnedOt > 0 && (
+                      <div className="text-[10px] font-normal text-emerald-600">
+                        +{EGP(earnedOt)}
+                      </div>
+                    )}
+                  </td>
+                  <td className="p-2 text-center tabular-nums text-rose-700 font-bold">
+                    {d.undertime_min && d.minutes
+                      ? `-${fmtMinutes(d.undertime_min)}`
+                      : '—'}
+                  </td>
+                  <td className="p-2 text-center tabular-nums">
+                    {d.minutes ? (
+                      <>
+                        <span className="font-black text-indigo-700">
+                          {EGP(earned)}
+                        </span>
+                        {earned < fullDayWage && (
+                          <div className="text-[10px] text-slate-400 line-through">
+                            أصل {EGP(fullDayWage)}
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      '—'
+                    )}
+                  </td>
+                  <td className="p-2 text-center tabular-nums text-indigo-700">
+                    {Number(d.bonuses) > 0 ? EGP(d.bonuses) : '—'}
+                  </td>
+                  <td className="p-2 text-center tabular-nums text-rose-700">
+                    {Number(d.deductions) > 0 ? EGP(d.deductions) : '—'}
+                  </td>
+                  <td className="p-2 text-center tabular-nums text-amber-700">
+                    {Number(d.advances) > 0 ? EGP(d.advances) : '—'}
+                  </td>
+                  {canGrantFullDay && (
+                    <td className="p-2 text-center">
+                      {canShowFullDay && userId && (
+                        <button
+                          className="px-2 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[10px]"
+                          disabled={payFullDay.isPending}
+                          onClick={() => payFullDay.mutate(d)}
+                          title="إضافة مكافأة بمقدار الفرق لصرف اليومية كاملة"
+                        >
+                          صرف يومية كاملة
+                        </button>
+                      )}
+                    </td>
+                  )}
+                </tr>
+              );
+            })}
             {!days.length && (
               <tr>
-                <td colSpan={9} className="p-10 text-center text-slate-400">
+                <td
+                  colSpan={canGrantFullDay ? 11 : 10}
+                  className="p-10 text-center text-slate-400"
+                >
                   لا سجل في الفترة المحددة
                 </td>
               </tr>

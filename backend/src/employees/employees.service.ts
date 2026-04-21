@@ -648,12 +648,33 @@ export class EmployeesService {
    */
   async daysHistory(userId: string, fromISO: string, toISO: string) {
     const [profile] = await this.ds.query(
-      `SELECT target_hours_day FROM users WHERE id = $1`,
+      `SELECT target_hours_day, target_hours_week, salary_amount,
+              salary_frequency, overtime_rate
+         FROM users WHERE id = $1`,
       [userId],
     );
-    const targetDayMin = Math.round(
-      Number(profile?.target_hours_day || 8) * 60,
-    );
+    const targetDayHr = Number(profile?.target_hours_day || 8);
+    const targetWeekHr = Number(profile?.target_hours_week || targetDayHr * 6);
+    const targetDayMin = Math.round(targetDayHr * 60);
+    const salary = Number(profile?.salary_amount || 0);
+    const otRate = Number(profile?.overtime_rate || 1.5);
+    // Hourly rate anchored to frequency so the math stays consistent:
+    // daily  → salary / target_hours_day
+    // weekly → salary / target_hours_week
+    // monthly→ salary / (target_hours_week × 4)
+    let hourlyRate = 0;
+    if (salary > 0 && targetDayHr > 0) {
+      if (profile.salary_frequency === 'daily') {
+        hourlyRate = salary / targetDayHr;
+      } else if (profile.salary_frequency === 'weekly') {
+        hourlyRate = targetWeekHr > 0 ? salary / targetWeekHr : 0;
+      } else {
+        hourlyRate = targetWeekHr > 0 ? salary / (targetWeekHr * 4) : 0;
+      }
+    }
+    const fullDayWage = hourlyRate * targetDayHr;
+    const overtimeHourly = hourlyRate * otRate;
+
     const rows = await this.ds.query(
       `
       WITH days AS (
@@ -704,9 +725,31 @@ export class EmployeesService {
        ORDER BY d.day DESC`,
       [userId, fromISO, toISO, targetDayMin],
     );
+    // Enrich each row with computed wage figures so the client can
+    // show "المستحق" / "الأجر الكامل" without doing the math again.
+    const enriched = rows.map((r: any) => {
+      const actualMin = Number(r.minutes || 0);
+      const regularMin = Math.min(actualMin, targetDayMin);
+      const overtimeMin = Math.max(0, actualMin - targetDayMin);
+      const earnedHours =
+        (regularMin / 60) * hourlyRate + (overtimeMin / 60) * overtimeHourly;
+      return {
+        ...r,
+        hourly_rate: Math.round(hourlyRate * 100) / 100,
+        overtime_hourly_rate: Math.round(overtimeHourly * 100) / 100,
+        full_day_wage: Math.round(fullDayWage * 100) / 100,
+        earned_hours_based: Math.round(earnedHours * 100) / 100,
+        earned_overtime: Math.round((overtimeMin / 60) * overtimeHourly * 100) / 100,
+        earned_regular: Math.round((regularMin / 60) * hourlyRate * 100) / 100,
+      };
+    });
+
     return {
-      target_hours_day: targetDayMin / 60,
-      days: rows,
+      target_hours_day: targetDayHr,
+      hourly_rate: Math.round(hourlyRate * 100) / 100,
+      full_day_wage: Math.round(fullDayWage * 100) / 100,
+      overtime_rate: otRate,
+      days: enriched,
     };
   }
 }

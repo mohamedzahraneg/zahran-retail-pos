@@ -164,6 +164,9 @@ export const employeesApi = {
   myHistory: (from?: string, to?: string) =>
     unwrap<{
       target_hours_day: number;
+      hourly_rate: number;
+      full_day_wage: number;
+      overtime_rate: number;
       days: Array<{
         day: string;
         minutes: number;
@@ -174,6 +177,12 @@ export const employeesApi = {
         bonuses: string;
         deductions: string;
         advances: string;
+        hourly_rate: number;
+        overtime_hourly_rate: number;
+        full_day_wage: number;
+        earned_hours_based: number;
+        earned_overtime: number;
+        earned_regular: number;
       }>;
     }>(
       api.get('/employees/me/history', {
