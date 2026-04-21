@@ -107,13 +107,25 @@ CREATE INDEX IF NOT EXISTS ix_emp_tasks_open
   WHERE status IN ('pending','acknowledged');
 
 -- ── seed a stable employee_no for existing users ───────────────────────────
+-- Employee codes are plain digits so they line up with numeric
+-- expense_categories.code values — that's how legacy advances were
+-- tracked (one category per employee named after them).
 UPDATE users u
-   SET employee_no = 'EMP-' || LPAD(
-         (ROW_NUMBER() OVER (ORDER BY u.created_at))::text, 4, '0')
+   SET employee_no = ord.rn::text
   FROM (
-    SELECT id, created_at,
+    SELECT id,
            ROW_NUMBER() OVER (ORDER BY created_at) AS rn
       FROM users
   ) ord
  WHERE u.id = ord.id
    AND u.employee_no IS NULL;
+
+-- ── Auto-link any existing expenses whose category code matches an
+--    employee's employee_no. Treats the match as an advance.
+UPDATE expenses e
+   SET employee_user_id = u.id,
+       is_advance       = TRUE
+  FROM expense_categories ec
+  JOIN users u ON u.employee_no = ec.code
+ WHERE e.category_id = ec.id
+   AND e.employee_user_id IS NULL;
