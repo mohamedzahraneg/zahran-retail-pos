@@ -663,6 +663,111 @@ function lineSummary(items: any[] | undefined | null): string {
     .join(' · ');
 }
 
+type LineLike = {
+  variant_id: string;
+  product_name_snapshot?: string;
+  product_name?: string;
+  quantity?: number;
+  qty?: number;
+  unit_price?: number;
+  unit_cost?: number;
+  discount_amount?: number;
+  discount?: number;
+  color_name_snapshot?: string;
+  size_label_snapshot?: string;
+};
+
+function normQty(l: LineLike) {
+  return Number((l as any).quantity ?? (l as any).qty ?? 0);
+}
+function normPrice(l: LineLike) {
+  return Number(l.unit_price ?? 0);
+}
+function normDiscount(l: LineLike) {
+  return Number(l.discount_amount ?? l.discount ?? 0);
+}
+function displayName(l: LineLike) {
+  const parts = [
+    l.product_name_snapshot || l.product_name || '—',
+    [l.color_name_snapshot, l.size_label_snapshot].filter(Boolean).join(' · '),
+  ].filter(Boolean);
+  return parts.join(' — ');
+}
+
+/** Diff the lines between a before/after snapshot, producing a list of
+ *  human-readable change descriptions. */
+function diffLines(
+  before: LineLike[] | undefined,
+  after: LineLike[] | undefined,
+): Array<{ type: 'added' | 'removed' | 'qty' | 'price' | 'discount'; text: string }> {
+  const out: Array<any> = [];
+  const b = before || [];
+  const a = after || [];
+  const byId = (list: LineLike[]) => {
+    const m = new Map<string, LineLike>();
+    for (const l of list) m.set(l.variant_id, l);
+    return m;
+  };
+  const bMap = byId(b);
+  const aMap = byId(a);
+  // Added
+  for (const [id, al] of aMap) {
+    if (!bMap.has(id)) {
+      out.push({
+        type: 'added',
+        text: `إضافة صنف: ${displayName(al)} × ${normQty(al)} (سعر ${normPrice(al).toLocaleString('en-US')} ج.م)`,
+      });
+    }
+  }
+  // Removed
+  for (const [id, bl] of bMap) {
+    if (!aMap.has(id)) {
+      out.push({
+        type: 'removed',
+        text: `حذف صنف: ${displayName(bl)} × ${normQty(bl)}`,
+      });
+    }
+  }
+  // Quantity / price / discount changes
+  for (const [id, bl] of bMap) {
+    const al = aMap.get(id);
+    if (!al) continue;
+    const bQty = normQty(bl);
+    const aQty = normQty(al);
+    const bPrice = normPrice(bl);
+    const aPrice = normPrice(al);
+    const bDisc = normDiscount(bl);
+    const aDisc = normDiscount(al);
+    if (bQty !== aQty) {
+      out.push({
+        type: 'qty',
+        text: `تعديل الكمية لـ ${displayName(bl)}: ${bQty} → ${aQty}`,
+      });
+    }
+    if (bPrice !== aPrice) {
+      out.push({
+        type: 'price',
+        text: `تعديل السعر لـ ${displayName(bl)}: ${bPrice.toLocaleString('en-US')} → ${aPrice.toLocaleString('en-US')} ج.م`,
+      });
+    }
+    if (bDisc !== aDisc) {
+      out.push({
+        type: 'discount',
+        text: `تعديل الخصم لـ ${displayName(bl)}: ${bDisc.toLocaleString('en-US')} → ${aDisc.toLocaleString('en-US')} ج.م`,
+      });
+    }
+  }
+  return out;
+}
+
+const CHANGE_BADGE: Record<string, { bg: string; label: string }> = {
+  added:    { bg: 'bg-emerald-100 text-emerald-700 border-emerald-200', label: 'إضافة صنف' },
+  removed:  { bg: 'bg-rose-100 text-rose-700 border-rose-200',          label: 'حذف صنف' },
+  qty:      { bg: 'bg-amber-100 text-amber-700 border-amber-200',       label: 'تغيير كمية' },
+  price:    { bg: 'bg-indigo-100 text-indigo-700 border-indigo-200',    label: 'تغيير سعر' },
+  discount: { bg: 'bg-violet-100 text-violet-700 border-violet-200',    label: 'تغيير خصم' },
+};
+
 function EditHistoryTab({
   invoiceId,
   history,
@@ -741,8 +846,11 @@ function EditHistoryTab({
               {r.reason && (
                 <div className="text-slate-700">السبب: {r.reason}</div>
               )}
-              <div className="text-slate-600">
-                التغيير المقترح: {lineSummary(r.proposed_changes?.lines)}
+              <div>
+                <div className="text-[10px] font-bold text-slate-500 mb-1">
+                  التغييرات المقترحة
+                </div>
+                <PendingChanges request={r} />
               </div>
               {canDecide && (
                 <div className="flex items-center gap-2 pt-1">
@@ -860,7 +968,7 @@ function EditHistoryTab({
                 {h.reason && (
                   <div className="text-slate-700 mb-2">السبب: {h.reason}</div>
                 )}
-                <div className="grid grid-cols-2 gap-2">
+                <div className="grid grid-cols-2 gap-2 mb-2">
                   <div className="bg-white rounded border border-slate-200 p-2">
                     <div className="text-[10px] font-bold text-slate-500 mb-1">
                       قبل التعديل
@@ -894,6 +1002,7 @@ function EditHistoryTab({
                     </div>
                   </div>
                 </div>
+                <AppliedChanges history={h} />
               </div>
             );
           })}
@@ -1572,4 +1681,66 @@ function EditAddItemBar({
       )}
     </div>
   );
+}
+
+/* ───────── Change renderers ───────── */
+
+function ChangeList({ changes }: { changes: Array<{ type: string; text: string }> }) {
+  if (!changes.length) {
+    return (
+      <div className="text-[11px] text-slate-500">
+        لا اختلافات في البنود — قد يكون التعديل على الدفع أو الخصم الإجمالي فقط.
+      </div>
+    );
+  }
+  return (
+    <ul className="space-y-1">
+      {changes.map((c, i) => {
+        const badge = CHANGE_BADGE[c.type] || CHANGE_BADGE.qty;
+        return (
+          <li
+            key={i}
+            className="flex items-start gap-2 text-[11px] bg-white border border-slate-200 rounded px-2 py-1"
+          >
+            <span className={`chip border text-[10px] ${badge.bg}`}>
+              {badge.label}
+            </span>
+            <span className="text-slate-700 flex-1">{c.text}</span>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+/** Compare the original invoice (fetched via posApi.get) with the
+ *  request's proposed_changes.lines to render a concrete diff. */
+function PendingChanges({ request }: { request: any }) {
+  const { data: inv } = useQuery({
+    queryKey: ['invoice-baseline', request.invoice_id],
+    queryFn: () => posApi.get(request.invoice_id),
+    staleTime: 60_000,
+  });
+  const changes = diffLines(
+    (inv as any)?.items || (inv as any)?.lines || [],
+    request?.proposed_changes?.lines || [],
+  );
+  return <ChangeList changes={changes} />;
+}
+
+/** Diff the before_snapshot (full invoice+items) against the post-edit
+ *  snapshot fetched fresh from the server. */
+function AppliedChanges({ history }: { history: any }) {
+  const { data: current } = useQuery({
+    queryKey: ['invoice-post-edit', history.invoice_id],
+    queryFn: () => posApi.get(history.invoice_id),
+    staleTime: 30_000,
+    // Only load when needed — small optimization.
+    enabled: !!history?.id,
+  });
+  const beforeItems = history?.before_snapshot?.items || [];
+  const afterItems =
+    (current as any)?.items || (current as any)?.lines || [];
+  const changes = diffLines(beforeItems, afterItems);
+  return <ChangeList changes={changes} />;
 }

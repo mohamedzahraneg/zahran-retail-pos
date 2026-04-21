@@ -688,9 +688,9 @@ export class PosService {
       // ── 6) Re-apply new stock + insert items + capture cogs ───────
       const variants = await em.query(
         `SELECT v.id, v.cost_price, v.sku,
-                p.name_ar     AS product_name,
-                v.color_value AS color_name,
-                v.size_label  AS size_label
+                p.name_ar AS product_name,
+                v.color   AS color_name,
+                v.size    AS size_label
            FROM product_variants v
            JOIN products p ON p.id = v.product_id
           WHERE v.id = ANY($1::uuid[])`,
