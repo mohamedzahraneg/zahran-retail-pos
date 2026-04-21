@@ -86,7 +86,7 @@ export default function Invoices() {
     user?.role === 'manager';
 
   const [period, setPeriod] = useState<PeriodRange>(() =>
-    resolvePeriod('month'),
+    resolvePeriod('day'),
   );
   const [q, setQ] = useState('');
   const from = period.from;
@@ -272,7 +272,7 @@ export default function Invoices() {
               setAmountMin('');
               setAmountMax('');
               setStatus('all');
-              setPeriod(resolvePeriod('month'));
+              setPeriod(resolvePeriod('day'));
             }}
             className="btn-ghost w-full"
             title="مسح الفلاتر"
