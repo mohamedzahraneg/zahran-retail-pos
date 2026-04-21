@@ -1013,27 +1013,520 @@ function CreateReturnModal({ onClose }: { onClose: () => void }) {
 }
 
 // ============================================================================
-// Create Exchange modal (simplified)
+// Create Exchange modal — returned lines from invoice + new lines picked
+// via the products catalog. Settles any price difference in one call.
 // ============================================================================
 function CreateExchangeModal({ onClose }: { onClose: () => void }) {
+  const qc = useQueryClient();
+  const [invoiceNo, setInvoiceNo] = useState('');
+  const [lookup, setLookup] = useState<InvoiceLookup | null>(null);
+  const [returnedQtys, setReturnedQtys] = useState<Record<string, number>>({});
+  const [newItems, setNewItems] = useState<any[]>([]);
+  const [productQ, setProductQ] = useState('');
+  const [variantPick, setVariantPick] = useState<any | null>(null);
+  const [reason, setReason] = useState<ReturnReason>('wrong_size');
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('cash');
+  const [refundMethod, setRefundMethod] = useState<PaymentMethod>('cash');
+  const [notes, setNotes] = useState('');
+
+  const lookupMut = useMutation({
+    mutationFn: () => returnsApi.lookupInvoice(invoiceNo),
+    onSuccess: (d) => setLookup(d),
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.message || 'الفاتورة غير موجودة'),
+  });
+
+  const { data: searchRes } = useQuery({
+    queryKey: ['products-for-exchange', productQ],
+    queryFn: () =>
+      productsApi.list({ q: productQ || undefined, limit: 500 }),
+    enabled: productQ.length >= 1,
+  });
+
+  // Returned value from the selected invoice lines.
+  const returnedLines = useMemo(() => {
+    if (!lookup) return [];
+    return lookup.items
+      .filter((i) => (returnedQtys[i.invoice_item_id] || 0) > 0)
+      .map((i) => ({
+        ...i,
+        quantity: returnedQtys[i.invoice_item_id],
+        line_total:
+          returnedQtys[i.invoice_item_id] * Number(i.unit_price),
+      }));
+  }, [lookup, returnedQtys]);
+
+  const returnedValue = returnedLines.reduce((s, l) => s + l.line_total, 0);
+  const newValue = newItems.reduce(
+    (s, i) => s + Number(i.quantity || 0) * Number(i.unit_price || 0),
+    0,
+  );
+  const diff = newValue - returnedValue;
+
+  const pushNewItem = (p: any, v: any) => {
+    if (newItems.find((i) => i.variant_id === v.id)) {
+      toast.error('الصنف مضاف بالفعل');
+      return;
+    }
+    setNewItems((prev) => [
+      ...prev,
+      {
+        variant_id: v.id,
+        product_name: p.name_ar,
+        sku: v.sku || '',
+        color: v.color,
+        size: v.size,
+        quantity: 1,
+        unit_price: Number(
+          v.selling_price ?? v.price_override ?? p.base_price ?? 0,
+        ),
+      },
+    ]);
+    setProductQ('');
+    setVariantPick(null);
+  };
+
+  const onEnterCode = async () => {
+    const code = productQ.trim();
+    if (!code) return;
+    try {
+      const { product, variant } = await productsApi.byBarcode(code);
+      pushNewItem(product, variant);
+    } catch {
+      toast.error(`الكود ${code} غير موجود`);
+    }
+  };
+
+  const pickProduct = async (p: any) => {
+    try {
+      const full = await productsApi.get(p.id);
+      const vs = (full.variants || []).filter(
+        (v: any) => v.is_active !== false,
+      );
+      if (vs.length === 0) return toast.error('المنتج بدون متغيرات نشطة');
+      if (vs.length === 1) return pushNewItem(full, vs[0]);
+      setVariantPick({ product: full, variants: vs });
+    } catch {
+      toast.error('فشل تحميل المتغيرات');
+    }
+  };
+
+  const submitMut = useMutation({
+    mutationFn: () => {
+      if (!lookup) return Promise.reject(new Error('ابحث عن الفاتورة أولاً'));
+      if (returnedLines.length === 0)
+        return Promise.reject(new Error('اختر الأصناف المُرجعة من الفاتورة'));
+      if (newItems.length === 0)
+        return Promise.reject(new Error('أضف الأصناف الجديدة'));
+      return returnsApi.exchange({
+        original_invoice_id: lookup.invoice.id,
+        returned_items: returnedLines.map((l) => ({
+          variant_id: l.variant_id,
+          quantity: l.quantity,
+          unit_price: Number(l.unit_price),
+        })),
+        new_items: newItems.map((i) => ({
+          variant_id: i.variant_id,
+          quantity: Number(i.quantity || 1),
+          unit_price: Number(i.unit_price || 0),
+        })),
+        payment_method: diff > 0 ? paymentMethod : undefined,
+        refund_method: diff < 0 ? refundMethod : undefined,
+        reason,
+        notes: notes || undefined,
+      });
+    },
+    onSuccess: (r) => {
+      toast.success(`تم الاستبدال ${r.exchange_no}`);
+      qc.invalidateQueries({ queryKey: ['exchanges'] });
+      onClose();
+    },
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.message || e?.message || 'فشل الاستبدال'),
+  });
+
   return (
-    <Modal title="استبدال جديد" onClose={onClose}>
-      <div className="p-8 text-center">
-        <ArrowLeftRight
-          size={48}
-          className="mx-auto mb-3 text-brand-400"
-        />
-        <p className="text-slate-600 mb-4">
-          لتفعيل شاشة الاستبدال اضغط على فاتورة البيع في شاشة{' '}
-          <b>نقطة البيع</b> ثم اختر "استبدال جزئي".
-          <br />
-          أو استخدم مباشرة endpoint <code>POST /api/v1/exchanges</code> من
-          شاشة المرتجعات المتقدمة.
-        </p>
-        <button onClick={onClose} className="btn-primary">
-          مفهوم
-        </button>
-      </div>
+    <Modal title="استبدال جديد" onClose={onClose} size="xl">
+      {/* Step 1 — invoice lookup */}
+      {!lookup && (
+        <div>
+          <Field label="رقم فاتورة البيع الأصلية — اكتب واضغط Enter">
+            <div className="flex gap-2">
+              <input
+                autoFocus
+                className="input flex-1 font-mono"
+                placeholder="INV-2026-000…"
+                value={invoiceNo}
+                onChange={(e) => setInvoiceNo(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && invoiceNo.trim()) {
+                    e.preventDefault();
+                    lookupMut.mutate();
+                  }
+                }}
+              />
+              <button
+                onClick={() => lookupMut.mutate()}
+                disabled={!invoiceNo || lookupMut.isPending}
+                className="btn-primary"
+              >
+                <Search size={16} />
+                {lookupMut.isPending ? 'جاري...' : 'بحث'}
+              </button>
+            </div>
+          </Field>
+          <div className="mt-4 p-4 bg-slate-50 rounded-lg text-sm text-slate-600">
+            <AlertCircle className="inline ml-1" size={14} /> الاستبدال يرد
+            الأصناف القديمة للمخزون ويصدر فاتورة بيع جديدة للأصناف
+            المستبدلة، والفرق يُحصَّل أو يُسترد حسب القيمة.
+          </div>
+        </div>
+      )}
+
+      {/* Step 2 — pick returned + new items */}
+      {lookup && (
+        <div className="space-y-4">
+          {/* Invoice header */}
+          <div className="p-3 bg-brand-50 border border-brand-200 rounded-lg flex items-center justify-between">
+            <div>
+              <div className="font-mono font-bold">
+                {lookup.invoice.invoice_no}
+              </div>
+              <div className="text-xs text-slate-600">
+                {lookup.invoice.customer_name || 'عميل عابر'}
+                {lookup.invoice.customer_phone &&
+                  ` · ${lookup.invoice.customer_phone}`}
+              </div>
+            </div>
+            <div className="text-left">
+              <div className="font-bold">{EGP(lookup.invoice.grand_total)}</div>
+            </div>
+          </div>
+
+          {/* Returned items */}
+          <section>
+            <div className="font-bold text-sm text-slate-700 mb-2">
+              الأصناف المُرجعة من الفاتورة
+            </div>
+            <div className="space-y-1.5">
+              {lookup.items.map((it) => {
+                const available = it.available_to_return;
+                const disabled = available <= 0;
+                const q = returnedQtys[it.invoice_item_id] || 0;
+                return (
+                  <div
+                    key={it.invoice_item_id}
+                    className={`p-2 rounded-lg border flex items-center gap-3 text-xs ${
+                      q > 0
+                        ? 'bg-rose-50 border-rose-200'
+                        : 'bg-white border-slate-200'
+                    } ${disabled ? 'opacity-50' : ''}`}
+                  >
+                    <div className="flex-1 min-w-0">
+                      <div className="font-bold">{it.product_name}</div>
+                      <div className="text-[10px] text-slate-500 font-mono">
+                        {it.sku}
+                        {[it.color, it.size].filter(Boolean).length > 0 &&
+                          ` · ${[it.color, it.size].filter(Boolean).join(' · ')}`}
+                      </div>
+                    </div>
+                    <div className="text-[10px] text-slate-500">
+                      متاح: {available}
+                    </div>
+                    <input
+                      type="number"
+                      min={0}
+                      max={available}
+                      disabled={disabled}
+                      value={q}
+                      onChange={(e) => {
+                        const n = Math.min(
+                          available,
+                          Math.max(0, Number(e.target.value) || 0),
+                        );
+                        setReturnedQtys((prev) => ({
+                          ...prev,
+                          [it.invoice_item_id]: n,
+                        }));
+                      }}
+                      className="input w-16 text-center py-1"
+                    />
+                    <div className="w-20 text-left font-mono text-slate-600">
+                      {EGP(Number(it.unit_price) * q)}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+
+          {/* New items picker */}
+          <section>
+            <div className="font-bold text-sm text-slate-700 mb-2">
+              الأصناف الجديدة
+            </div>
+            <div className="relative">
+              <input
+                type="search"
+                value={productQ}
+                onChange={(e) => setProductQ(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    onEnterCode();
+                  }
+                }}
+                placeholder="اكتب الكود واضغط Enter أو ابحث بالاسم لاختيار لون/مقاس…"
+                className="input w-full"
+              />
+              {searchRes && searchRes.data?.length > 0 && (
+                <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-slate-200 rounded-lg shadow-lg z-50 max-h-60 overflow-auto">
+                  {(() => {
+                    const q = productQ.trim().toLowerCase();
+                    const exact = q
+                      ? searchRes.data.find(
+                          (p: any) =>
+                            (p.sku_root || '').toLowerCase() === q,
+                        )
+                      : null;
+                    const rest = exact
+                      ? searchRes.data.filter((p: any) => p.id !== exact.id)
+                      : searchRes.data;
+                    return (
+                      <>
+                        {exact && (
+                          <button
+                            onClick={() => pickProduct(exact)}
+                            className="w-full text-right p-2 bg-emerald-50 hover:bg-emerald-100 border-b border-emerald-200 flex justify-between"
+                          >
+                            <div className="font-black">
+                              ✓ {exact.name_ar}
+                            </div>
+                            <div className="font-bold text-emerald-700">
+                              {EGP(exact.base_price)}
+                            </div>
+                          </button>
+                        )}
+                        {rest.map((p: any) => (
+                          <button
+                            key={p.id}
+                            onClick={() => pickProduct(p)}
+                            className="w-full text-right p-2 hover:bg-brand-50 border-b last:border-b-0 border-slate-100 flex justify-between"
+                          >
+                            <div>
+                              <div className="font-medium">{p.name_ar}</div>
+                              <div className="text-xs text-slate-400 font-mono">
+                                {p.sku_root}
+                              </div>
+                            </div>
+                            <div className="font-bold text-brand-600">
+                              {EGP(p.base_price)}
+                            </div>
+                          </button>
+                        ))}
+                      </>
+                    );
+                  })()}
+                </div>
+              )}
+            </div>
+
+            {variantPick && (
+              <div className="mt-2 p-3 border-2 border-indigo-200 bg-indigo-50/60 rounded-lg">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="text-sm font-black text-indigo-800">
+                    اختر اللون والمقاس — {variantPick.product.name_ar}
+                  </div>
+                  <button
+                    onClick={() => setVariantPick(null)}
+                    className="p-1 hover:bg-indigo-100 rounded"
+                  >
+                    ✕
+                  </button>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {variantPick.variants.map((v: any) => (
+                    <button
+                      key={v.id}
+                      onClick={() => pushNewItem(variantPick.product, v)}
+                      className="px-2 py-1.5 rounded-lg bg-white border border-indigo-200 hover:border-indigo-400 text-xs"
+                    >
+                      {[v.color, v.size].filter(Boolean).join(' · ') ||
+                        v.sku ||
+                        '—'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {newItems.length > 0 && (
+              <div className="mt-2 space-y-1.5">
+                {newItems.map((it, idx) => (
+                  <div
+                    key={it.variant_id}
+                    className="p-2 rounded-lg border border-emerald-200 bg-emerald-50 flex items-center gap-3 text-xs"
+                  >
+                    <div className="flex-1 min-w-0">
+                      <div className="font-bold">{it.product_name}</div>
+                      <div className="text-[10px] text-slate-500 font-mono">
+                        {it.sku}
+                        {[it.color, it.size].filter(Boolean).length > 0 &&
+                          ` · ${[it.color, it.size].filter(Boolean).join(' · ')}`}
+                      </div>
+                    </div>
+                    <input
+                      type="number"
+                      min={1}
+                      value={it.quantity}
+                      onChange={(e) => {
+                        const n = Math.max(1, Number(e.target.value) || 1);
+                        setNewItems((p) =>
+                          p.map((x, i) =>
+                            i === idx ? { ...x, quantity: n } : x,
+                          ),
+                        );
+                      }}
+                      className="input w-16 text-center py-1"
+                    />
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={it.unit_price}
+                      onChange={(e) =>
+                        setNewItems((p) =>
+                          p.map((x, i) =>
+                            i === idx
+                              ? {
+                                  ...x,
+                                  unit_price: Number(e.target.value) || 0,
+                                }
+                              : x,
+                          ),
+                        )
+                      }
+                      className="input w-20 text-center py-1"
+                    />
+                    <div className="w-20 text-left font-mono">
+                      {EGP(it.quantity * it.unit_price)}
+                    </div>
+                    <button
+                      onClick={() =>
+                        setNewItems((p) => p.filter((_, i) => i !== idx))
+                      }
+                      className="text-rose-600 hover:bg-rose-100 rounded p-1"
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          {/* Price diff + settlement */}
+          <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg space-y-2">
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-slate-600">قيمة المُرجع</span>
+              <span className="font-mono tabular-nums text-rose-700">
+                {EGP(returnedValue)}
+              </span>
+            </div>
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-slate-600">قيمة الأصناف الجديدة</span>
+              <span className="font-mono tabular-nums text-emerald-700">
+                {EGP(newValue)}
+              </span>
+            </div>
+            <div className="flex items-center justify-between text-base font-black border-t border-slate-300 pt-2">
+              <span>
+                {diff > 0
+                  ? 'مستحق على العميل'
+                  : diff < 0
+                    ? 'مسترد للعميل'
+                    : 'لا فرق'}
+              </span>
+              <span
+                className={`font-mono tabular-nums ${
+                  diff > 0
+                    ? 'text-amber-700'
+                    : diff < 0
+                      ? 'text-indigo-700'
+                      : 'text-slate-500'
+                }`}
+              >
+                {EGP(Math.abs(diff))}
+              </span>
+            </div>
+          </div>
+
+          {/* Settlement method */}
+          {diff > 0 && (
+            <Field label="طريقة تحصيل الفرق">
+              <select
+                value={paymentMethod}
+                onChange={(e) => setPaymentMethod(e.target.value as PaymentMethod)}
+                className="input"
+              >
+                {Object.entries(METHOD_LABELS).map(([v, l]) => (
+                  <option key={v} value={v}>
+                    {l}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          )}
+          {diff < 0 && (
+            <Field label="طريقة صرف الفرق">
+              <select
+                value={refundMethod}
+                onChange={(e) => setRefundMethod(e.target.value as PaymentMethod)}
+                className="input"
+              >
+                {Object.entries(METHOD_LABELS).map(([v, l]) => (
+                  <option key={v} value={v}>
+                    {l}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          )}
+          <div className="grid md:grid-cols-2 gap-3">
+            <Field label="سبب الاستبدال">
+              <select
+                value={reason}
+                onChange={(e) => setReason(e.target.value as ReturnReason)}
+                className="input"
+              >
+                {Object.entries(REASON_LABELS).map(([v, l]) => (
+                  <option key={v} value={v}>
+                    {l}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="ملاحظات">
+              <input
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                className="input"
+              />
+            </Field>
+          </div>
+
+          <button
+            onClick={() => submitMut.mutate()}
+            disabled={
+              submitMut.isPending ||
+              returnedLines.length === 0 ||
+              newItems.length === 0
+            }
+            className="btn-primary w-full"
+          >
+            {submitMut.isPending ? 'جاري الاستبدال...' : 'تأكيد الاستبدال'}
+          </button>
+        </div>
+      )}
     </Modal>
   );
 }
