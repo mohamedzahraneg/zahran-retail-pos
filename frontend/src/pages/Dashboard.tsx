@@ -383,8 +383,10 @@ export default function Dashboard() {
         <KPI
           icon={ShoppingBag}
           label="القطع المباعة"
-          value={NUM(Number(todayData.items_sold || 0))}
-          hint="اليوم"
+          value={NUM(
+            Number(analytics?.totals?.units_sold ?? todayData.items_sold ?? 0),
+          )}
+          hint={periodNoun}
           tone="pink"
         />
         <KPI
