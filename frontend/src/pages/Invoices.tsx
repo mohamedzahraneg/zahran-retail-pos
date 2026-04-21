@@ -1265,26 +1265,50 @@ function InvoiceEditModal({
           )}
         </div>
 
-        <div className="p-4 border-t flex items-center justify-end gap-2">
-          <button onClick={onClose} className="btn-ghost">
-            إلغاء
-          </button>
-          <button
-            onClick={() => save.mutate()}
-            disabled={
-              save.isPending ||
-              !reason.trim() ||
-              lines.length === 0 ||
-              isLoading
-            }
-            className="btn-primary"
-          >
-            {save.isPending
-              ? 'جاري الحفظ...'
-              : canApplyDirect
-                ? 'حفظ التعديل على نفس الفاتورة'
-                : 'إرسال طلب تعديل للموافقة'}
-          </button>
+        <div className="p-4 border-t flex items-center justify-between gap-2">
+          <div className="text-xs text-amber-700 min-h-[16px]">
+            {!reason.trim() && 'اكتب سبب التعديل قبل الإرسال'}
+            {reason.trim() && lines.length === 0 && 'أضف صنف واحد على الأقل'}
+          </div>
+          <div className="flex items-center gap-2">
+            <button onClick={onClose} className="btn-ghost" disabled={save.isPending}>
+              إلغاء
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                // Surface common blockers as toasts so users don't stare
+                // at an unresponsive disabled button.
+                if (isLoading) {
+                  toast('جارٍ تحميل بيانات الفاتورة — انتظر قليلًا');
+                  return;
+                }
+                if (lines.length === 0) {
+                  toast.error('أضف صنف واحد على الأقل قبل الحفظ');
+                  return;
+                }
+                if (!reason.trim()) {
+                  toast.error('يجب كتابة سبب التعديل قبل الإرسال');
+                  return;
+                }
+                if (!canApplyDirect && !canSubmitRequest) {
+                  toast.error('لا تملك صلاحية تعديل الفاتورة');
+                  return;
+                }
+                save.mutate();
+              }}
+              disabled={save.isPending}
+              className={`btn-primary ${
+                save.isPending ? 'opacity-60 cursor-wait' : ''
+              }`}
+            >
+              {save.isPending
+                ? 'جاري الحفظ...'
+                : canApplyDirect
+                  ? 'حفظ التعديل على نفس الفاتورة'
+                  : 'إرسال طلب تعديل للموافقة'}
+            </button>
+          </div>
         </div>
       </div>
     </div>
