@@ -865,7 +865,7 @@ export class PosService {
         payload: { invoice_id: id, edited: true, edited_by: userId },
       });
 
-      return { invoice: updated, edited: true };
+      return { invoice: updated, edited: true, history_id: historyId };
     });
   }
 
@@ -874,9 +874,16 @@ export class PosService {
     return this.ds.query(
       `SELECT h.id, h.invoice_id, h.edited_at, h.reason,
               h.before_snapshot, h.after_snapshot, h.after_summary,
-              u.full_name AS edited_by_name, u.username AS edited_by_username
+              u.full_name  AS edited_by_name,  u.username AS edited_by_username,
+              req.id       AS request_id,
+              req.reason   AS request_reason,
+              req.requested_at,
+              ru.full_name AS requested_by_name,
+              ru.username  AS requested_by_username
          FROM invoice_edit_history h
-         LEFT JOIN users u ON u.id = h.edited_by
+         LEFT JOIN users u                    ON u.id = h.edited_by
+         LEFT JOIN invoice_edit_requests req  ON req.history_id = h.id
+         LEFT JOIN users ru                   ON ru.id = req.requested_by
         WHERE h.invoice_id = $1
         ORDER BY h.edited_at DESC`,
       [invoiceId],
@@ -972,9 +979,10 @@ export class PosService {
           SET status          = 'approved',
               decided_by      = $2,
               decided_at      = NOW(),
-              decision_reason = $3
+              decision_reason = $3,
+              history_id      = $4
         WHERE id = $1`,
-      [requestId, userId, note || null],
+      [requestId, userId, note || null, (result as any).history_id ?? null],
     );
     return { approved: true, ...result };
   }

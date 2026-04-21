@@ -676,7 +676,11 @@ function ReceiptPreviewModal({
 function fmtWhen(s: string) {
   if (!s) return '';
   const d = new Date(s);
-  return d.toLocaleString('ar-EG', {
+  const dow = d.toLocaleDateString('ar-EG', {
+    timeZone: 'Africa/Cairo',
+    weekday: 'long',
+  });
+  const rest = d.toLocaleString('ar-EG', {
     timeZone: 'Africa/Cairo',
     year: 'numeric',
     month: '2-digit',
@@ -686,6 +690,7 @@ function fmtWhen(s: string) {
     second: '2-digit',
     hour12: true,
   });
+  return `${dow} · ${rest}`;
 }
 
 function lineSummary(items: any[] | undefined | null): string {
@@ -702,6 +707,8 @@ type LineLike = {
   variant_id: string;
   product_name_snapshot?: string;
   product_name?: string;
+  sku?: string;
+  sku_snapshot?: string;
   quantity?: number;
   qty?: number;
   unit_price?: number;
@@ -710,6 +717,8 @@ type LineLike = {
   discount?: number;
   color_name_snapshot?: string;
   size_label_snapshot?: string;
+  color?: string;
+  size?: string;
 };
 
 function normQty(l: LineLike) {
@@ -721,12 +730,34 @@ function normPrice(l: LineLike) {
 function normDiscount(l: LineLike) {
   return Number(l.discount_amount ?? l.discount ?? 0);
 }
-function displayName(l: LineLike) {
-  const parts = [
-    l.product_name_snapshot || l.product_name || '—',
-    [l.color_name_snapshot, l.size_label_snapshot].filter(Boolean).join(' · '),
-  ].filter(Boolean);
-  return parts.join(' — ');
+function lineSku(l: LineLike) {
+  return l.sku_snapshot || l.sku || '';
+}
+function lineColor(l: LineLike) {
+  return l.color_name_snapshot || l.color || '';
+}
+function lineSize(l: LineLike) {
+  return l.size_label_snapshot || l.size || '';
+}
+
+function displayName(l: LineLike): string {
+  const name = l.product_name_snapshot || l.product_name || '—';
+  const sku = lineSku(l);
+  const cs = [lineColor(l), lineSize(l)].filter(Boolean).join(' · ');
+  const parts = [name];
+  if (sku) parts.push(`[${sku}]`);
+  if (cs) parts.push(`(${cs})`);
+  return parts.join(' ');
+}
+
+function fullLineText(l: LineLike): string {
+  return `${displayName(l)} · الكمية ${normQty(l)} · السعر ${normPrice(
+    l,
+  ).toLocaleString('en-US')} ج.م${
+    normDiscount(l) > 0
+      ? ` · خصم ${normDiscount(l).toLocaleString('en-US')} ج.م`
+      : ''
+  }`;
 }
 
 /** Diff the lines between a before/after snapshot, producing a list of
@@ -748,19 +779,13 @@ function diffLines(
   // Added
   for (const [id, al] of aMap) {
     if (!bMap.has(id)) {
-      out.push({
-        type: 'added',
-        text: `إضافة صنف: ${displayName(al)} × ${normQty(al)} (سعر ${normPrice(al).toLocaleString('en-US')} ج.م)`,
-      });
+      out.push({ type: 'added', text: `إضافة صنف · ${fullLineText(al)}` });
     }
   }
   // Removed
   for (const [id, bl] of bMap) {
     if (!aMap.has(id)) {
-      out.push({
-        type: 'removed',
-        text: `حذف صنف: ${displayName(bl)} × ${normQty(bl)}`,
-      });
+      out.push({ type: 'removed', text: `حذف صنف · ${fullLineText(bl)}` });
     }
   }
   // Quantity / price / discount changes
@@ -997,16 +1022,31 @@ function EditHistoryTab({
                 key={`hist-${h.id}`}
                 className="border border-emerald-200 bg-emerald-50/60 rounded-lg p-3 text-xs"
               >
-                <div className="flex items-center justify-between mb-1">
-                  <div className="flex items-center gap-2">
-                    <span className="chip bg-emerald-200 text-emerald-800 border-emerald-400 text-[10px] font-bold">
-                      ✓ معتمد
-                    </span>
-                    <div className="font-bold text-emerald-800">
-                      {h.edited_by_name || h.edited_by_username || '—'}
+                <div className="flex items-start justify-between mb-2">
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="chip bg-emerald-200 text-emerald-800 border-emerald-400 text-[10px] font-bold">
+                        ✓ معتمد
+                      </span>
+                      <div className="font-bold text-emerald-800">
+                        اعتمد: {h.edited_by_name || h.edited_by_username || '—'}
+                      </div>
                     </div>
+                    {(h.requested_by_name || h.requested_by_username) && (
+                      <div className="text-[11px] text-slate-600">
+                        مقدم الطلب:{' '}
+                        <span className="font-bold">
+                          {h.requested_by_name || h.requested_by_username}
+                        </span>
+                        {h.requested_at && (
+                          <span className="text-slate-400 mx-1">
+                            · تم الطلب {fmtWhen(h.requested_at)}
+                          </span>
+                        )}
+                      </div>
+                    )}
                   </div>
-                  <div className="text-slate-500 tabular-nums">
+                  <div className="text-slate-500 tabular-nums text-[11px] text-left">
                     {fmtWhen(h.edited_at)}
                   </div>
                 </div>
