@@ -249,8 +249,10 @@ export default function Dashboard() {
   const todayData = data?.today || ({} as any);
   const revenue = data?.revenue30 || [];
   const mix = data?.paymentMix || [];
-  const cashiers = data?.cashierPerf || [];
-  const salespeople = data?.salespersonPerf || [];
+  // Prefer period-aware perf from analytics; fall back to the legacy
+  // overview arrays if analytics hasn't loaded yet.
+  const cashiers = analytics?.cashierPerf ?? data?.cashierPerf ?? [];
+  const salespeople = analytics?.salespersonPerf ?? data?.salespersonPerf ?? [];
   const products = data?.topProducts || [];
 
   const now = new Date();
@@ -532,7 +534,7 @@ export default function Dashboard() {
         <div className="card p-5">
           <h3 className="font-black text-slate-800 flex items-center gap-2 mb-4">
             <Activity size={18} className="text-indigo-500" />
-            أداء الكاشيرين
+            أداء الكاشيرين — {periodNoun}
           </h3>
           {cashiers.length > 0 ? (
             <Bar
@@ -542,9 +544,9 @@ export default function Dashboard() {
                 ),
                 datasets: [
                   {
-                    label: 'إيراد الأسبوع',
+                    label: `إيراد ${periodNoun}`,
                     data: cashiers.map((c: any) =>
-                      Number(c.revenue_week ?? c.revenue ?? 0),
+                      Number(c.revenue ?? c.revenue_week ?? 0),
                     ),
                     backgroundColor: '#6366f1',
                     borderRadius: 6,
@@ -575,7 +577,7 @@ export default function Dashboard() {
       <div className="card p-5">
         <h3 className="font-black text-slate-800 flex items-center gap-2 mb-4">
           <Award size={18} className="text-emerald-500" />
-          أداء البائعين — آخر 30 يوم
+          أداء البائعين — {periodNoun}
         </h3>
         {salespeople.length > 0 ? (
           <div className="overflow-x-auto">

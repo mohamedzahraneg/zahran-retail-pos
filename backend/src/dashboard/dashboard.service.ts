@@ -259,6 +259,56 @@ export class DashboardService {
             : 0,
       }));
 
+    // Cashier performance over the selected period.
+    const cashierPerf = await this.ds.query(
+      `
+      SELECT u.id                                         AS user_id,
+             u.full_name,
+             u.username,
+             COUNT(i.id)::int                             AS invoices,
+             COALESCE(SUM(i.grand_total), 0)::numeric(14,2) AS revenue,
+             COALESCE(SUM(i.gross_profit), 0)::numeric(14,2) AS profit
+      FROM users u
+      LEFT JOIN invoices i
+             ON i.cashier_id = u.id
+            AND i.status IN ('paid','completed','partially_paid')
+            AND (COALESCE(i.completed_at, i.created_at) AT TIME ZONE 'Africa/Cairo')::date
+                BETWEEN $1::date AND $2::date
+      WHERE u.is_active = true
+      GROUP BY u.id, u.full_name, u.username
+      HAVING COUNT(i.id) > 0
+      ORDER BY revenue DESC
+      LIMIT 10
+      `,
+      [fromDate, toDate],
+    );
+
+    // Salesperson performance over the selected period.
+    const salespersonPerf = await this.ds.query(
+      `
+      SELECT sp.id                                        AS user_id,
+             sp.full_name,
+             sp.username,
+             COUNT(DISTINCT i.id)::int                    AS invoices,
+             COALESCE(SUM(i.grand_total), 0)::numeric(14,2) AS revenue,
+             COALESCE(SUM(i.gross_profit), 0)::numeric(14,2) AS profit
+      FROM users sp
+      LEFT JOIN invoices i
+             ON i.salesperson_id = sp.id
+            AND i.status IN ('paid','completed','partially_paid')
+            AND (COALESCE(i.completed_at, i.created_at) AT TIME ZONE 'Africa/Cairo')::date
+                BETWEEN $1::date AND $2::date
+      WHERE EXISTS (
+              SELECT 1 FROM invoices i2 WHERE i2.salesperson_id = sp.id
+            )
+         OR sp.role_id IN (SELECT id FROM roles WHERE code = 'salesperson')
+      GROUP BY sp.id, sp.full_name, sp.username
+      ORDER BY revenue DESC
+      LIMIT 10
+      `,
+      [fromDate, toDate],
+    );
+
     return {
       range: { from: fromDate, to: toDate },
       totals: {
@@ -279,6 +329,8 @@ export class DashboardService {
       topProducts: withShare(topProducts),
       losingProducts: withShare(losingProducts),
       worstProducts: withShare(worstProducts),
+      cashierPerf,
+      salespersonPerf,
     };
   }
 
