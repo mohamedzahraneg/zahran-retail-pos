@@ -78,55 +78,83 @@ export default function Accounting() {
         <PeriodSelector value={period} onChange={setPeriod} />
       </div>
 
-      {/* KPIs — scoped to selected period */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        {(() => {
-          const todayP = profitLabel(kpis.data?.today.net_profit ?? 0, 'ربح اليوم');
-          return (
+      {/* KPIs — today snapshot with smart hints */}
+      {(() => {
+        const k = kpis.data as any;
+        const todayRevenue = Number(k?.today?.revenue ?? 0);
+        const todayProfit = Number(k?.today?.net_profit ?? 0);
+        const todayExpenses =
+          Number(k?.today?.operating_expenses ?? 0) +
+          Number(k?.today?.allocated_expenses ?? 0);
+        const todayMargin = Number(k?.today?.net_margin_pct ?? 0);
+        const expenseRatio =
+          todayRevenue > 0 ? (todayExpenses / todayRevenue) * 100 : 0;
+        const invCount = Number(k?.today_invoice_count ?? 0);
+        const expCount = Number(k?.today_expense_count ?? 0);
+        const payAmt = Number(k?.today_payments ?? 0);
+        const payCount = Number(k?.today_payments_count ?? 0);
+        const shiftRem = Number(k?.today_shift_remaining ?? 0);
+        const profitP = profitLabel(todayProfit, 'أرباح اليوم');
+        return (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
             <KpiCard
-              title={todayP.label}
-              value={todayP.amount}
+              title="إيرادات اليوم"
+              value={EGP(todayRevenue)}
               icon={TrendingUp}
-              color={todayP.isLoss ? 'rose' : 'emerald'}
-              subtitle={`إيراد ${EGP(kpis.data?.today.revenue ?? 0)}`}
+              color="emerald"
+              subtitle={`${invCount} فاتورة · ${
+                invCount > 0
+                  ? `متوسط ${EGP(todayRevenue / invCount)}`
+                  : 'لا مبيعات'
+              }`}
             />
-          );
-        })()}
-        {(() => {
-          const netP = Number(periodPL.data?.net_profit ?? 0);
-          const label = profitLabel(netP, `ربح ${periodNoun}`);
-          const marg = marginLabel(
-            periodPL.data?.net_margin_pct ?? 0,
-            'هامش الربح',
-          );
-          return (
             <KpiCard
-              title={label.label}
-              value={label.amount}
+              title={profitP.label}
+              value={profitP.amount}
               icon={TrendingUp}
-              color={label.isLoss ? 'rose' : 'indigo'}
-              subtitle={`${marg.label} ${marg.signedAmount}`}
+              color={profitP.isLoss ? 'rose' : 'indigo'}
+              subtitle={`هامش ${todayMargin.toFixed(1)}% · COGS ${EGP(
+                k?.today?.cogs ?? 0,
+              )}`}
             />
-          );
-        })()}
-        <KpiCard
-          title={`مصاريف ${periodNoun}`}
-          value={EGP(
-            Number(periodPL.data?.operating_expenses ?? 0) +
-              Number(periodPL.data?.allocated_expenses ?? 0),
-          )}
-          icon={Receipt}
-          color="amber"
-          subtitle={`COGS ${EGP(periodPL.data?.cogs ?? 0)}`}
-        />
-        <KpiCard
-          title="مصاريف بانتظار الاعتماد"
-          value={String(kpis.data?.pending_expenses ?? 0)}
-          icon={AlertCircle}
-          color="rose"
-          subtitle={EGP(kpis.data?.pending_amount ?? 0)}
-        />
-      </div>
+            <KpiCard
+              title="مصروفات اليوم"
+              value={EGP(todayExpenses)}
+              icon={Receipt}
+              color="amber"
+              subtitle={`${expCount} بند${
+                expenseRatio > 0
+                  ? ` · ${expenseRatio.toFixed(1)}% من الإيراد`
+                  : ''
+              }`}
+            />
+            <KpiCard
+              title="دفعات اليوم"
+              value={EGP(payAmt)}
+              icon={Receipt}
+              color="indigo"
+              subtitle={`${payCount} عملية${
+                k?.pending_amount
+                  ? ` · معلّق ${EGP(k.pending_amount)}`
+                  : ''
+              }`}
+            />
+            <KpiCard
+              title="الباقي من وردية اليوم"
+              value={EGP(shiftRem)}
+              icon={AlertCircle}
+              color={shiftRem < 0 ? 'rose' : 'emerald'}
+              subtitle={
+                shiftRem > 0
+                  ? 'مستحق في الخزينة'
+                  : shiftRem < 0
+                    ? 'عجز في الخزينة'
+                    : 'مطابقة تامة'
+              }
+            />
+          </div>
+        );
+      })()}
 
       {/* Tabs */}
       <div className="bg-white rounded-xl shadow-sm border border-slate-200">

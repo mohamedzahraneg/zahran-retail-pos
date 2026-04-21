@@ -650,9 +650,46 @@ export class AccountingService {
        WHERE is_approved = FALSE`,
     );
 
+    // Extra counts + today payments + shift remaining that the
+    // accounting landing-page cards now surface.
+    const [invCount] = await this.ds.query(
+      `SELECT COUNT(*)::int AS n
+         FROM invoices
+        WHERE status IN ('paid','completed','partially_paid')
+          AND (COALESCE(completed_at, created_at) AT TIME ZONE 'Africa/Cairo')::date
+              = (now() AT TIME ZONE 'Africa/Cairo')::date`,
+    );
+    const [expCount] = await this.ds.query(
+      `SELECT COUNT(*)::int AS n
+         FROM expenses
+        WHERE expense_date = (now() AT TIME ZONE 'Africa/Cairo')::date`,
+    );
+    const [payments] = await this.ds.query(
+      `SELECT COALESCE(SUM(ip.amount), 0)::numeric(14,2) AS today_payments,
+              COUNT(*)::int                               AS payments_count
+         FROM invoice_payments ip
+         JOIN invoices i ON i.id = ip.invoice_id
+        WHERE (COALESCE(i.completed_at, i.created_at) AT TIME ZONE 'Africa/Cairo')::date
+              = (now() AT TIME ZONE 'Africa/Cairo')::date`,
+    );
+    // Live shift expected cash (expected_closing - paid out),
+    // aggregated across every shift that was open at any point today.
+    const [shift] = await this.ds.query(
+      `SELECT COALESCE(SUM(expected_closing - COALESCE(actual_closing, 0)), 0)
+                ::numeric(14,2) AS remaining
+         FROM shifts
+        WHERE (opened_at AT TIME ZONE 'Africa/Cairo')::date
+              = (now() AT TIME ZONE 'Africa/Cairo')::date`,
+    );
+
     return {
       today: today_pl,
       month: month_pl,
+      today_invoice_count: Number(invCount?.n || 0),
+      today_expense_count: Number(expCount?.n || 0),
+      today_payments: Number(payments?.today_payments || 0),
+      today_payments_count: Number(payments?.payments_count || 0),
+      today_shift_remaining: Number(shift?.remaining || 0),
       pending_expenses: pendingRow.pending_expenses,
       pending_amount: Number(pendingRow.pending_amount),
     };

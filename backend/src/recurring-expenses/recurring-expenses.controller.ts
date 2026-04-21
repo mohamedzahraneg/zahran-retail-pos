@@ -34,8 +34,10 @@ import {
 } from '../common/decorators/current-user.decorator';
 
 class CreateDto implements CreateRecurringExpenseDto {
-  @IsString() @MinLength(2) code: string;
-  @IsString() @MinLength(2) name_ar: string;
+  // Code can be a short digit like "1" or "10" — keep it present but
+  // don't force a minimum length.
+  @IsString() @MinLength(1) code: string;
+  @IsString() @MinLength(1) name_ar: string;
   @IsOptional() @IsString() name_en?: string;
   @IsUUID() category_id: string;
   @IsUUID() warehouse_id: string;
