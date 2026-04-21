@@ -17,8 +17,53 @@
 const CACHE_VERSION = 'v1-2026-04-21';
 const RUNTIME_CACHE = `zahran-runtime-${CACHE_VERSION}`;
 
-self.addEventListener('install', () => {
+self.addEventListener('install', (event) => {
   self.skipWaiting();
+  // On install, fetch the current index.html, parse out every asset
+  // URL it references (JS bundle, CSS, icons, manifest, favicon…)
+  // and precache them. This way the user can go offline immediately
+  // after their first visit without having to browse around first.
+  event.waitUntil(
+    (async () => {
+      try {
+        const res = await fetch('/', { cache: 'no-cache' });
+        if (!res.ok) return;
+        const html = await res.text();
+        const urls = new Set();
+        // <script src="...">  and  <link href="...">
+        const rx = /(?:src|href)="([^"]+)"/g;
+        let m;
+        while ((m = rx.exec(html)) !== null) {
+          const ref = m[1];
+          if (
+            ref.startsWith('/') ||
+            ref.startsWith('./') ||
+            (!ref.startsWith('http') && !ref.startsWith('data:'))
+          ) {
+            urls.add(new URL(ref, self.location.origin).pathname);
+          }
+        }
+        // Add the icons + favicon explicitly — they may not be in
+        // the HTML but are needed for the PWA shell.
+        [
+          '/favicon.svg',
+          '/icons/icon-192.png',
+          '/icons/icon-512.png',
+          '/icons/icon-512-maskable.png',
+        ].forEach((u) => urls.add(u));
+        const cache = await caches.open(RUNTIME_CACHE);
+        await Promise.all(
+          Array.from(urls).map((u) =>
+            fetch(u, { cache: 'no-cache' })
+              .then((r) => (r.ok ? cache.put(u, r) : null))
+              .catch(() => {}),
+          ),
+        );
+      } catch {
+        /* precache best-effort — runtime caching still kicks in */
+      }
+    })(),
+  );
 });
 
 self.addEventListener('activate', (event) => {
