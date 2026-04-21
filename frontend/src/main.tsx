@@ -12,23 +12,17 @@ import { startAutoSync } from '@/lib/offline-queue';
 // Kick off background sync of pending offline invoices
 startAutoSync();
 
-// PWA is temporarily disabled (see vite.config.ts). If an old
-// Workbox service worker is still registered on this origin, tell the
-// browser to evict it — /sw.js is now a kill-switch that unregisters
-// itself and clears every Cache-Storage entry. Auto-reloads the tab
-// on controller change so the user lands on a SW-less page.
+// Register the custom offline service worker (public/sw.js). It uses
+// NetworkFirst for navigations and the API, CacheFirst for hashed
+// /assets, and never precaches index.html so new deploys always
+// serve a fresh HTML shell when online.
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker
-    .getRegistrations()
-    .then((regs) => {
-      regs.forEach((r) => r.update().catch(() => {}));
-    })
-    .catch(() => {});
-  let reloaded = false;
-  navigator.serviceWorker.addEventListener('controllerchange', () => {
-    if (reloaded) return;
-    reloaded = true;
-    window.location.reload();
+  window.addEventListener('load', () => {
+    navigator.serviceWorker
+      .register('/sw.js', { scope: '/' })
+      .catch(() => {
+        /* SW registration failure isn't fatal — site still works */
+      });
   });
 }
 
