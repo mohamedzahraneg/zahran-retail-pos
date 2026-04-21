@@ -24,6 +24,7 @@ import {
 } from '@/api/reservations.api';
 import { customersApi } from '@/api/customers.api';
 import { productsApi } from '@/api/products.api';
+import { printReservationReceipt } from '@/lib/printReservationReceipt';
 
 const WAREHOUSE_ID = import.meta.env.VITE_DEFAULT_WAREHOUSE_ID as string;
 
@@ -485,6 +486,14 @@ function ReservationDetailsPanel({
           </section>
         )}
 
+        {/* Print reservation receipt */}
+        <button
+          onClick={() => printReservationReceipt(res)}
+          className="btn-ghost text-sm border border-slate-300 w-full"
+        >
+          🧾 طباعة إيصال الحجز
+        </button>
+
         {/* Actions */}
         {isActive && (
           <div className="grid grid-cols-2 gap-2 pt-2">
@@ -613,9 +622,16 @@ function CreateReservationModal({ onClose }: { onClose: () => void }) {
 
   const { data: products } = useQuery({
     queryKey: ['products-for-res', productQ],
-    queryFn: () => productsApi.list({ q: productQ, limit: 20 }),
-    enabled: productQ.length > 1,
+    queryFn: () => productsApi.list({ q: productQ || undefined, limit: 500 }),
+    // show suggestions as soon as user types one character; blank
+    // stays closed so we don't slam the dropdown with 500 items.
+    enabled: productQ.length >= 1,
   });
+
+  const [variantPick, setVariantPick] = useState<{
+    product: any;
+    variants: any[];
+  } | null>(null);
 
   const total = useMemo(
     () => items.reduce((s, it) => s + it.quantity * it.unit_price, 0),
@@ -663,29 +679,60 @@ function CreateReservationModal({ onClose }: { onClose: () => void }) {
     depositAmount >= required &&
     depositAmount > 0;
 
+  const pushVariantItem = (p: any, variant: any) => {
+    if (items.find((i) => i.variant_id === variant.id)) {
+      toast.error('الصنف مضاف بالفعل');
+      return;
+    }
+    setItems((prev) => [
+      ...prev,
+      {
+        variant_id: variant.id,
+        product_name: p.name_ar,
+        sku: variant.sku || '',
+        quantity: 1,
+        unit_price: Number(
+          variant.selling_price ??
+            variant.price_override ??
+            p.base_price ??
+            0,
+        ),
+      },
+    ]);
+    setProductQ('');
+    setVariantPick(null);
+  };
+
+  /** Exact-code Enter lookup — matches barcode, variant SKU, or
+   *  sku_root via the /products/barcode/:code endpoint. */
+  const onEnterCode = async () => {
+    const code = productQ.trim();
+    if (!code) return;
+    try {
+      const { product, variant } = await productsApi.byBarcode(code);
+      pushVariantItem(product, variant);
+    } catch {
+      toast.error(`الكود ${code} غير موجود`);
+    }
+  };
+
   const addItem = async (p: any) => {
     try {
       const full = await productsApi.get(p.id);
-      const variant = full.variants?.[0];
-      if (!variant) {
-        toast.error('المنتج لا يحتوي على Variant');
+      const variants = (full.variants || []).filter(
+        (v: any) => v.is_active !== false,
+      );
+      if (variants.length === 0) {
+        toast.error('المنتج لا يحتوي على متغيرات نشطة');
         return;
       }
-      if (items.find((i) => i.variant_id === variant.id)) {
-        toast.error('الصنف مضاف بالفعل');
+      // Single variant → add straight. Multiple → let the user pick
+      // a specific colour / size.
+      if (variants.length === 1) {
+        pushVariantItem(full, variants[0]);
         return;
       }
-      setItems([
-        ...items,
-        {
-          variant_id: variant.id,
-          product_name: p.name_ar,
-          sku: variant.sku || '',
-          quantity: 1,
-          unit_price: Number(variant.price_override ?? p.base_price ?? 0),
-        },
-      ]);
-      setProductQ('');
+      setVariantPick({ product: full, variants });
     } catch {
       toast.error('فشل تحميل بيانات المنتج');
     }
@@ -742,38 +789,129 @@ function CreateReservationModal({ onClose }: { onClose: () => void }) {
 
       {/* Products */}
       <div className="mt-5">
-        <Field label="إضافة أصناف">
+        <Field label="إضافة أصناف — اكتب الكود واضغط Enter">
           <div className="relative">
             <input
               type="search"
               value={productQ}
               onChange={(e) => setProductQ(e.target.value)}
-              placeholder="ابحث باسم المنتج أو SKU..."
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  onEnterCode();
+                }
+              }}
+              placeholder="اكتب الكود واضغط Enter، أو ابحث بالاسم لاختيار لون/مقاس…"
               className="input w-full"
             />
-            {products && products.data?.length > 0 && (
-              <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-slate-200 rounded-lg shadow-lg z-50 max-h-60 overflow-auto">
-                {products.data.map((p: any) => (
-                  <button
-                    key={p.id}
-                    onClick={() => addItem(p)}
-                    className="w-full text-right p-2.5 hover:bg-brand-50 border-b last:border-b-0 border-slate-100 flex justify-between"
-                  >
-                    <div>
-                      <div className="font-medium">{p.name_ar}</div>
-                      <div className="text-xs text-slate-500 font-mono">
-                        {p.sku_root}
-                      </div>
-                    </div>
-                    <div className="font-bold text-brand-600">
-                      {EGP(p.base_price)}
-                    </div>
-                  </button>
-                ))}
-              </div>
-            )}
+            {/* Exact match pin — if the query is a code that matches
+                a product sku_root, show it highlighted at the top. */}
+            {products &&
+              products.data?.length > 0 &&
+              (() => {
+                const q = productQ.trim().toLowerCase();
+                const exact = q
+                  ? products.data.find(
+                      (p: any) => (p.sku_root || '').toLowerCase() === q,
+                    )
+                  : null;
+                const rest = exact
+                  ? products.data.filter((p: any) => p.id !== exact.id)
+                  : products.data;
+                return (
+                  <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-slate-200 rounded-lg shadow-lg z-50 max-h-72 overflow-auto">
+                    {exact && (
+                      <button
+                        onClick={() => addItem(exact)}
+                        className="w-full text-right p-2.5 bg-emerald-50 hover:bg-emerald-100 border-b border-emerald-200 flex justify-between items-center"
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className="text-emerald-600 font-black">✓</span>
+                          <div>
+                            <div className="font-black">{exact.name_ar}</div>
+                            <div className="text-[11px] text-emerald-700 font-mono">
+                              مطابقة تامة · {exact.sku_root}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="font-bold text-emerald-700">
+                          {EGP(exact.base_price)}
+                        </div>
+                      </button>
+                    )}
+                    {rest.map((p: any) => (
+                      <button
+                        key={p.id}
+                        onClick={() => addItem(p)}
+                        className="w-full text-right p-2.5 hover:bg-brand-50 border-b last:border-b-0 border-slate-100 flex justify-between"
+                      >
+                        <div>
+                          <div className="font-medium">{p.name_ar}</div>
+                          <div className="text-xs text-slate-500 font-mono">
+                            {p.sku_root}
+                          </div>
+                        </div>
+                        <div className="font-bold text-brand-600">
+                          {EGP(p.base_price)}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                );
+              })()}
           </div>
         </Field>
+
+        {variantPick && (
+          <div className="mt-2 p-3 border-2 border-indigo-200 bg-indigo-50/50 rounded-lg">
+            <div className="flex items-center justify-between mb-2">
+              <div className="text-sm font-black text-indigo-800">
+                اختر اللون والمقاس — {variantPick.product.name_ar}
+              </div>
+              <button
+                onClick={() => setVariantPick(null)}
+                className="p-1 hover:bg-indigo-100 rounded text-indigo-700"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {variantPick.variants.map((v: any) => {
+                const stock = Number(
+                  (v as any).total_stock ?? (v as any).qty ?? 0,
+                );
+                return (
+                  <button
+                    key={v.id}
+                    onClick={() =>
+                      pushVariantItem(variantPick.product, v)
+                    }
+                    className="px-2 py-1.5 rounded-lg bg-white border border-indigo-200 hover:border-indigo-400 text-xs flex items-center gap-1.5"
+                  >
+                    <span className="font-bold">
+                      {[v.color, v.size].filter(Boolean).join(' · ') ||
+                        v.sku ||
+                        '—'}
+                    </span>
+                    <span className="text-[10px] text-slate-400">
+                      {EGP(
+                        v.selling_price ??
+                          v.price_override ??
+                          variantPick.product.base_price ??
+                          0,
+                      )}
+                    </span>
+                    {stock > 0 && (
+                      <span className="chip bg-emerald-50 text-emerald-700 border-emerald-200 text-[9px] px-1 py-0">
+                        {stock}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {items.length > 0 && (
           <div className="mt-3 space-y-2">
