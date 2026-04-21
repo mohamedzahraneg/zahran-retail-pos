@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { posApi } from '@/api/pos.api';
 import { usersApi } from '@/api/users.api';
+import { productsApi, Product, Variant } from '@/api/products.api';
 import { Receipt, ReceiptData } from '@/components/Receipt';
 import { InvoiceHoverCard } from '@/components/InvoiceHoverCard';
 import { useAuthStore } from '@/stores/auth.store';
@@ -1050,6 +1051,39 @@ function InvoiceEditModal({
             <div className="p-10 text-center text-slate-400">جاري التحميل…</div>
           ) : (
             <>
+              <EditAddItemBar
+                onAdd={(variant, product) => {
+                  setLines((prev) => {
+                    const existingIdx = prev.findIndex(
+                      (l) => l.variant_id === variant.id,
+                    );
+                    if (existingIdx >= 0) {
+                      return prev.map((l, i) =>
+                        i === existingIdx ? { ...l, qty: l.qty + 1 } : l,
+                      );
+                    }
+                    return [
+                      ...prev,
+                      {
+                        variant_id: variant.id,
+                        product_name: product?.name_ar || '',
+                        sku: variant.sku || '',
+                        color_name: variant.color ?? undefined,
+                        size_label: variant.size ?? undefined,
+                        qty: 1,
+                        unit_price: Number(
+                          variant.selling_price ??
+                            variant.price_override ??
+                            product?.base_price ??
+                            0,
+                        ),
+                        discount: 0,
+                      },
+                    ];
+                  });
+                }}
+              />
+
               <div className="border rounded-lg overflow-hidden">
                 <table className="w-full text-sm">
                   <thead className="bg-slate-50 text-slate-600 text-xs">
@@ -1253,6 +1287,108 @@ function InvoiceEditModal({
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+/* ───────── Edit — add-item search bar ───────── */
+
+function EditAddItemBar({
+  onAdd,
+}: {
+  onAdd: (variant: Variant, product: Product) => void;
+}) {
+  const [q, setQ] = useState('');
+  const [open, setOpen] = useState(false);
+
+  const { data } = useQuery({
+    queryKey: ['edit-add-item-search', q],
+    queryFn: () => productsApi.list({ q, limit: 25, active: true }),
+    enabled: q.trim().length >= 2,
+    staleTime: 30_000,
+  });
+
+  const items: Product[] = (data as any)?.data || (data as any) || [];
+
+  return (
+    <div className="relative">
+      <div className="flex items-center gap-2">
+        <div className="relative flex-1">
+          <Search
+            size={14}
+            className="absolute top-1/2 -translate-y-1/2 right-3 text-slate-400"
+          />
+          <input
+            className="input w-full pr-9"
+            placeholder="إضافة صنف… اكتب الاسم أو الكود أو الباركود"
+            value={q}
+            onChange={(e) => {
+              setQ(e.target.value);
+              setOpen(true);
+            }}
+            onFocus={() => setOpen(true)}
+            onBlur={() => setTimeout(() => setOpen(false), 120)}
+          />
+        </div>
+      </div>
+      {open && q.trim().length >= 2 && items.length > 0 && (
+        <div className="absolute z-20 mt-1 left-0 right-0 bg-white border border-slate-200 rounded-lg shadow-lg max-h-72 overflow-y-auto">
+          {items.map((p) => {
+            const variants = (p as any).variants || [];
+            if (!variants.length) {
+              return (
+                <div
+                  key={p.id}
+                  className="p-2 text-xs text-slate-400"
+                >
+                  {p.name_ar} — لا توجد متغيرات
+                </div>
+              );
+            }
+            return (
+              <div
+                key={p.id}
+                className="border-b border-slate-100 last:border-0"
+              >
+                <div className="px-3 py-1.5 bg-slate-50 font-bold text-xs text-slate-700 flex items-center justify-between">
+                  <span>{p.name_ar}</span>
+                  <span className="font-mono text-[10px] text-slate-400">
+                    {(p as any).sku_root || ''}
+                  </span>
+                </div>
+                {variants.map((v: any) => (
+                  <button
+                    key={v.id}
+                    type="button"
+                    className="w-full text-right px-3 py-2 hover:bg-brand-50 flex items-center justify-between text-xs"
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      onAdd(v as Variant, p);
+                      setQ('');
+                      setOpen(false);
+                    }}
+                  >
+                    <span className="text-slate-700">
+                      {[v.color, v.size].filter(Boolean).join(' · ') ||
+                        v.sku ||
+                        '—'}
+                    </span>
+                    <span className="font-mono text-slate-500">
+                      {Number(
+                        v.selling_price ??
+                          v.price_override ??
+                          (p as any).base_price ??
+                          0,
+                      ).toLocaleString('en-US')}{' '}
+                      ج.م
+                    </span>
+                  </button>
+                ))}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
