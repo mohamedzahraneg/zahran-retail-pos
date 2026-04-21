@@ -413,19 +413,34 @@ export class SuppliersService {
     );
 
     const monthly = await this.ds.query(
-      `SELECT to_char(date_trunc('month', invoice_date), 'YYYY-MM') AS month,
-              COALESCE(SUM(grand_total), 0)::numeric(14,2) AS purchases,
-              COALESCE((
-                SELECT SUM(pp.amount)
-                  FROM purchase_payments pp
-                  JOIN purchases p2 ON p2.id = pp.purchase_id
-                 WHERE date_trunc('month', pp.paid_at) =
-                       date_trunc('month', purchases.invoice_date)
-              ), 0)::numeric(14,2) AS paid
-         FROM purchases
-        WHERE invoice_date >= (CURRENT_DATE - INTERVAL '6 months')
-        GROUP BY date_trunc('month', invoice_date)
-        ORDER BY date_trunc('month', invoice_date)`,
+      `WITH months AS (
+         SELECT generate_series(
+                  date_trunc('month', CURRENT_DATE - INTERVAL '5 months'),
+                  date_trunc('month', CURRENT_DATE),
+                  INTERVAL '1 month'
+                )::date AS month_start
+       ),
+       pur AS (
+         SELECT date_trunc('month', invoice_date)::date AS month_start,
+                COALESCE(SUM(grand_total), 0)::numeric(14,2) AS purchases
+           FROM purchases
+          WHERE invoice_date >= (CURRENT_DATE - INTERVAL '6 months')
+          GROUP BY date_trunc('month', invoice_date)
+       ),
+       pay AS (
+         SELECT date_trunc('month', paid_at)::date AS month_start,
+                COALESCE(SUM(amount), 0)::numeric(14,2) AS paid
+           FROM purchase_payments
+          WHERE paid_at >= (CURRENT_DATE - INTERVAL '6 months')
+          GROUP BY date_trunc('month', paid_at)
+       )
+       SELECT to_char(m.month_start, 'YYYY-MM') AS month,
+              COALESCE(pur.purchases, 0)::numeric(14,2) AS purchases,
+              COALESCE(pay.paid, 0)::numeric(14,2)     AS paid
+         FROM months m
+         LEFT JOIN pur ON pur.month_start = m.month_start
+         LEFT JOIN pay ON pay.month_start = m.month_start
+        ORDER BY m.month_start`,
     );
 
     return { totals, byType, topOutstanding, topSpend, monthly };
