@@ -4,7 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { alertsApi } from '@/api/alerts.api';
 import { useLayoutStore } from '@/stores/layout.store';
-import { PrayerStrip } from './PrayerStrip';
+import { PrayerStripSafe } from './PrayerStripSafe';
 
 export function Topbar({ title: _title }: { title: string }) {
   const [online, setOnline] = useState(navigator.onLine);
@@ -41,7 +41,7 @@ export function Topbar({ title: _title }: { title: string }) {
         >
           <Menu size={22} />
         </button>
-        <PrayerStrip />
+        <PrayerStripSafe />
       </div>
       <div className="flex items-center gap-2 md:gap-4">
         <div

@@ -80,43 +80,54 @@ export function PrayerStrip() {
 
   // Fire a toast + beep when a prayer has just started. Runs every
   // second but only inside the first minute after each prayer, and
-  // only once per prayer per day.
+  // only once per prayer per day. Wrapped in try/catch so any
+  // localStorage / adhan hiccup can't break the render loop.
   useEffect(() => {
-    for (const { key, label } of ORDER) {
-      const t = today[key] as Date;
-      if (!t) continue;
-      const diffMs = now.getTime() - t.getTime();
-      if (diffMs < 0 || diffMs > 60_000) continue;
-      const stamp = `${t.toDateString()}:${key}`;
-      const ls = `zahran_prayer_fired_${stamp}`;
-      if (localStorage.getItem(ls)) continue;
-      localStorage.setItem(ls, '1');
-      toast(`حان الآن موعد ${label}`, {
-        icon: '🕌',
-        duration: 8000,
-        style: {
-          background: '#ecfccb',
-          color: '#365314',
-          fontWeight: 700,
-        },
-      });
-      try {
-        const ctx = new (window.AudioContext ||
-          (window as any).webkitAudioContext)();
-        const o = ctx.createOscillator();
-        const g = ctx.createGain();
-        o.type = 'sine';
-        o.frequency.value = 660;
-        o.connect(g);
-        g.connect(ctx.destination);
-        g.gain.setValueAtTime(0.0001, ctx.currentTime);
-        g.gain.exponentialRampToValueAtTime(0.2, ctx.currentTime + 0.05);
-        g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 1.1);
-        o.start();
-        o.stop(ctx.currentTime + 1.1);
-      } catch {
-        /* audio context blocked — silent beep, not fatal */
+    try {
+      for (const { key, label } of ORDER) {
+        const t = today?.[key] as Date | undefined;
+        if (!t || !(t instanceof Date) || isNaN(t.getTime())) continue;
+        const diffMs = now.getTime() - t.getTime();
+        if (diffMs < 0 || diffMs > 60_000) continue;
+        const stamp = `${t.toDateString()}:${key}`;
+        const ls = `zahran_prayer_fired_${stamp}`;
+        try {
+          if (localStorage.getItem(ls)) continue;
+          localStorage.setItem(ls, '1');
+        } catch {
+          /* private mode / quota — just fire the toast this tick */
+        }
+        toast(`حان الآن موعد ${label}`, {
+          icon: '🕌',
+          duration: 8000,
+          style: {
+            background: '#ecfccb',
+            color: '#365314',
+            fontWeight: 700,
+          },
+        });
+        try {
+          const AC =
+            (window as any).AudioContext || (window as any).webkitAudioContext;
+          if (!AC) continue;
+          const ctx = new AC();
+          const o = ctx.createOscillator();
+          const g = ctx.createGain();
+          o.type = 'sine';
+          o.frequency.value = 660;
+          o.connect(g);
+          g.connect(ctx.destination);
+          g.gain.setValueAtTime(0.0001, ctx.currentTime);
+          g.gain.exponentialRampToValueAtTime(0.2, ctx.currentTime + 0.05);
+          g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 1.1);
+          o.start();
+          o.stop(ctx.currentTime + 1.1);
+        } catch {
+          /* audio blocked — silent beep is fine */
+        }
       }
+    } catch {
+      /* outer safety — never throw from this effect */
     }
   }, [now, today]);
 
@@ -124,8 +135,12 @@ export function PrayerStrip() {
   // if all of today's prayers have passed, fall back to tomorrow's fajr.
   const upcoming = ORDER.map((p) => ({
     ...p,
-    at: today[p.key] as Date,
-  })).filter((p) => p.at && p.at.getTime() > now.getTime())[0];
+    at: today?.[p.key] as Date | undefined,
+  })).filter(
+    (p): p is { key: PrayerKey; label: string; at: Date } =>
+      !!p.at && p.at instanceof Date && !isNaN(p.at.getTime()) &&
+      p.at.getTime() > now.getTime(),
+  )[0];
 
   let nextLabel: string | null = null;
   let nextTime: Date | null = null;
@@ -154,15 +169,25 @@ export function PrayerStrip() {
 
   // All remaining prayers today (plus tomorrow's fajr if all of today's have passed).
   const remaining = (() => {
-    const list = ORDER.map((p) => ({
-      label: p.label,
-      at: today[p.key] as Date,
-    })).filter((p) => p.at && p.at.getTime() > now.getTime());
-    if (list.length) return list;
-    const t = new Date(now);
-    t.setDate(t.getDate() + 1);
-    const tomorrow = new PrayerTimes(CAIRO, t, PARAMS);
-    return [{ label: 'الفجر', at: tomorrow.fajr }];
+    try {
+      const list = ORDER.map((p) => ({
+        label: p.label,
+        at: today?.[p.key] as Date | undefined,
+      })).filter(
+        (p): p is { label: string; at: Date } =>
+          !!p.at && p.at instanceof Date && !isNaN(p.at.getTime()) &&
+          p.at.getTime() > now.getTime(),
+      );
+      if (list.length) return list;
+      const t = new Date(now);
+      t.setDate(t.getDate() + 1);
+      const tomorrow = new PrayerTimes(CAIRO, t, PARAMS);
+      return tomorrow?.fajr
+        ? [{ label: 'الفجر', at: tomorrow.fajr }]
+        : [];
+    } catch {
+      return [];
+    }
   })();
 
   return (
