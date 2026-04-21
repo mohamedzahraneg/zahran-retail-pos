@@ -98,6 +98,26 @@ export class ProductsService {
           variants_count: Number(r.variants_count || 0),
         });
       }
+      // Short variants summary so the UI can search by color / size
+      // and highlight which variant a number matched. Limit to 20
+      // entries per product — more than enough for the list view.
+      const variantsRows = await this.ds.query(
+        `SELECT v.product_id, v.sku, v.color, v.size
+           FROM product_variants v
+          WHERE v.product_id = ANY($1) AND v.is_active = TRUE
+          ORDER BY v.product_id, v.id
+          LIMIT 5000`,
+        [ids],
+      );
+      const variantsByProduct = new Map<string, any[]>();
+      for (const v of variantsRows) {
+        const arr = variantsByProduct.get(v.product_id) || [];
+        if (arr.length < 20) {
+          arr.push({ sku: v.sku, color: v.color, size: v.size });
+          variantsByProduct.set(v.product_id, arr);
+        }
+      }
+
       enriched = data.map((p) => {
         const s = stockMap.get(p.id);
         return {
@@ -105,6 +125,7 @@ export class ProductsService {
           total_stock: s?.total_stock ?? 0,
           stock_value: s?.stock_value ?? 0,
           variants_count: s?.variants_count ?? 0,
+          variants_summary: variantsByProduct.get(p.id) || [],
         };
       });
     }

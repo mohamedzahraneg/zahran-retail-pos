@@ -52,6 +52,14 @@ export default function Products() {
   const [showCreate, setShowCreate] = useState(false);
   const [editTarget, setEditTarget] = useState<Product | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Product | null>(null);
+  // Per-column smart filters — each box narrows the rows by matching
+  // the column's value. The "بحث ذكي" box looks inside the product's
+  // variant summaries so color / size / variant SKU all match too.
+  const [colSku, setColSku] = useState('');
+  const [colName, setColName] = useState('');
+  const [colPrice, setColPrice] = useState('');
+  const [colStock, setColStock] = useState('');
+  const [colVariant, setColVariant] = useState('');
   const [showGroups, setShowGroups] = useState(false);
   const qc = useQueryClient();
 
@@ -91,8 +99,66 @@ export default function Products() {
         return true;
       });
     }
+    // ── Per-column smart filters ────────────────────────────────────
+    const sku = colSku.trim().toLowerCase();
+    const nm = colName.trim().toLowerCase();
+    const pr = colPrice.trim();
+    const st = colStock.trim();
+    const vq = colVariant.trim().toLowerCase();
+    if (sku) {
+      list = list.filter((p) => {
+        if ((p.sku_root || '').toLowerCase().includes(sku)) return true;
+        // Also match if any variant SKU contains the query
+        const vs = (p as any).variants_summary || [];
+        return vs.some((v: any) => (v.sku || '').toLowerCase().includes(sku));
+      });
+    }
+    if (nm) {
+      list = list.filter((p) =>
+        (p.name_ar || '').toLowerCase().includes(nm) ||
+        (p.name_en || '').toLowerCase().includes(nm),
+      );
+    }
+    if (pr) list = list.filter((p) => String(p.base_price ?? '').includes(pr));
+    if (st) list = list.filter((p) => String(p.total_stock ?? '').includes(st));
+    if (vq) {
+      list = list.filter((p) => {
+        const vs = (p as any).variants_summary || [];
+        return vs.some(
+          (v: any) =>
+            (v.color || '').toLowerCase().includes(vq) ||
+            (v.size || '').toLowerCase().includes(vq) ||
+            (v.sku || '').toLowerCase().includes(vq),
+        );
+      });
+    }
     return list;
-  }, [data, categoryFilter, activeFilter, stockFilter]);
+  }, [
+    data,
+    categoryFilter,
+    activeFilter,
+    stockFilter,
+    colSku,
+    colName,
+    colPrice,
+    colStock,
+    colVariant,
+  ]);
+
+  // Grand totals across ALL products (pre-filter) for the footer.
+  const catalogTotals = useMemo(() => {
+    const all = data?.data || [];
+    const products = all.length;
+    const variants = all.reduce(
+      (s, p) => s + Number((p as any).variants_count || 0),
+      0,
+    );
+    const units = all.reduce(
+      (s, p) => s + Number((p as any).total_stock || 0),
+      0,
+    );
+    return { products, variants, units };
+  }, [data]);
 
   const { sorted, thProps, sortIcon } = useTableSort(filteredData, null, 'asc');
 
@@ -209,6 +275,7 @@ export default function Products() {
         <table className="w-full">
           <thead className="bg-slate-50 border-b border-slate-200">
             <tr className="text-xs text-slate-500 font-bold">
+              <th className="text-center p-3 w-12">#</th>
               <th {...thProps('name_ar')} className={`text-right p-3 ${thProps('name_ar').className}`}>
                 {sortIcon('name_ar')} المنتج
               </th>
@@ -228,6 +295,7 @@ export default function Products() {
               <th {...thProps('total_stock')} className={`text-left p-3 ${thProps('total_stock').className}`}>
                 {sortIcon('total_stock')} المخزون
               </th>
+              <th className="text-right p-3">الأصناف (لون/مقاس)</th>
               <th {...thProps('stock_value')} className={`text-left p-3 ${thProps('stock_value').className}`}>
                 {sortIcon('stock_value')} قيمة المخزون
               </th>
@@ -236,22 +304,109 @@ export default function Products() {
               </th>
               <th className="text-left p-3">إجراءات</th>
             </tr>
+            {/* Per-column filter row */}
+            <tr className="bg-white border-t border-slate-100 text-xs">
+              <td className="p-1.5"></td>
+              <td className="p-1.5">
+                <input
+                  className="input py-1 text-xs"
+                  placeholder="بحث بالاسم…"
+                  value={colName}
+                  onChange={(e) => setColName(e.target.value)}
+                />
+              </td>
+              <td className="p-1.5">
+                <input
+                  className="input py-1 text-xs font-mono"
+                  placeholder="كود"
+                  dir="ltr"
+                  value={colSku}
+                  onChange={(e) => setColSku(e.target.value)}
+                />
+              </td>
+              <td className="p-1.5"></td>
+              <td className="p-1.5"></td>
+              <td className="p-1.5">
+                <input
+                  className="input py-1 text-xs font-mono"
+                  placeholder="سعر"
+                  dir="ltr"
+                  value={colPrice}
+                  onChange={(e) => setColPrice(e.target.value)}
+                />
+              </td>
+              <td className="p-1.5"></td>
+              <td className="p-1.5">
+                <input
+                  className="input py-1 text-xs font-mono"
+                  placeholder="كمية"
+                  dir="ltr"
+                  value={colStock}
+                  onChange={(e) => setColStock(e.target.value)}
+                />
+              </td>
+              <td className="p-1.5">
+                <input
+                  className="input py-1 text-xs"
+                  placeholder="لون / مقاس / SKU صنف"
+                  value={colVariant}
+                  onChange={(e) => setColVariant(e.target.value)}
+                />
+              </td>
+              <td className="p-1.5"></td>
+              <td className="p-1.5"></td>
+              <td className="p-1.5"></td>
+            </tr>
           </thead>
           <tbody>
             {isLoading && (
               <tr>
-                <td colSpan={10} className="text-center py-12 text-slate-400">
+                <td colSpan={12} className="text-center py-12 text-slate-400">
                   جارٍ التحميل...
                 </td>
               </tr>
             )}
-            {sorted.map((p) => {
+            {sorted.map((p, idx) => {
               const cat = categories.find((c) => c.id === p.category_id);
+              // Does this product have an EXACT SKU match for colSku?
+              // (If so, the row gets a small "✓" marker.)
+              const skuQuery = colSku.trim().toLowerCase();
+              const exactSkuHit =
+                skuQuery.length > 0 &&
+                ((p.sku_root || '').toLowerCase() === skuQuery ||
+                  ((p as any).variants_summary || []).some(
+                    (v: any) => (v.sku || '').toLowerCase() === skuQuery,
+                  ));
+              // Which variants match the current variant-search query?
+              const vq = colVariant.trim().toLowerCase();
+              const matchedVariants = vq
+                ? ((p as any).variants_summary || []).filter(
+                    (v: any) =>
+                      (v.color || '').toLowerCase().includes(vq) ||
+                      (v.size || '').toLowerCase().includes(vq) ||
+                      (v.sku || '').toLowerCase().includes(vq),
+                  )
+                : [];
               return (
                 <tr
                   key={p.id}
-                  className="border-b border-slate-100 hover:bg-slate-50"
+                  className={`border-b border-slate-100 hover:bg-slate-50 ${
+                    exactSkuHit ? 'bg-emerald-50/50' : ''
+                  }`}
                 >
+                  <td className="p-3 text-center">
+                    <div className="inline-flex items-center gap-1 font-mono text-slate-500 text-xs tabular-nums">
+                      {idx + 1}
+                      {exactSkuHit && (
+                        <span
+                          className="text-emerald-600 font-bold"
+                          title="مطابقة تامة للكود"
+                        >
+                          ✓
+                        </span>
+                      )}
+                    </div>
+                  </td>
                   <td className="p-3">
                     <div className="flex items-center gap-3">
                       {p.primary_image_url ? (
@@ -324,6 +479,40 @@ export default function Products() {
                       );
                     })()}
                   </td>
+                  <td className="p-2 text-xs">
+                    {((p as any).variants_summary || []).length === 0 ? (
+                      <span className="text-slate-400">—</span>
+                    ) : (
+                      <div className="flex flex-wrap gap-1 max-w-[260px]">
+                        {((p as any).variants_summary || [])
+                          .slice(0, 6)
+                          .map((v: any, i: number) => {
+                            const isHit = matchedVariants.includes(v);
+                            const parts = [v.color, v.size]
+                              .filter(Boolean)
+                              .join(' · ');
+                            return (
+                              <span
+                                key={i}
+                                className={`chip border text-[10px] ${
+                                  isHit
+                                    ? 'bg-amber-100 text-amber-700 border-amber-300'
+                                    : 'bg-slate-50 text-slate-600 border-slate-200'
+                                }`}
+                                title={v.sku}
+                              >
+                                {parts || v.sku || '—'}
+                              </span>
+                            );
+                          })}
+                        {((p as any).variants_summary || []).length > 6 && (
+                          <span className="text-[10px] text-slate-400">
+                            +{((p as any).variants_summary || []).length - 6}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </td>
                   <td className="p-3 text-left font-semibold text-slate-700">
                     {EGP(p.stock_value ?? 0)}
                   </td>
@@ -369,6 +558,42 @@ export default function Products() {
             )}
           </tbody>
         </table>
+      </div>
+
+      {/* Sticky bottom totals bar */}
+      <div className="sticky bottom-0 -mx-3 md:-mx-6 mt-6 bg-gradient-to-l from-slate-900 via-slate-800 to-slate-900 text-white px-4 py-3 shadow-2xl border-t border-slate-700 z-40">
+        <div className="flex items-center justify-between gap-4 flex-wrap text-xs">
+          <div className="flex items-center gap-4 flex-wrap">
+            <span className="text-slate-400">المعروض:</span>
+            <span className="font-black tabular-nums text-amber-300">
+              {sorted.length.toLocaleString('en-US')} منتج
+            </span>
+            <span className="text-slate-500">من</span>
+            <span className="font-black tabular-nums text-white">
+              {catalogTotals.products.toLocaleString('en-US')}
+            </span>
+          </div>
+          <div className="flex items-center gap-4 flex-wrap">
+            <div className="flex items-center gap-1">
+              <span className="text-slate-400">إجمالي المنتجات:</span>
+              <span className="font-black tabular-nums text-white">
+                {catalogTotals.products.toLocaleString('en-US')}
+              </span>
+            </div>
+            <div className="flex items-center gap-1">
+              <span className="text-slate-400">الأصناف:</span>
+              <span className="font-black tabular-nums text-indigo-300">
+                {catalogTotals.variants.toLocaleString('en-US')}
+              </span>
+            </div>
+            <div className="flex items-center gap-1">
+              <span className="text-slate-400">القطع:</span>
+              <span className="font-black tabular-nums text-emerald-300">
+                {catalogTotals.units.toLocaleString('en-US')}
+              </span>
+            </div>
+          </div>
+        </div>
       </div>
 
       {showCreate && (
