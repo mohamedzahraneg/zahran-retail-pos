@@ -109,11 +109,46 @@ function ShiftCountdown({
   return (
     <div
       className={`text-xs flex items-center gap-1.5 font-bold ${
-        past ? 'text-amber-700' : 'text-emerald-700'
+        past ? 'text-amber-100' : 'text-emerald-100'
       }`}
     >
       {past ? '🟡 ساعات إضافية' : '🟢 متبقي للهدف'}
       <span className="tabular-nums">{past ? '+' : ''}{fmt}</span>
+    </div>
+  );
+}
+
+/** Live date + day + clock (HH:MM:SS) in Cairo time. */
+function LiveDateTime() {
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const t = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  const dow = now.toLocaleDateString('ar-EG', {
+    timeZone: 'Africa/Cairo',
+    weekday: 'long',
+  });
+  const date = now.toLocaleDateString('ar-EG-u-ca-gregory', {
+    timeZone: 'Africa/Cairo',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+  });
+  const clock = now.toLocaleTimeString('ar-EG', {
+    timeZone: 'Africa/Cairo',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true,
+  });
+  return (
+    <div className="bg-white/15 backdrop-blur-sm border border-white/25 rounded-xl px-3 py-2 text-white flex items-center gap-3 text-xs">
+      <span className="opacity-90">{dow}</span>
+      <span className="opacity-90">·</span>
+      <span className="opacity-90">{date}</span>
+      <span className="opacity-90">·</span>
+      <span className="tabular-nums font-black text-sm">{clock}</span>
     </div>
   );
 }
@@ -176,26 +211,28 @@ function EmployeeDashboardBody({ data }: { data: EmployeeDashboard }) {
   return (
     <div className="space-y-5">
       {/* ─── Profile header card ─── */}
-      <div className="card p-5 bg-gradient-to-br from-indigo-600 to-violet-600 text-white">
+      <div className="card p-5 bg-gradient-to-br from-indigo-700 via-indigo-600 to-violet-600 text-white">
         <div className="flex items-center justify-between flex-wrap gap-4">
           <div className="flex items-center gap-4">
-            <div className="w-14 h-14 rounded-2xl bg-white/15 flex items-center justify-center">
+            <div className="w-14 h-14 rounded-2xl bg-white/20 border border-white/20 flex items-center justify-center">
               <Briefcase size={26} />
             </div>
             <div>
-              <div className="text-xs uppercase tracking-widest opacity-80">
+              <div className="text-[11px] uppercase tracking-widest text-white/80">
                 ملف الموظف
               </div>
-              <div className="text-2xl font-black mt-1">{profile.full_name}</div>
-              <div className="text-xs opacity-90 flex items-center gap-2 mt-1 flex-wrap">
-                <span className="chip bg-white/15 border-white/20 font-mono text-[11px]">
+              <div className="text-2xl font-black mt-1 text-white">
+                {profile.full_name}
+              </div>
+              <div className="text-xs flex items-center gap-2 mt-1 flex-wrap">
+                <span className="chip bg-white/20 border-white/30 font-mono text-[11px] text-white">
                   {profile.employee_no}
                 </span>
                 {profile.job_title && (
-                  <span className="opacity-90">{profile.job_title}</span>
+                  <span className="text-white/90">{profile.job_title}</span>
                 )}
                 {profile.role_name && (
-                  <span className="chip bg-white/15 border-white/20 text-[11px]">
+                  <span className="chip bg-white/20 border-white/30 text-[11px] text-white">
                     {profile.role_name}
                   </span>
                 )}
@@ -203,7 +240,7 @@ function EmployeeDashboardBody({ data }: { data: EmployeeDashboard }) {
             </div>
           </div>
           <div className="text-center">
-            <div className="text-xs opacity-80 mb-1">
+            <div className="text-[11px] text-white/80 mb-1">
               {isClockedIn
                 ? 'منذ تسجيل الحضور'
                 : clockOutAt
@@ -212,7 +249,7 @@ function EmployeeDashboardBody({ data }: { data: EmployeeDashboard }) {
             </div>
             {isClockedIn ? (
               <div>
-                <div className="text-3xl">
+                <div className="text-3xl text-white">
                   <LiveElapsed since={clockInAt} />
                 </div>
                 {attendance.expected_end_utc && (
@@ -223,7 +260,7 @@ function EmployeeDashboardBody({ data }: { data: EmployeeDashboard }) {
                 )}
               </div>
             ) : (
-              <div className="text-xl font-bold">
+              <div className="text-xl font-bold text-white">
                 {clockOutAt ? 'شكراً لجهدك' : '—'}
               </div>
             )}
@@ -239,7 +276,7 @@ function EmployeeDashboardBody({ data }: { data: EmployeeDashboard }) {
               )}
               {isClockedIn && (
                 <button
-                  className="px-3 py-1.5 rounded-lg bg-white/15 border border-white/30 text-xs font-black"
+                  className="px-3 py-1.5 rounded-lg bg-white text-indigo-700 text-xs font-black"
                   onClick={() => clockOut.mutate()}
                   disabled={clockOut.isPending}
                 >
@@ -248,6 +285,11 @@ function EmployeeDashboardBody({ data }: { data: EmployeeDashboard }) {
               )}
             </div>
           </div>
+        </div>
+        {/* Live date + day + clock — always visible, distinct from the
+            attendance timer above. */}
+        <div className="mt-4 flex justify-start">
+          <LiveDateTime />
         </div>
       </div>
 

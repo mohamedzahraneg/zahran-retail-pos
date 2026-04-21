@@ -123,8 +123,13 @@ const groups: NavGroup[] = [
     title: 'الإدارة',
     items: [
       { to: '/users', label: 'المستخدمون', icon: UserCog, roles: ['admin', 'manager'], permission: 'users.view' },
-      { to: '/attendance', label: 'الحضور والانصراف', icon: UserCheck, roles: ['admin', 'manager', 'cashier', 'accountant', 'salesperson', 'inventory'], permission: 'attendance.clock' },
+      // Personal attendance + everything-about-you lives on /me. The
+      // admin-only team attendance board is still reachable at
+      // /attendance (route still registered) but no longer needs its
+      // own sidebar entry — it shows up only for users with
+      // attendance.view_team.
       { to: '/me', label: 'ملفي الشخصي', icon: BadgeCheck, roles: ['admin', 'manager', 'cashier', 'accountant', 'salesperson', 'inventory'], permission: 'employee.dashboard.view' },
+      { to: '/attendance', label: 'حضور الفريق', icon: UserCheck, roles: ['admin', 'manager', 'accountant'], permission: 'attendance.view_team' },
       { to: '/team', label: 'إدارة الفريق', icon: Users2, roles: ['admin', 'manager'], permission: 'employee.team.view' },
       { to: '/settings', label: 'الإعدادات', icon: Settings, roles: ['admin'], permission: 'settings.view' },
       { to: '/import', label: 'استيراد Excel', icon: FileUp, roles: ['admin', 'manager'], permission: 'import.run' },

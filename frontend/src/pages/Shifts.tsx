@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import { attendanceApi } from '@/api/attendance.api';
+import { useAuthStore } from '@/stores/auth.store';
 import {
   Clock,
   Play,
@@ -110,6 +111,9 @@ export default function Shifts() {
 
       {/* Current shift summary */}
       {current && <CurrentShiftCard shift={current} />}
+
+      {/* Pending close-out approvals — admin-only */}
+      <PendingCloseInbox />
 
       {/* Filter */}
       <div className="card p-4">
@@ -635,18 +639,38 @@ function CloseShiftModal({
   const canSubmit =
     (useCounter && billsCount > 0) || (!useCounter && actual !== '');
 
+  const hasPermission = useAuthStore((s) => s.hasPermission);
+  const canDirectClose = hasPermission('shifts.close_approve');
+
   const mutation = useMutation({
-    mutationFn: () =>
-      shiftsApi.close(shift.id, {
+    mutationFn: () => {
+      const basePayload = {
         actual_closing: Number(actualNum),
         notes: notes || undefined,
-        denominations: useCounter
-          ? Object.fromEntries(
-              Object.entries(denom).filter(([, c]) => Number(c) > 0),
-            )
-          : undefined,
-      } as any),
-    onSuccess: (result) => {
+      };
+      const denominations = useCounter
+        ? Object.fromEntries(
+            Object.entries(denom).filter(([, c]) => Number(c) > 0),
+          )
+        : undefined;
+      if (canDirectClose) {
+        return shiftsApi.close(shift.id, {
+          ...basePayload,
+          denominations,
+        } as any);
+      }
+      // Non-approvers submit a close request instead — the shift moves
+      // to pending_close until an admin reviews it.
+      return shiftsApi.requestClose(shift.id, basePayload) as any;
+    },
+    onSuccess: (result: any) => {
+      if (!canDirectClose && result?.pending) {
+        toast.success(
+          'تم إرسال طلب إقفال الوردية — بانتظار اعتماد المدير',
+        );
+        onSuccess();
+        return;
+      }
       const v =
         result.summary?.variance ??
         Number(result.actual_closing || 0) -
@@ -1178,5 +1202,171 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <span className="text-xs font-bold text-slate-600 mb-1 block">{label}</span>
       {children}
     </label>
+  );
+}
+
+/* ───────── Admin-only pending close-out inbox ───────── */
+
+function PendingCloseInbox() {
+  const qc = useQueryClient();
+  const hasPermission = useAuthStore((s) => s.hasPermission);
+  const canDecide = hasPermission('shifts.close_approve');
+  const [rejectTarget, setRejectTarget] = useState<Shift | null>(null);
+  const [rejectReason, setRejectReason] = useState('');
+
+  const { data: pending = [] } = useQuery({
+    queryKey: ['shifts-pending-close'],
+    queryFn: () => shiftsApi.pendingCloses(),
+    enabled: canDecide,
+    refetchInterval: 30_000,
+  });
+
+  const approve = useMutation({
+    mutationFn: (id: string) => shiftsApi.approveClose(id),
+    onSuccess: () => {
+      toast.success('تم اعتماد إقفال الوردية');
+      qc.invalidateQueries({ queryKey: ['shifts-pending-close'] });
+      qc.invalidateQueries({ queryKey: ['shifts'] });
+      qc.invalidateQueries({ queryKey: ['shift-current'] });
+    },
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.message || 'فشل الاعتماد'),
+  });
+
+  const reject = useMutation({
+    mutationFn: ({ id, reason }: { id: string; reason: string }) =>
+      shiftsApi.rejectClose(id, reason),
+    onSuccess: () => {
+      toast.success('تم رفض طلب الإقفال — الوردية مفتوحة من جديد');
+      qc.invalidateQueries({ queryKey: ['shifts-pending-close'] });
+      qc.invalidateQueries({ queryKey: ['shifts'] });
+      setRejectTarget(null);
+      setRejectReason('');
+    },
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.message || 'فشل الرفض'),
+  });
+
+  if (!canDecide || pending.length === 0) return null;
+
+  return (
+    <div className="card p-4 border-2 border-amber-200 bg-amber-50/40">
+      <div className="flex items-center gap-2 mb-3">
+        <Square className="text-amber-600" size={16} />
+        <h3 className="font-black text-amber-800">
+          طلبات إقفال وردية بانتظار الاعتماد ({pending.length})
+        </h3>
+      </div>
+      <div className="space-y-2">
+        {pending.map((s: any) => (
+          <div
+            key={s.id}
+            className="bg-white border border-amber-200 rounded-lg p-3 text-xs"
+          >
+            <div className="flex items-center justify-between flex-wrap gap-2 mb-1">
+              <div className="flex items-center gap-2">
+                <span className="font-mono font-bold">{s.shift_no}</span>
+                <span className="chip bg-amber-100 text-amber-700 border-amber-200 text-[10px]">
+                  قيمة المقدم: {EGP(s.close_requested_amount || 0)}
+                </span>
+                <span className="text-slate-700">
+                  الكاشير: {s.requested_by_name || s.requested_by_username || '—'}
+                </span>
+              </div>
+              <span className="text-slate-500 tabular-nums">
+                {s.close_requested_at
+                  ? new Date(s.close_requested_at).toLocaleString('ar-EG', {
+                      timeZone: 'Africa/Cairo',
+                    })
+                  : ''}
+              </span>
+            </div>
+            {s.close_requested_notes && (
+              <div className="text-slate-600 mb-2">
+                ملاحظات: {s.close_requested_notes}
+              </div>
+            )}
+            <div className="flex gap-2">
+              <button
+                className="px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[11px]"
+                onClick={() => approve.mutate(s.id)}
+                disabled={approve.isPending || reject.isPending}
+              >
+                اعتماد الإقفال
+              </button>
+              <button
+                className="px-3 py-1.5 rounded bg-rose-600 hover:bg-rose-700 text-white font-bold text-[11px]"
+                onClick={() => {
+                  setRejectTarget(s);
+                  setRejectReason('');
+                }}
+                disabled={approve.isPending || reject.isPending}
+              >
+                رفض
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {rejectTarget && (
+        <div
+          className="fixed inset-0 bg-black/40 z-[60] flex items-center justify-center p-4"
+          onClick={() => {
+            if (!reject.isPending) {
+              setRejectTarget(null);
+              setRejectReason('');
+            }
+          }}
+        >
+          <div
+            className="bg-white rounded-2xl max-w-md w-full p-5"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h4 className="font-black text-slate-800 mb-2">رفض طلب الإقفال</h4>
+            <p className="text-xs text-slate-500 mb-3">
+              الوردية سترجع إلى حالة "مفتوحة" بعد الرفض.
+            </p>
+            <textarea
+              rows={3}
+              className="input w-full"
+              placeholder="مثال: فرق في عدّ الدرج / تحتاج مراجعة المسموحات"
+              value={rejectReason}
+              onChange={(e) => setRejectReason(e.target.value)}
+              disabled={reject.isPending}
+              autoFocus
+            />
+            <div className="flex justify-end gap-2 mt-3">
+              <button
+                className="btn-ghost"
+                disabled={reject.isPending}
+                onClick={() => {
+                  setRejectTarget(null);
+                  setRejectReason('');
+                }}
+              >
+                إلغاء
+              </button>
+              <button
+                className="px-4 py-2 rounded-lg bg-rose-600 text-white font-bold text-sm"
+                disabled={reject.isPending}
+                onClick={() => {
+                  if (!rejectReason.trim()) {
+                    toast.error('يجب كتابة سبب الرفض');
+                    return;
+                  }
+                  reject.mutate({
+                    id: rejectTarget.id,
+                    reason: rejectReason.trim(),
+                  });
+                }}
+              >
+                تأكيد الرفض
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }

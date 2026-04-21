@@ -347,6 +347,103 @@ export class ShiftsService {
     };
   }
 
+  // ── Request / approve close-out flow ───────────────────────────────
+  /**
+   * A cashier without shifts.close_approve submits their closing
+   * balance here; the shift enters `pending_close` status and stays
+   * open for business until a supervisor decides. This lets the
+   * owner review variance before money is committed to the ledger.
+   */
+  async requestClose(
+    id: string,
+    dto: { actual_closing: number; notes?: string },
+    userId: string,
+  ) {
+    const [shift] = await this.ds.query(
+      `SELECT id, status, opened_by FROM shifts WHERE id = $1`,
+      [id],
+    );
+    if (!shift) throw new NotFoundException('الوردية غير موجودة');
+    if (shift.status !== 'open') {
+      throw new BadRequestException('لا يمكن طلب إقفال وردية غير مفتوحة');
+    }
+    const [row] = await this.ds.query(
+      `UPDATE shifts
+          SET status                 = 'pending_close',
+              close_requested_at     = NOW(),
+              close_requested_by     = $1,
+              close_requested_amount = $2::numeric,
+              close_requested_notes  = $3
+        WHERE id = $4
+        RETURNING *`,
+      [userId, Number(dto.actual_closing) || 0, dto.notes ?? null, id],
+    );
+    return { pending: true, shift: row };
+  }
+
+  /** Admin approves → runs the real close() with the requested amount. */
+  async approveClose(id: string, userId: string) {
+    const [shift] = await this.ds.query(
+      `SELECT * FROM shifts WHERE id = $1`,
+      [id],
+    );
+    if (!shift) throw new NotFoundException('الوردية غير موجودة');
+    if (shift.status !== 'pending_close') {
+      throw new BadRequestException('الوردية ليست في انتظار الإقفال');
+    }
+    const actual = Number(shift.close_requested_amount || 0);
+    const result = await this.close(
+      id,
+      { actual_closing: actual, notes: shift.close_requested_notes || '' } as any,
+      userId,
+    );
+    await this.ds.query(
+      `UPDATE shifts
+          SET close_approved_at = NOW(),
+              close_approved_by = $2
+        WHERE id = $1`,
+      [id, userId],
+    );
+    return { approved: true, shift: result };
+  }
+
+  /** Admin rejects → shift reopens, rejection reason is stored. */
+  async rejectClose(id: string, userId: string, reason: string) {
+    if (!reason?.trim()) {
+      throw new BadRequestException('يجب كتابة سبب الرفض');
+    }
+    const [shift] = await this.ds.query(
+      `SELECT status FROM shifts WHERE id = $1`,
+      [id],
+    );
+    if (!shift) throw new NotFoundException('الوردية غير موجودة');
+    if (shift.status !== 'pending_close') {
+      throw new BadRequestException('الوردية ليست في انتظار الإقفال');
+    }
+    const [row] = await this.ds.query(
+      `UPDATE shifts
+          SET status                 = 'open',
+              close_rejection_reason = $2,
+              close_approved_by      = $3,
+              close_approved_at      = NOW()
+        WHERE id = $1
+        RETURNING *`,
+      [id, reason, userId],
+    );
+    return { rejected: true, shift: row };
+  }
+
+  /** Admin inbox — every shift waiting on approval. */
+  listPendingCloses() {
+    return this.ds.query(
+      `SELECT s.*, u.full_name AS requested_by_name, u.username AS requested_by_username
+         FROM shifts s
+         LEFT JOIN users u ON u.id = s.close_requested_by
+        WHERE s.status = 'pending_close'
+        ORDER BY s.close_requested_at DESC`,
+    );
+  }
+
   list(status?: string, userId?: string) {
     const conds: string[] = [];
     const params: any[] = [];

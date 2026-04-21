@@ -127,4 +127,27 @@ export const shiftsApi = {
     unwrap<Shift & { summary?: ShiftSummary }>(
       api.post(`/shifts/${id}/close`, payload),
     ),
+
+  requestClose: (
+    id: string,
+    payload: { actual_closing: number; notes?: string },
+  ) =>
+    unwrap<{ pending: true; shift: Shift }>(
+      api.post(`/shifts/${id}/request-close`, payload),
+    ),
+
+  pendingCloses: () =>
+    unwrap<Array<Shift & { requested_by_name?: string }>>(
+      api.get('/shifts/pending-close'),
+    ),
+
+  approveClose: (id: string) =>
+    unwrap<{ approved: true; shift: Shift }>(
+      api.post(`/shifts/${id}/approve-close`, {}),
+    ),
+
+  rejectClose: (id: string, reason: string) =>
+    unwrap<{ rejected: true; shift: Shift }>(
+      api.post(`/shifts/${id}/reject-close`, { reason }),
+    ),
 };
