@@ -291,6 +291,35 @@ export class SuppliersService {
       [supplierId],
     ).catch(() => [] as any[]);
 
+    // Compute next scheduled payment date for the weekly plan.
+    let nextPaymentDate: string | null = null;
+    let daysUntilPayment: number | null = null;
+    if (supplier.payment_day_of_week !== null && supplier.payment_day_of_week !== undefined) {
+      const todayDow = new Date()
+        .toLocaleString('en-US', { timeZone: 'Africa/Cairo', weekday: 'short' })
+        .toLowerCase();
+      const map: Record<string, number> = {
+        sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6,
+      };
+      const todayIdx = map[todayDow] ?? 0;
+      daysUntilPayment =
+        (Number(supplier.payment_day_of_week) - todayIdx + 7) % 7;
+      const n = new Date();
+      n.setDate(n.getDate() + daysUntilPayment);
+      nextPaymentDate = n.toISOString().slice(0, 10);
+    }
+
+    // Outstanding total that includes opening balance explicitly so
+    // the landing-page figures match the profile "current_balance".
+    const openingBalance = Number(supplier.opening_balance || 0);
+    const outstandingTotal = Number(supplier.current_balance || 0);
+    const paidTotal = Number(supplier.paid_total || 0);
+    const sumKnown = outstandingTotal + paidTotal;
+    const outstandingPct = sumKnown > 0
+      ? Math.round((outstandingTotal / sumKnown) * 10000) / 100
+      : 0;
+    const paidPct = sumKnown > 0 ? 100 - outstandingPct : 0;
+
     return {
       supplier,
       purchases,
@@ -300,12 +329,154 @@ export class SuppliersService {
       credit_usage_pct:
         Number(supplier.credit_limit || 0) > 0
           ? Math.round(
-              (Number(supplier.current_balance || 0) /
-                Number(supplier.credit_limit)) *
-                10000,
+              (outstandingTotal / Number(supplier.credit_limit)) * 10000,
             ) / 100
           : null,
+      schedule: {
+        day_of_week: supplier.payment_day_of_week ?? null,
+        installment_amount: supplier.payment_installment_amount
+          ? Number(supplier.payment_installment_amount)
+          : null,
+        next_payment_date: nextPaymentDate,
+        days_until: daysUntilPayment,
+      },
+      ratios: {
+        opening_balance: openingBalance,
+        outstanding: outstandingTotal,
+        paid: paidTotal,
+        outstanding_pct: outstandingPct,
+        paid_pct: paidPct,
+      },
     };
+  }
+
+  /**
+   * Smart analytics for the suppliers landing page:
+   *   • Totals across the whole supplier set (count, outstanding,
+   *     paid last 30d, opening balances, purchases last 30d).
+   *   • Breakdown by supplier_type (cash / credit / installments).
+   *   • Top 5 by outstanding + top 5 by spend last 30d.
+   *   • Monthly spend series (last 6 months) for a stacked bar
+   *     chart.
+   */
+  async analytics() {
+    const [totals] = await this.ds.query(
+      `SELECT COUNT(*)::int                                         AS supplier_count,
+              COALESCE(SUM(current_balance), 0)::numeric(14,2)       AS outstanding_total,
+              COALESCE(SUM(opening_balance), 0)::numeric(14,2)       AS opening_total,
+              COALESCE(SUM(credit_limit), 0)::numeric(14,2)          AS credit_limit_total,
+              (
+                SELECT COALESCE(SUM(pp.amount), 0)::numeric(14,2)
+                  FROM purchase_payments pp
+                  JOIN purchases pu ON pu.id = pp.purchase_id
+                 WHERE pp.paid_at >= NOW() - INTERVAL '30 days'
+              )                                                     AS paid_last_30d,
+              (
+                SELECT COALESCE(SUM(grand_total), 0)::numeric(14,2)
+                  FROM purchases
+                 WHERE invoice_date >= (CURRENT_DATE - INTERVAL '30 days')
+              )                                                     AS purchases_last_30d
+         FROM suppliers
+        WHERE deleted_at IS NULL`,
+    );
+
+    const byType = await this.ds.query(
+      `SELECT supplier_type,
+              COUNT(*)::int                                  AS count,
+              COALESCE(SUM(current_balance), 0)::numeric(14,2) AS outstanding,
+              COALESCE(SUM(opening_balance), 0)::numeric(14,2) AS opening
+         FROM suppliers
+        WHERE deleted_at IS NULL
+        GROUP BY supplier_type`,
+    );
+
+    const topOutstanding = await this.ds.query(
+      `SELECT id, code, name, current_balance
+         FROM suppliers
+        WHERE deleted_at IS NULL AND current_balance > 0
+        ORDER BY current_balance DESC
+        LIMIT 5`,
+    );
+
+    const topSpend = await this.ds.query(
+      `SELECT s.id, s.code, s.name,
+              COALESCE(SUM(p.grand_total), 0)::numeric(14,2) AS spend
+         FROM suppliers s
+         LEFT JOIN purchases p
+                ON p.supplier_id = s.id
+               AND p.invoice_date >= (CURRENT_DATE - INTERVAL '30 days')
+        WHERE s.deleted_at IS NULL
+        GROUP BY s.id, s.code, s.name
+        HAVING SUM(p.grand_total) IS NOT NULL
+        ORDER BY spend DESC
+        LIMIT 5`,
+    );
+
+    const monthly = await this.ds.query(
+      `SELECT to_char(date_trunc('month', invoice_date), 'YYYY-MM') AS month,
+              COALESCE(SUM(grand_total), 0)::numeric(14,2) AS purchases,
+              COALESCE((
+                SELECT SUM(pp.amount)
+                  FROM purchase_payments pp
+                  JOIN purchases p2 ON p2.id = pp.purchase_id
+                 WHERE date_trunc('month', pp.paid_at) =
+                       date_trunc('month', purchases.invoice_date)
+              ), 0)::numeric(14,2) AS paid
+         FROM purchases
+        WHERE invoice_date >= (CURRENT_DATE - INTERVAL '6 months')
+        GROUP BY date_trunc('month', invoice_date)
+        ORDER BY date_trunc('month', invoice_date)`,
+    );
+
+    return { totals, byType, topOutstanding, topSpend, monthly };
+  }
+
+  /**
+   * Suppliers whose weekly payment day lands inside the next
+   * `windowDays` (default 7). Powers the "دفعات قريبة" inbox.
+   */
+  async upcomingPayments(windowDays = 7) {
+    const rows = await this.ds.query(
+      `SELECT s.id, s.code, s.name, s.supplier_type,
+              s.payment_day_of_week,
+              s.payment_installment_amount,
+              s.current_balance,
+              s.credit_limit
+         FROM suppliers s
+        WHERE s.deleted_at IS NULL
+          AND s.payment_day_of_week IS NOT NULL
+          AND s.is_active = TRUE`,
+    );
+    // Compute the next occurrence in JS so we return both the
+    // calendar date and the days-until.
+    const todayDow = new Date()
+      .toLocaleString('en-US', { timeZone: 'Africa/Cairo', weekday: 'short' })
+      .toLowerCase();
+    const dowMap: Record<string, number> = {
+      sun: 0,
+      mon: 1,
+      tue: 2,
+      wed: 3,
+      thu: 4,
+      fri: 5,
+      sat: 6,
+    };
+    const todayIdx = dowMap[todayDow] ?? 0;
+    const upcoming: any[] = [];
+    for (const r of rows) {
+      const due = Number(r.payment_day_of_week);
+      let daysUntil = (due - todayIdx + 7) % 7;
+      if (daysUntil > windowDays) continue;
+      const next = new Date();
+      next.setDate(next.getDate() + daysUntil);
+      upcoming.push({
+        ...r,
+        next_payment_date: next.toISOString().slice(0, 10),
+        days_until: daysUntil,
+      });
+    }
+    upcoming.sort((a, b) => a.days_until - b.days_until);
+    return upcoming;
   }
 
   /** All payments made to this supplier (across all invoices). */

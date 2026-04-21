@@ -1,4 +1,5 @@
 import { useState, useMemo } from 'react';
+import { Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import {
@@ -15,6 +16,9 @@ import {
   Pencil,
   ExternalLink,
   Trash2,
+  PieChart as PieChartIcon,
+  TrendingUp,
+  CalendarClock,
 } from 'lucide-react';
 import { suppliersApi, Supplier, SupplierOutstanding } from '@/api/suppliers.api';
 import { cashDeskApi } from '@/api/cash-desk.api';
@@ -33,6 +37,7 @@ export default function Suppliers() {
   const [q, setQ] = useState('');
   const [sort, setSort] = useState<SupplierSort>('balance_desc');
   const [onlyOutstanding, setOnlyOutstanding] = useState(false);
+  const [typeFilter, setTypeFilter] = useState<'all' | 'cash' | 'credit' | 'installments'>('all');
   const [showCreate, setShowCreate] = useState(false);
   const [selected, setSelected] = useState<Supplier | null>(null);
   const [payTarget, setPayTarget] = useState<Supplier | null>(null);
@@ -64,6 +69,18 @@ export default function Suppliers() {
     queryFn: suppliersApi.outstanding,
   });
 
+  const { data: analytics } = useQuery({
+    queryKey: ['suppliers-analytics'],
+    queryFn: suppliersApi.analytics,
+    refetchInterval: 120_000,
+  });
+
+  const { data: upcoming = [] } = useQuery({
+    queryKey: ['suppliers-upcoming'],
+    queryFn: () => suppliersApi.upcomingPayments(7),
+    refetchInterval: 300_000,
+  });
+
   const sortedSuppliers = useMemo(() => {
     const m: Record<string, SupplierOutstanding> = {};
     for (const o of outstanding) m[o.id] = o;
@@ -72,6 +89,9 @@ export default function Suppliers() {
       list = list.filter(
         (s) => Number(m[s.id]?.current_balance || s.current_balance || 0) > 0,
       );
+    }
+    if (typeFilter !== 'all') {
+      list = list.filter((s) => (s.supplier_type || 'credit') === typeFilter);
     }
     list.sort((a, b) => {
       const oa = m[a.id];
@@ -105,7 +125,7 @@ export default function Suppliers() {
       }
     });
     return list;
-  }, [suppliers, outstanding, sort, onlyOutstanding]);
+  }, [suppliers, outstanding, sort, onlyOutstanding, typeFilter]);
 
   const outstandingMap = useMemo(() => {
     const m: Record<string, SupplierOutstanding> = {};
@@ -119,8 +139,19 @@ export default function Suppliers() {
       (s, o) => s + Number(o.overdue_amount || 0),
       0,
     );
-    return { due, overdue, count: outstanding.length };
-  }, [outstanding]);
+    // include opening balances in the total payable overview
+    const opening = suppliers.reduce(
+      (s, x) => s + Number(x.opening_balance || 0),
+      0,
+    );
+    return {
+      due,
+      overdue,
+      opening,
+      total: due + opening,
+      count: outstanding.length,
+    };
+  }, [outstanding, suppliers]);
 
   return (
     <div className="space-y-6">
@@ -140,12 +171,24 @@ export default function Suppliers() {
       </div>
 
       {/* KPIs */}
-      <div className="grid md:grid-cols-3 gap-4">
+      <div className="grid md:grid-cols-4 gap-4">
         <Kpi
           title="إجمالي المستحقات"
-          value={EGP(totals.due)}
+          value={EGP(totals.total)}
           color="bg-amber-50"
           icon={<CreditCard className="text-amber-600" />}
+          hint={`شامل رصيد افتتاحي ${EGP(totals.opening)}`}
+        />
+        <Kpi
+          title="مستحقات جارية"
+          value={EGP(totals.due)}
+          color="bg-indigo-50"
+          icon={<CreditCard className="text-indigo-600" />}
+          hint={
+            analytics?.totals
+              ? `مدفوعات آخر 30 يوم ${EGP(analytics.totals.paid_last_30d)}`
+              : undefined
+          }
         />
         <Kpi
           title="مستحقات متأخرة"
@@ -154,12 +197,23 @@ export default function Suppliers() {
           icon={<AlertTriangle className="text-rose-600" />}
         />
         <Kpi
-          title="موردون لهم مستحقات"
-          value={String(totals.count)}
+          title="موردون نشطون"
+          value={String(analytics?.totals?.supplier_count ?? suppliers.length)}
           color="bg-brand-50"
           icon={<Truck className="text-brand-600" />}
+          hint={
+            analytics?.totals
+              ? `مشتريات آخر 30 يوم ${EGP(analytics.totals.purchases_last_30d)}`
+              : undefined
+          }
         />
       </div>
+
+      {/* Analytics strip — type breakdown + top outstanding + top spend */}
+      {analytics && <SuppliersAnalytics analytics={analytics} />}
+
+      {/* Upcoming payments inbox */}
+      {upcoming.length > 0 && <UpcomingPaymentsInbox upcoming={upcoming} />}
 
       {/* Search + sort + filter */}
       <div className="card p-4 flex flex-wrap items-center gap-3">
@@ -185,6 +239,16 @@ export default function Suppliers() {
           <option value="overdue_desc">متأخر أكثر</option>
           <option value="name">الاسم (أ-ي)</option>
           <option value="created_desc">الأحدث أولاً</option>
+        </select>
+        <select
+          className="input max-w-[160px]"
+          value={typeFilter}
+          onChange={(e) => setTypeFilter(e.target.value as any)}
+        >
+          <option value="all">كل الأنواع</option>
+          <option value="cash">كاش</option>
+          <option value="credit">آجل</option>
+          <option value="installments">أقساط</option>
         </select>
         <label className="inline-flex items-center gap-1 text-sm text-slate-600">
           <input
@@ -215,7 +279,18 @@ export default function Suppliers() {
               <div className="flex items-start justify-between mb-3 gap-2">
                 <div className="min-w-0 flex-1">
                   <div className="font-black text-slate-800 truncate">{s.name}</div>
-                  <div className="text-xs text-slate-500 font-mono">{s.code}</div>
+                  <div className="text-xs text-slate-500 font-mono flex items-center gap-1.5 mt-0.5">
+                    <span>{s.code}</span>
+                    {s.supplier_type && (
+                      <span
+                        className={`chip border text-[10px] px-1.5 py-0 ${
+                          TYPE_TONE[s.supplier_type] || TYPE_TONE.credit
+                        }`}
+                      >
+                        {TYPE_LABEL_AR[s.supplier_type] || s.supplier_type}
+                      </span>
+                    )}
+                  </div>
                 </div>
                 <div className="flex items-center gap-1 flex-shrink-0">
                   {due > 0 && (
@@ -274,6 +349,37 @@ export default function Suppliers() {
                   <span className="truncate">{s.address}</span>
                 </div>
               )}
+
+              {/* Balance strip — always visible, includes opening balance
+                  so the displayed figure matches the detail page. */}
+              <div className="mt-3 p-2 rounded-lg bg-slate-50 border border-slate-100 text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-500">الرصيد الحالي</span>
+                  <span
+                    className={`font-mono font-black tabular-nums ${
+                      due > 0 ? 'text-rose-700' : 'text-emerald-700'
+                    }`}
+                  >
+                    {EGP(due)}
+                  </span>
+                </div>
+                {Number(s.opening_balance || 0) > 0 && (
+                  <div className="flex items-center justify-between mt-1 text-[10px] text-slate-400">
+                    <span>رصيد افتتاحي</span>
+                    <span className="tabular-nums">
+                      {EGP(s.opening_balance || 0)}
+                    </span>
+                  </div>
+                )}
+                {Number(s.credit_limit || 0) > 0 && (
+                  <div className="flex items-center justify-between mt-1 text-[10px] text-slate-400">
+                    <span>حد الائتمان</span>
+                    <span className="tabular-nums">
+                      {EGP(s.credit_limit || 0)}
+                    </span>
+                  </div>
+                )}
+              </div>
 
               <div className="flex gap-2 mt-3 pt-3 border-t border-slate-100">
                 <button
@@ -374,6 +480,13 @@ function EditSupplierModal({
     credit_limit: String(supplier.credit_limit ?? ''),
     opening_balance: String(supplier.opening_balance ?? ''),
     payment_terms_days: String(supplier.payment_terms_days ?? ''),
+    payment_day_of_week:
+      (supplier as any).payment_day_of_week == null
+        ? ''
+        : String((supplier as any).payment_day_of_week),
+    payment_installment_amount: String(
+      (supplier as any).payment_installment_amount ?? '',
+    ),
   });
   const mutation = useMutation({
     mutationFn: (body: Partial<Supplier>) =>
@@ -487,6 +600,40 @@ function EditSupplierModal({
               title="يُسجَّل كرصيد افتتاحي في كشف حساب المورد"
             />
           </Field>
+          <Field label="يوم الدفع الأسبوعي">
+            <select
+              className="input"
+              value={form.payment_day_of_week}
+              onChange={(e) =>
+                setForm({ ...form, payment_day_of_week: e.target.value })
+              }
+            >
+              <option value="">بدون</option>
+              <option value="6">السبت</option>
+              <option value="0">الأحد</option>
+              <option value="1">الإثنين</option>
+              <option value="2">الثلاثاء</option>
+              <option value="3">الأربعاء</option>
+              <option value="4">الخميس</option>
+              <option value="5">الجمعة</option>
+            </select>
+          </Field>
+          <Field label="قيمة الدفعة الأسبوعية (ج.م)">
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              className="input"
+              dir="ltr"
+              value={form.payment_installment_amount}
+              onChange={(e) =>
+                setForm({
+                  ...form,
+                  payment_installment_amount: e.target.value,
+                })
+              }
+            />
+          </Field>
         </div>
         <div className="flex gap-2 pt-2">
           <button
@@ -506,6 +653,13 @@ function EditSupplierModal({
                   : undefined,
                 payment_terms_days: form.payment_terms_days
                   ? Number(form.payment_terms_days)
+                  : undefined,
+                payment_day_of_week:
+                  form.payment_day_of_week === ''
+                    ? undefined
+                    : Number(form.payment_day_of_week),
+                payment_installment_amount: form.payment_installment_amount
+                  ? Number(form.payment_installment_amount)
                   : undefined,
               } as any);
             }}
@@ -569,20 +723,229 @@ function Kpi({
   value,
   color,
   icon,
+  hint,
 }: {
   title: string;
   value: string;
   color: string;
   icon: React.ReactNode;
+  hint?: string;
 }) {
   return (
     <div className="card p-5 flex items-center gap-4">
       <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${color}`}>
         {icon}
       </div>
-      <div>
+      <div className="min-w-0">
         <div className="text-xs text-slate-500">{title}</div>
-        <div className="font-black text-2xl text-slate-800">{value}</div>
+        <div className="font-black text-2xl text-slate-800 truncate">{value}</div>
+        {hint && <div className="text-[11px] text-slate-400 mt-0.5">{hint}</div>}
+      </div>
+    </div>
+  );
+}
+
+/* ───────── Analytics strip ───────── */
+
+const TYPE_LABEL_AR: Record<string, string> = {
+  cash: 'كاش',
+  credit: 'آجل',
+  installments: 'أقساط',
+};
+const TYPE_TONE: Record<string, string> = {
+  cash: 'bg-emerald-100 text-emerald-700 border-emerald-200',
+  credit: 'bg-amber-100 text-amber-700 border-amber-200',
+  installments: 'bg-violet-100 text-violet-700 border-violet-200',
+};
+
+function SuppliersAnalytics({ analytics }: { analytics: any }) {
+  const outstandingTotal = Number(analytics.totals.outstanding_total || 0);
+  const openingTotal = Number(analytics.totals.opening_total || 0);
+  return (
+    <div className="grid lg:grid-cols-3 gap-4">
+      <div className="card p-5">
+        <div className="flex items-center gap-2 mb-3">
+          <PieChartIcon className="text-violet-600" size={18} />
+          <h3 className="font-black text-slate-800">توزيع الموردين</h3>
+        </div>
+        <div className="space-y-2">
+          {analytics.byType.map((t: any) => {
+            const amount = Number(t.outstanding || 0) + Number(t.opening || 0);
+            const pct =
+              outstandingTotal + openingTotal > 0
+                ? (amount / (outstandingTotal + openingTotal)) * 100
+                : 0;
+            return (
+              <div key={t.supplier_type}>
+                <div className="flex items-center justify-between text-xs mb-1">
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={`chip border text-[11px] ${TYPE_TONE[t.supplier_type]}`}
+                    >
+                      {TYPE_LABEL_AR[t.supplier_type] || t.supplier_type}
+                    </span>
+                    <span className="text-slate-500">{t.count} مورد</span>
+                  </div>
+                  <span className="font-mono tabular-nums text-slate-700">
+                    {EGP(amount)} · {pct.toFixed(1)}%
+                  </span>
+                </div>
+                <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-gradient-to-l from-indigo-500 to-violet-500"
+                    style={{ width: `${Math.min(100, pct)}%` }}
+                  />
+                </div>
+              </div>
+            );
+          })}
+          {analytics.byType.length === 0 && (
+            <div className="text-xs text-slate-400">لا بيانات</div>
+          )}
+        </div>
+      </div>
+
+      <div className="card p-5">
+        <div className="flex items-center gap-2 mb-3">
+          <AlertTriangle className="text-amber-600" size={18} />
+          <h3 className="font-black text-slate-800">
+            أكبر مستحقات (أعلى 5)
+          </h3>
+        </div>
+        {analytics.topOutstanding.length === 0 ? (
+          <div className="text-xs text-slate-400">لا مستحقات حالية</div>
+        ) : (
+          <ul className="space-y-1 text-xs">
+            {analytics.topOutstanding.map((t: any) => (
+              <li
+                key={t.id}
+                className="flex items-center justify-between border-b border-slate-100 last:border-0 py-1.5"
+              >
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <span className="font-mono text-[10px] text-slate-400">
+                    {t.code}
+                  </span>
+                  <span className="truncate font-bold text-slate-700">
+                    {t.name}
+                  </span>
+                </div>
+                <span className="font-mono font-bold text-rose-700">
+                  {EGP(t.current_balance)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      <div className="card p-5">
+        <div className="flex items-center gap-2 mb-3">
+          <TrendingUp className="text-emerald-600" size={18} />
+          <h3 className="font-black text-slate-800">
+            أعلى مشتريات — آخر 30 يوم
+          </h3>
+        </div>
+        {analytics.topSpend.length === 0 ? (
+          <div className="text-xs text-slate-400">لا مشتريات</div>
+        ) : (
+          <ul className="space-y-1 text-xs">
+            {analytics.topSpend.map((t: any) => (
+              <li
+                key={t.id}
+                className="flex items-center justify-between border-b border-slate-100 last:border-0 py-1.5"
+              >
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <span className="font-mono text-[10px] text-slate-400">
+                    {t.code}
+                  </span>
+                  <span className="truncate font-bold text-slate-700">
+                    {t.name}
+                  </span>
+                </div>
+                <span className="font-mono font-bold text-emerald-700">
+                  {EGP(t.spend)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ───────── Upcoming payments inbox ───────── */
+
+const DOW_LABEL: Record<number, string> = {
+  0: 'الأحد',
+  1: 'الإثنين',
+  2: 'الثلاثاء',
+  3: 'الأربعاء',
+  4: 'الخميس',
+  5: 'الجمعة',
+  6: 'السبت',
+};
+
+function UpcomingPaymentsInbox({ upcoming }: { upcoming: any[] }) {
+  return (
+    <div className="card p-5 border-2 border-amber-200 bg-amber-50/40">
+      <div className="flex items-center gap-2 mb-3">
+        <CalendarClock className="text-amber-600" size={18} />
+        <h3 className="font-black text-amber-800">
+          دفعات قريبة ({upcoming.length})
+        </h3>
+      </div>
+      <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-2">
+        {upcoming.map((u) => (
+          <Link
+            key={u.id}
+            to={`/suppliers/${u.id}`}
+            className="bg-white border border-amber-200 rounded-lg p-3 text-xs hover:border-amber-400"
+          >
+            <div className="flex items-center justify-between mb-1">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="font-mono text-[10px] text-slate-400">
+                  {u.code}
+                </span>
+                <span className="font-black text-slate-800 truncate">
+                  {u.name}
+                </span>
+              </div>
+              <span
+                className={`chip border text-[10px] ${
+                  u.days_until <= 1
+                    ? 'bg-rose-100 text-rose-700 border-rose-200'
+                    : u.days_until <= 3
+                      ? 'bg-amber-100 text-amber-700 border-amber-200'
+                      : 'bg-slate-100 text-slate-600 border-slate-200'
+                }`}
+              >
+                {u.days_until === 0
+                  ? 'اليوم'
+                  : u.days_until === 1
+                    ? 'غدًا'
+                    : `بعد ${u.days_until} يوم`}
+              </span>
+            </div>
+            <div className="text-slate-500">
+              {DOW_LABEL[u.payment_day_of_week]} —{' '}
+              <span className="tabular-nums">{u.next_payment_date}</span>
+            </div>
+            <div className="flex items-center justify-between mt-1.5">
+              <span className="text-slate-600">
+                دفعة:{' '}
+                <span className="font-bold">
+                  {u.payment_installment_amount
+                    ? EGP(u.payment_installment_amount)
+                    : 'غير محددة'}
+                </span>
+              </span>
+              <span className="font-mono text-rose-700">
+                مدين {EGP(u.current_balance)}
+              </span>
+            </div>
+          </Link>
+        ))}
       </div>
     </div>
   );

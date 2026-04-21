@@ -47,6 +47,16 @@ export class SuppliersController {
     return this.suppliers.outstanding();
   }
 
+  @Get('analytics')
+  analytics() {
+    return this.suppliers.analytics();
+  }
+
+  @Get('upcoming-payments')
+  upcomingPayments(@Query('days') days?: string) {
+    return this.suppliers.upcomingPayments(days ? Number(days) : 7);
+  }
+
   @Get(':id')
   find(@Param('id', ParseUUIDPipe) id: string) {
     return this.suppliers.findOne(id);

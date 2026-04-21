@@ -28,6 +28,21 @@ export interface SupplierSummary {
     purchases_total: string;
     paid_total: string;
     unpaid_total: string;
+    payment_day_of_week?: number | null;
+    payment_installment_amount?: string | number | null;
+  };
+  schedule?: {
+    day_of_week: number | null;
+    installment_amount: number | null;
+    next_payment_date: string | null;
+    days_until: number | null;
+  };
+  ratios?: {
+    opening_balance: number;
+    outstanding: number;
+    paid: number;
+    outstanding_pct: number;
+    paid_pct: number;
   };
   purchases: Array<{
     id: string;
@@ -91,6 +106,53 @@ export const suppliersApi = {
 
   summary: (id: string) =>
     unwrap<SupplierSummary>(api.get(`/suppliers/${id}/summary`)),
+
+  analytics: () =>
+    unwrap<{
+      totals: {
+        supplier_count: number;
+        outstanding_total: string;
+        opening_total: string;
+        credit_limit_total: string;
+        paid_last_30d: string;
+        purchases_last_30d: string;
+      };
+      byType: Array<{
+        supplier_type: SupplierType;
+        count: number;
+        outstanding: string;
+        opening: string;
+      }>;
+      topOutstanding: Array<{
+        id: string;
+        code: string;
+        name: string;
+        current_balance: string;
+      }>;
+      topSpend: Array<{
+        id: string;
+        code: string;
+        name: string;
+        spend: string;
+      }>;
+      monthly: Array<{ month: string; purchases: string; paid: string }>;
+    }>(api.get('/suppliers/analytics')),
+
+  upcomingPayments: (days?: number) =>
+    unwrap<
+      Array<{
+        id: string;
+        code: string;
+        name: string;
+        supplier_type: SupplierType;
+        payment_day_of_week: number;
+        payment_installment_amount: string | null;
+        current_balance: string;
+        credit_limit: string;
+        next_payment_date: string;
+        days_until: number;
+      }>
+    >(api.get('/suppliers/upcoming-payments', { params: days ? { days } : undefined })),
 
   outstanding: () =>
     unwrap<SupplierOutstanding[]>(api.get('/suppliers/outstanding')),

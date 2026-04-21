@@ -32,6 +32,9 @@ export class CreateSupplierDto {
   @IsOptional() @IsNumber() @Min(0) opening_balance?: number;
   @IsOptional() @IsNumber() @Min(0) payment_terms_days?: number;
 
+  @IsOptional() @IsNumber() @Min(0) payment_day_of_week?: number;
+  @IsOptional() @IsNumber() @Min(0) payment_installment_amount?: number;
+
   @IsOptional() @IsString() notes?: string;
 }
 

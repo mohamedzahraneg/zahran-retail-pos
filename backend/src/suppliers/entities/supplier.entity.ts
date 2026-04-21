@@ -40,6 +40,12 @@ export class SupplierEntity {
   @Column({ type: 'int', default: 0 })
   payment_terms_days: number;
 
+  @Column({ type: 'smallint', nullable: true })
+  payment_day_of_week: number | null;
+
+  @Column({ type: 'numeric', precision: 14, scale: 2, nullable: true })
+  payment_installment_amount: number | null;
+
   @Column({ type: 'boolean', default: true })
   is_active: boolean;
 

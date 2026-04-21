@@ -182,6 +182,81 @@ export default function SupplierDetail() {
         </div>
       )}
 
+      {/* Payment schedule + upcoming-due alert */}
+      {data.schedule?.day_of_week !== null &&
+        data.schedule?.day_of_week !== undefined && (
+          <div
+            className={`card p-4 border-2 ${
+              Number(data.schedule.days_until) <= 1
+                ? 'border-rose-300 bg-rose-50'
+                : Number(data.schedule.days_until) <= 3
+                  ? 'border-amber-300 bg-amber-50'
+                  : 'border-indigo-200 bg-indigo-50'
+            }`}
+          >
+            <div className="flex items-start gap-2">
+              <AlertTriangle
+                className={
+                  Number(data.schedule.days_until) <= 1
+                    ? 'text-rose-600 mt-0.5'
+                    : Number(data.schedule.days_until) <= 3
+                      ? 'text-amber-600 mt-0.5'
+                      : 'text-indigo-600 mt-0.5'
+                }
+                size={18}
+              />
+              <div className="text-sm flex-1">
+                <div className="font-black mb-1">
+                  موعد دفعة قادم —{' '}
+                  {data.schedule.days_until === 0
+                    ? 'اليوم'
+                    : data.schedule.days_until === 1
+                      ? 'غدًا'
+                      : `بعد ${data.schedule.days_until} يوم`}
+                </div>
+                <div className="text-xs">
+                  التاريخ: {data.schedule.next_payment_date} · قيمة الدفعة:{' '}
+                  {data.schedule.installment_amount != null
+                    ? EGP(data.schedule.installment_amount)
+                    : 'غير محددة'}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+      {/* Ratios strip (outstanding vs paid) */}
+      {data.ratios && (
+        <div className="card p-4">
+          <div className="flex items-center justify-between text-xs mb-2">
+            <div className="flex items-center gap-2">
+              <span className="font-black text-slate-700">نسبة السداد</span>
+              <span className="text-slate-400">
+                من إجمالي النشاط (مستحق + مدفوع)
+              </span>
+            </div>
+            <div className="flex items-center gap-3 text-[11px] font-bold">
+              <span className="text-rose-700">
+                مستحق {data.ratios.outstanding_pct}%
+              </span>
+              <span className="text-emerald-700">
+                مدفوع {data.ratios.paid_pct}%
+              </span>
+            </div>
+          </div>
+          <div className="h-3 rounded-full bg-slate-100 overflow-hidden flex">
+            <div
+              className="h-full bg-emerald-500"
+              style={{ width: `${data.ratios.paid_pct}%` }}
+            />
+            <div
+              className="h-full bg-rose-500"
+              style={{ width: `${data.ratios.outstanding_pct}%` }}
+            />
+          </div>
+        </div>
+      )}
+
       {/* ─── Metrics ─── */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <Metric
