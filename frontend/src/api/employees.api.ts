@@ -150,4 +150,34 @@ export const employeesApi = {
   }) => unwrap<EmployeeTask>(api.post('/employees/tasks', body)),
   cancelTask: (id: string | number) =>
     unwrap<EmployeeTask>(api.post(`/employees/tasks/${id}/cancel`, {})),
+
+  myHistory: (from?: string, to?: string) =>
+    unwrap<{
+      target_hours_day: number;
+      days: Array<{
+        day: string;
+        minutes: number;
+        overtime_min: number;
+        undertime_min: number;
+        first_in: string | null;
+        last_out: string | null;
+        bonuses: string;
+        deductions: string;
+        advances: string;
+      }>;
+    }>(
+      api.get('/employees/me/history', {
+        params: from || to ? { from, to } : undefined,
+      }),
+    ),
+
+  userHistory: (id: string, from?: string, to?: string) =>
+    unwrap<{
+      target_hours_day: number;
+      days: Array<any>;
+    }>(
+      api.get(`/employees/${id}/history`, {
+        params: from || to ? { from, to } : undefined,
+      }),
+    ),
 };

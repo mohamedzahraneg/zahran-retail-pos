@@ -292,6 +292,140 @@ function EmployeeDashboardBody({ data }: { data: EmployeeDashboard }) {
         <TasksCard tasks={tasks} />
         <RequestsCard requests={requests} />
       </div>
+
+      {/* ─── Daily history ─── */}
+      <HistoryCard />
+    </div>
+  );
+}
+
+/* ───────── History card ───────── */
+
+function HistoryCard() {
+  const [range, setRange] = useState<'week' | 'month'>('month');
+  const now = new Date();
+  const to = now.toISOString().slice(0, 10);
+  const from = new Date(
+    now.getTime() - (range === 'week' ? 7 : 30) * 24 * 3600 * 1000,
+  )
+    .toISOString()
+    .slice(0, 10);
+
+  const { data } = useQuery({
+    queryKey: ['employee-history-mine', from, to],
+    queryFn: () => employeesApi.myHistory(from, to),
+    refetchInterval: 60_000,
+  });
+
+  const days = data?.days || [];
+  const targetDayHr = data?.target_hours_day || 8;
+
+  return (
+    <div className="card p-5">
+      <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+        <div className="flex items-center gap-2">
+          <Clock size={18} className="text-indigo-600" />
+          <h3 className="font-black text-slate-800">سجل الأيام</h3>
+          <span className="text-[11px] text-slate-500">
+            الهدف {targetDayHr} س/يوم
+          </span>
+        </div>
+        <div className="inline-flex rounded-lg bg-slate-100 p-1 text-xs">
+          <button
+            className={`px-3 py-1 rounded-md font-bold ${
+              range === 'week'
+                ? 'bg-white text-indigo-700 shadow-sm'
+                : 'text-slate-600'
+            }`}
+            onClick={() => setRange('week')}
+          >
+            آخر 7 أيام
+          </button>
+          <button
+            className={`px-3 py-1 rounded-md font-bold ${
+              range === 'month'
+                ? 'bg-white text-indigo-700 shadow-sm'
+                : 'text-slate-600'
+            }`}
+            onClick={() => setRange('month')}
+          >
+            آخر 30 يوم
+          </button>
+        </div>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead className="bg-slate-50 text-slate-600">
+            <tr>
+              <th className="p-2 text-right">اليوم</th>
+              <th className="p-2 text-center">الحضور</th>
+              <th className="p-2 text-center">الانصراف</th>
+              <th className="p-2 text-center">ساعات فعلية</th>
+              <th className="p-2 text-center">إضافي</th>
+              <th className="p-2 text-center">تأخير/نقص</th>
+              <th className="p-2 text-center">حوافز</th>
+              <th className="p-2 text-center">خصم</th>
+              <th className="p-2 text-center">سلف</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {days.map((d) => (
+              <tr key={d.day}>
+                <td className="p-2 tabular-nums font-medium text-slate-700">
+                  {d.day}
+                </td>
+                <td className="p-2 text-center tabular-nums text-slate-600">
+                  {d.first_in
+                    ? new Date(d.first_in).toLocaleTimeString('ar-EG', {
+                        timeZone: 'Africa/Cairo',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        hour12: true,
+                      })
+                    : '—'}
+                </td>
+                <td className="p-2 text-center tabular-nums text-slate-600">
+                  {d.last_out
+                    ? new Date(d.last_out).toLocaleTimeString('ar-EG', {
+                        timeZone: 'Africa/Cairo',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        hour12: true,
+                      })
+                    : '—'}
+                </td>
+                <td className="p-2 text-center tabular-nums font-bold">
+                  {d.minutes ? fmtMinutes(d.minutes) : '—'}
+                </td>
+                <td className="p-2 text-center tabular-nums text-emerald-700 font-bold">
+                  {d.overtime_min ? `+${fmtMinutes(d.overtime_min)}` : '—'}
+                </td>
+                <td className="p-2 text-center tabular-nums text-rose-700 font-bold">
+                  {d.undertime_min && d.minutes
+                    ? `-${fmtMinutes(d.undertime_min)}`
+                    : '—'}
+                </td>
+                <td className="p-2 text-center tabular-nums text-indigo-700">
+                  {Number(d.bonuses) > 0 ? EGP(d.bonuses) : '—'}
+                </td>
+                <td className="p-2 text-center tabular-nums text-rose-700">
+                  {Number(d.deductions) > 0 ? EGP(d.deductions) : '—'}
+                </td>
+                <td className="p-2 text-center tabular-nums text-amber-700">
+                  {Number(d.advances) > 0 ? EGP(d.advances) : '—'}
+                </td>
+              </tr>
+            ))}
+            {!days.length && (
+              <tr>
+                <td colSpan={9} className="p-10 text-center text-slate-400">
+                  لا سجل في الفترة المحددة
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

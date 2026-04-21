@@ -210,4 +210,32 @@ export class EmployeesController {
   userDashboard(@Param('id', ParseUUIDPipe) id: string) {
     return this.svc.myDashboard(id);
   }
+
+  @Get('me/history')
+  @Permissions('employee.dashboard.view')
+  myHistory(
+    @CurrentUser() user: JwtUser,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    const today = new Date().toISOString().slice(0, 10);
+    const thirty = new Date(Date.now() - 30 * 24 * 3600 * 1000)
+      .toISOString()
+      .slice(0, 10);
+    return this.svc.daysHistory(user.userId, from || thirty, to || today);
+  }
+
+  @Get(':id/history')
+  @Permissions('employee.team.view')
+  history(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    const today = new Date().toISOString().slice(0, 10);
+    const thirty = new Date(Date.now() - 30 * 24 * 3600 * 1000)
+      .toISOString()
+      .slice(0, 10);
+    return this.svc.daysHistory(id, from || thirty, to || today);
+  }
 }

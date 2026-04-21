@@ -521,4 +521,76 @@ export class EmployeesService {
       throw new ForbiddenException('لا يمكنك الوصول إلى بيانات مستخدم آخر');
     }
   }
+
+  /**
+   * Per-day attendance + salary history for a user over an arbitrary
+   * date range. Powers the "سجل الأيام" tab on the personal and admin
+   * profiles. Returns one row per day with:
+   *   - minutes worked & overtime minutes vs target
+   *   - bonuses / deductions / advances for that day
+   *   - late / early flags (based on target hours compared to actual)
+   */
+  async daysHistory(userId: string, fromISO: string, toISO: string) {
+    const [profile] = await this.ds.query(
+      `SELECT target_hours_day FROM users WHERE id = $1`,
+      [userId],
+    );
+    const targetDayMin = Math.round(
+      Number(profile?.target_hours_day || 8) * 60,
+    );
+    const rows = await this.ds.query(
+      `
+      WITH days AS (
+        SELECT generate_series($2::date, $3::date, INTERVAL '1 day')::date AS day
+      ),
+      att AS (
+        SELECT work_date AS day,
+               MIN(clock_in)  AS first_in,
+               MAX(clock_out) AS last_out,
+               COALESCE(SUM(duration_min),0)::int AS minutes
+          FROM attendance_records
+         WHERE user_id = $1 AND work_date BETWEEN $2::date AND $3::date
+         GROUP BY work_date
+      ),
+      bns AS (
+        SELECT bonus_date AS day, COALESCE(SUM(amount),0)::numeric(14,2) AS amt
+          FROM employee_bonuses
+         WHERE user_id = $1 AND bonus_date BETWEEN $2::date AND $3::date
+         GROUP BY bonus_date
+      ),
+      dds AS (
+        SELECT deduction_date AS day, COALESCE(SUM(amount),0)::numeric(14,2) AS amt
+          FROM employee_deductions
+         WHERE user_id = $1 AND deduction_date BETWEEN $2::date AND $3::date
+         GROUP BY deduction_date
+      ),
+      advs AS (
+        SELECT expense_date AS day, COALESCE(SUM(amount),0)::numeric(14,2) AS amt
+          FROM expenses
+         WHERE employee_user_id = $1 AND is_advance = true
+           AND expense_date BETWEEN $2::date AND $3::date
+         GROUP BY expense_date
+      )
+      SELECT d.day,
+             COALESCE(att.minutes, 0)                AS minutes,
+             GREATEST(COALESCE(att.minutes,0) - $4, 0)::int AS overtime_min,
+             GREATEST($4 - COALESCE(att.minutes,0), 0)::int AS undertime_min,
+             att.first_in,
+             att.last_out,
+             COALESCE(bns.amt, 0)  AS bonuses,
+             COALESCE(dds.amt, 0)  AS deductions,
+             COALESCE(advs.amt, 0) AS advances
+        FROM days d
+        LEFT JOIN att  ON att.day  = d.day
+        LEFT JOIN bns  ON bns.day  = d.day
+        LEFT JOIN dds  ON dds.day  = d.day
+        LEFT JOIN advs ON advs.day = d.day
+       ORDER BY d.day DESC`,
+      [userId, fromISO, toISO, targetDayMin],
+    );
+    return {
+      target_hours_day: targetDayMin / 60,
+      days: rows,
+    };
+  }
 }
