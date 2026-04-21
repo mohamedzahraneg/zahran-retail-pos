@@ -409,23 +409,9 @@ export default function Invoices() {
                       <button
                         className="p-1.5 rounded hover:bg-brand-50 text-slate-500 hover:text-brand-600"
                         onClick={() => setPreviewId(i.id)}
-                        title="عرض الإيصال"
+                        title="عرض الإيصال والطباعة"
                       >
-                        <Printer size={14} />
-                      </button>
-                      <button
-                        className="p-1.5 rounded hover:bg-emerald-50 text-slate-500 hover:text-emerald-600"
-                        onClick={() => {
-                          printInvoiceThermal(i.id).catch((err) => {
-                            toast.error(
-                              err?.response?.data?.message ||
-                                'فشل إرسال الطباعة الحرارية',
-                            );
-                          });
-                        }}
-                        title="طباعة حرارية 80mm"
-                      >
-                        🧾
+                        <ReceiptIcon size={14} />
                       </button>
                       {canEdit && i.status !== 'cancelled' && (
                         <button
@@ -769,9 +755,10 @@ function InvoiceEditModal({
       });
     },
     onSuccess: () => {
-      toast.success('تم إصدار فاتورة جديدة بديلة وإلغاء السابقة');
+      toast.success('تم حفظ التعديل على نفس الفاتورة');
       qc.invalidateQueries({ queryKey: ['invoices'] });
       qc.invalidateQueries({ queryKey: ['dashboard-overview'] });
+      qc.invalidateQueries({ queryKey: ['invoice-edit-history', invoiceId] });
       onClose();
     },
     onError: (e: any) =>
@@ -791,7 +778,8 @@ function InvoiceEditModal({
               تعديل فاتورة {data?.invoice_no || ''}
             </h3>
             <p className="text-xs text-slate-500 mt-1">
-              سيُصدر فاتورة جديدة بديلة وتُلغى الحالية مع عكس المخزون والخزينة.
+              التعديل يتم على نفس الفاتورة. البنود والدفعات السابقة تُحفظ
+              في سجل التعديلات مع اسم المعدِّل والتاريخ والوقت.
             </p>
           </div>
           <button
@@ -1003,7 +991,7 @@ function InvoiceEditModal({
             }
             className="btn-primary"
           >
-            {save.isPending ? 'جاري الحفظ...' : 'حفظ التعديل وإصدار فاتورة بديلة'}
+            {save.isPending ? 'جاري الحفظ...' : 'حفظ التعديل على نفس الفاتورة'}
           </button>
         </div>
       </div>
