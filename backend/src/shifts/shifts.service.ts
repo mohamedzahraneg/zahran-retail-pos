@@ -282,7 +282,10 @@ export class ShiftsService {
       [id],
     );
     if (!shift) throw new NotFoundException('الوردية غير موجودة');
-    if (shift.status !== 'open') {
+    // Allow both `open` and `pending_close` — the latter is how an admin
+    // finalizes a cashier's review-required request. Only truly closed
+    // shifts should be rejected.
+    if (shift.status !== 'open' && shift.status !== 'pending_close') {
       throw new BadRequestException('الوردية مغلقة بالفعل');
     }
 
