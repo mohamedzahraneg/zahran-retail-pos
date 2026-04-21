@@ -81,6 +81,8 @@ export default function SupplierDetail() {
   const totals = useMemo(() => {
     if (!data) return null;
     const s = data.supplier;
+    // current_balance already includes opening_balance (seeded at create
+    // time) — it IS the total outstanding.
     return {
       purchases: Number(s.purchases_total || 0),
       paid: Number(s.paid_total || 0),
@@ -274,15 +276,22 @@ export default function SupplierDetail() {
           icon={<Wallet size={18} />}
         />
         <Metric
-          label="غير المسدد"
+          label="الرصيد المستحق"
+          value={EGP(totals?.balance || 0)}
+          tone={totals && totals.balance > 0 ? 'rose' : 'slate'}
+          icon={<DollarSign size={18} />}
+          hint={
+            Number(s.opening_balance || 0) > 0
+              ? `شامل رصيد افتتاحي ${EGP(s.opening_balance || 0)}`
+              : undefined
+          }
+        />
+        <Metric
+          label="غير مسدد من المشتريات"
           value={EGP(totals?.unpaid || 0)}
           tone={totals && totals.unpaid > 0 ? 'amber' : 'slate'}
           icon={<DollarSign size={18} />}
-        />
-        <Metric
-          label="رصيد افتتاحي"
-          value={EGP(s.opening_balance || 0)}
-          tone="slate"
+          hint="قيمة الفواتير الحالية غير المسددة"
         />
       </div>
 

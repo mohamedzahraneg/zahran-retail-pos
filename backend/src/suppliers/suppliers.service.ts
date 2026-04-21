@@ -64,7 +64,48 @@ export class SuppliersService {
   async update(id: string, body: Partial<SupplierEntity>) {
     const supplier = await this.repo.findOne({ where: { id } });
     if (!supplier) throw new NotFoundException(`Supplier ${id} not found`);
+
+    // If opening_balance changed, reflect the delta in current_balance
+    // so the outstanding figure stays accurate. Also drop a ledger row
+    // describing the adjustment.
+    const newOpening =
+      body.opening_balance !== undefined
+        ? Number(body.opening_balance)
+        : Number(supplier.opening_balance || 0);
+    const oldOpening = Number(supplier.opening_balance || 0);
+    const openingDelta = newOpening - oldOpening;
+
     await this.repo.update(id, body);
+
+    if (body.opening_balance !== undefined && openingDelta !== 0) {
+      await this.ds.query(
+        `UPDATE suppliers
+            SET current_balance = current_balance + $2,
+                updated_at = NOW()
+          WHERE id = $1`,
+        [id, openingDelta],
+      );
+      const [{ current_balance }] = await this.ds.query(
+        `SELECT current_balance FROM suppliers WHERE id = $1`,
+        [id],
+      );
+      await this.ds.query(
+        `INSERT INTO supplier_ledger
+           (supplier_id, direction, amount, reference_type, reference_id,
+            balance_after, notes)
+         VALUES ($1, $2, $3, 'opening_balance', NULL, $4, $5)`,
+        [
+          id,
+          openingDelta > 0 ? 'in' : 'out',
+          Math.abs(openingDelta),
+          current_balance,
+          `تعديل الرصيد الافتتاحي إلى ${newOpening.toFixed(2)} ج.م`,
+        ],
+      ).catch(() => {
+        /* supplier_ledger optional on older schemas */
+      });
+    }
+
     return this.findOne(id);
   }
 
