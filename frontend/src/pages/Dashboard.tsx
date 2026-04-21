@@ -366,7 +366,7 @@ export default function Dashboard() {
               label="إجمالي الخصومات"
               value={EGP.format(Number(t.discounts || 0))}
               tone="violet"
-              hint={`${pct(Number(t.discounts || 0))} من الإيراد`}
+              hint={`بعد الخصم ${EGP.format(rev)} · ${pct(Number(t.discounts || 0))} من الإيراد`}
             />
             <AnalyticsCell
               label="فواتير الخصم"
