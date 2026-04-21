@@ -12,11 +12,18 @@ import { startAutoSync } from '@/lib/offline-queue';
 // Kick off background sync of pending offline invoices
 startAutoSync();
 
-// When a new service worker takes control of this page (autoUpdate +
-// skipWaiting + clientsClaim), reload once so the fresh index.html
-// boots the new JS bundle. Prevents the "white screen until I clear
-// cache" symptom that showed up after deploys.
+// PWA is temporarily disabled (see vite.config.ts). If an old
+// Workbox service worker is still registered on this origin, tell the
+// browser to evict it — /sw.js is now a kill-switch that unregisters
+// itself and clears every Cache-Storage entry. Auto-reloads the tab
+// on controller change so the user lands on a SW-less page.
 if ('serviceWorker' in navigator) {
+  navigator.serviceWorker
+    .getRegistrations()
+    .then((regs) => {
+      regs.forEach((r) => r.update().catch(() => {}));
+    })
+    .catch(() => {});
   let reloaded = false;
   navigator.serviceWorker.addEventListener('controllerchange', () => {
     if (reloaded) return;
