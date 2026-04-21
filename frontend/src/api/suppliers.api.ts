@@ -114,7 +114,9 @@ export const suppliersApi = {
         outstanding_total: string;
         opening_total: string;
         credit_limit_total: string;
+        credit_for_us_total: string;
         paid_last_30d: string;
+        payment_count_30d: number;
         purchases_last_30d: string;
       };
       byType: Array<{
@@ -173,6 +175,7 @@ export const suppliersApi = {
       paid: boolean;
       amount: number;
       allocations: Array<{ purchase_id: string; applied: number }>;
+      overpaid?: number;
       new_balance: number;
     }>(api.post(`/suppliers/${id}/pay`, body)),
 };

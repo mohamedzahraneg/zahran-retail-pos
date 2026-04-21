@@ -171,22 +171,22 @@ export default function Suppliers() {
       </div>
 
       {/* KPIs */}
-      <div className="grid md:grid-cols-4 gap-4">
+      <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-4">
         <Kpi
-          title="إجمالي المستحقات"
+          title="إجمالي مستحقات الموردين"
           value={EGP(totals.total)}
           color="bg-amber-50"
           icon={<CreditCard className="text-amber-600" />}
-          hint={`شامل رصيد افتتاحي ${EGP(totals.opening)}`}
+          hint={`جاري ${EGP(totals.due)} · افتتاحي ${EGP(totals.opening)}`}
         />
         <Kpi
-          title="مستحقات جارية"
-          value={EGP(totals.due)}
-          color="bg-indigo-50"
-          icon={<CreditCard className="text-indigo-600" />}
+          title="المدفوعات — آخر 30 يوم"
+          value={EGP(analytics?.totals?.paid_last_30d || 0)}
+          color="bg-emerald-50"
+          icon={<CreditCard className="text-emerald-600" />}
           hint={
             analytics?.totals
-              ? `مدفوعات آخر 30 يوم ${EGP(analytics.totals.paid_last_30d)}`
+              ? `${analytics.totals.payment_count_30d} دفعة`
               : undefined
           }
         />
@@ -457,6 +457,85 @@ export default function Suppliers() {
           isPending={deleteMutation.isPending}
         />
       )}
+
+      {/* Sticky footer — grand totals across every supplier */}
+      <SuppliersTotalsBar
+        outstanding={totals.due}
+        opening={totals.opening}
+        creditForUs={Number(analytics?.totals?.credit_for_us_total || 0)}
+        paid30={Number(analytics?.totals?.paid_last_30d || 0)}
+        paidCount30={Number(analytics?.totals?.payment_count_30d || 0)}
+      />
+    </div>
+  );
+}
+
+function SuppliersTotalsBar({
+  outstanding,
+  opening,
+  creditForUs,
+  paid30,
+  paidCount30,
+}: {
+  outstanding: number;
+  opening: number;
+  creditForUs: number;
+  paid30: number;
+  paidCount30: number;
+}) {
+  const total = outstanding + opening;
+  return (
+    <div className="sticky bottom-0 -mx-3 md:-mx-6 mt-6 bg-gradient-to-l from-slate-900 via-slate-800 to-slate-900 text-white px-4 py-3 shadow-2xl border-t border-slate-700 z-40">
+      <div className="flex items-center justify-between gap-4 flex-wrap text-xs">
+        <div className="flex items-center gap-4 flex-wrap">
+          <TotalPill
+            label="إجمالي مستحقات الموردين"
+            value={EGP(total)}
+            accent="text-amber-300"
+          />
+          <TotalPill
+            label="جاري"
+            value={EGP(outstanding)}
+            accent="text-indigo-300"
+          />
+          <TotalPill
+            label="افتتاحي"
+            value={EGP(opening)}
+            accent="text-slate-300"
+          />
+          {creditForUs > 0 && (
+            <TotalPill
+              label="زيادة لصالحنا"
+              value={EGP(creditForUs)}
+              accent="text-emerald-300"
+            />
+          )}
+        </div>
+        <div className="flex items-center gap-2 text-slate-300">
+          <span>مدفوعات 30 يوم:</span>
+          <span className="font-black text-emerald-300 tabular-nums">
+            {EGP(paid30)}
+          </span>
+          <span className="text-slate-500">· {paidCount30} دفعة</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TotalPill({
+  label,
+  value,
+  accent,
+}: {
+  label: string;
+  value: string;
+  accent: string;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-slate-400">{label}</span>
+      <span className={`font-black tabular-nums ${accent}`}>{value}</span>
     </div>
   );
 }

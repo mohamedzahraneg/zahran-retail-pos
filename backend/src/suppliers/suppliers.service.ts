@@ -178,11 +178,10 @@ export class SuppliersService {
         remaining -= apply;
       }
 
-      if (remaining > 0) {
-        throw new BadRequestException(
-          `المبلغ المتبقي ${remaining.toFixed(2)} أكبر من رصيد المورد المستحق`,
-        );
-      }
+      // Overpayment is allowed — anything past the outstanding amount
+      // becomes a negative (credit) balance on the supplier so it can
+      // offset the next purchase automatically.
+      const overpaid = remaining > 0 ? remaining : 0;
 
       // supplier balance down + ledger row
       await m.query(
@@ -203,7 +202,10 @@ export class SuppliersService {
           supplierId,
           payload.amount,
           current_balance,
-          payload.notes ?? `سداد للمورد ${supplier.name}`,
+          (payload.notes ?? `سداد للمورد ${supplier.name}`) +
+            (overpaid > 0
+              ? ` — زيادة ${overpaid.toFixed(2)} ج.م محفوظة كرصيد مستحق لنا`
+              : ''),
           userId,
         ],
       );
@@ -212,6 +214,7 @@ export class SuppliersService {
         paid: true,
         amount: payload.amount,
         allocations,
+        overpaid: Math.round(overpaid * 100) / 100,
         new_balance: Number(current_balance),
       };
     });
@@ -365,12 +368,20 @@ export class SuppliersService {
               COALESCE(SUM(current_balance), 0)::numeric(14,2)       AS outstanding_total,
               COALESCE(SUM(opening_balance), 0)::numeric(14,2)       AS opening_total,
               COALESCE(SUM(credit_limit), 0)::numeric(14,2)          AS credit_limit_total,
+              COALESCE(SUM(CASE WHEN current_balance < 0
+                                THEN -current_balance ELSE 0 END), 0)::numeric(14,2)
+                                                                    AS credit_for_us_total,
               (
                 SELECT COALESCE(SUM(pp.amount), 0)::numeric(14,2)
                   FROM purchase_payments pp
                   JOIN purchases pu ON pu.id = pp.purchase_id
                  WHERE pp.paid_at >= NOW() - INTERVAL '30 days'
               )                                                     AS paid_last_30d,
+              (
+                SELECT COUNT(*)::int
+                  FROM purchase_payments pp
+                 WHERE pp.paid_at >= NOW() - INTERVAL '30 days'
+              )                                                     AS payment_count_30d,
               (
                 SELECT COALESCE(SUM(grand_total), 0)::numeric(14,2)
                   FROM purchases
