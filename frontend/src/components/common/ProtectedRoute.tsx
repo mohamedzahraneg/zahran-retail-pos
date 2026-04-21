@@ -4,11 +4,12 @@ import { useAuthStore } from '@/stores/auth.store';
 
 /**
  * Route gate. Unauthenticated users go to /login; authenticated users who
- * don't match the required roles or permissions go to "/".
+ * don't satisfy every required check go to "/".
  *
- * If both `roles` and `permissions` are provided, access is granted when
- * EITHER matches (OR semantics) — so callers can keep legacy role lists and
- * add a permission safely.
+ * Permissions are authoritative: if a permissions list is supplied the user
+ * must hold at least one. Roles are treated the same way but no longer act
+ * as a bypass for missing permissions — managers without the grant can't
+ * sneak past via their role.
  */
 export function ProtectedRoute({
   children,
@@ -25,23 +26,20 @@ export function ProtectedRoute({
   if (!accessToken) {
     return <Navigate to="/login" state={{ from: location }} replace />;
   }
-  const roleOk = !roles || roles.length === 0 || hasRole(...roles);
-  const permOk =
-    !permissions || permissions.length === 0 || hasPermission(...permissions);
 
-  // When BOTH are specified, either one grants access (OR). When only one is
-  // specified, that one must pass.
-  const pass =
-    roles && permissions
-      ? roleOk || permOk
-      : roles
-        ? roleOk
-        : permissions
-          ? permOk
-          : true;
-
-  if (!pass) {
-    return <Navigate to="/" replace />;
+  if (permissions && permissions.length > 0) {
+    if (!hasPermission(...permissions)) {
+      return <Navigate to="/" replace />;
+    }
+    return <>{children}</>;
   }
+
+  if (roles && roles.length > 0) {
+    if (!hasRole(...roles)) {
+      return <Navigate to="/" replace />;
+    }
+    return <>{children}</>;
+  }
+
   return <>{children}</>;
 }

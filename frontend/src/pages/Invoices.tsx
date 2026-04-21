@@ -76,14 +76,11 @@ const STATUS_STYLE: Record<string, string> = {
 export default function Invoices() {
   const user = useAuthStore((s) => s.user);
   const hasPermission = useAuthStore((s) => s.hasPermission);
-  const canVoid =
-    hasPermission('invoices.void') ||
-    user?.role === 'admin' ||
-    user?.role === 'manager';
-  const canEdit =
-    hasPermission('invoices.edit') ||
-    user?.role === 'admin' ||
-    user?.role === 'manager';
+  // Permissions are authoritative. Role fallbacks used to leak edit /
+  // void buttons to managers who hadn't been granted the permission;
+  // hasPermission('*') handles system admins via the wildcard.
+  const canVoid = hasPermission('invoices.void');
+  const canEdit = hasPermission('invoices.edit');
 
   const [period, setPeriod] = useState<PeriodRange>(() =>
     resolvePeriod('day'),

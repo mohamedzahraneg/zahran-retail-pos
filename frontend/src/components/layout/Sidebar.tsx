@@ -141,17 +141,22 @@ export function Sidebar() {
   const closeMobile = useLayoutStore((s) => s.closeMobile);
   const toggleCollapsed = useLayoutStore((s) => s.toggleCollapsed);
 
-  // Show an item when the user has its permission, OR (legacy fallback) when
-  // the user's role is listed. This lets us migrate gradually — eventually
-  // every item has a permission and the role fallback can go.
+  // An item is visible only when the user has at least one of the
+  // declared permissions. The old "role fallback" was leaking menu
+  // items (Excel import, audit log, etc.) to managers just because
+  // their role was listed — even when the admin hadn't granted them
+  // the corresponding permission. Permission-only is the one rule.
   const allowed = (it: NavItem) => {
     const perms = Array.isArray(it.permission)
       ? it.permission
       : it.permission
         ? [it.permission]
         : [];
-    if (perms.length > 0 && perms.some((p) => hasPermission(p))) return true;
-    return it.roles.includes(role);
+    // Items without any declared permission are treated as admin-only
+    // (safe default) — the admin wildcard '*' passes hasPermission on
+    // anything, so admins still see them.
+    if (perms.length === 0) return hasPermission('*');
+    return perms.some((p) => hasPermission(p));
   };
 
   const visibleGroups = groups

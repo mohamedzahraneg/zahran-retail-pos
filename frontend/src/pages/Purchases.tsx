@@ -60,12 +60,11 @@ export default function PurchasesPage() {
 
   const user = useAuthStore((s) => s.user);
   const hasPermission = useAuthStore((s) => s.hasPermission);
-  const canEdit =
-    hasPermission('purchases.edit') ||
-    user?.role === 'admin' ||
-    user?.role === 'manager';
-  const canCancelNonDraft =
-    hasPermission('purchases.cancel') || user?.role === 'admin';
+  // Permission-only: admin passes through the '*' wildcard. Managers
+  // now need the purchases.* grants explicitly.
+  void user;
+  const canEdit = hasPermission('purchases.edit');
+  const canCancelNonDraft = hasPermission('purchases.cancel');
 
   const qc = useQueryClient();
 

@@ -56,7 +56,7 @@ export default function App() {
         <Route
           path="customer-groups"
           element={
-            <ProtectedRoute roles={['admin', 'manager']}>
+            <ProtectedRoute permissions={['customer_groups.manage']}>
               <CustomerGroups />
             </ProtectedRoute>
           }
@@ -69,16 +69,23 @@ export default function App() {
         <Route
           path="notifications"
           element={
-            <ProtectedRoute roles={['admin', 'manager']}>
+            <ProtectedRoute permissions={['alerts.view']}>
               <Notifications />
             </ProtectedRoute>
           }
         />
-        <Route path="commissions" element={<Commissions />} />
+        <Route
+          path="commissions"
+          element={
+            <ProtectedRoute permissions={['commissions.view', 'accounting.view']}>
+              <Commissions />
+            </ProtectedRoute>
+          }
+        />
         <Route
           path="audit-log"
           element={
-            <ProtectedRoute roles={['admin', 'manager']}>
+            <ProtectedRoute permissions={['audit.view']}>
               <AuditLog />
             </ProtectedRoute>
           }
@@ -89,13 +96,27 @@ export default function App() {
         <Route
           path="returns-analytics"
           element={
-            <ProtectedRoute roles={['admin', 'manager', 'accountant']}>
+            <ProtectedRoute permissions={['returns.view', 'returns.analytics']}>
               <ReturnsAnalytics />
             </ProtectedRoute>
           }
         />
-        <Route path="reports" element={<Reports />} />
-        <Route path="import" element={<Import />} />
+        <Route
+          path="reports"
+          element={
+            <ProtectedRoute permissions={['reports.view']}>
+              <Reports />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="import"
+          element={
+            <ProtectedRoute permissions={['import.run']}>
+              <Import />
+            </ProtectedRoute>
+          }
+        />
         <Route path="shifts" element={<Shifts />} />
         <Route path="stock-transfers" element={<StockTransfers />} />
         <Route path="stock-count" element={<StockCount />} />
@@ -105,7 +126,7 @@ export default function App() {
         <Route
           path="recurring-expenses"
           element={
-            <ProtectedRoute roles={['admin', 'manager', 'accountant']}>
+            <ProtectedRoute permissions={['recurring_expenses.manage']}>
               <RecurringExpenses />
             </ProtectedRoute>
           }
@@ -113,7 +134,7 @@ export default function App() {
         <Route
           path="loyalty"
           element={
-            <ProtectedRoute roles={['admin', 'manager', 'accountant']}>
+            <ProtectedRoute permissions={['loyalty.view']}>
               <Loyalty />
             </ProtectedRoute>
           }
@@ -123,7 +144,7 @@ export default function App() {
         <Route
           path="users"
           element={
-            <ProtectedRoute roles={['admin', 'manager']}>
+            <ProtectedRoute permissions={['users.view', 'users.manage']}>
               <Users />
             </ProtectedRoute>
           }
