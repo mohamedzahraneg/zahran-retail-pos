@@ -44,6 +44,7 @@ import { useAuthStore } from '@/stores/auth.store';
 import { useLayoutStore } from '@/stores/layout.store';
 import { Receipt, ReceiptData } from '@/components/Receipt';
 import { printInvoiceThermal } from '@/lib/printInvoiceThermal';
+import { offlineQueue } from '@/lib/offline-queue';
 
 const EGP = (n: number) =>
   `${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ج.م`;
@@ -196,6 +197,32 @@ export default function POS() {
       cart.clear();
     },
     onError: (err: any) => {
+      // Network-level failure → queue for later sync. Validation errors
+      // from the server carry a response body, so we don't queue those.
+      if (!err?.response && err?.message !== 'canceled') {
+        const payload = err?.config?.data
+          ? (() => {
+              try {
+                return JSON.parse(err.config.data);
+              } catch {
+                return null;
+              }
+            })()
+          : null;
+        if (payload) {
+          offlineQueue
+            .enqueueInvoice(payload)
+            .then(() => {
+              toast.success(
+                'الخادم غير متاح — حُفظت الفاتورة محليًا وسترُفع تلقائيًا',
+              );
+              setPayOpen(false);
+              cart.clear();
+            })
+            .catch(() => toast.error('تعذّر حفظ الفاتورة محليًا'));
+          return;
+        }
+      }
       const msg = err?.response?.data?.message || 'فشل إنشاء الفاتورة';
       toast.error(Array.isArray(msg) ? msg[0] : String(msg));
     },
@@ -245,7 +272,7 @@ export default function POS() {
       toast.error('يجب اختيار البائع قبل حفظ الفاتورة');
       return;
     }
-    createInvoice.mutate({
+    const payload = {
       warehouse_id: warehouseId,
       customer_id: cart.customer?.id,
       salesperson_id: cart.salesperson.id,
@@ -264,7 +291,24 @@ export default function POS() {
       coupon_code: cart.coupon?.code,
       redeem_points: cart.loyalty?.points,
       notes: cart.notes,
-    });
+    };
+    // If the browser says we're offline, skip the network and queue
+    // the invoice for auto-sync. Auto-sync runs on "online" events and
+    // every 60s while online (wired in main.tsx → startAutoSync).
+    if (!navigator.onLine) {
+      offlineQueue
+        .enqueueInvoice(payload)
+        .then(() => {
+          toast.success('تم حفظ الفاتورة محليًا — ستُرفع تلقائيًا عند الاتصال');
+          setPayOpen(false);
+          cart.clear();
+        })
+        .catch(() =>
+          toast.error('تعذّر حفظ الفاتورة محليًا — أعد المحاولة'),
+        );
+      return;
+    }
+    createInvoice.mutate(payload);
   };
 
   // Draft invoice number preview (actual number is assigned server-side)
