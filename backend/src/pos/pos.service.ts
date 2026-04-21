@@ -547,12 +547,19 @@ export class PosService {
   }
 
   /**
-   * Edit a previously-issued invoice. Because invoices are immutable once
-   * posted (stock moved, cash received, loyalty accrued), the "edit" here is
-   * void-and-recreate: we reverse the original via fn_void_invoice and then
-   * create a new invoice with the modified lines/payments. The new invoice
-   * gets a `replaces_invoice_id` note in the `notes` field so auditors can
-   * trace the relationship.
+   * Edit a previously-issued invoice in place.
+   *
+   *  1. Snapshot the current invoice + items + payments into
+   *     invoice_edit_history so nothing is lost.
+   *  2. Reverse the old stock movements and cashbox cash-in entries.
+   *  3. Swap in the new items/payments and recompute the monetary
+   *     totals (VAT, discounts, grand total, COGS, profit).
+   *  4. Re-apply stock and cashbox for the new content.
+   *  5. Bump edit_count / last_edited_at and return the refreshed row.
+   *
+   * The invoice_no and id are preserved, so customers/receivers still
+   * see the same document — only the line-level content changes and a
+   * history row records who changed what and when.
    */
   async editInvoice(
     id: string,
@@ -560,30 +567,285 @@ export class PosService {
     userId: string,
     reason: string,
   ) {
-    // Void first (outside our create transaction — fn_void_invoice runs in its
-    // own autonomous commit via plpgsql). If this throws, no new invoice is
-    // created and the original stays intact.
-    await this.ds.query(`SELECT fn_void_invoice($1, $2, $3)`, [
-      id,
-      userId,
-      reason,
-    ]);
-    const tagged = {
-      ...dto,
-      notes: [dto.notes, `تعديل للفاتورة رقم ${id}`]
-        .filter(Boolean)
-        .join(' — '),
-    };
-    const created = await this.createInvoice(tagged, userId);
-    this.realtime?.emitPosEvent({
-      type: 'invoice.created',
-      payload: {
-        original_invoice_id: id,
-        new_invoice_id: (created as any)?.id,
-        edited_by: userId,
-        edited: true,
-      },
+    if (!dto?.lines?.length) {
+      throw new BadRequestException('Invoice must have at least one line');
+    }
+
+    return this.ds.transaction(async (em) => {
+      // ── Snapshot original state ───────────────────────────────────
+      const [orig] = await em.query(
+        `SELECT * FROM invoices WHERE id = $1 FOR UPDATE`,
+        [id],
+      );
+      if (!orig) throw new BadRequestException('الفاتورة غير موجودة');
+      if (orig.status === 'cancelled') {
+        throw new BadRequestException('لا يمكن تعديل فاتورة ملغاة');
+      }
+      const origItems = await em.query(
+        `SELECT * FROM invoice_items WHERE invoice_id = $1 ORDER BY id`,
+        [id],
+      );
+      const origPayments = await em.query(
+        `SELECT * FROM invoice_payments WHERE invoice_id = $1 ORDER BY id`,
+        [id],
+      );
+
+      // ── 1) Reverse stock (one adjustment-in per original line) ───
+      for (const it of origItems) {
+        await em.query(
+          `INSERT INTO stock_movements
+             (variant_id, warehouse_id, movement_type, direction,
+              quantity, unit_cost, reference_type, reference_id,
+              user_id, notes)
+           VALUES ($1,$2,'adjustment','in',$3,$4,'invoice',$5,$6,$7)`,
+          [
+            it.variant_id,
+            orig.warehouse_id,
+            it.quantity,
+            it.unit_cost || 0,
+            id,
+            userId,
+            'تعديل فاتورة — عكس بند سابق',
+          ],
+        );
+      }
+
+      // ── 2) Reverse cashbox for original CASH payments ─────────────
+      const [cbRef] = await em.query(
+        `SELECT cashbox_id FROM cashbox_transactions
+          WHERE reference_type = 'invoice' AND reference_id = $1
+          ORDER BY id LIMIT 1`,
+        [id],
+      );
+      const cashboxId = cbRef?.cashbox_id ?? null;
+      if (cashboxId) {
+        for (const p of origPayments) {
+          if (p.payment_method !== 'cash') continue;
+          await em.query(
+            `SELECT fn_record_cashbox_txn($1,'out',$2,'sale','invoice',$3,$4,$5)`,
+            [
+              cashboxId,
+              p.amount,
+              id,
+              userId,
+              'تعديل فاتورة — عكس دفع سابق',
+            ],
+          );
+        }
+      }
+
+      // ── 3) Persist the snapshot to edit history ───────────────────
+      const [historyRow] = await em.query(
+        `INSERT INTO invoice_edit_history
+           (invoice_id, edited_by, reason, before_snapshot)
+         VALUES ($1,$2,$3,$4::jsonb)
+         RETURNING id`,
+        [
+          id,
+          userId,
+          reason,
+          JSON.stringify({ invoice: orig, items: origItems, payments: origPayments }),
+        ],
+      );
+      const historyId = historyRow.id;
+
+      // ── 4) Wipe old lines + payments ──────────────────────────────
+      await em.query(`DELETE FROM invoice_items    WHERE invoice_id = $1`, [id]);
+      await em.query(`DELETE FROM invoice_payments WHERE invoice_id = $1`, [id]);
+
+      // ── 5) Recompute totals from the new content ──────────────────
+      const lines = dto.lines as Array<{
+        variant_id: string;
+        qty: number;
+        unit_price: number;
+        discount?: number;
+      }>;
+      const payments = (dto.payments || []) as Array<{
+        payment_method: 'cash' | 'card' | 'instapay' | 'bank_transfer';
+        amount: number;
+        reference?: string;
+      }>;
+
+      const subtotal = lines.reduce(
+        (s, l) => s + l.unit_price * l.qty - (l.discount || 0),
+        0,
+      );
+      const invoice_discount = Number(dto.discount_total || 0);
+      const net_before_tax = Math.max(0, subtotal - invoice_discount);
+
+      // Keep the original VAT configuration from the invoice row.
+      const vatRate = Number(orig.tax_rate || 0);
+      let tax_amount = 0;
+      let grand_total = net_before_tax;
+      if (vatRate > 0) {
+        // Assume inclusive (matches what createInvoice does by default).
+        tax_amount = (net_before_tax * vatRate) / (100 + vatRate);
+      }
+
+      const paid_total = payments.reduce((s, p) => s + Number(p.amount || 0), 0);
+      const change_amount = Math.max(0, paid_total - grand_total);
+
+      // ── 6) Re-apply new stock + insert items + capture cogs ───────
+      const variants = await em.query(
+        `SELECT v.id, v.cost_price, v.sku,
+                p.name_ar     AS product_name,
+                v.color_value AS color_name,
+                v.size_label  AS size_label
+           FROM product_variants v
+           JOIN products p ON p.id = v.product_id
+          WHERE v.id = ANY($1::uuid[])`,
+        [lines.map((l) => l.variant_id)],
+      );
+      const vmap = new Map<string, any>(variants.map((v: any) => [v.id, v]));
+
+      let cogs_total = 0;
+      for (const line of lines) {
+        const v = vmap.get(line.variant_id);
+        if (!v) throw new BadRequestException(`Variant ${line.variant_id} not found`);
+        const unit_cost = Number(v.cost_price || 0);
+        const line_subtotal = line.qty * line.unit_price;
+        const line_total = line_subtotal - (line.discount || 0);
+        cogs_total += unit_cost * line.qty;
+        await em.query(
+          `INSERT INTO invoice_items
+             (invoice_id, variant_id,
+              product_name_snapshot, sku_snapshot,
+              color_name_snapshot, size_label_snapshot,
+              quantity, unit_cost, unit_price,
+              discount_amount, line_subtotal, line_total,
+              salesperson_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+          [
+            id,
+            line.variant_id,
+            v.product_name,
+            v.sku,
+            v.color_name ?? null,
+            v.size_label ?? null,
+            line.qty,
+            unit_cost,
+            line.unit_price,
+            line.discount || 0,
+            line_subtotal,
+            line_total,
+            dto.salesperson_id ?? orig.salesperson_id ?? null,
+          ],
+        );
+        await em.query(
+          `INSERT INTO stock_movements
+             (variant_id, warehouse_id, movement_type, direction,
+              quantity, unit_cost, reference_type, reference_id,
+              user_id, notes)
+           VALUES ($1,$2,'sale','out',$3,$4,'invoice',$5,$6,$7)`,
+          [
+            line.variant_id,
+            orig.warehouse_id,
+            line.qty,
+            unit_cost,
+            id,
+            userId,
+            'تعديل فاتورة — بند جديد',
+          ],
+        );
+      }
+
+      // ── 7) Insert new payments + cashbox in ───────────────────────
+      for (const p of payments) {
+        await em.query(
+          `INSERT INTO invoice_payments
+             (invoice_id, payment_method, amount, reference)
+           VALUES ($1,$2,$3,$4)`,
+          [id, p.payment_method, p.amount, p.reference ?? null],
+        );
+        if (p.payment_method === 'cash' && cashboxId && Number(p.amount) > 0) {
+          await em.query(
+            `SELECT fn_record_cashbox_txn($1,'in',$2,'sale','invoice',$3,$4,$5)`,
+            [
+              cashboxId,
+              p.amount,
+              id,
+              userId,
+              'تعديل فاتورة — دفع جديد',
+            ],
+          );
+        }
+      }
+
+      // ── 8) Update invoice totals + edit marker ────────────────────
+      const gross_profit = grand_total - cogs_total;
+      const [updated] = await em.query(
+        `UPDATE invoices
+            SET subtotal         = $2,
+                invoice_discount = $3,
+                tax_amount       = $4,
+                grand_total      = $5,
+                paid_amount      = $6,
+                change_amount    = $7,
+                cogs_total       = $8,
+                gross_profit     = $9,
+                customer_id      = COALESCE($10, customer_id),
+                salesperson_id   = COALESCE($11, salesperson_id),
+                notes            = $12,
+                edit_count       = edit_count + 1,
+                last_edited_at   = NOW(),
+                updated_at       = NOW()
+          WHERE id = $1
+          RETURNING *`,
+        [
+          id,
+          subtotal,
+          invoice_discount,
+          tax_amount,
+          grand_total,
+          paid_total,
+          change_amount,
+          cogs_total,
+          gross_profit,
+          dto.customer_id ?? null,
+          dto.salesperson_id ?? null,
+          dto.notes ?? orig.notes ?? null,
+        ],
+      );
+
+      // Backfill the after-summary on the history row we inserted
+      // earlier so the UI can show "before → after" without diffing
+      // every field itself.
+      await em.query(
+        `UPDATE invoice_edit_history
+            SET after_summary = $2::jsonb
+          WHERE id = $1`,
+        [
+          historyId,
+          JSON.stringify({
+            items_count: lines.length,
+            grand_total,
+            cogs_total,
+            gross_profit,
+            paid: paid_total,
+          }),
+        ],
+      );
+
+      this.realtime?.emitPosEvent({
+        type: 'invoice.created', // same channel — the UI refetches
+        payload: { invoice_id: id, edited: true, edited_by: userId },
+      });
+
+      return { invoice: updated, edited: true };
     });
-    return { replaced: id, invoice: created };
+  }
+
+  /** Return the edit-history timeline for an invoice. */
+  editHistory(invoiceId: string) {
+    return this.ds.query(
+      `SELECT h.id, h.edited_at, h.reason,
+              h.before_snapshot, h.after_summary,
+              u.full_name AS edited_by_name, u.username AS edited_by_username
+         FROM invoice_edit_history h
+         LEFT JOIN users u ON u.id = h.edited_by
+        WHERE h.invoice_id = $1
+        ORDER BY h.edited_at DESC`,
+      [invoiceId],
+    );
   }
 }

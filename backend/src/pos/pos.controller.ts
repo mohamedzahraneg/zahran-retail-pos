@@ -87,4 +87,9 @@ export class PosController {
       dto.edit_reason || 'تعديل فاتورة',
     );
   }
+
+  @Get('invoices/:id/edit-history')
+  editHistory(@Param('id', ParseUUIDPipe) id: string) {
+    return this.pos.editHistory(id);
+  }
 }
