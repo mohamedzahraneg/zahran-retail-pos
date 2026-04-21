@@ -53,7 +53,7 @@ export class ReturnsAnalyticsController {
 
   @Get('widget')
   @ApiOperation({ summary: 'بيانات مختصرة لويدجت الداشبورد' })
-  widget() {
-    return this.svc.widget();
+  widget(@Query('from') from?: string, @Query('to') to?: string) {
+    return this.svc.widget({ from, to });
   }
 }

@@ -12,11 +12,19 @@ const EGP = new Intl.NumberFormat('en-US', {
   maximumFractionDigits: 0,
 });
 
-export function ReturnsWidget() {
+export function ReturnsWidget({
+  from,
+  to,
+  label,
+}: {
+  from?: string;
+  to?: string;
+  label?: string;
+}) {
   const { data, isLoading } = useQuery({
-    queryKey: ['returns-widget'],
-    queryFn: () => returnsAnalyticsApi.widget(),
-    refetchInterval: 60_000,
+    queryKey: ['returns-widget', from ?? 'last30', to ?? 'last30'],
+    queryFn: () => returnsAnalyticsApi.widget({ from, to }),
+    refetchInterval: 30_000,
   });
 
   return (
@@ -24,7 +32,7 @@ export function ReturnsWidget() {
       <div className="flex items-center justify-between mb-4">
         <h3 className="font-black text-slate-800 flex items-center gap-2">
           <Undo2 size={18} className="text-rose-500" />
-          المرتجعات — آخر 30 يوم
+          المرتجعات {label ? `— ${label}` : '— آخر 30 يوم'}
         </h3>
         <Link
           to="/returns-analytics"

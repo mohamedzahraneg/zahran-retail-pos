@@ -645,7 +645,7 @@ export default function Dashboard() {
       )}
 
       {/* ═════ Returns widget ═════ */}
-      <ReturnsWidget />
+      <ReturnsWidget from={period.from} to={period.to} label={periodNoun} />
     </div>
   );
 }

@@ -84,7 +84,12 @@ export const returnsAnalyticsApi = {
     ),
   byCondition: () =>
     unwrap(api.get<ReturnsByCondition[]>('/returns/analytics/by-condition')),
-  widget: () => unwrap(api.get<ReturnsWidget>('/returns/analytics/widget')),
+  widget: (range?: { from?: string; to?: string }) =>
+    unwrap(
+      api.get<ReturnsWidget>('/returns/analytics/widget', {
+        params: range?.from && range?.to ? range : undefined,
+      }),
+    ),
 };
 
 export const REASON_LABELS_AR: Record<string, string> = {
