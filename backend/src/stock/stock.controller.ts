@@ -8,7 +8,7 @@ import {
   MinLength,
 } from 'class-validator';
 import { StockService } from './stock.service';
-import { Roles } from '../common/decorators/roles.decorator';
+import { Roles, Permissions } from '../common/decorators/roles.decorator';
 import {
   CurrentUser,
   JwtUser,
@@ -24,6 +24,7 @@ class AdjustStockDto {
 
 @ApiBearerAuth()
 @ApiTags('stock')
+@Permissions('stock.view')
 @Controller('stock')
 export class StockController {
   constructor(private readonly stock: StockService) {}

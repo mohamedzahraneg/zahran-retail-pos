@@ -16,7 +16,7 @@ import {
   UpdateCouponDto,
   ValidateCouponDto,
 } from './dto/coupon.dto';
-import { Roles } from '../common/decorators/roles.decorator';
+import { Roles, Permissions } from '../common/decorators/roles.decorator';
 import {
   CurrentUser,
   JwtUser,
@@ -24,6 +24,7 @@ import {
 
 @ApiBearerAuth()
 @ApiTags('coupons')
+@Permissions('coupons.view')
 @Controller('coupons')
 export class CouponsController {
   constructor(private readonly svc: CouponsService) {}

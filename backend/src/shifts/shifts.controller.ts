@@ -10,7 +10,7 @@ import {
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { ShiftsService } from './shifts.service';
 import { OpenShiftDto, CloseShiftDto } from './dto/shift.dto';
-import { Roles } from '../common/decorators/roles.decorator';
+import { Roles, Permissions } from '../common/decorators/roles.decorator';
 import {
   CurrentUser,
   JwtUser,
@@ -18,6 +18,7 @@ import {
 
 @ApiBearerAuth()
 @ApiTags('shifts')
+@Permissions('shifts.open')
 @Controller('shifts')
 export class ShiftsController {
   constructor(private readonly svc: ShiftsService) {}

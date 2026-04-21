@@ -13,7 +13,7 @@ import {
   CreateTransferDto,
   ReceiveTransferDto,
 } from './dto/stock-transfer.dto';
-import { Roles } from '../common/decorators/roles.decorator';
+import { Roles, Permissions } from '../common/decorators/roles.decorator';
 import {
   CurrentUser,
   JwtUser,
@@ -21,6 +21,7 @@ import {
 
 @ApiBearerAuth()
 @ApiTags('stock-transfers')
+@Permissions('inventory.view')
 @Controller('stock-transfers')
 export class StockTransfersController {
   constructor(private readonly svc: StockTransfersService) {}

@@ -18,7 +18,7 @@ import {
   Min,
 } from 'class-validator';
 import { SuppliersService } from './suppliers.service';
-import { Roles } from '../common/decorators/roles.decorator';
+import { Roles, Permissions } from '../common/decorators/roles.decorator';
 import { Req } from '@nestjs/common';
 
 class CreateSupplierDto {
@@ -47,6 +47,7 @@ class PaySupplierDto {
 
 @ApiBearerAuth()
 @ApiTags('suppliers')
+@Permissions('suppliers.view')
 @Controller('suppliers')
 export class SuppliersController {
   constructor(private readonly suppliers: SuppliersService) {}

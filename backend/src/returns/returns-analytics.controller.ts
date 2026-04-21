@@ -1,10 +1,11 @@
 import { Controller, Get, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { ReturnsAnalyticsService } from './returns-analytics.service';
-import { Roles } from '../common/decorators/roles.decorator';
+import { Roles, Permissions } from '../common/decorators/roles.decorator';
 
 @ApiBearerAuth()
 @ApiTags('returns-analytics')
+@Permissions('returns.view')
 @Controller('returns/analytics')
 export class ReturnsAnalyticsController {
   constructor(private readonly svc: ReturnsAnalyticsService) {}

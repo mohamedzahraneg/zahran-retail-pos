@@ -18,7 +18,7 @@ import {
   IsUUID,
 } from 'class-validator';
 import { CustomersService } from './customers.service';
-import { Roles } from '../common/decorators/roles.decorator';
+import { Roles, Permissions } from '../common/decorators/roles.decorator';
 
 class CreateCustomerDto {
   @IsString() code: string;
@@ -34,6 +34,7 @@ class CreateCustomerDto {
 
 @ApiBearerAuth()
 @ApiTags('customers')
+@Permissions('customers.view')
 @Controller('customers')
 export class CustomersController {
   constructor(private readonly customers: CustomersService) {}

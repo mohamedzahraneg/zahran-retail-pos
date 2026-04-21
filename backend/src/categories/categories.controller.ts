@@ -11,7 +11,7 @@ import {
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { IsOptional, IsString, IsUUID, IsInt, IsBoolean } from 'class-validator';
 import { CategoriesService } from './categories.service';
-import { Roles } from '../common/decorators/roles.decorator';
+import { Roles, Permissions } from '../common/decorators/roles.decorator';
 
 class CreateCategoryBody {
   @IsString() name_ar: string;
@@ -34,6 +34,7 @@ class UpdateCategoryBody {
 
 @ApiBearerAuth()
 @ApiTags('categories')
+@Permissions('products.view')
 @Controller('categories')
 export class CategoriesController {
   constructor(private readonly service: CategoriesService) {}

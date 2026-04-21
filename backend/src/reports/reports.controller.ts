@@ -10,12 +10,12 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
 import { ReportsService } from './reports.service';
 import { SalesReportDto, DateRangeDto, ExportFormatDto } from './dto/reports.dto';
-import { Roles } from '../common/decorators/roles.decorator';
+import { Permissions } from '../common/decorators/roles.decorator';
 
 @ApiBearerAuth()
 @ApiTags('reports')
-// Reports are readable by anyone authenticated; sensitive actions stay admin-only.
-@Roles('admin', 'manager', 'accountant', 'cashier', 'inventory', 'salesperson')
+// Gated on reports.view — grantable per-user via extra_permissions.
+@Permissions('reports.view')
 @Controller('reports')
 export class ReportsController {
   constructor(private readonly svc: ReportsService) {}

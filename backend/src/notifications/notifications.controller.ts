@@ -17,7 +17,7 @@ import {
   MinLength,
 } from 'class-validator';
 import { NotificationsService } from './notifications.service';
-import { Roles } from '../common/decorators/roles.decorator';
+import { Roles, Permissions } from '../common/decorators/roles.decorator';
 import {
   CurrentUser,
   JwtUser,
@@ -50,6 +50,7 @@ class SendAdHocDto {
 
 @ApiBearerAuth()
 @ApiTags('notifications')
+@Permissions('alerts.view')
 @Controller('notifications')
 // All authenticated users see their notifications.
 @Roles('admin', 'manager', 'accountant', 'cashier', 'inventory', 'salesperson')

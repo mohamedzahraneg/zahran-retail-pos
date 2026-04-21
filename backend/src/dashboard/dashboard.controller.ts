@@ -1,13 +1,13 @@
 import { Controller, Get, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { DashboardService } from './dashboard.service';
-import { Roles } from '../common/decorators/roles.decorator';
+import { Permissions } from '../common/decorators/roles.decorator';
 
 @ApiBearerAuth()
 @ApiTags('dashboard')
 @Controller('dashboard')
-// Dashboard is readable by any authenticated user — cashiers need their daily KPIs.
-@Roles('admin', 'manager', 'accountant', 'cashier', 'inventory', 'salesperson')
+// Dashboard is permission-gated on dashboard.view. Admins pass via '*'.
+@Permissions('dashboard.view')
 export class DashboardController {
   constructor(private readonly dashboard: DashboardService) {}
 

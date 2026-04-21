@@ -10,7 +10,7 @@ import {
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { IsNumber, Max, Min } from 'class-validator';
 import { CommissionsService } from './commissions.service';
-import { Roles } from '../common/decorators/roles.decorator';
+import { Roles, Permissions } from '../common/decorators/roles.decorator';
 
 class UpdateRateDto {
   @IsNumber()
@@ -21,6 +21,7 @@ class UpdateRateDto {
 
 @ApiBearerAuth()
 @ApiTags('commissions')
+@Permissions('accounting.view')
 @Controller('commissions')
 export class CommissionsController {
   constructor(private readonly svc: CommissionsService) {}

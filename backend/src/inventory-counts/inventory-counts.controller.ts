@@ -14,7 +14,7 @@ import {
   SubmitCountDto,
   FinalizeCountDto,
 } from './dto/inventory-count.dto';
-import { Roles } from '../common/decorators/roles.decorator';
+import { Roles, Permissions } from '../common/decorators/roles.decorator';
 import {
   CurrentUser,
   JwtUser,
@@ -22,6 +22,7 @@ import {
 
 @ApiBearerAuth()
 @ApiTags('inventory-counts')
+@Permissions('inventory.count')
 @Controller('inventory-counts')
 export class InventoryCountsController {
   constructor(private readonly svc: InventoryCountsService) {}

@@ -27,7 +27,7 @@ import {
   UpdateRecurringExpenseDto,
   Frequency,
 } from './recurring-expenses.service';
-import { Roles } from '../common/decorators/roles.decorator';
+import { Roles, Permissions } from '../common/decorators/roles.decorator';
 import {
   CurrentUser,
   JwtUser,
@@ -102,6 +102,7 @@ class UpdateDto implements UpdateRecurringExpenseDto {
 @ApiBearerAuth()
 @ApiTags('recurring-expenses')
 @Roles('admin', 'manager', 'accountant')
+@Permissions('recurring_expenses.manage')
 @Controller('recurring-expenses')
 export class RecurringExpensesController {
   constructor(private readonly svc: RecurringExpensesService) {}

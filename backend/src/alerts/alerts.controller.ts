@@ -10,7 +10,7 @@ import {
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { AlertsService } from './alerts.service';
 import { CreateAlertDto } from './dto/alert.dto';
-import { Roles } from '../common/decorators/roles.decorator';
+import { Roles, Permissions } from '../common/decorators/roles.decorator';
 import {
   CurrentUser,
   JwtUser,
@@ -18,6 +18,7 @@ import {
 
 @ApiBearerAuth()
 @ApiTags('alerts')
+@Permissions('alerts.view')
 @Controller('alerts')
 export class AlertsController {
   constructor(private readonly svc: AlertsService) {}

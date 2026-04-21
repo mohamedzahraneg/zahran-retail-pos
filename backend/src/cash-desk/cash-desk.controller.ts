@@ -23,7 +23,7 @@ import {
   CreateCustomerPaymentDto,
   CreateSupplierPaymentDto,
 } from './dto/payment.dto';
-import { Roles } from '../common/decorators/roles.decorator';
+import { Roles, Permissions } from '../common/decorators/roles.decorator';
 import {
   CurrentUser,
   JwtUser,
@@ -44,6 +44,7 @@ class CashDepositDto {
 
 @ApiBearerAuth()
 @ApiTags('cash-desk')
+@Permissions('cashdesk.view')
 @Controller('cash-desk')
 export class CashDeskController {
   constructor(private readonly svc: CashDeskService) {}

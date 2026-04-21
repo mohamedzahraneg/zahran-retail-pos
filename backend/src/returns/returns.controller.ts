@@ -17,7 +17,7 @@ import {
   RefundReturnDto,
   RejectReturnDto,
 } from './dto/return.dto';
-import { Roles } from '../common/decorators/roles.decorator';
+import { Roles, Permissions } from '../common/decorators/roles.decorator';
 import {
   CurrentUser,
   JwtUser,
@@ -25,6 +25,7 @@ import {
 
 @ApiBearerAuth()
 @ApiTags('returns')
+@Permissions('returns.view')
 @Controller()
 export class ReturnsController {
   constructor(private readonly svc: ReturnsService) {}

@@ -18,7 +18,7 @@ import {
   ExtendReservationDto,
   ListReservationsQueryDto,
 } from './dto/reservation.dto';
-import { Roles } from '../common/decorators/roles.decorator';
+import { Roles, Permissions } from '../common/decorators/roles.decorator';
 import {
   CurrentUser,
   JwtUser,
@@ -26,6 +26,7 @@ import {
 
 @ApiBearerAuth()
 @ApiTags('reservations')
+@Permissions('reservations.view')
 @Controller('reservations')
 export class ReservationsController {
   constructor(private readonly svc: ReservationsService) {}

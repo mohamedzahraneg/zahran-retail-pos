@@ -17,10 +17,11 @@ import {
   UpdateProductDto,
   UpdateVariantDto,
 } from './dto/product.dto';
-import { Roles } from '../common/decorators/roles.decorator';
+import { Roles, Permissions } from '../common/decorators/roles.decorator';
 
 @ApiBearerAuth()
 @ApiTags('products')
+@Permissions('products.view')
 @Controller('products')
 export class ProductsController {
   constructor(private readonly products: ProductsService) {}

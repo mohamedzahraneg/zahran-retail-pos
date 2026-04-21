@@ -30,7 +30,7 @@ import {
   CreateCustomerGroupDto,
   UpdateCustomerGroupDto,
 } from './customer-groups.service';
-import { Roles } from '../common/decorators/roles.decorator';
+import { Roles, Permissions } from '../common/decorators/roles.decorator';
 
 class CreateGroupDto implements CreateCustomerGroupDto {
   @IsString() @MinLength(2) code: string;
@@ -92,6 +92,7 @@ class ResolveDto {
 
 @ApiBearerAuth()
 @ApiTags('customer-groups')
+@Permissions('customer_groups.manage')
 @Controller('customer-groups')
 export class CustomerGroupsController {
   constructor(private readonly svc: CustomerGroupsService) {}
