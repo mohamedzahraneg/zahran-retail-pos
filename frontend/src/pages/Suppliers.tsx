@@ -13,6 +13,7 @@ import {
   FileText,
   CreditCard,
   Pencil,
+  ExternalLink,
   Trash2,
 } from 'lucide-react';
 import { suppliersApi, Supplier, SupplierOutstanding } from '@/api/suppliers.api';
@@ -225,6 +226,16 @@ export default function Suppliers() {
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
+                      window.location.href = `/suppliers/${s.id}`;
+                    }}
+                    className="p-1.5 rounded-lg hover:bg-indigo-50 text-slate-500 hover:text-indigo-600"
+                    title="الصفحة الذكية للمورد"
+                  >
+                    <ExternalLink size={14} />
+                  </button>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
                       setEditTarget(s);
                     }}
                     className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 hover:text-brand-600"
@@ -359,6 +370,10 @@ function EditSupplierModal({
     phone: supplier.phone || '',
     email: supplier.email || '',
     address: supplier.address || '',
+    supplier_type: (supplier.supplier_type as any) || 'credit',
+    credit_limit: String(supplier.credit_limit ?? ''),
+    opening_balance: String(supplier.opening_balance ?? ''),
+    payment_terms_days: String(supplier.payment_terms_days ?? ''),
   });
   const mutation = useMutation({
     mutationFn: (body: Partial<Supplier>) =>
@@ -419,13 +434,80 @@ function EditSupplierModal({
             onChange={(e) => setForm({ ...form, address: e.target.value })}
           />
         </Field>
+        <div className="grid md:grid-cols-2 gap-3">
+          <Field label="نوع التعامل">
+            <select
+              className="input"
+              value={form.supplier_type}
+              onChange={(e) =>
+                setForm({ ...form, supplier_type: e.target.value as any })
+              }
+            >
+              <option value="cash">كاش</option>
+              <option value="credit">آجل</option>
+              <option value="installments">أقساط</option>
+            </select>
+          </Field>
+          <Field label="مهلة السداد (يوم)">
+            <input
+              type="number"
+              min="0"
+              className="input"
+              dir="ltr"
+              value={form.payment_terms_days}
+              onChange={(e) =>
+                setForm({ ...form, payment_terms_days: e.target.value })
+              }
+            />
+          </Field>
+          <Field label="حد الائتمان (ج.م)">
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              className="input"
+              dir="ltr"
+              value={form.credit_limit}
+              onChange={(e) =>
+                setForm({ ...form, credit_limit: e.target.value })
+              }
+            />
+          </Field>
+          <Field label="الرصيد الافتتاحي (ج.م)">
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              className="input"
+              dir="ltr"
+              value={form.opening_balance}
+              onChange={(e) =>
+                setForm({ ...form, opening_balance: e.target.value })
+              }
+              title="يُسجَّل كرصيد افتتاحي في كشف حساب المورد"
+            />
+          </Field>
+        </div>
         <div className="flex gap-2 pt-2">
           <button
             className="btn-primary flex-1"
             onClick={() => {
               if (!form.code || !form.name)
                 return toast.error('الكود والاسم مطلوبان');
-              mutation.mutate(form);
+              if (!/^[0-9]+$/.test(form.code))
+                return toast.error('كود المورد أرقام إنجليزي فقط');
+              mutation.mutate({
+                ...form,
+                credit_limit: form.credit_limit
+                  ? Number(form.credit_limit)
+                  : undefined,
+                opening_balance: form.opening_balance
+                  ? Number(form.opening_balance)
+                  : undefined,
+                payment_terms_days: form.payment_terms_days
+                  ? Number(form.payment_terms_days)
+                  : undefined,
+              } as any);
             }}
             disabled={mutation.isPending}
           >
@@ -546,25 +628,42 @@ function CreateSupplierModal({
     phone: '',
     email: '',
     address: '',
+    supplier_type: 'credit' as 'cash' | 'credit' | 'installments',
+    credit_limit: '',
+    opening_balance: '',
+    payment_terms_days: '',
   });
   const mutation = useMutation({
-    mutationFn: suppliersApi.create,
+    mutationFn: (body: any) => suppliersApi.create(body),
     onSuccess: () => {
       toast.success('تم إضافة المورد');
       onSuccess();
     },
+    onError: (e: any) =>
+      toast.error(
+        e?.response?.data?.message ||
+          (Array.isArray(e?.response?.data?.message)
+            ? e.response.data.message[0]
+            : 'فشل إضافة المورد'),
+      ),
   });
 
   return (
     <Modal title="إضافة مورد جديد" onClose={onClose}>
       <div className="space-y-3">
         <div className="grid md:grid-cols-2 gap-3">
-          <Field label="الكود *">
+          <Field label="كود المورد (اختياري — أرقام فقط)">
             <input
               className="input"
+              dir="ltr"
               value={form.code}
-              onChange={(e) => setForm({ ...form, code: e.target.value })}
-              placeholder="SUP-001"
+              onChange={(e) =>
+                setForm({
+                  ...form,
+                  code: e.target.value.replace(/[^0-9]/g, ''),
+                })
+              }
+              placeholder="يُولَّد تلقائيًا"
             />
           </Field>
           <Field label="الاسم *">
@@ -602,13 +701,81 @@ function CreateSupplierModal({
             onChange={(e) => setForm({ ...form, address: e.target.value })}
           />
         </Field>
+        <div className="grid md:grid-cols-2 gap-3">
+          <Field label="نوع التعامل">
+            <select
+              className="input"
+              value={form.supplier_type}
+              onChange={(e) =>
+                setForm({ ...form, supplier_type: e.target.value as any })
+              }
+            >
+              <option value="cash">كاش</option>
+              <option value="credit">آجل</option>
+              <option value="installments">أقساط</option>
+            </select>
+          </Field>
+          <Field label="مهلة السداد (يوم)">
+            <input
+              type="number"
+              min="0"
+              className="input"
+              dir="ltr"
+              value={form.payment_terms_days}
+              onChange={(e) =>
+                setForm({ ...form, payment_terms_days: e.target.value })
+              }
+            />
+          </Field>
+          <Field label="حد الائتمان (ج.م)">
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              className="input"
+              dir="ltr"
+              value={form.credit_limit}
+              onChange={(e) =>
+                setForm({ ...form, credit_limit: e.target.value })
+              }
+            />
+          </Field>
+          <Field label="الرصيد الافتتاحي (ج.م)">
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              className="input"
+              dir="ltr"
+              value={form.opening_balance}
+              onChange={(e) =>
+                setForm({ ...form, opening_balance: e.target.value })
+              }
+            />
+          </Field>
+        </div>
 
         <div className="flex gap-2 pt-2">
           <button
             className="btn-primary flex-1"
             onClick={() => {
-              if (!form.code || !form.name) return toast.error('الكود والاسم مطلوبان');
-              mutation.mutate(form);
+              if (!form.name) return toast.error('الاسم مطلوب');
+              if (form.code && !/^[0-9]+$/.test(form.code)) {
+                return toast.error('كود المورد أرقام إنجليزي فقط');
+              }
+              mutation.mutate({
+                ...form,
+                code: form.code || undefined,
+                credit_limit: form.credit_limit
+                  ? Number(form.credit_limit)
+                  : undefined,
+                opening_balance: form.opening_balance
+                  ? Number(form.opening_balance)
+                  : undefined,
+                payment_terms_days: form.payment_terms_days
+                  ? Number(form.payment_terms_days)
+                  : undefined,
+              } as any);
             }}
             disabled={mutation.isPending}
           >

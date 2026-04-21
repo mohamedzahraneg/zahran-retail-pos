@@ -20,22 +20,7 @@ import {
 import { SuppliersService } from './suppliers.service';
 import { Roles, Permissions } from '../common/decorators/roles.decorator';
 import { Req } from '@nestjs/common';
-
-class CreateSupplierDto {
-  @IsString() code: string;
-  @IsString() name: string;
-  @IsOptional() @IsString() phone?: string;
-  @IsOptional() @IsString() email?: string;
-  @IsOptional() @IsString() address?: string;
-}
-
-class UpdateSupplierDto {
-  @IsOptional() @IsString() code?: string;
-  @IsOptional() @IsString() name?: string;
-  @IsOptional() @IsString() phone?: string;
-  @IsOptional() @IsString() email?: string;
-  @IsOptional() @IsString() address?: string;
-}
+import { CreateSupplierDto, UpdateSupplierDto } from './dto/supplier.dto';
 
 class PaySupplierDto {
   @IsNumber() @Min(0.01) amount: number;
@@ -70,6 +55,11 @@ export class SuppliersController {
   @Get(':id/ledger')
   ledger(@Param('id', ParseUUIDPipe) id: string) {
     return this.suppliers.ledger(id);
+  }
+
+  @Get(':id/summary')
+  summary(@Param('id', ParseUUIDPipe) id: string) {
+    return this.suppliers.summary(id);
   }
 
   @Post()

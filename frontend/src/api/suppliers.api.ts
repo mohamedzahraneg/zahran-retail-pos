@@ -1,15 +1,65 @@
 import { api, unwrap } from './client';
 
+export type SupplierType = 'cash' | 'credit' | 'installments';
+
 export interface Supplier {
   id: string;
   code: string;
   name: string;
   phone?: string | null;
+  alt_phone?: string | null;
   email?: string | null;
   address?: string | null;
+  contact_person?: string | null;
+  tax_number?: string | null;
+  notes?: string | null;
+  supplier_type?: SupplierType;
+  opening_balance?: string | number;
   current_balance?: string;
-  credit_limit?: string;
+  credit_limit?: string | number;
+  payment_terms_days?: number;
+  is_active?: boolean;
   created_at?: string;
+}
+
+export interface SupplierSummary {
+  supplier: Supplier & {
+    purchase_count: number;
+    purchases_total: string;
+    paid_total: string;
+    unpaid_total: string;
+  };
+  purchases: Array<{
+    id: string;
+    purchase_no: string;
+    invoice_date: string;
+    grand_total: string;
+    paid_amount: string;
+    remaining: string;
+    status: string;
+  }>;
+  payments: Array<{
+    id: string;
+    paid_at: string;
+    amount: string;
+    payment_method: string;
+    reference_number?: string;
+    notes?: string;
+    purchase_no: string;
+    paid_by_name?: string;
+  }>;
+  ledger: any[];
+  discounts: Array<{
+    id: string;
+    name: string;
+    sku: string;
+    quantity: number;
+    unit_cost: string;
+    discount: string;
+    purchase_no: string;
+    invoice_date: string;
+  }>;
+  credit_usage_pct: number | null;
 }
 
 export interface SupplierOutstanding {
@@ -38,6 +88,9 @@ export const suppliersApi = {
     unwrap<{ archived: boolean }>(api.delete(`/suppliers/${id}`)),
 
   ledger: (id: string) => unwrap<any[]>(api.get(`/suppliers/${id}/ledger`)),
+
+  summary: (id: string) =>
+    unwrap<SupplierSummary>(api.get(`/suppliers/${id}/summary`)),
 
   outstanding: () =>
     unwrap<SupplierOutstanding[]>(api.get('/suppliers/outstanding')),

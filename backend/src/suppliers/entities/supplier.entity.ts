@@ -28,6 +28,18 @@ export class SupplierEntity {
   @Column({ type: 'numeric', precision: 14, scale: 2, default: 0 })
   current_balance: number;
 
+  @Column({ type: 'varchar', length: 12, default: 'credit' })
+  supplier_type: 'cash' | 'credit' | 'installments';
+
+  @Column({ type: 'numeric', precision: 14, scale: 2, default: 0 })
+  opening_balance: number;
+
+  @Column({ type: 'numeric', precision: 14, scale: 2, default: 0 })
+  credit_limit: number;
+
+  @Column({ type: 'int', default: 0 })
+  payment_terms_days: number;
+
   @Column({ type: 'boolean', default: true })
   is_active: boolean;
 

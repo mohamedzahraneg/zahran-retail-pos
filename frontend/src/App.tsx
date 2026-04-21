@@ -12,6 +12,7 @@ import Returns from '@/pages/Returns';
 import ReturnsAnalytics from '@/pages/ReturnsAnalytics';
 import CashDesk from '@/pages/CashDesk';
 import Suppliers from '@/pages/Suppliers';
+import SupplierDetail from '@/pages/SupplierDetail';
 import Purchases from '@/pages/Purchases';
 import StockAdjustments from '@/pages/StockAdjustments';
 import BarcodeLabels from '@/pages/BarcodeLabels';
@@ -64,6 +65,7 @@ export default function App() {
           }
         />
         <Route path="suppliers" element={<Suppliers />} />
+        <Route path="suppliers/:id" element={<SupplierDetail />} />
         <Route path="purchases" element={<Purchases />} />
         <Route path="stock-adjustments" element={<StockAdjustments />} />
         <Route path="barcode-labels" element={<BarcodeLabels />} />

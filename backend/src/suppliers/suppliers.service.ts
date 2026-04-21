@@ -27,8 +27,38 @@ export class SuppliersService {
     return s;
   }
 
-  create(body: Partial<SupplierEntity>) {
-    return this.repo.save(this.repo.create(body));
+  async create(body: Partial<SupplierEntity>) {
+    // Auto-generate a numeric code if not supplied — MAX(code)+1 so
+    // renumbering survives soft-deletes.
+    if (!body.code) {
+      const [row] = await this.ds.query(
+        `SELECT COALESCE(MAX(code::int), 0) + 1 AS next_code
+           FROM suppliers
+          WHERE code ~ '^[0-9]+$' AND deleted_at IS NULL`,
+      );
+      body.code = String(row?.next_code || 1);
+    }
+    const saved = await this.repo.save(this.repo.create(body));
+    // Seed the opening balance as the current balance on first save so
+    // the supplier starts off the ledger matching the user's input.
+    if (Number((body as any).opening_balance) > 0) {
+      await this.ds.query(
+        `UPDATE suppliers
+            SET current_balance = $2
+          WHERE id = $1`,
+        [saved.id, Number((body as any).opening_balance)],
+      );
+      await this.ds.query(
+        `INSERT INTO supplier_ledger
+           (supplier_id, direction, amount, reference_type, reference_id,
+            balance_after, notes)
+         VALUES ($1,'in',$2,'opening_balance',NULL,$2,'رصيد افتتاحي')`,
+        [saved.id, Number((body as any).opening_balance)],
+      ).catch(() => {
+        /* supplier_ledger schema may not exist yet on older DBs — not fatal */
+      });
+    }
+    return this.findOne(saved.id);
   }
 
   async update(id: string, body: Partial<SupplierEntity>) {
@@ -185,6 +215,97 @@ export class SuppliersService {
         new_balance: Number(current_balance),
       };
     });
+  }
+
+  /**
+   * Full smart summary for a supplier — used by the dedicated
+   * supplier page. Bundles profile, running totals, purchases
+   * breakdown, payment history, discounts allocated to their items,
+   * and the raw ledger in one call.
+   */
+  async summary(supplierId: string) {
+    const [supplier] = await this.ds.query(
+      `SELECT s.*,
+              (SELECT COUNT(*) FROM purchases WHERE supplier_id = s.id)::int
+                 AS purchase_count,
+              (SELECT COALESCE(SUM(grand_total), 0) FROM purchases
+                WHERE supplier_id = s.id)::numeric(14,2) AS purchases_total,
+              (SELECT COALESCE(SUM(paid_amount), 0) FROM purchases
+                WHERE supplier_id = s.id)::numeric(14,2) AS paid_total,
+              (SELECT COALESCE(SUM(grand_total - paid_amount), 0)
+                 FROM purchases WHERE supplier_id = s.id
+                  AND status IN ('received','partial'))::numeric(14,2) AS unpaid_total
+         FROM suppliers s
+        WHERE s.id = $1 AND s.deleted_at IS NULL`,
+      [supplierId],
+    );
+    if (!supplier) throw new NotFoundException('المورد غير موجود');
+
+    const purchases = await this.ds.query(
+      `SELECT id, purchase_no, invoice_date, grand_total, paid_amount,
+              (grand_total - paid_amount) AS remaining, status
+         FROM purchases
+        WHERE supplier_id = $1
+        ORDER BY invoice_date DESC, created_at DESC
+        LIMIT 200`,
+      [supplierId],
+    );
+
+    const payments = await this.ds.query(
+      `SELECT pp.id, pp.paid_at, pp.amount, pp.payment_method,
+              pp.reference_number, pp.notes,
+              pu.purchase_no,
+              u.full_name AS paid_by_name
+         FROM purchase_payments pp
+         JOIN purchases pu ON pu.id = pp.purchase_id
+         LEFT JOIN users u ON u.id = pp.paid_by
+        WHERE pu.supplier_id = $1
+        ORDER BY pp.paid_at DESC
+        LIMIT 200`,
+      [supplierId],
+    );
+
+    const ledger = await this.ds.query(
+      `SELECT * FROM supplier_ledger
+        WHERE supplier_id = $1
+        ORDER BY entry_date DESC, created_at DESC
+        LIMIT 200`,
+      [supplierId],
+    ).catch(() => [] as any[]);
+
+    // Discounts distributed across items bought from this supplier.
+    // Each purchase_item carries an invoice-level allocated discount
+    // (discount_amount_share) in most schemas; if not present we just
+    // surface the purchase-level discount.
+    const discounts = await this.ds.query(
+      `SELECT pi.id, pi.product_name_snapshot AS name, pi.sku_snapshot AS sku,
+              pi.quantity, pi.unit_cost,
+              COALESCE(pi.discount_amount, 0)::numeric(14,2) AS discount,
+              pu.purchase_no, pu.invoice_date
+         FROM purchase_items pi
+         JOIN purchases pu ON pu.id = pi.purchase_id
+        WHERE pu.supplier_id = $1
+          AND COALESCE(pi.discount_amount, 0) > 0
+        ORDER BY pu.invoice_date DESC
+        LIMIT 200`,
+      [supplierId],
+    ).catch(() => [] as any[]);
+
+    return {
+      supplier,
+      purchases,
+      payments,
+      ledger,
+      discounts,
+      credit_usage_pct:
+        Number(supplier.credit_limit || 0) > 0
+          ? Math.round(
+              (Number(supplier.current_balance || 0) /
+                Number(supplier.credit_limit)) *
+                10000,
+            ) / 100
+          : null,
+    };
   }
 
   /** All payments made to this supplier (across all invoices). */
