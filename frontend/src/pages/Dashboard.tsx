@@ -327,44 +327,54 @@ export default function Dashboard() {
       </div>
 
       {/* ═════ Period analytics hero — revenue / profit / expenses / returns / discounts ═════ */}
-      {analytics?.totals && (
-        <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
-          <AnalyticsCell
-            label={`إيرادات ${periodNoun}`}
-            value={EGP.format(Number(analytics.totals.revenue || 0))}
-            tone="indigo"
-            hint={`${Number(analytics.totals.invoices || 0)} فاتورة`}
-          />
-          <AnalyticsCell
-            label="ربح إجمالي"
-            value={EGP.format(Number(analytics.totals.profit || 0))}
-            tone="emerald"
-            hint={`هامش ${Number(analytics.totals.margin_pct || 0).toFixed(1)}%`}
-          />
-          <AnalyticsCell
-            label="مصاريف"
-            value={EGP.format(Number(analytics.totals.expenses || 0))}
-            tone="amber"
-          />
-          <AnalyticsCell
-            label="مرتجعات"
-            value={EGP.format(Number(analytics.totals.returns_amount || 0))}
-            tone="rose"
-            hint={`${Number(analytics.totals.returns_count || 0)} عملية`}
-          />
-          <AnalyticsCell
-            label="إجمالي الخصومات"
-            value={EGP.format(Number(analytics.totals.discounts || 0))}
-            tone="violet"
-          />
-          <AnalyticsCell
-            label="فواتير الخصم"
-            value={NUM(Number(analytics.totals.discount_invoices || 0))}
-            tone="violet"
-            hint="عدد الفواتير بخصم"
-          />
-        </div>
-      )}
+      {analytics?.totals && (() => {
+        const t = analytics.totals;
+        const rev = Number(t.revenue || 0);
+        const invCount = Number(t.invoices || 0);
+        const pct = (n: number) => (rev > 0 ? `${((n / rev) * 100).toFixed(1)}%` : '—');
+        const avg = invCount > 0 ? rev / invCount : 0;
+        const discInvShare = invCount > 0 ? ((Number(t.discount_invoices || 0) / invCount) * 100).toFixed(1) : '0';
+        return (
+          <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
+            <AnalyticsCell
+              label={`إيرادات ${periodNoun}`}
+              value={EGP.format(rev)}
+              tone="indigo"
+              hint={`${NUM(invCount)} فاتورة · متوسط ${EGP.format(avg)}`}
+            />
+            <AnalyticsCell
+              label="ربح إجمالي"
+              value={EGP.format(Number(t.profit || 0))}
+              tone="emerald"
+              hint={`هامش ${Number(t.margin_pct || 0).toFixed(1)}% · ${NUM(Number(t.units_sold || 0))} قطعة`}
+            />
+            <AnalyticsCell
+              label="مصاريف"
+              value={EGP.format(Number(t.expenses || 0))}
+              tone="amber"
+              hint={`${NUM(Number(t.expense_count || 0))} بند · ${pct(Number(t.expenses || 0))} من الإيراد`}
+            />
+            <AnalyticsCell
+              label="مرتجعات"
+              value={EGP.format(Number(t.returns_amount || 0))}
+              tone="rose"
+              hint={`${NUM(Number(t.returns_count || 0))} عملية · ${pct(Number(t.returns_amount || 0))} من الإيراد`}
+            />
+            <AnalyticsCell
+              label="إجمالي الخصومات"
+              value={EGP.format(Number(t.discounts || 0))}
+              tone="violet"
+              hint={`${pct(Number(t.discounts || 0))} من الإيراد`}
+            />
+            <AnalyticsCell
+              label="فواتير الخصم"
+              value={NUM(Number(t.discount_invoices || 0))}
+              tone="violet"
+              hint={`${discInvShare}% من إجمالي الفواتير`}
+            />
+          </div>
+        );
+      })()}
 
       {/* ═════ KPIs ═════ */}
       <div className="grid grid-cols-2 gap-4">

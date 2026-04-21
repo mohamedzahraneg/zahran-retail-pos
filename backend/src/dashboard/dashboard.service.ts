@@ -160,9 +160,22 @@ export class DashboardService {
       [fromDate, toDate],
     );
 
+    const [itemsRow] = await this.ds.query(
+      `
+      SELECT COALESCE(SUM(ii.quantity), 0)::int AS units_sold
+      FROM invoice_items ii
+      JOIN invoices i ON i.id = ii.invoice_id
+      WHERE i.status IN ('paid','completed','partially_paid')
+        AND (COALESCE(i.completed_at, i.created_at) AT TIME ZONE 'Africa/Cairo')::date
+            BETWEEN $1::date AND $2::date
+      `,
+      [fromDate, toDate],
+    );
+
     const [expensesRow] = await this.ds.query(
       `
-      SELECT COALESCE(SUM(amount), 0)::numeric(14,2) AS expenses
+      SELECT COALESCE(SUM(amount), 0)::numeric(14,2) AS expenses,
+             COUNT(*)::int                           AS expense_count
       FROM expenses
       WHERE expense_date BETWEEN $1::date AND $2::date
       `,
@@ -254,9 +267,11 @@ export class DashboardService {
         cogs,
         profit,
         margin_pct: Math.round(margin * 100) / 100,
+        units_sold: Number(itemsRow.units_sold),
         discounts: Number(totals.discounts),
         discount_invoices: Number(totals.discount_invoices),
         expenses,
+        expense_count: Number(expensesRow.expense_count),
         returns_count: Number(returnsRow.returns_count),
         returns_amount: returnsAmount,
         net,
