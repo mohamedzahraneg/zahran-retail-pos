@@ -274,12 +274,8 @@ export default function Dashboard() {
       hour12: false,
     }).format(now),
   );
-  const greeting =
-    cairoHour >= 4 && cairoHour < 12
-      ? 'صباح الخير'
-      : cairoHour >= 12 && cairoHour < 18
-        ? 'مساء الخير'
-        : 'مساء الخير';
+  // Before noon Cairo = صباح الخير, from noon onwards = مساء الخير.
+  const greeting = cairoHour < 12 ? 'صباح الخير' : 'مساء الخير';
 
   return (
     <div className="space-y-6">
@@ -302,9 +298,6 @@ export default function Dashboard() {
             </div>
             <div className="text-3xl font-black mt-1">
               {greeting} {displayName} 👋
-            </div>
-            <div className="text-sm opacity-90 mt-1">
-              {dayStr} · {dateStr}
             </div>
           </div>
           <div className="text-left">
