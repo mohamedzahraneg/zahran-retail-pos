@@ -1,4 +1,8 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, ILike, Repository } from 'typeorm';
 import { ProductEntity } from './entities/product.entity';
@@ -195,6 +199,34 @@ export class ProductsService {
   }
 
   async remove(id: string) {
+    // Refuse to archive a product that has ever been sold or
+    // stock-adjusted — keeping historical references intact matters
+    // more than tidying the catalog.
+    const [sale] = await this.ds.query(
+      `SELECT COUNT(*)::int AS n
+         FROM invoice_items ii
+         JOIN product_variants v ON v.id = ii.variant_id
+        WHERE v.product_id = $1`,
+      [id],
+    );
+    if (Number(sale?.n || 0) > 0) {
+      throw new BadRequestException(
+        'لا يمكن حذف منتج سبق بيعه — أرشفته ستخفيه، بس تاريخه لا يُمحى.',
+      );
+    }
+    const [movements] = await this.ds.query(
+      `SELECT COUNT(*)::int AS n
+         FROM stock_movements m
+         JOIN product_variants v ON v.id = m.variant_id
+        WHERE v.product_id = $1
+          AND m.movement_type IN ('sale','return','adjustment','count','transfer')`,
+      [id],
+    );
+    if (Number(movements?.n || 0) > 0) {
+      throw new BadRequestException(
+        'لا يمكن حذف منتج له حركات مخزون (بيع/مرتجع/تسوية/جرد/تحويل).',
+      );
+    }
     await this.repo.update(id, { is_active: false });
     return { archived: true };
   }

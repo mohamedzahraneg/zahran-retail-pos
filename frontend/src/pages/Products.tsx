@@ -162,6 +162,36 @@ export default function Products() {
 
   const { sorted, thProps, sortIcon } = useTableSort(filteredData, null, 'asc');
 
+  // Exact-SKU matches jump to the top ABOVE the numbered list, and
+  // lose their sequence number — only the ✓ marker stays.
+  const skuExact = colSku.trim().toLowerCase();
+  const variantExact = colVariant.trim().toLowerCase();
+  const { topHits, rest } = useMemo(() => {
+    if (!skuExact && !variantExact)
+      return { topHits: [] as any[], rest: sorted };
+    const hits: any[] = [];
+    const leftover: any[] = [];
+    for (const p of sorted) {
+      const skuHit =
+        skuExact.length > 0 &&
+        ((p.sku_root || '').toLowerCase() === skuExact ||
+          ((p as any).variants_summary || []).some(
+            (v: any) => (v.sku || '').toLowerCase() === skuExact,
+          ));
+      const variantHit =
+        variantExact.length > 0 &&
+        ((p as any).variants_summary || []).some(
+          (v: any) =>
+            (v.color || '').toLowerCase() === variantExact ||
+            (v.size || '').toLowerCase() === variantExact ||
+            (v.sku || '').toLowerCase() === variantExact,
+        );
+      if (skuHit || variantHit) hits.push(p);
+      else leftover.push(p);
+    }
+    return { topHits: hits, rest: leftover };
+  }, [sorted, skuExact, variantExact]);
+
   const deleteMutation = useMutation({
     mutationFn: (id: string) => productsApi.remove(id),
     onSuccess: () => {
@@ -366,10 +396,22 @@ export default function Products() {
                 </td>
               </tr>
             )}
-            {sorted.map((p, idx) => {
+            {/* Exact matches — pinned above, no sequence number, just ✓ */}
+            {topHits.length > 0 && (
+              <tr className="bg-emerald-50/40 border-b border-emerald-200">
+                <td
+                  colSpan={12}
+                  className="px-3 py-1.5 text-[11px] font-bold text-emerald-800"
+                >
+                  ✓ نتيجة مطابقة تامة ({topHits.length})
+                </td>
+              </tr>
+            )}
+            {[...topHits.map((p) => ({ p, pinned: true, idx: 0 })),
+              ...rest.map((p, i) => ({ p, pinned: false, idx: i }))
+            ].map(({ p, pinned, idx }) => {
               const cat = categories.find((c) => c.id === p.category_id);
               // Does this product have an EXACT SKU match for colSku?
-              // (If so, the row gets a small "✓" marker.)
               const skuQuery = colSku.trim().toLowerCase();
               const exactSkuHit =
                 skuQuery.length > 0 &&
@@ -377,7 +419,6 @@ export default function Products() {
                   ((p as any).variants_summary || []).some(
                     (v: any) => (v.sku || '').toLowerCase() === skuQuery,
                   ));
-              // Which variants match the current variant-search query?
               const vq = colVariant.trim().toLowerCase();
               const matchedVariants = vq
                 ? ((p as any).variants_summary || []).filter(
@@ -389,23 +430,32 @@ export default function Products() {
                 : [];
               return (
                 <tr
-                  key={p.id}
+                  key={`${pinned ? 'pin' : 'row'}-${p.id}`}
                   className={`border-b border-slate-100 hover:bg-slate-50 ${
-                    exactSkuHit ? 'bg-emerald-50/50' : ''
+                    pinned ? 'bg-emerald-50/60 hover:bg-emerald-100/40' : ''
                   }`}
                 >
                   <td className="p-3 text-center">
-                    <div className="inline-flex items-center gap-1 font-mono text-slate-500 text-xs tabular-nums">
-                      {idx + 1}
-                      {exactSkuHit && (
-                        <span
-                          className="text-emerald-600 font-bold"
-                          title="مطابقة تامة للكود"
-                        >
-                          ✓
-                        </span>
-                      )}
-                    </div>
+                    {pinned ? (
+                      <span
+                        className="text-emerald-600 font-black text-base"
+                        title="مطابقة تامة"
+                      >
+                        ✓
+                      </span>
+                    ) : (
+                      <span className="font-mono text-slate-500 text-xs tabular-nums">
+                        {idx + 1}
+                        {exactSkuHit && (
+                          <span
+                            className="text-emerald-600 font-bold mx-1"
+                            title="مطابقة تامة للكود"
+                          >
+                            ✓
+                          </span>
+                        )}
+                      </span>
+                    )}
                   </td>
                   <td className="p-3">
                     <div className="flex items-center gap-3">
