@@ -46,7 +46,7 @@ export default function Accounting() {
 
   // Period selector drives the top KPI cards.
   const [period, setPeriod] = useState<PeriodRange>(() =>
-    resolvePeriod('month'),
+    resolvePeriod('day'),
   );
   const periodNoun = {
     day: 'اليوم',
