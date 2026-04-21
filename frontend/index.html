@@ -11,6 +11,47 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800;900&display=swap" rel="stylesheet" />
     <title>نظام زهران للبيع بالتجزئة</title>
+    <script>
+      // Kill-switch bootstrap (inline so it runs BEFORE any cached old
+      // bundle gets a chance to fail). Forcibly unregisters every
+      // service worker this origin owns and nukes all Cache-Storage
+      // entries. Runs once per load — if anything was done, reloads
+      // the page so the fresh, SW-less shell boots.
+      (function killOldServiceWorker() {
+        try {
+          if (!('serviceWorker' in navigator)) return;
+          navigator.serviceWorker.getRegistrations().then(function (regs) {
+            var had = regs && regs.length > 0;
+            var work = [];
+            if (regs) {
+              for (var i = 0; i < regs.length; i++)
+                work.push(regs[i].unregister().catch(function () {}));
+            }
+            if ('caches' in window) {
+              work.push(
+                caches
+                  .keys()
+                  .then(function (keys) {
+                    return Promise.all(keys.map(function (k) { return caches.delete(k); }));
+                  })
+                  .catch(function () {}),
+              );
+            }
+            Promise.all(work).then(function () {
+              if (had) {
+                // Mark so we don't keep reloading forever.
+                if (!sessionStorage.getItem('__zahran_sw_killed__')) {
+                  sessionStorage.setItem('__zahran_sw_killed__', '1');
+                  window.location.reload();
+                }
+              }
+            });
+          });
+        } catch (_) {
+          /* never throw from the boot script */
+        }
+      })();
+    </script>
   </head>
   <body class="bg-slate-50 text-slate-900 antialiased">
     <div id="root"></div>

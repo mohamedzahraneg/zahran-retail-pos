@@ -28,11 +28,12 @@ self.addEventListener('activate', (event) => {
       } catch (_) {
         // ignore
       }
-      const clients = await self.clients.matchAll({ type: 'window' });
-      for (const client of clients) {
-        // Navigate clients so they boot a fresh, SW-less page.
-        client.navigate(client.url);
-      }
     })(),
   );
 });
+
+// Let the browser fall through to network on every fetch — don't
+// serve anything from cache. No-op fetch handler is intentional so
+// an active kill-switch can't accidentally satisfy a request with
+// a stale resource.
+self.addEventListener('fetch', () => {});
