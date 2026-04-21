@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { Navigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import {
@@ -71,11 +72,31 @@ export default function POS() {
   // Mobile-only view switcher. On desktop both panels are visible side-by-side.
   const [mobileView, setMobileView] = useState<'cart' | 'products'>('cart');
 
-  const { data: shift } = useQuery({
+  const { data: shift, isLoading: loadingShift, isFetched: shiftFetched } = useQuery({
     queryKey: ['current-shift'],
     queryFn: () => shiftsApi.current(),
     refetchInterval: 30_000,
   });
+
+  // Shift is mandatory for POS — if the query has resolved and there's
+  // no open shift, bounce to /shifts with a toast so the cashier opens
+  // one first. The redirect only fires after the first fetch (otherwise
+  // we'd bounce on page refresh before the answer came back).
+  useEffect(() => {
+    if (shiftFetched && !shift) {
+      toast.error('لا يمكن فتح نقطة البيع قبل فتح وردية', { id: 'pos-no-shift' });
+    }
+  }, [shiftFetched, shift]);
+  if (shiftFetched && !shift) {
+    return <Navigate to="/shifts?open=1" replace />;
+  }
+  if (loadingShift && !shiftFetched) {
+    return (
+      <div className="h-screen w-full flex items-center justify-center text-slate-400">
+        جارٍ التحقق من الوردية…
+      </div>
+    );
+  }
 
   const { data: products = { data: [], meta: {} as any } } = useQuery({
     queryKey: ['products', category, selectedCategoryId, search, cart.warehouse?.id],

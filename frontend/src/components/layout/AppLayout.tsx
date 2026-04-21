@@ -2,6 +2,7 @@ import { Outlet, useLocation } from 'react-router-dom';
 import { Sidebar } from './Sidebar';
 import { Topbar } from './Topbar';
 import { useRealtime } from '@/hooks/useRealtime';
+import { useShiftGate } from '@/hooks/useShiftGate';
 
 interface Props {
   title: string;
@@ -10,6 +11,9 @@ interface Props {
 export function AppLayout({ title }: Props) {
   // Open the realtime socket for the signed-in session.
   useRealtime();
+  // First action after login: make sure a shift is open (also triggers
+  // attendance check-in on the shifts page).
+  useShiftGate();
   const { pathname } = useLocation();
   // POS is a full-screen workspace — hide the top bar and inner padding
   const fullscreen = pathname === '/pos';

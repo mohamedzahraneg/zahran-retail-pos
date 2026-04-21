@@ -1,6 +1,8 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
+import { attendanceApi } from '@/api/attendance.api';
 import {
   Clock,
   Play,
@@ -32,6 +34,35 @@ export default function Shifts() {
   const [detail, setDetail] = useState<Shift | null>(null);
   const [statusFilter, setStatusFilter] = useState<'' | 'open' | 'closed'>('');
   const qc = useQueryClient();
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  // Auto-clock-in on entering this page — no-op if already checked in
+  // today (the backend throws a friendly error we swallow silently).
+  useEffect(() => {
+    let done = false;
+    attendanceApi.myToday().then((row) => {
+      if (done) return;
+      if (!row || !row.clock_in || row.clock_out) {
+        attendanceApi
+          .clockIn()
+          .then(() => toast.success('تم تسجيل حضورك'))
+          .catch(() => {});
+      }
+    });
+    return () => {
+      done = true;
+    };
+  }, []);
+
+  // /shifts?open=1 — auto-pop the "open shift" modal (used by the
+  // session-start redirect from useShiftGate).
+  useEffect(() => {
+    if (searchParams.get('open') === '1') {
+      setShowOpen(true);
+      searchParams.delete('open');
+      setSearchParams(searchParams, { replace: true });
+    }
+  }, [searchParams, setSearchParams]);
 
   const { data: current } = useQuery({
     queryKey: ['shift-current'],

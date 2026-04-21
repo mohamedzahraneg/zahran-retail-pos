@@ -1,0 +1,57 @@
+import { useEffect, useRef } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
+import toast from 'react-hot-toast';
+import { shiftsApi } from '@/api/shifts.api';
+import { useAuthStore } from '@/stores/auth.store';
+
+const PROMPTED_KEY = 'zahran_shift_prompted';
+
+/**
+ * Once per login, if the user has no open shift, redirect to /shifts
+ * so they open one (and register attendance) before using the system.
+ *
+ * Pages that are always allowed without a shift:
+ *   /shifts, /login, /profile, /settings.
+ */
+export function useShiftGate() {
+  const navigate = useNavigate();
+  const { pathname, search } = useLocation();
+  const isHydrated = useAuthStore((s) => s.isHydrated);
+  const accessToken = useAuthStore((s) => s.accessToken);
+  const didPromptRef = useRef(false);
+
+  const { data: shift, isFetched } = useQuery({
+    queryKey: ['current-shift'],
+    queryFn: () => shiftsApi.current(),
+    enabled: isHydrated && !!accessToken,
+    refetchInterval: 60_000,
+  });
+
+  useEffect(() => {
+    if (!isHydrated || !accessToken) return;
+    if (!isFetched) return;
+    if (shift) {
+      // There's an open shift — reset the prompt marker so if the shift
+      // is closed later in this session, we gate again.
+      sessionStorage.removeItem(PROMPTED_KEY);
+      return;
+    }
+    // Allow a few pages to render without a shift.
+    const allowed =
+      pathname.startsWith('/shifts') ||
+      pathname.startsWith('/login') ||
+      pathname.startsWith('/profile') ||
+      pathname.startsWith('/settings');
+    if (allowed) return;
+    if (didPromptRef.current) return;
+    if (sessionStorage.getItem(PROMPTED_KEY)) return;
+    didPromptRef.current = true;
+    sessionStorage.setItem(PROMPTED_KEY, '1');
+    toast('سجّل حضورك وافتح الوردية للبدء', {
+      icon: '⏱️',
+      duration: 5000,
+    });
+    navigate('/shifts?open=1', { replace: true });
+  }, [isHydrated, accessToken, isFetched, shift, pathname, search, navigate]);
+}
