@@ -158,6 +158,77 @@ export class CashDeskService {
   }
 
   /**
+   * Net/gross shift variance totals across every closed shift.
+   * Powers the "فوارق الورديات" tile next to the cashbox KPIs.
+   */
+  async shiftVariances() {
+    const [row] = await this.ds.query(`SELECT * FROM v_shift_variances`);
+    return (
+      row || {
+        net_variance: 0,
+        total_surplus: 0,
+        total_deficit: 0,
+        surplus_count: 0,
+        deficit_count: 0,
+        matched_count: 0,
+      }
+    );
+  }
+
+  /**
+   * Unified cashbox movement feed — every inflow and outflow with an
+   * Arabic label and the source document's reference number. Supports
+   * optional cashbox, date range, direction and limit filters so the
+   * UI can paginate without extra queries.
+   */
+  movements(params: {
+    cashbox_id?: string;
+    from?: string;
+    to?: string;
+    direction?: 'in' | 'out';
+    category?: string;
+    limit?: number;
+    offset?: number;
+  }) {
+    const conds: string[] = [];
+    const args: any[] = [];
+    if (params.cashbox_id) {
+      args.push(params.cashbox_id);
+      conds.push(`cashbox_id = $${args.length}`);
+    }
+    if (params.direction === 'in' || params.direction === 'out') {
+      args.push(params.direction);
+      conds.push(`direction = $${args.length}`);
+    }
+    if (params.category) {
+      args.push(params.category);
+      conds.push(`category = $${args.length}`);
+    }
+    if (params.from) {
+      args.push(params.from);
+      conds.push(
+        `(created_at AT TIME ZONE 'Africa/Cairo')::date >= $${args.length}::date`,
+      );
+    }
+    if (params.to) {
+      args.push(params.to);
+      conds.push(
+        `(created_at AT TIME ZONE 'Africa/Cairo')::date <= $${args.length}::date`,
+      );
+    }
+    const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+    args.push(Math.min(Number(params.limit ?? 200), 1000));
+    args.push(Math.max(Number(params.offset ?? 0), 0));
+    return this.ds.query(
+      `SELECT * FROM v_cashbox_movements
+       ${where}
+       ORDER BY created_at DESC
+       LIMIT $${args.length - 1} OFFSET $${args.length}`,
+      args,
+    );
+  }
+
+  /**
    * Manually deposit or withdraw cash from a cashbox. Used for opening
    * balances, owner top-ups, bank deposits, etc. Accepts an optional
    * `txn_date` so backdated adjustments can be recorded (e.g. "this was

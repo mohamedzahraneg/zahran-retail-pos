@@ -59,6 +59,32 @@ export class CashDeskController {
     return this.svc.cashflowToday();
   }
 
+  @Get('shift-variances')
+  shiftVariances() {
+    return this.svc.shiftVariances();
+  }
+
+  @Get('movements')
+  movements(
+    @Query('cashbox_id') cashbox_id?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('direction') direction?: 'in' | 'out',
+    @Query('category') category?: string,
+    @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
+  ) {
+    return this.svc.movements({
+      cashbox_id,
+      from,
+      to,
+      direction,
+      category,
+      limit: limit ? Number(limit) : undefined,
+      offset: offset ? Number(offset) : undefined,
+    });
+  }
+
   // ── Customer receipts ────────────────────────────────────────────────
   @Post('customer-payments')
   @Roles('admin', 'manager', 'cashier', 'accountant')

@@ -1083,6 +1083,18 @@ function ShiftDetailModal({ shift, onClose }: { shift: Shift; onClose: () => voi
                   value={EGP(s.total_cash_out)}
                   color="text-rose-600"
                 />
+                {(() => {
+                  const net = Number(s.total_cash_in) - Number(s.total_cash_out);
+                  return (
+                    <Row
+                      label="الصافي (داخل − خارج)"
+                      value={`${net >= 0 ? '' : '- '}${EGP(Math.abs(net))}`}
+                      color={
+                        net >= 0 ? 'text-emerald-700' : 'text-rose-600'
+                      }
+                    />
+                  );
+                })()}
               </div>
             </div>
           )}

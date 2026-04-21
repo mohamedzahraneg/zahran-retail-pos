@@ -634,13 +634,26 @@ export class AccountingService {
     );
   }
 
-  /** Quick financial KPIs for the accounting page header */
-  async kpis() {
-    const today = new Date().toISOString().slice(0, 10);
-    const monthStart = today.slice(0, 7) + '-01';
+  /**
+   * Quick financial KPIs for the accounting page header.
+   *
+   * Without args → today's snapshot (Cairo calendar). With `from`/`to`
+   * → inclusive range; the "today_*" keys hold the range totals so the
+   * UI labels can rename themselves freely.
+   */
+  async kpis(args?: { date?: string; from?: string; to?: string }) {
+    const [{ cairo_today }] = await this.ds.query(
+      `SELECT (now() AT TIME ZONE 'Africa/Cairo')::date::text AS cairo_today`,
+    );
+    const isISO = (s?: string) => !!s && /^\d{4}-\d{2}-\d{2}$/.test(s);
+    const single = isISO(args?.date) ? args!.date! : cairo_today;
+    const from = isISO(args?.from) ? args!.from! : single;
+    const to = isISO(args?.to) ? args!.to! : single;
+    const monthStart = to.slice(0, 7) + '-01';
+
     const [today_pl, month_pl] = await Promise.all([
-      this.profitAndLoss({ from: today, to: today } as any),
-      this.profitAndLoss({ from: monthStart, to: today } as any),
+      this.profitAndLoss({ from, to } as any),
+      this.profitAndLoss({ from: monthStart, to } as any),
     ]);
 
     const [pendingRow] = await this.ds.query(
@@ -650,19 +663,19 @@ export class AccountingService {
        WHERE is_approved = FALSE`,
     );
 
-    // Extra counts + today payments + shift remaining that the
-    // accounting landing-page cards now surface.
     const [invCount] = await this.ds.query(
       `SELECT COUNT(*)::int AS n
          FROM invoices
         WHERE status IN ('paid','completed','partially_paid')
           AND (COALESCE(completed_at, created_at) AT TIME ZONE 'Africa/Cairo')::date
-              = (now() AT TIME ZONE 'Africa/Cairo')::date`,
+              BETWEEN $1::date AND $2::date`,
+      [from, to],
     );
     const [expCount] = await this.ds.query(
       `SELECT COUNT(*)::int AS n
          FROM expenses
-        WHERE expense_date = (now() AT TIME ZONE 'Africa/Cairo')::date`,
+        WHERE expense_date BETWEEN $1::date AND $2::date`,
+      [from, to],
     );
     const [payments] = await this.ds.query(
       `SELECT COALESCE(SUM(ip.amount), 0)::numeric(14,2) AS today_payments,
@@ -670,19 +683,23 @@ export class AccountingService {
          FROM invoice_payments ip
          JOIN invoices i ON i.id = ip.invoice_id
         WHERE (COALESCE(i.completed_at, i.created_at) AT TIME ZONE 'Africa/Cairo')::date
-              = (now() AT TIME ZONE 'Africa/Cairo')::date`,
+              BETWEEN $1::date AND $2::date`,
+      [from, to],
     );
-    // Live shift expected cash (expected_closing - paid out),
-    // aggregated across every shift that was open at any point today.
+    // Shifts OPENED in range — remaining = expected - actual
     const [shift] = await this.ds.query(
       `SELECT COALESCE(SUM(expected_closing - COALESCE(actual_closing, 0)), 0)
                 ::numeric(14,2) AS remaining
          FROM shifts
         WHERE (opened_at AT TIME ZONE 'Africa/Cairo')::date
-              = (now() AT TIME ZONE 'Africa/Cairo')::date`,
+              BETWEEN $1::date AND $2::date`,
+      [from, to],
     );
 
     return {
+      date: single,
+      from,
+      to,
       today: today_pl,
       month: month_pl,
       today_invoice_count: Number(invCount?.n || 0),

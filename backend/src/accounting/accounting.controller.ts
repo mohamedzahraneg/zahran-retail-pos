@@ -154,7 +154,13 @@ export class AccountingController {
   @Get('kpis')
   @Roles('admin', 'manager', 'accountant')
   @ApiOperation({ summary: 'Accounting KPIs for dashboard' })
-  kpis() {
-    return this.service.kpis();
+  kpis(
+    @Query('date') date?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    // Either a single `date` or an inclusive `from`/`to` range (Cairo
+    // calendar, YYYY-MM-DD). Omit everything to default to today.
+    return this.service.kpis({ date, from, to });
   }
 }

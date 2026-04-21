@@ -15,13 +15,42 @@ export interface Cashbox {
 export interface CashflowToday {
   cashbox_id: string;
   cashbox_name: string;
-  opening_balance: string;
+  current_balance: string;
+  // New (post-migration 046)
+  cash_in_today: string;
+  cash_out_today: string;
+  // Legacy aliases — same values, kept for backwards compatibility
   inflows_total: string;
   outflows_total: string;
-  current_balance: string;
-  invoices_cash: string;
-  customer_receipts: string;
-  supplier_payments: string;
+  transactions_today: number;
+}
+
+export interface ShiftVariances {
+  net_variance: string;
+  total_surplus: string;
+  total_deficit: string;
+  surplus_count: number;
+  deficit_count: number;
+  matched_count: number;
+}
+
+export interface CashboxMovement {
+  id: string;
+  cashbox_id: string;
+  cashbox_name: string | null;
+  direction: 'in' | 'out';
+  amount: string;
+  category: string;
+  reference_type: string;
+  reference_id: string | null;
+  reference_no: string | null;
+  counterparty_name: string | null;
+  balance_after: string;
+  notes: string | null;
+  user_id: string | null;
+  user_name: string | null;
+  kind_ar: string;
+  created_at: string;
 }
 
 export interface CustomerPayment {
@@ -85,6 +114,20 @@ export const cashDeskApi = {
 
   cashflowToday: () =>
     unwrap<CashflowToday[]>(api.get('/cash-desk/cashflow/today')),
+
+  shiftVariances: () =>
+    unwrap<ShiftVariances>(api.get('/cash-desk/shift-variances')),
+
+  movements: (params?: {
+    cashbox_id?: string;
+    from?: string;
+    to?: string;
+    direction?: 'in' | 'out';
+    category?: string;
+    limit?: number;
+    offset?: number;
+  }) =>
+    unwrap<CashboxMovement[]>(api.get('/cash-desk/movements', { params })),
 
   // Customer receipts
   receive: (payload: CreateCustomerPaymentPayload) =>

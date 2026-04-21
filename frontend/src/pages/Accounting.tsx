@@ -56,9 +56,17 @@ export default function Accounting() {
     custom: 'الفترة',
   }[period.key];
 
+  // KPI cards now respect the period selector: pass from/to so expenses,
+  // payments, invoice count etc. span the chosen range. Also auto-refresh
+  // every 60 s and whenever the browser tab comes back into focus, so the
+  // cards roll over to a fresh day without a manual reload.
   const kpis = useQuery({
-    queryKey: ['accounting-kpis'],
-    queryFn: () => accountingApi.kpis(),
+    queryKey: ['accounting-kpis', period.from, period.to],
+    queryFn: () =>
+      accountingApi.kpis({ from: period.from, to: period.to }),
+    refetchInterval: 60_000,
+    refetchOnWindowFocus: true,
+    refetchOnMount: 'always',
   });
 
   // Period-scoped P&L powers the dynamic KPI cards (اليوم / الأسبوع / الشهر / السنة).
@@ -66,6 +74,8 @@ export default function Accounting() {
     queryKey: ['accounting-pl-period', period.from, period.to],
     queryFn: () =>
       accountingApi.profitAndLoss({ from: period.from, to: period.to }),
+    refetchInterval: 60_000,
+    refetchOnWindowFocus: true,
   });
 
   return (
@@ -94,11 +104,11 @@ export default function Accounting() {
         const payAmt = Number(k?.today_payments ?? 0);
         const payCount = Number(k?.today_payments_count ?? 0);
         const shiftRem = Number(k?.today_shift_remaining ?? 0);
-        const profitP = profitLabel(todayProfit, 'أرباح اليوم');
+        const profitP = profitLabel(todayProfit, `أرباح ${periodNoun}`);
         return (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
             <KpiCard
-              title="إيرادات اليوم"
+              title={`إيرادات ${periodNoun}`}
               value={EGP(todayRevenue)}
               icon={TrendingUp}
               color="emerald"
@@ -118,7 +128,7 @@ export default function Accounting() {
               )}`}
             />
             <KpiCard
-              title="مصروفات اليوم"
+              title={`مصروفات ${periodNoun}`}
               value={EGP(todayExpenses)}
               icon={Receipt}
               color="amber"
@@ -129,7 +139,7 @@ export default function Accounting() {
               }`}
             />
             <KpiCard
-              title="دفعات اليوم"
+              title={`دفعات ${periodNoun}`}
               value={EGP(payAmt)}
               icon={Receipt}
               color="indigo"
@@ -140,7 +150,7 @@ export default function Accounting() {
               }`}
             />
             <KpiCard
-              title="الباقي من وردية اليوم"
+              title={`الباقي من ورديات ${periodNoun}`}
               value={EGP(shiftRem)}
               icon={AlertCircle}
               color={shiftRem < 0 ? 'rose' : 'emerald'}

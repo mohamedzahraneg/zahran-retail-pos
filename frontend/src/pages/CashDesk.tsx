@@ -23,7 +23,9 @@ import {
   PaymentMethod,
   CustomerPayment,
   SupplierPayment,
+  CashboxMovement,
 } from '@/api/cash-desk.api';
+import { AlertCircle, ArrowLeftRight } from 'lucide-react';
 import { customersApi, Customer } from '@/api/customers.api';
 import { suppliersApi, Supplier } from '@/api/suppliers.api';
 
@@ -44,7 +46,7 @@ const METHOD_ICONS: Record<PaymentMethod, any> = {
   bank_transfer: Building2,
 };
 
-type Tab = 'receipts' | 'payments';
+type Tab = 'receipts' | 'payments' | 'movements';
 
 export default function CashDesk() {
   const [tab, setTab] = useState<Tab>('receipts');
@@ -65,6 +67,20 @@ export default function CashDesk() {
     queryKey: ['cashflow-today'],
     queryFn: cashDeskApi.cashflowToday,
     refetchInterval: 30_000,
+    refetchOnWindowFocus: true,
+  });
+
+  const { data: variances } = useQuery({
+    queryKey: ['shift-variances'],
+    queryFn: cashDeskApi.shiftVariances,
+    refetchInterval: 60_000,
+  });
+
+  const { data: movements = [], isLoading: loadingMovements } = useQuery({
+    queryKey: ['cashbox-movements'],
+    queryFn: () => cashDeskApi.movements({ limit: 300 }),
+    enabled: tab === 'movements',
+    refetchInterval: tab === 'movements' ? 30_000 : false,
   });
 
   const { data: receipts = [], isLoading: loadingReceipts } = useQuery({
@@ -78,13 +94,21 @@ export default function CashDesk() {
   });
 
   const totals = useMemo(() => {
-    const sum = (arr: any[], key: string) =>
-      arr.reduce((s, r) => s + Number(r[key] || 0), 0);
-    const firstBox = cashflow[0];
+    // Prefer new column names (cash_in_today/cash_out_today); fall back
+    // to the legacy inflows_total/outflows_total aliases.
+    const sum = (arr: any[], a: string, b: string) =>
+      arr.reduce(
+        (s, r) => s + Number((r[a] ?? r[b]) || 0),
+        0,
+      );
+    const currentTotal = cashflow.reduce(
+      (s, r) => s + Number(r.current_balance || 0),
+      0,
+    );
     return {
-      currentBalance: firstBox?.current_balance ?? 0,
-      inflowsToday: sum(cashflow, 'inflows_total'),
-      outflowsToday: sum(cashflow, 'outflows_total'),
+      currentBalance: currentTotal,
+      inflowsToday: sum(cashflow, 'cash_in_today', 'inflows_total'),
+      outflowsToday: sum(cashflow, 'cash_out_today', 'outflows_total'),
     };
   }, [cashflow]);
 
@@ -143,25 +167,29 @@ export default function CashDesk() {
       </div>
 
       {/* KPIs */}
-      <div className="grid md:grid-cols-3 gap-4">
+      <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-4">
         <KpiCard
           title="الرصيد الحالي"
           value={EGP(totals.currentBalance)}
           icon={<Wallet className="text-brand-600" />}
           color="bg-brand-50"
+          hint="إجمالي كل الخزائن النشطة"
         />
         <KpiCard
           title="داخل اليوم"
           value={EGP(totals.inflowsToday)}
           icon={<ArrowDownCircle className="text-emerald-600" />}
           color="bg-emerald-50"
+          hint="مبيعات كاش + مقبوضات + إيداعات"
         />
         <KpiCard
           title="خارج اليوم"
           value={EGP(totals.outflowsToday)}
           icon={<ArrowUpCircle className="text-rose-600" />}
           color="bg-rose-50"
+          hint="مصروفات + دفعات موردين + سحب"
         />
+        <VarianceCard variances={variances} />
       </div>
 
       {/* Cashboxes List */}
@@ -188,6 +216,12 @@ export default function CashDesk() {
       {/* Tabs */}
       <div className="card p-0 overflow-hidden">
         <div className="flex border-b border-slate-200 bg-slate-50/60">
+          <TabBtn
+            active={tab === 'movements'}
+            onClick={() => setTab('movements')}
+            label="حركة الخزنة"
+            count={movements.length || undefined}
+          />
           <TabBtn
             active={tab === 'receipts'}
             onClick={() => setTab('receipts')}
@@ -220,14 +254,18 @@ export default function CashDesk() {
 
         {/* Table */}
         <div className="overflow-x-auto">
-          {tab === 'receipts' ? (
+          {tab === 'receipts' && (
             <ReceiptsTable
               rows={filteredReceipts}
               loading={loadingReceipts}
               onVoid={setVoidTarget}
             />
-          ) : (
+          )}
+          {tab === 'payments' && (
             <PaymentsTable rows={filteredPayments} loading={loadingPayments} />
+          )}
+          {tab === 'movements' && (
+            <MovementsTable rows={movements} loading={loadingMovements} q={q} />
           )}
         </div>
       </div>
@@ -293,22 +331,186 @@ function KpiCard({
   value,
   icon,
   color,
+  hint,
 }: {
   title: string;
   value: string;
   icon: React.ReactNode;
   color: string;
+  hint?: string;
 }) {
   return (
     <div className="card p-5 flex items-center gap-4">
       <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${color}`}>
         {icon}
       </div>
-      <div className="flex-1">
+      <div className="flex-1 min-w-0">
         <div className="text-xs text-slate-500 mb-1">{title}</div>
-        <div className="font-black text-2xl text-slate-800">{value}</div>
+        <div className="font-black text-2xl text-slate-800 truncate">{value}</div>
+        {hint && (
+          <div className="text-[11px] text-slate-400 mt-0.5 truncate">{hint}</div>
+        )}
       </div>
     </div>
+  );
+}
+
+/** Shift-variance tile: net surplus/deficit across every closed shift. */
+function VarianceCard({
+  variances,
+}: {
+  variances: import('@/api/cash-desk.api').ShiftVariances | undefined;
+}) {
+  const net = Number(variances?.net_variance || 0);
+  const surplus = Number(variances?.total_surplus || 0);
+  const deficit = Number(variances?.total_deficit || 0);
+  const surplusCount = variances?.surplus_count ?? 0;
+  const deficitCount = variances?.deficit_count ?? 0;
+  const matched = variances?.matched_count ?? 0;
+
+  const isPositive = net > 0.01;
+  const isNegative = net < -0.01;
+  const color = isNegative
+    ? 'bg-rose-50'
+    : isPositive
+      ? 'bg-emerald-50'
+      : 'bg-slate-50';
+  const textColor = isNegative
+    ? 'text-rose-700'
+    : isPositive
+      ? 'text-emerald-700'
+      : 'text-slate-700';
+  const label = isNegative
+    ? `عجز صافي ${EGP(Math.abs(net))}`
+    : isPositive
+      ? `زيادة صافية ${EGP(net)}`
+      : 'لا فوارق';
+
+  return (
+    <div className="card p-5 flex items-center gap-4">
+      <div
+        className={`w-12 h-12 rounded-xl flex items-center justify-center ${color}`}
+      >
+        <AlertCircle className={textColor} />
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="text-xs text-slate-500 mb-1">فوارق الورديات</div>
+        <div className={`font-black text-2xl truncate ${textColor}`}>
+          {label}
+        </div>
+        <div className="text-[11px] text-slate-400 mt-0.5 truncate">
+          <span className="text-emerald-600">+{EGP(surplus)}</span>
+          {' · '}
+          <span className="text-rose-600">−{EGP(deficit)}</span>
+          {' · '}
+          {matched} مطابقة / {surplusCount} زيادة / {deficitCount} عجز
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MovementsTable({
+  rows,
+  loading,
+  q,
+}: {
+  rows: CashboxMovement[];
+  loading: boolean;
+  q: string;
+}) {
+  const filtered = useMemo(() => {
+    if (!q) return rows;
+    const s = q.toLowerCase();
+    return rows.filter(
+      (r) =>
+        (r.reference_no || '').toLowerCase().includes(s) ||
+        (r.counterparty_name || '').toLowerCase().includes(s) ||
+        (r.notes || '').toLowerCase().includes(s) ||
+        (r.kind_ar || '').toLowerCase().includes(s),
+    );
+  }, [rows, q]);
+
+  if (loading) {
+    return (
+      <div className="text-center py-12 text-slate-400">
+        <RefreshCw className="animate-spin mx-auto mb-2" /> جارٍ التحميل...
+      </div>
+    );
+  }
+  if (!filtered.length) {
+    return (
+      <div className="text-center py-12 text-slate-400">
+        لا توجد حركات بعد
+      </div>
+    );
+  }
+  return (
+    <table className="min-w-full text-sm">
+      <thead className="bg-slate-50/60 text-slate-600 text-xs font-bold sticky top-0">
+        <tr>
+          <Th>الوقت</Th>
+          <Th>النوع</Th>
+          <Th>الخزنة</Th>
+          <Th>المرجع</Th>
+          <Th>الطرف المقابل</Th>
+          <Th>داخل</Th>
+          <Th>خارج</Th>
+          <Th>الرصيد بعد</Th>
+          <Th>المستخدم</Th>
+          <Th>ملاحظات</Th>
+        </tr>
+      </thead>
+      <tbody>
+        {filtered.map((r) => {
+          const isIn = r.direction === 'in';
+          return (
+            <tr
+              key={r.id}
+              className="border-t border-slate-100 hover:bg-slate-50/60"
+            >
+              <Td className="whitespace-nowrap text-xs text-slate-500 font-mono">
+                {new Date(r.created_at).toLocaleString('en-GB', {
+                  timeZone: 'Africa/Cairo',
+                  day: '2-digit',
+                  month: '2-digit',
+                  year: 'numeric',
+                  hour: '2-digit',
+                  minute: '2-digit',
+                })}
+              </Td>
+              <Td>
+                <span
+                  className={`chip ${
+                    isIn
+                      ? 'bg-emerald-100 text-emerald-800'
+                      : 'bg-rose-100 text-rose-800'
+                  }`}
+                >
+                  <ArrowLeftRight size={12} /> {r.kind_ar}
+                </span>
+              </Td>
+              <Td className="text-xs text-slate-600">{r.cashbox_name || '—'}</Td>
+              <Td className="font-mono text-xs font-bold text-brand-700">
+                {r.reference_no || '—'}
+              </Td>
+              <Td className="text-xs">{r.counterparty_name || '—'}</Td>
+              <Td className="font-bold text-emerald-700">
+                {isIn ? EGP(r.amount) : '—'}
+              </Td>
+              <Td className="font-bold text-rose-700">
+                {isIn ? '—' : EGP(r.amount)}
+              </Td>
+              <Td className="font-mono text-xs">{EGP(r.balance_after)}</Td>
+              <Td className="text-xs text-slate-500">{r.user_name || '—'}</Td>
+              <Td className="text-xs text-slate-500 max-w-xs truncate">
+                {r.notes || '—'}
+              </Td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
   );
 }
 

@@ -183,5 +183,6 @@ export const accountingApi = {
     offset?: number;
   }) => unwrap<GLRow[]>(api.get('/accounting/reports/general-ledger', { params })),
 
-  kpis: () => unwrap<AccountingKPIs>(api.get('/accounting/kpis')),
+  kpis: (params?: { date?: string; from?: string; to?: string }) =>
+    unwrap<AccountingKPIs>(api.get('/accounting/kpis', { params })),
 };
