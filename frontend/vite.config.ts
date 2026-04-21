@@ -30,6 +30,12 @@ export default defineConfig(({ mode }) => {
     plugins: [
       react(),
       VitePWA({
+        // Nuclear option: publish a self-destroying service worker
+        // that unregisters the old SW on every visiting client. This
+        // clears the "white screen until I delete cache" state that
+        // lingered from earlier SW builds. Offline support stays
+        // disabled until a later deploy re-enables PWA cleanly.
+        selfDestroying: true,
         registerType: 'autoUpdate',
         includeAssets: ['favicon.svg', 'icons/*.png'],
         manifest: {
