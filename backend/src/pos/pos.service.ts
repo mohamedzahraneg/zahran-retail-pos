@@ -32,6 +32,28 @@ export class PosService {
       throw new BadRequestException('Invoice must have at least one line');
     }
 
+    // Salesperson is required on every invoice so performance reports and
+    // commissions can attribute the sale. Front-end enforces this too; the
+    // backend check is the source of truth.
+    if (!dto.salesperson_id) {
+      throw new BadRequestException('يجب اختيار البائع قبل حفظ الفاتورة');
+    }
+
+    // Require an open shift for the cashier before accepting a sale. Falls
+    // back to any open shift this user holds (warehouse mismatch shouldn't
+    // block the sale, but *no open shift* means the cashier is off-duty).
+    const [openShift] = await this.ds.query(
+      `SELECT id FROM shifts
+         WHERE opened_by = $1 AND status = 'open'
+         ORDER BY opened_at DESC LIMIT 1`,
+      [userId],
+    );
+    if (!openShift) {
+      throw new BadRequestException(
+        'لا يمكن تسجيل فاتورة قبل فتح وردية جديدة — برجاء فتح الوردية أولاً',
+      );
+    }
+
     const subtotal = dto.lines.reduce(
       (s, l) => s + l.unit_price * l.qty - (l.discount || 0),
       0,

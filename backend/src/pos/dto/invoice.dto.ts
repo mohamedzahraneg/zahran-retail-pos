@@ -35,8 +35,9 @@ export class CreateInvoiceDto {
   @ApiPropertyOptional() @IsOptional() @IsUUID() customer_id?: string;
   @ApiProperty() @IsUUID() warehouse_id: string;
 
-  /** Salesperson on the invoice level (applies to all items by default) */
-  @ApiPropertyOptional() @IsOptional() @IsUUID() salesperson_id?: string;
+  /** Salesperson on the invoice level — required so sales can be
+   *  attributed to a user for reports and commissions. */
+  @ApiProperty() @IsUUID() salesperson_id: string;
 
   @ApiProperty({ type: [InvoiceLineDto] })
   @IsArray() @ValidateNested({ each: true }) @Type(() => InvoiceLineDto)

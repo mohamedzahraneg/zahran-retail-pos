@@ -45,6 +45,18 @@ export interface UpdateUserPayload {
 export const usersApi = {
   list: () => unwrap<User[]>(api.get('/users')),
 
+  /** Slim list — callable by any authenticated user, used to populate
+   *  the salesperson / cashier pickers in POS and invoices. */
+  pickable: () =>
+    unwrap<
+      Array<{
+        id: string;
+        full_name: string;
+        username: string;
+        role_id: string | null;
+      }>
+    >(api.get('/users/pickable')),
+
   get: (id: string) => unwrap<User>(api.get(`/users/${id}`)),
 
   create: (payload: CreateUserPayload) =>

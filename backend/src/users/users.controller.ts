@@ -53,6 +53,25 @@ export class UsersController {
     return this.users.findAll();
   }
 
+  /**
+   * Slim directory of active users — available to every authenticated
+   * caller (no users.view permission). Powers the salesperson / cashier
+   * pickers in POS and invoices where a cashier without users.view
+   * still needs to attribute the sale.
+   */
+  @Get('pickable')
+  async pickable() {
+    const all = await this.users.findAll();
+    return all
+      .filter((u: any) => u.is_active)
+      .map((u: any) => ({
+        id: u.id,
+        full_name: u.full_name,
+        username: u.username,
+        role_id: u.role_id,
+      }));
+  }
+
   @Get('me')
   me(@CurrentUser() user: JwtUser) {
     return this.users.findById(user.userId);

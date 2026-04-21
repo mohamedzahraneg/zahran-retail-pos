@@ -220,10 +220,14 @@ export default function POS() {
       toast.error('يجب اختيار الفرع');
       return;
     }
+    if (!cart.salesperson?.id) {
+      toast.error('يجب اختيار البائع قبل حفظ الفاتورة');
+      return;
+    }
     createInvoice.mutate({
       warehouse_id: warehouseId,
       customer_id: cart.customer?.id,
-      salesperson_id: cart.salesperson?.id,
+      salesperson_id: cart.salesperson.id,
       lines: cart.items.map((i) => ({
         variant_id: i.variantId,
         qty: i.qty,
@@ -1133,17 +1137,26 @@ function WarehouseSelect() {
 function SalespersonSelect() {
   const cart = useCartStore();
   const { data: users = [] } = useQuery({
-    queryKey: ['users-active'],
-    queryFn: () => usersApi.list(),
+    queryKey: ['users-pickable'],
+    queryFn: () => usersApi.pickable(),
     staleTime: 5 * 60 * 1000,
   });
-  const salespeople = (users || []).filter((u) => u.is_active);
+  // Everyone registered in the system can be attributed to a sale —
+  // cashiers, salespeople, managers, admins. The backend filters to
+  // active users only.
+  const salespeople = users || [];
+  const isMissing = !cart.salesperson?.id;
 
   return (
     <div className="flex items-center gap-2">
-      <Briefcase size={14} className="text-slate-400 shrink-0" />
+      <Briefcase
+        size={14}
+        className={isMissing ? 'text-amber-400 shrink-0' : 'text-slate-400 shrink-0'}
+      />
       <select
-        className="flex-1 bg-white/5 border border-white/10 rounded-lg px-2 py-1.5 text-sm text-white"
+        className={`flex-1 bg-white/5 border rounded-lg px-2 py-1.5 text-sm text-white ${
+          isMissing ? 'border-amber-400/60 ring-1 ring-amber-400/30' : 'border-white/10'
+        }`}
         value={cart.salesperson?.id ?? ''}
         onChange={(e) => {
           const id = e.target.value;
@@ -1161,7 +1174,7 @@ function SalespersonSelect() {
         }}
       >
         <option value="" className="bg-slate-900">
-          — اختر البائع —
+          — اختر البائع (إلزامي) —
         </option>
         {salespeople.map((u) => (
           <option key={u.id} value={u.id} className="bg-slate-900">
