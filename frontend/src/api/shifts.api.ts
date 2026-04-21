@@ -1,6 +1,6 @@
 import { api, unwrap } from './client';
 
-export type ShiftStatus = 'open' | 'closed';
+export type ShiftStatus = 'open' | 'closed' | 'pending_close';
 
 export interface PaymentBreakdown {
   cash: { amount: number; count: number };
@@ -84,6 +84,14 @@ export interface Shift {
   opened_at: string;
   closed_at: string | null;
   notes: string | null;
+  // Pending-close request metadata (set while status='pending_close')
+  close_requested_at?: string | null;
+  close_requested_by?: string | null;
+  close_requested_amount?: string | number | null;
+  close_requested_notes?: string | null;
+  close_approved_at?: string | null;
+  close_approved_by?: string | null;
+  close_rejection_reason?: string | null;
   invoices?: Array<{
     id: string;
     invoice_no: string;
@@ -132,9 +140,10 @@ export const shiftsApi = {
     id: string,
     payload: { actual_closing: number; notes?: string },
   ) =>
-    unwrap<{ pending: true; shift: Shift }>(
-      api.post(`/shifts/${id}/request-close`, payload),
-    ),
+    unwrap<
+      | { pending: true; shift: Shift; variance: number; expected_closing: number }
+      | { pending: false; auto_closed: true; shift: Shift & { summary?: ShiftSummary } }
+    >(api.post(`/shifts/${id}/request-close`, payload)),
 
   pendingCloses: () =>
     unwrap<Array<Shift & { requested_by_name?: string }>>(

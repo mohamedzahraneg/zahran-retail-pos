@@ -176,12 +176,18 @@ export default function Shifts() {
                       {s.cashbox_name || '—'}
                     </td>
                     <td className="px-3 py-2 text-xs">
-                      {new Date(s.opened_at).toLocaleString('en-US')}
+                      {fmtShiftTime(s.opened_at)}
                     </td>
                     <td className="px-3 py-2 text-xs">
-                      {s.closed_at
-                        ? new Date(s.closed_at).toLocaleString('en-US')
-                        : <span className="text-slate-400">— جارية</span>}
+                      {s.closed_at ? (
+                        fmtShiftTime(s.closed_at)
+                      ) : s.status === 'pending_close' ? (
+                        <span className="text-amber-600">
+                          طلب إقفال — تحت المراجعة
+                        </span>
+                      ) : (
+                        <span className="text-slate-400">— جارية</span>
+                      )}
                     </td>
                     <td className="px-3 py-2 font-bold text-emerald-700">
                       {s.status === 'open'
@@ -448,12 +454,42 @@ function Stat({
 }
 
 function StatusBadge({ status }: { status: string }) {
-  const cls =
-    status === 'open'
-      ? 'bg-emerald-100 text-emerald-700'
-      : 'bg-slate-100 text-slate-700';
-  const label = status === 'open' ? 'مفتوحة' : 'مغلقة';
-  return <span className={`chip ${cls}`}>{label}</span>;
+  if (status === 'open') {
+    return (
+      <span className="chip bg-emerald-100 text-emerald-700">مفتوحة</span>
+    );
+  }
+  if (status === 'pending_close') {
+    return (
+      <span className="chip bg-amber-100 text-amber-700 border border-amber-300">
+        تحت المراجعة
+      </span>
+    );
+  }
+  return <span className="chip bg-slate-100 text-slate-700">مغلقة</span>;
+}
+
+/** Cairo-local timestamp with the full second precision. */
+function fmtShiftTime(iso: string | null | undefined) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  const date = d.toLocaleDateString('en-GB', {
+    timeZone: 'Africa/Cairo',
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+  });
+  const time = d
+    .toLocaleTimeString('en-GB', {
+      timeZone: 'Africa/Cairo',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: true,
+    })
+    .replace(/\s?AM\s*$/i, ' ص')
+    .replace(/\s?PM\s*$/i, ' م');
+  return `${date} · ${time}`;
 }
 
 function DiffBadge({ value }: { value: number }) {
@@ -664,17 +700,30 @@ function CloseShiftModal({
       return shiftsApi.requestClose(shift.id, basePayload) as any;
     },
     onSuccess: (result: any) => {
-      if (!canDirectClose && result?.pending) {
-        toast.success(
-          'تم إرسال طلب إقفال الوردية — بانتظار اعتماد المدير',
-        );
-        onSuccess();
-        return;
+      // Non-admin path via requestClose may return either a true pending
+      // review (variance != 0) OR an auto-close (variance == 0).
+      if (!canDirectClose) {
+        if (result?.pending) {
+          const v = Number(result.variance || 0);
+          toast.success(
+            v > 0
+              ? `تم إرسال طلب إقفال — زيادة ${EGP(v)} بانتظار الاعتماد`
+              : `تم إرسال طلب إقفال — عجز ${EGP(Math.abs(v))} بانتظار الاعتماد`,
+          );
+          onSuccess();
+          return;
+        }
+        if (result?.auto_closed) {
+          toast.success('تم إغلاق الوردية تلقائياً — مطابقة تامة');
+          onSuccess();
+          return;
+        }
       }
+      const closed = result?.shift ?? result;
       const v =
-        result.summary?.variance ??
-        Number(result.actual_closing || 0) -
-          Number(result.expected_closing || 0);
+        closed?.summary?.variance ??
+        Number(closed?.actual_closing || 0) -
+          Number(closed?.expected_closing || 0);
       if (Math.abs(v) < 0.01) {
         toast.success('تم إغلاق الوردية — مطابقة تامة');
       } else if (v > 0) {
@@ -758,6 +807,13 @@ function CloseShiftModal({
             💡 متبقي على العملاء: {EGP(s.remaining_receivable)} (فواتير جزئية)
           </div>
         )}
+
+        {/* Clarifier: actual_closing must include opening balance */}
+        <div className="text-xs p-2 rounded bg-indigo-50 border border-indigo-200 text-indigo-800">
+          ℹ️ المطلوب: عُدّ <b>كل</b> النقدية الموجودة في الدرج الآن (الرصيد
+          الافتتاحي + المبيعات الكاش + المقبوضات − المصروفات)، وليس فقط
+          المبيعات الجديدة.
+        </div>
 
         {/* Toggle between denomination counter and free-form entry */}
         <div className="flex items-center gap-2 text-xs">
@@ -1066,39 +1122,69 @@ function ShiftDetailModal({ shift, onClose }: { shift: Shift; onClose: () => voi
             </div>
           )}
 
-          {/* Close-time box */}
-          {!isOpen && (
-            <div className="card p-4 bg-slate-50">
-              <div className="grid md:grid-cols-4 gap-3">
-                <Row
-                  label="الرصيد المتوقع"
-                  value={EGP(s?.expected_closing || 0)}
-                />
-                <Row
-                  label="الرصيد الفعلي (عُدّ)"
-                  value={EGP(s?.actual_closing || detail?.actual_closing || 0)}
-                />
-                <div className="flex justify-between">
-                  <span className="text-slate-600">الفرق</span>
-                  <DiffBadge
-                    value={Number(
-                      s?.variance ??
-                        Number(detail?.actual_closing || 0) -
-                          Number(detail?.expected_closing || 0),
-                    )}
+          {/* Close-time / pending-review box */}
+          {!isOpen && (() => {
+            const isPending = detail?.status === 'pending_close';
+            // Counted cash: when still pending we only have the cashier's
+            // requested amount; once truly closed we store it on the row.
+            const countedCash = Number(
+              detail?.actual_closing ??
+                s?.actual_closing ??
+                detail?.close_requested_amount ??
+                0,
+            );
+            const expected = Number(s?.expected_closing || 0);
+            const variance = Number(s?.variance ?? countedCash - expected);
+
+            return (
+              <div
+                className={`card p-4 ${
+                  isPending
+                    ? 'bg-amber-50 border border-amber-200'
+                    : 'bg-slate-50'
+                }`}
+              >
+                {isPending && (
+                  <div className="mb-3 flex items-start gap-2 text-amber-800 bg-amber-100/60 border border-amber-200 rounded-lg px-3 py-2 text-xs">
+                    <span className="font-bold">⏳ طلب إقفال تحت المراجعة</span>
+                    <span>
+                      — النقدية التي أدخلها الكاشير {EGP(countedCash)} لا
+                      تطابق المتوقع؛ بانتظار اعتماد مدير النظام.
+                    </span>
+                  </div>
+                )}
+                <div className="grid md:grid-cols-4 gap-3">
+                  <Row label="الرصيد المتوقع" value={EGP(expected)} />
+                  <Row
+                    label={
+                      isPending
+                        ? 'النقدية التي عدّها الكاشير'
+                        : 'الرصيد الفعلي (عُدّ)'
+                    }
+                    value={EGP(countedCash)}
+                  />
+                  <div className="flex justify-between">
+                    <span className="text-slate-600">الفرق</span>
+                    <DiffBadge value={variance} />
+                  </div>
+                  <Row
+                    label={isPending ? 'وقت طلب الإقفال' : 'وقت الإغلاق'}
+                    value={
+                      isPending
+                        ? fmtShiftTime(detail?.close_requested_at) || '—'
+                        : fmtShiftTime(detail?.closed_at) || '—'
+                    }
                   />
                 </div>
-                <Row
-                  label="وقت الإغلاق"
-                  value={
-                    detail?.closed_at
-                      ? new Date(detail.closed_at).toLocaleString('en-US')
-                      : '—'
-                  }
-                />
+                {detail?.close_requested_notes && (
+                  <div className="mt-3 text-xs text-slate-600 border-t border-slate-200 pt-2">
+                    <span className="font-bold">ملاحظات الكاشير:</span>{' '}
+                    {detail.close_requested_notes}
+                  </div>
+                )}
               </div>
-            </div>
-          )}
+            );
+          })()}
 
           {isOpen && (
             <div className="flex items-center justify-end pt-2">

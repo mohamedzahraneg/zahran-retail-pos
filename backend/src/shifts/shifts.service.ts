@@ -360,13 +360,33 @@ export class ShiftsService {
     userId: string,
   ) {
     const [shift] = await this.ds.query(
-      `SELECT id, status, opened_by FROM shifts WHERE id = $1`,
+      `SELECT * FROM shifts WHERE id = $1`,
       [id],
     );
     if (!shift) throw new NotFoundException('الوردية غير موجودة');
     if (shift.status !== 'open') {
       throw new BadRequestException('لا يمكن طلب إقفال وردية غير مفتوحة');
     }
+
+    // Auto-close when the counted cash matches the expected closing
+    // within a 1-piaster tolerance. Any surplus OR deficit sends the
+    // shift into `pending_close` so a supervisor can review before the
+    // ledger is finalized.
+    const summary = await this.computeSummary(shift);
+    const actual = Number(dto.actual_closing) || 0;
+    const variance = actual - Number(summary.expected_closing || 0);
+
+    if (Math.abs(variance) < 0.01) {
+      // Matches exactly — skip review, close immediately.
+      const result = await this.close(
+        id,
+        { actual_closing: actual, notes: dto.notes || '' } as any,
+        userId,
+      );
+      return { pending: false, auto_closed: true, shift: result };
+    }
+
+    // Variance (surplus OR deficit) → park in pending_close for review.
     const [row] = await this.ds.query(
       `UPDATE shifts
           SET status                 = 'pending_close',
@@ -376,9 +396,14 @@ export class ShiftsService {
               close_requested_notes  = $3
         WHERE id = $4
         RETURNING *`,
-      [userId, Number(dto.actual_closing) || 0, dto.notes ?? null, id],
+      [userId, actual, dto.notes ?? null, id],
     );
-    return { pending: true, shift: row };
+    return {
+      pending: true,
+      shift: row,
+      variance,
+      expected_closing: Number(summary.expected_closing || 0),
+    };
   }
 
   /** Admin approves → runs the real close() with the requested amount. */
