@@ -15,6 +15,7 @@ import {
   Plus,
   Minus,
   Trash2,
+  History,
 } from 'lucide-react';
 import { posApi } from '@/api/pos.api';
 import { usersApi } from '@/api/users.api';
@@ -101,7 +102,9 @@ export default function Invoices() {
   const [cashierId, setCashierId] = useState<string>('');
   const [amountMin, setAmountMin] = useState('');
   const [amountMax, setAmountMax] = useState('');
-  const [previewId, setPreviewId] = useState<string | null>(null);
+  const [preview, setPreview] = useState<
+    { id: string; tab: 'receipt' | 'history' } | null
+  >(null);
   const [voidTarget, setVoidTarget] = useState<any | null>(null);
   const [editTarget, setEditTarget] = useState<any | null>(null);
 
@@ -359,7 +362,7 @@ export default function Invoices() {
                       : 'hover:bg-slate-50'
                   }`}
                 >
-                  <td className="p-3 font-mono text-sm font-bold text-brand-700">
+                  <td className="p-3 font-mono text-sm font-bold text-brand-700 min-w-[240px]">
                     <div className="flex items-center gap-1.5">
                       <InvoiceHoverCard
                         invoiceId={i.id}
@@ -377,7 +380,19 @@ export default function Invoices() {
                           {Number(i.edit_count)}
                         </span>
                       )}
+                      {Number(i.pending_edit_requests || 0) > 0 && (
+                        <span
+                          className="chip bg-amber-50 text-amber-700 border-amber-300 text-[10px] font-bold"
+                          title={`${i.pending_edit_requests} طلب تعديل ينتظر الموافقة`}
+                        >
+                          ⏳ {Number(i.pending_edit_requests)}
+                        </span>
+                      )}
                     </div>
+                    {Array.isArray(i.items_summary) &&
+                      i.items_summary.length > 0 && (
+                        <ItemsSummary items={i.items_summary} />
+                      )}
                   </td>
                   <td className="p-3 text-xs text-slate-600">
                     {fmtDateTime(i.completed_at || i.created_at)}
@@ -426,11 +441,28 @@ export default function Invoices() {
                     <div className="flex items-center justify-center gap-1">
                       <button
                         className="p-1.5 rounded hover:bg-brand-50 text-slate-500 hover:text-brand-600"
-                        onClick={() => setPreviewId(i.id)}
+                        onClick={() => setPreview({ id: i.id, tab: 'receipt' })}
                         title="عرض الإيصال والطباعة"
                       >
                         <ReceiptIcon size={14} />
                       </button>
+                      {(Number(i.edit_count || 0) > 0 ||
+                        Number(i.pending_edit_requests || 0) > 0) && (
+                        <button
+                          className="relative p-1.5 rounded hover:bg-indigo-50 text-slate-500 hover:text-indigo-600"
+                          onClick={() =>
+                            setPreview({ id: i.id, tab: 'history' })
+                          }
+                          title="سجل التعديلات"
+                        >
+                          <History size={14} />
+                          {Number(i.pending_edit_requests || 0) > 0 && (
+                            <span className="absolute -top-1 -right-1 min-w-[14px] h-[14px] rounded-full bg-amber-500 text-white text-[9px] font-bold flex items-center justify-center px-0.5">
+                              {Number(i.pending_edit_requests)}
+                            </span>
+                          )}
+                        </button>
+                      )}
                       {canEdit && i.status !== 'cancelled' && (
                         <button
                           className="p-1.5 rounded hover:bg-amber-50 text-slate-500 hover:text-amber-600"
@@ -467,10 +499,11 @@ export default function Invoices() {
         </table>
       </div>
 
-      {previewId && (
+      {preview && (
         <ReceiptPreviewModal
-          invoiceId={previewId}
-          onClose={() => setPreviewId(null)}
+          invoiceId={preview.id}
+          initialTab={preview.tab}
+          onClose={() => setPreview(null)}
         />
       )}
 
@@ -533,11 +566,13 @@ function KpiCard({
 function ReceiptPreviewModal({
   invoiceId,
   onClose,
+  initialTab = 'receipt',
 }: {
   invoiceId: string;
   onClose: () => void;
+  initialTab?: 'receipt' | 'history';
 }) {
-  const [tab, setTab] = useState<'receipt' | 'history'>('receipt');
+  const [tab, setTab] = useState<'receipt' | 'history'>(initialTab);
   const { data, isLoading } = useQuery({
     queryKey: ['receipt', invoiceId],
     queryFn: () => posApi.receipt(invoiceId),
@@ -836,8 +871,13 @@ function EditHistoryTab({
               className="border border-amber-300 bg-amber-50 rounded-lg p-3 text-xs space-y-2"
             >
               <div className="flex items-center justify-between">
-                <div className="font-bold text-amber-800">
-                  {r.requested_by_name || r.requested_by_username || '—'}
+                <div className="flex items-center gap-2">
+                  <span className="chip bg-amber-200 text-amber-800 border-amber-400 text-[10px] font-bold">
+                    ⏳ انتظار الموافقة
+                  </span>
+                  <div className="font-bold text-amber-800">
+                    {r.requested_by_name || r.requested_by_username || '—'}
+                  </div>
                 </div>
                 <div className="text-slate-500 tabular-nums">
                   {fmtWhen(r.requested_at)}
@@ -958,8 +998,13 @@ function EditHistoryTab({
                 className="border border-emerald-200 bg-emerald-50/60 rounded-lg p-3 text-xs"
               >
                 <div className="flex items-center justify-between mb-1">
-                  <div className="font-bold text-emerald-800">
-                    {h.edited_by_name || h.edited_by_username || '—'}
+                  <div className="flex items-center gap-2">
+                    <span className="chip bg-emerald-200 text-emerald-800 border-emerald-400 text-[10px] font-bold">
+                      ✓ معتمد
+                    </span>
+                    <div className="font-bold text-emerald-800">
+                      {h.edited_by_name || h.edited_by_username || '—'}
+                    </div>
                   </div>
                   <div className="text-slate-500 tabular-nums">
                     {fmtWhen(h.edited_at)}
@@ -1020,8 +1065,13 @@ function EditHistoryTab({
               className="border border-rose-200 bg-rose-50/60 rounded-lg p-3 text-xs"
             >
               <div className="flex items-center justify-between mb-1">
-                <div className="font-bold text-rose-800">
-                  {r.requested_by_name || r.requested_by_username || '—'}
+                <div className="flex items-center gap-2">
+                  <span className="chip bg-rose-200 text-rose-800 border-rose-400 text-[10px] font-bold">
+                    ✗ مرفوض
+                  </span>
+                  <div className="font-bold text-rose-800">
+                    {r.requested_by_name || r.requested_by_username || '—'}
+                  </div>
                 </div>
                 <div className="text-slate-500 tabular-nums">
                   {fmtWhen(r.requested_at)}
@@ -1728,19 +1778,54 @@ function PendingChanges({ request }: { request: any }) {
   return <ChangeList changes={changes} />;
 }
 
-/** Diff the before_snapshot (full invoice+items) against the post-edit
- *  snapshot fetched fresh from the server. */
+/** Compact, two-line items preview shown under the invoice number
+ *  in the list so cashiers can see "what's in this invoice" without
+ *  opening it. Collapses after 3 items into "...و N أخرى". */
+function ItemsSummary({ items }: { items: any[] }) {
+  const shown = items.slice(0, 3);
+  const extra = Math.max(0, items.length - shown.length);
+  return (
+    <div className="mt-1 text-[11px] font-normal text-slate-500 leading-snug">
+      {shown.map((it, i) => (
+        <div key={i} className="truncate">
+          <span className="text-slate-700 font-medium">
+            {it.name || '—'}
+          </span>
+          {it.sku && (
+            <span className="font-mono text-slate-400 mx-1">
+              [{it.sku}]
+            </span>
+          )}
+          <span className="text-slate-500">× {Number(it.qty || 0)}</span>
+          {[it.color, it.size].filter(Boolean).length > 0 && (
+            <span className="text-slate-400 mr-1">
+              ({[it.color, it.size].filter(Boolean).join(' · ')})
+            </span>
+          )}
+        </div>
+      ))}
+      {extra > 0 && (
+        <div className="text-slate-400">… و {extra} صنف آخر</div>
+      )}
+    </div>
+  );
+}
+
+/** Diff a stored edit's before/after snapshots. Falls back to the
+ *  current invoice state only if after_snapshot is missing (legacy
+ *  rows written before the after_snapshot column existed). */
 function AppliedChanges({ history }: { history: any }) {
+  const hasAfterSnap = !!history?.after_snapshot?.items;
   const { data: current } = useQuery({
     queryKey: ['invoice-post-edit', history.invoice_id],
     queryFn: () => posApi.get(history.invoice_id),
     staleTime: 30_000,
-    // Only load when needed — small optimization.
-    enabled: !!history?.id,
+    enabled: !hasAfterSnap && !!history?.invoice_id,
   });
   const beforeItems = history?.before_snapshot?.items || [];
-  const afterItems =
-    (current as any)?.items || (current as any)?.lines || [];
+  const afterItems = hasAfterSnap
+    ? history.after_snapshot.items
+    : (current as any)?.items || (current as any)?.lines || [];
   const changes = diffLines(beforeItems, afterItems);
   return <ChangeList changes={changes} />;
 }

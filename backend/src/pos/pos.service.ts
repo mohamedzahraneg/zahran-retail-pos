@@ -520,7 +520,26 @@ export class PosService {
              c.full_name AS customer_name,
              c.phone     AS customer_phone,
              u.full_name AS cashier_name,
-             sp.full_name AS salesperson_name
+             sp.full_name AS salesperson_name,
+             (
+               SELECT COALESCE(
+                 json_agg(
+                   json_build_object(
+                     'name',  it.product_name_snapshot,
+                     'sku',   it.sku_snapshot,
+                     'color', it.color_name_snapshot,
+                     'size',  it.size_label_snapshot,
+                     'qty',   it.quantity,
+                     'price', it.unit_price
+                   ) ORDER BY it.id
+                 ), '[]'::json)
+                 FROM invoice_items it
+                WHERE it.invoice_id = i.id
+             )                                     AS items_summary,
+             (
+               SELECT COUNT(*)::int FROM invoice_edit_requests ier
+                WHERE ier.invoice_id = i.id AND ier.status = 'pending'
+             )                                     AS pending_edit_requests
       FROM invoices i
       LEFT JOIN customers c ON c.id = i.customer_id
       LEFT JOIN users     u ON u.id = i.cashier_id
@@ -807,12 +826,22 @@ export class PosService {
         ],
       );
 
-      // Backfill the after-summary on the history row we inserted
-      // earlier so the UI can show "before → after" without diffing
-      // every field itself.
+      // Backfill the history row with both the summary AND the full
+      // post-edit items snapshot. Storing the after-items lets the UI
+      // render a proper before/after diff for historical edits — not
+      // just the most recent one.
+      const newItems = await em.query(
+        `SELECT * FROM invoice_items WHERE invoice_id = $1 ORDER BY id`,
+        [id],
+      );
+      const newPayments = await em.query(
+        `SELECT * FROM invoice_payments WHERE invoice_id = $1 ORDER BY id`,
+        [id],
+      );
       await em.query(
         `UPDATE invoice_edit_history
-            SET after_summary = $2::jsonb
+            SET after_summary  = $2::jsonb,
+                after_snapshot = $3::jsonb
           WHERE id = $1`,
         [
           historyId,
@@ -822,6 +851,11 @@ export class PosService {
             cogs_total,
             gross_profit,
             paid: paid_total,
+          }),
+          JSON.stringify({
+            invoice: updated,
+            items: newItems,
+            payments: newPayments,
           }),
         ],
       );
@@ -838,8 +872,8 @@ export class PosService {
   /** Return the edit-history timeline for an invoice. */
   editHistory(invoiceId: string) {
     return this.ds.query(
-      `SELECT h.id, h.edited_at, h.reason,
-              h.before_snapshot, h.after_summary,
+      `SELECT h.id, h.invoice_id, h.edited_at, h.reason,
+              h.before_snapshot, h.after_snapshot, h.after_summary,
               u.full_name AS edited_by_name, u.username AS edited_by_username
          FROM invoice_edit_history h
          LEFT JOIN users u ON u.id = h.edited_by
