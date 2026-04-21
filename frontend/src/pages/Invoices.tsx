@@ -1300,15 +1300,25 @@ function EditAddItemBar({
 }) {
   const [q, setQ] = useState('');
   const [open, setOpen] = useState(false);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
 
+  // Product-level search (list endpoint returns products w/o variants).
   const { data } = useQuery({
     queryKey: ['edit-add-item-search', q],
     queryFn: () => productsApi.list({ q, limit: 25, active: true }),
     enabled: q.trim().length >= 2,
     staleTime: 30_000,
   });
-
   const items: Product[] = (data as any)?.data || (data as any) || [];
+
+  // Variants for the currently-expanded product. Lazy — only fetched
+  // on click so we don't burn 25 requests per keystroke.
+  const { data: expanded } = useQuery({
+    queryKey: ['edit-add-item-variants', expandedId],
+    queryFn: () => productsApi.get(expandedId as string),
+    enabled: !!expandedId,
+    staleTime: 30_000,
+  });
 
   return (
     <div className="relative">
@@ -1325,65 +1335,89 @@ function EditAddItemBar({
             onChange={(e) => {
               setQ(e.target.value);
               setOpen(true);
+              setExpandedId(null);
             }}
             onFocus={() => setOpen(true)}
-            onBlur={() => setTimeout(() => setOpen(false), 120)}
+            onBlur={() => setTimeout(() => setOpen(false), 150)}
           />
         </div>
       </div>
       {open && q.trim().length >= 2 && items.length > 0 && (
-        <div className="absolute z-20 mt-1 left-0 right-0 bg-white border border-slate-200 rounded-lg shadow-lg max-h-72 overflow-y-auto">
+        <div className="absolute z-20 mt-1 left-0 right-0 bg-white border border-slate-200 rounded-lg shadow-lg max-h-80 overflow-y-auto">
           {items.map((p) => {
-            const variants = (p as any).variants || [];
-            if (!variants.length) {
-              return (
-                <div
-                  key={p.id}
-                  className="p-2 text-xs text-slate-400"
-                >
-                  {p.name_ar} — لا توجد متغيرات
-                </div>
-              );
-            }
+            const isExpanded = expandedId === p.id;
+            const variants = isExpanded
+              ? ((expanded as any)?.variants || [])
+              : [];
+            const variantsCount = Number((p as any).variants_count || 0);
             return (
               <div
                 key={p.id}
                 className="border-b border-slate-100 last:border-0"
               >
-                <div className="px-3 py-1.5 bg-slate-50 font-bold text-xs text-slate-700 flex items-center justify-between">
-                  <span>{p.name_ar}</span>
+                <button
+                  type="button"
+                  className="w-full text-right px-3 py-2 bg-slate-50 hover:bg-brand-50 font-bold text-xs text-slate-700 flex items-center justify-between"
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    setExpandedId(isExpanded ? null : p.id);
+                  }}
+                >
+                  <span className="flex items-center gap-1.5">
+                    <span>{p.name_ar}</span>
+                    {variantsCount > 0 && (
+                      <span className="chip bg-indigo-100 text-indigo-700 border-indigo-200 text-[10px]">
+                        {variantsCount} متغير
+                      </span>
+                    )}
+                  </span>
                   <span className="font-mono text-[10px] text-slate-400">
                     {(p as any).sku_root || ''}
                   </span>
-                </div>
-                {variants.map((v: any) => (
-                  <button
-                    key={v.id}
-                    type="button"
-                    className="w-full text-right px-3 py-2 hover:bg-brand-50 flex items-center justify-between text-xs"
-                    onMouseDown={(e) => {
-                      e.preventDefault();
-                      onAdd(v as Variant, p);
-                      setQ('');
-                      setOpen(false);
-                    }}
-                  >
-                    <span className="text-slate-700">
-                      {[v.color, v.size].filter(Boolean).join(' · ') ||
-                        v.sku ||
-                        '—'}
-                    </span>
-                    <span className="font-mono text-slate-500">
-                      {Number(
-                        v.selling_price ??
-                          v.price_override ??
-                          (p as any).base_price ??
-                          0,
-                      ).toLocaleString('en-US')}{' '}
-                      ج.م
-                    </span>
-                  </button>
-                ))}
+                </button>
+                {isExpanded && variants.length === 0 && (
+                  <div className="p-3 text-center text-xs text-slate-400">
+                    جارٍ تحميل المتغيرات…
+                  </div>
+                )}
+                {isExpanded && variants.length > 0 && (
+                  <div className="divide-y divide-slate-100">
+                    {variants.map((v: any) => (
+                      <button
+                        key={v.id}
+                        type="button"
+                        className="w-full text-right px-3 py-2 hover:bg-emerald-50 flex items-center justify-between text-xs"
+                        onMouseDown={(e) => {
+                          e.preventDefault();
+                          onAdd(v as Variant, p);
+                          setQ('');
+                          setOpen(false);
+                          setExpandedId(null);
+                        }}
+                      >
+                        <span className="text-slate-700">
+                          {[v.color, v.size].filter(Boolean).join(' · ') ||
+                            v.sku ||
+                            '—'}
+                        </span>
+                        <span className="flex items-center gap-2 text-[11px]">
+                          <span className="text-slate-400 tabular-nums">
+                            رصيد {Number(v.total_stock ?? v.qty ?? 0)}
+                          </span>
+                          <span className="font-mono text-slate-600">
+                            {Number(
+                              v.selling_price ??
+                                v.price_override ??
+                                (p as any).base_price ??
+                                0,
+                            ).toLocaleString('en-US')}{' '}
+                            ج.م
+                          </span>
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
             );
           })}
