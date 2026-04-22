@@ -320,14 +320,19 @@ RETURNS TRIGGER AS $$
 BEGIN
     IF NEW.quantity_on_hand <= NEW.reorder_point
        AND (OLD.quantity_on_hand IS NULL OR OLD.quantity_on_hand > NEW.reorder_point) THEN
+        -- Explicit enum casts — Postgres 14 was lenient about CASE
+        -- returning text-coerced-to-enum; PG15 rejects it. Migration
+        -- 036 replaces this function body with the proper casts, but
+        -- seed migration 016 fires this trigger BEFORE 036 runs, so
+        -- the cast has to be correct here too.
         INSERT INTO alerts (alert_type, severity, title, message, entity, entity_id, metadata)
         VALUES (
-            CASE WHEN NEW.quantity_on_hand = 0 THEN 'out_of_stock' ELSE 'low_stock' END,
-            CASE WHEN NEW.quantity_on_hand = 0 THEN 'critical'     ELSE 'warning' END,
+            (CASE WHEN NEW.quantity_on_hand = 0 THEN 'out_of_stock' ELSE 'low_stock' END)::alert_type,
+            (CASE WHEN NEW.quantity_on_hand = 0 THEN 'critical'     ELSE 'warning'   END)::alert_severity,
             'تنبيه مخزون',
             format('المنتج (variant %s) أصبح المخزون %s قطعة في المخزن %s',
                    NEW.variant_id, NEW.quantity_on_hand, NEW.warehouse_id),
-            'stock',
+            'stock'::entity_type,
             NEW.id,
             jsonb_build_object(
                 'variant_id',  NEW.variant_id,
