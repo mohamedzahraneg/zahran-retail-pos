@@ -146,6 +146,15 @@ describe('cart.store', () => {
 
     useCartStore.getState().setManualDiscount('value', 25);
     expect(useCartStore.getState().manualDiscountInput).toBe(25);
+    // Sanity-check the computed amount, but only when the cart has
+    // enough subtotal to not clamp it. `manualDiscountAmount` does
+    // `Math.min(subtotal, input)` — on an empty cart it reports 0,
+    // which is the correct behaviour (you can't discount nothing).
+    useCartStore.getState().addItem({
+      product: makeProduct({ base_price: 100 }),
+      variant: makeVariant({ id: 'v-for-discount' }),
+      qty: 1,
+    });
     expect(useCartStore.getState().manualDiscountAmount()).toBe(25);
   });
 

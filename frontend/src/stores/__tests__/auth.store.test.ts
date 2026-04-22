@@ -3,13 +3,22 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 /**
  * Auth store tests — we mock out authApi so we never hit a network.
  */
-const loginMock = vi.fn();
-const refreshMock = vi.fn();
+// Hoisted so the factory below has access at mock-evaluation time.
+const { loginMock, refreshMock, logoutMock } = vi.hoisted(() => ({
+  loginMock: vi.fn(),
+  refreshMock: vi.fn(),
+  logoutMock: vi.fn().mockResolvedValue(undefined),
+}));
 
 vi.mock('@/api/auth.api', () => ({
   authApi: {
     login: (...args: any[]) => loginMock(...args),
     refresh: (...args: any[]) => refreshMock(...args),
+    // auth.store.logout() fires-and-forgets authApi.logout() for
+    // server-side audit; mock it so the test doesn't explode with
+    // "logout is not a function".
+    logout: (...args: any[]) => logoutMock(...args),
+    me: vi.fn(),
   },
 }));
 
@@ -44,6 +53,7 @@ describe('auth.store', () => {
   beforeEach(() => {
     loginMock.mockReset();
     refreshMock.mockReset();
+    logoutMock.mockReset().mockResolvedValue(undefined);
     resetAuth();
   });
 

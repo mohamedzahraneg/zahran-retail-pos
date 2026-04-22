@@ -16,23 +16,27 @@ vi.mock('react-hot-toast', () => ({
   },
 }));
 
-// Mock the IndexedDB layer
-const mockDb = {
-  pendingInvoices: {
-    put: vi.fn(),
-    delete: vi.fn(),
-    update: vi.fn(),
-    count: vi.fn(),
-    orderBy: vi.fn(() => ({ toArray: vi.fn() })),
+// `vi.mock()` factories are hoisted above regular declarations, so a
+// top-level `const mockDb = {...}` would be undefined by the time the
+// factory runs (classic "Cannot access 'mockDb' before initialization").
+// `vi.hoisted()` lets us share state with the hoisted factory safely.
+const { mockDb, pushMock } = vi.hoisted(() => ({
+  mockDb: {
+    pendingInvoices: {
+      put: vi.fn(),
+      delete: vi.fn(),
+      update: vi.fn(),
+      count: vi.fn(),
+      orderBy: vi.fn(() => ({ toArray: vi.fn() })),
+    },
   },
-};
+  pushMock: vi.fn(),
+}));
 
 vi.mock('../db', () => ({
   db: mockDb,
 }));
 
-// Mock the HTTP sync client
-const pushMock = vi.fn();
 vi.mock('@/api/sync.api', () => ({
   syncApi: {
     push: (...args: any[]) => pushMock(...args),
