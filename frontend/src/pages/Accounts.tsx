@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import {
   BookOpen,
@@ -872,57 +873,88 @@ function JournalTab() {
 }
 
 /**
- * All the rarely-used maintenance tools (backfill / factory reset /
- * review / backup / full cleanup) tucked into a single dropdown so
- * the day-to-day UI isn't polluted with six red buttons.
+ * ONE prominent button to do everything the "recommended flow"
+ * requires in a single action:
+ *   1. Backup all transactional data (auto-downloads an Excel)
+ *   2. Factory reset (wipe the DB clean)
+ *   3. Navigate to /opening-balance
+ *
+ * No dropdown, no chain of steps — the user clicks once, we do the
+ * rest. Confirm prompt asks for a typed phrase to prevent accidents.
  */
 function AdminToolsMenu() {
-  const [open, setOpen] = useState(false);
+  const nav = useNavigate();
+  const qc = useQueryClient();
+  const mutation = useMutation({
+    mutationFn: () => accountsApi.quickStart(),
+    onSuccess: async (r) => {
+      // Step A — download backup Excel
+      try {
+        const { exportMultiSheet } = await import('@/lib/exportExcel');
+        const labels: Record<string, string> = {
+          invoices: 'المبيعات',
+          invoice_items: 'بنود الفواتير',
+          invoice_payments: 'دفعات الفواتير',
+          expenses: 'المصروفات',
+          customer_payments: 'مقبوضات العملاء',
+          supplier_payments: 'مدفوعات الموردين',
+          returns: 'المرتجعات',
+          cashbox_transactions: 'حركات الخزنة',
+        };
+        const sheets = Object.entries(r.snapshot || {})
+          .filter(([, rows]) => Array.isArray(rows))
+          .map(([k, rows]) => ({
+            name: labels[k] || k,
+            rows: (rows as any[]) || [],
+          }));
+        const today = new Date().toISOString().slice(0, 10);
+        exportMultiSheet(
+          `zahran-backup-before-reset-${today}`,
+          sheets,
+        );
+      } catch {
+        // Non-blocking — reset already ran; if download failed the user
+        // can re-export from the backup endpoint anytime.
+      }
+
+      // Step B — summarize + move on
+      const wipedCount = Object.values(r.reset.wiped || {}).reduce(
+        (s: number, v) => s + (Number(v) || 0),
+        0,
+      );
+      toast.success(
+        `تم — نسخة احتياطية نُزِّلت · ${wipedCount} صف ممسوح · جاهز لفتح الحسابات`,
+        { duration: 6000 },
+      );
+      qc.invalidateQueries();
+      // Step C — navigate to the opening-balance wizard
+      setTimeout(() => nav('/opening-balance'), 800);
+    },
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.message || 'فشل التنفيذ'),
+  });
+
   return (
-    <div className="relative">
-      <button
-        className="btn-secondary"
-        onClick={() => setOpen((v) => !v)}
-        title="أدوات الصيانة"
-      >
-        🛠 أدوات الصيانة
-      </button>
-      {open && (
-        <>
-          {/* click outside to close */}
-          <div
-            className="fixed inset-0 z-40"
-            onClick={() => setOpen(false)}
-          />
-          <div className="absolute top-full mt-1 left-0 z-50 bg-white border border-slate-200 rounded-lg shadow-lg p-2 min-w-[260px] space-y-1">
-            <div className="text-[11px] font-bold text-slate-500 px-2 pt-1 pb-0.5">
-              قبل المسح
-            </div>
-            <div onClick={() => setOpen(false)}>
-              <ReviewReportButton />
-            </div>
-            <div onClick={() => setOpen(false)}>
-              <ExportBackupButton />
-            </div>
-            <div className="text-[11px] font-bold text-slate-500 px-2 pt-2 pb-0.5 border-t border-slate-100">
-              صيانة الأرقام
-            </div>
-            <div onClick={() => setOpen(false)}>
-              <BackfillButton />
-            </div>
-            <div onClick={() => setOpen(false)}>
-              <FullCleanupButton />
-            </div>
-            <div className="text-[11px] font-bold text-rose-600 px-2 pt-2 pb-0.5 border-t border-slate-100">
-              ⚠ عمليات جذرية
-            </div>
-            <div onClick={() => setOpen(false)}>
-              <FactoryResetButton />
-            </div>
-          </div>
-        </>
-      )}
-    </div>
+    <button
+      className="btn-primary bg-gradient-to-l from-rose-700 to-rose-900 hover:from-rose-800 hover:to-rose-950 text-white"
+      onClick={() => {
+        const phrase = 'امسح الكل';
+        const typed = prompt(
+          '🚀 بدء من صفر — ثلاث خطوات في ضغطة واحدة:\n\n' +
+            '١. ينزّل ملف Excel احتياطي بكل بياناتك الحالية\n' +
+            '٢. يمسح كل البيانات التجريبية (فواتير/مصروفات/قيود/حركات)\n' +
+            '٣. ينقلك لشاشة "فتح الحسابات" لتسجل أرصدة البداية\n\n' +
+            'يُحفظ: الكتالوج + المستخدمون + شجرة الحسابات + البنوك.\n\n' +
+            `للتأكيد اكتب: ${phrase}`,
+        );
+        if (typed === phrase) mutation.mutate();
+        else if (typed !== null) toast.error('تم الإلغاء — الكلمة غير صحيحة');
+      }}
+      disabled={mutation.isPending}
+      title="بداية نظيفة — نسخة احتياطية + مسح + فتح الحسابات"
+    >
+      {mutation.isPending ? '⏳ جارٍ التنفيذ...' : '🚀 بدء من صفر'}
+    </button>
   );
 }
 

@@ -407,6 +407,22 @@ export class ReconciliationService {
   }
 
   /**
+   * One-shot "start fresh" — snapshot every transactional row to the
+   * caller (so the frontend can download an Excel backup BEFORE
+   * anything is touched), then perform a full factory reset in a
+   * single atomic action. Returns the snapshot + the wipe counts
+   * in one response.
+   */
+  async quickStart(): Promise<{
+    snapshot: Record<string, any[]>;
+    reset: { wiped: Record<string, number>; note: string };
+  }> {
+    const snapshot = await this.dataSnapshot();
+    const reset = await this.factoryReset({ keep_stock: false });
+    return { snapshot, reset };
+  }
+
+  /**
    * Post an opening-balance journal entry — the single starting point
    * for a fresh deployment. Writes one balanced entry that sets:
    *

@@ -424,6 +424,12 @@ export const accountsApi = {
       api.post('/accounts/audit/recompute-party-balances', {}),
     ),
 
+  quickStart: () =>
+    unwrap<{
+      snapshot: Record<string, any[]>;
+      reset: { wiped: Record<string, number>; note: string };
+    }>(api.post('/accounts/audit/quick-start', {})),
+
   postOpeningBalance: (payload: {
     entry_date: string;
     cash_in_hand?: number;

@@ -723,6 +723,16 @@ export class ChartOfAccountsController {
     return this.recon.factoryReset({ keep_stock: !!body?.keep_stock });
   }
 
+  @Post('audit/quick-start')
+  @Permissions('accounts.journal.void')
+  @ApiOperation({
+    summary:
+      'بداية نظيفة — نسخة احتياطية + مسح شامل في استدعاء واحد. ثم يظل على المستخدم فتح الحسابات.',
+  })
+  quickStart() {
+    return this.recon.quickStart();
+  }
+
   @Get('audit/data-snapshot')
   @Permissions('accounts.chart.view')
   @ApiOperation({
