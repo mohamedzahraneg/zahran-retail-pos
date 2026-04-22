@@ -31,6 +31,7 @@ import Accounting from '@/pages/Accounting';
 import Accounts from '@/pages/Accounts';
 import Cashboxes from '@/pages/Cashboxes';
 import BankReconciliation from '@/pages/BankReconciliation';
+import Analytics from '@/pages/Analytics';
 import RecurringExpenses from '@/pages/RecurringExpenses';
 import CustomerGroups from '@/pages/CustomerGroups';
 import Settings from '@/pages/Settings';
@@ -151,6 +152,14 @@ export default function App() {
           element={
             <ProtectedRoute permissions={['accounts.reconcile']}>
               <BankReconciliation />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="analytics"
+          element={
+            <ProtectedRoute permissions={['accounts.chart.view']}>
+              <Analytics />
             </ProtectedRoute>
           }
         />

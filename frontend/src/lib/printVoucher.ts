@@ -20,6 +20,8 @@ export interface VoucherPayload {
   user_name?: string;
 }
 
+import { numberToArabicWords } from './numberToArabic';
+
 const egp = (n: number) =>
   `${Number(n).toLocaleString('en-US', {
     minimumFractionDigits: 2,
@@ -27,6 +29,10 @@ const egp = (n: number) =>
   })} ج.م`;
 
 export function printVoucher(v: VoucherPayload) {
+  // Auto-fill in_words if the caller didn't provide one.
+  if (!v.in_words) {
+    v.in_words = numberToArabicWords(v.amount);
+  }
   const title =
     v.kind === 'receipt' ? 'سند قبض' : 'سند صرف';
   const partyLabel = v.kind === 'receipt' ? 'استلمنا من' : 'دفعنا إلى';

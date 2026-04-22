@@ -31,6 +31,7 @@ import {
   Calculator,
   BookOpen,
   Scale,
+  Sparkles,
   Repeat,
   Users2,
   Settings,
@@ -86,6 +87,7 @@ const groups: NavGroup[] = [
     items: [
       { to: '/accounting', label: 'الحسابات', icon: Calculator, roles: ['admin', 'manager', 'accountant'], permission: 'accounting.view' },
       { to: '/accounts', label: 'شجرة الحسابات', icon: BookOpen, roles: ['admin', 'manager', 'accountant'], permission: 'accounts.chart.view' },
+      { to: '/analytics', label: 'التحليلات الذكية', icon: Sparkles, roles: ['admin', 'manager', 'accountant'], permission: 'accounts.chart.view' },
       { to: '/cash-desk', label: 'الصندوق', icon: Wallet, roles: ['admin', 'manager', 'accountant'], permission: 'cashdesk.view' },
       { to: '/cashboxes', label: 'الخزائن والبنوك', icon: Wallet, roles: ['admin', 'manager', 'accountant'], permission: 'cashdesk.view' },
       { to: '/bank-reconciliation', label: 'تسوية بنكية', icon: Scale, roles: ['admin', 'accountant'], permission: 'accounts.reconcile' },

@@ -212,7 +212,155 @@ export const accountsApi = {
 
   removeFixedAsset: (id: string) =>
     unwrap<any>(api.delete(`/accounts/fixed-assets/${id}`)),
+
+  // ── Analytics ────────────────────────────────────────────────────
+  dailyPerformance: (params: { from: string; to: string }) =>
+    unwrap<DailyPerfRow[]>(
+      api.get('/accounts/analytics/daily-performance', { params }),
+    ),
+  hourlyHeatmap: (params: { from: string; to: string }) =>
+    unwrap<HeatmapCell[]>(
+      api.get('/accounts/analytics/hourly-heatmap', { params }),
+    ),
+  topProducts: (params: { from: string; to: string; limit?: number }) =>
+    unwrap<TopProduct[]>(
+      api.get('/accounts/analytics/top-products', { params }),
+    ),
+  topCustomers: (params: { from: string; to: string; limit?: number }) =>
+    unwrap<TopCustomer[]>(
+      api.get('/accounts/analytics/top-customers', { params }),
+    ),
+  topSalespeople: (params: { from: string; to: string; limit?: number }) =>
+    unwrap<TopSalesperson[]>(
+      api.get('/accounts/analytics/top-salespeople', { params }),
+    ),
+  expenseBreakdown: (params: { from: string; to: string }) =>
+    unwrap<ExpenseBreakdownRow[]>(
+      api.get('/accounts/analytics/expense-breakdown', { params }),
+    ),
+  indicators: (params: { from: string; to: string }) =>
+    unwrap<SmartIndicators>(
+      api.get('/accounts/analytics/indicators', { params }),
+    ),
+  recommendations: (params: { from: string; to: string }) =>
+    unwrap<Recommendation[]>(
+      api.get('/accounts/analytics/recommendations', { params }),
+    ),
+  cashflowWaterfall: (params: { from: string; to: string }) =>
+    unwrap<{
+      opening: number;
+      buckets: Array<{
+        direction: 'in' | 'out';
+        category: string;
+        amount: string;
+      }>;
+    }>(api.get('/accounts/analytics/cashflow-waterfall', { params })),
+
+  // ── VAT ──────────────────────────────────────────────────────────
+  vatReturn: (params: { from: string; to: string }) =>
+    unwrap<VatReturn>(api.get('/accounts/reports/vat-return', { params })),
 };
+
+// ── Analytics types ──────────────────────────────────────────────────
+
+export interface DailyPerfRow {
+  date: string;
+  invoice_count: number;
+  revenue: string;
+  cogs: string;
+  tax: string;
+  returns: string;
+  expenses: string;
+  gross_profit: string;
+  net_profit: string;
+  cash_low: string;
+  cash_high: string;
+}
+
+export interface HeatmapCell {
+  dow: number;
+  hour: number;
+  invoice_count: number;
+  revenue: string;
+}
+
+export interface TopProduct {
+  variant_id: string;
+  product_name: string;
+  sku: string | null;
+  qty: number;
+  revenue: string;
+  cogs: string;
+  gross: string;
+}
+
+export interface TopCustomer {
+  id: string;
+  full_name: string;
+  phone: string | null;
+  code: string;
+  invoice_count: number;
+  revenue: string;
+  avg_ticket: string;
+}
+
+export interface TopSalesperson {
+  id: string;
+  full_name: string;
+  invoice_count: number;
+  revenue: string;
+  gross: string;
+}
+
+export interface ExpenseBreakdownRow {
+  code: string;
+  name_ar: string;
+  amount: string;
+}
+
+export interface SmartIndicators {
+  revenue: number;
+  cogs: number;
+  gross_profit: number;
+  gross_margin_pct: number;
+  expenses: number;
+  returns_value: number;
+  net_profit: number;
+  net_margin_pct: number;
+  invoice_count: number;
+  avg_ticket: number;
+  return_count: number;
+  return_rate_pct: number;
+  inventory_value: number;
+  inventory_turns: number;
+  receivables: number;
+  payables: number;
+  cash_on_hand: number;
+  daily_burn: number;
+  cash_runway_days: number;
+}
+
+export interface Recommendation {
+  severity: 'info' | 'warning' | 'critical';
+  title: string;
+  detail: string;
+  action?: string;
+}
+
+export interface VatReturn {
+  from: string;
+  to: string;
+  taxable_sales: number;
+  output_vat: number;
+  output_vat_refunded: number;
+  net_output_vat: number;
+  invoice_count: number;
+  taxable_purchases: number;
+  input_vat: number;
+  purchase_count: number;
+  net_vat_due: number;
+  status: string;
+}
 
 // ── More report types ────────────────────────────────────────────────
 

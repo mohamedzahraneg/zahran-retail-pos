@@ -5,6 +5,7 @@ import { ChartOfAccountsController } from './chart-of-accounts.controller';
 import { AccountingPostingService } from './posting.service';
 import { AccountingReportsService } from './reports.service';
 import { FixedAssetsService } from './fixed-assets.service';
+import { AccountingAnalyticsService } from './analytics.service';
 
 @Global()
 @Module({
@@ -14,6 +15,7 @@ import { FixedAssetsService } from './fixed-assets.service';
     AccountingPostingService,
     AccountingReportsService,
     FixedAssetsService,
+    AccountingAnalyticsService,
   ],
   controllers: [ChartOfAccountsController],
   exports: [
@@ -22,6 +24,7 @@ import { FixedAssetsService } from './fixed-assets.service';
     AccountingPostingService,
     AccountingReportsService,
     FixedAssetsService,
+    AccountingAnalyticsService,
   ],
 })
 export class ChartOfAccountsModule {}

@@ -28,6 +28,8 @@ import {
   CreateAccountPayload,
   CreateJournalPayload,
 } from '@/api/accounts.api';
+import { exportToExcel } from '@/lib/exportExcel';
+import { Download } from 'lucide-react';
 import { cashDeskApi } from '@/api/cash-desk.api';
 import { useAuthStore } from '@/stores/auth.store';
 
@@ -60,6 +62,7 @@ type Tab =
   | 'income'
   | 'balance'
   | 'aging'
+  | 'vat'
   | 'assets'
   | 'closing';
 
@@ -118,6 +121,12 @@ export default function Accounts() {
             label="أعمار الديون"
           />
           <TabBtn
+            active={tab === 'vat'}
+            onClick={() => setTab('vat')}
+            icon={<Scale className="w-4 h-4" />}
+            label="إقرار القيمة المضافة"
+          />
+          <TabBtn
             active={tab === 'assets'}
             onClick={() => setTab('assets')}
             icon={<Lock className="w-4 h-4" />}
@@ -137,6 +146,7 @@ export default function Accounts() {
           {tab === 'income' && <IncomeStatementTab />}
           {tab === 'balance' && <BalanceSheetTab />}
           {tab === 'aging' && <AgingTab />}
+          {tab === 'vat' && <VatReturnTab />}
           {tab === 'assets' && <FixedAssetsTab />}
           {tab === 'closing' && <ClosingTab />}
         </div>
@@ -1376,6 +1386,19 @@ function IncomeStatementTab() {
     queryFn: () => accountsApi.incomeStatement({ from, to }),
   });
 
+  const exportPL = () => {
+    if (!data) return;
+    exportToExcel(
+      `income-statement-${from}-to-${to}`,
+      data.accounts.map((a) => ({
+        الكود: a.code,
+        الحساب: a.name_ar,
+        النوع: a.account_type === 'revenue' ? 'إيراد' : 'مصروف',
+        القيمة: a.amount,
+      })),
+    );
+  };
+
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-3 flex-wrap">
@@ -1393,6 +1416,11 @@ function IncomeStatementTab() {
           onChange={(e) => setTo(e.target.value)}
           className="input w-40"
         />
+        {data && (
+          <button className="btn-secondary mr-auto" onClick={exportPL}>
+            <Download size={14} /> Excel
+          </button>
+        )}
       </div>
       {isLoading ? (
         <div className="py-12 text-center text-slate-400">جارٍ التحميل...</div>
@@ -2378,6 +2406,148 @@ function ClosingTab() {
         {mut.isPending ? '⏳ جاري الإقفال...' : '🔒 تأكيد إقفال السنة'}
       </button>
     </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  VAT Return (إقرار ضريبة القيمة المضافة)
+// ═══════════════════════════════════════════════════════════════════════
+
+function VatReturnTab() {
+  const todayISO = new Date().toISOString().slice(0, 10);
+  const monthStart = todayISO.slice(0, 7) + '-01';
+  const [from, setFrom] = useState(monthStart);
+  const [to, setTo] = useState(todayISO);
+
+  const { data, isLoading } = useQuery({
+    queryKey: ['vat-return', from, to],
+    queryFn: () => accountsApi.vatReturn({ from, to }),
+  });
+
+  return (
+    <div className="space-y-3 max-w-3xl">
+      <div className="flex items-center gap-3 flex-wrap">
+        <label className="text-sm">من</label>
+        <input
+          type="date"
+          value={from}
+          onChange={(e) => setFrom(e.target.value)}
+          className="input w-40"
+        />
+        <label className="text-sm">إلى</label>
+        <input
+          type="date"
+          value={to}
+          onChange={(e) => setTo(e.target.value)}
+          className="input w-40"
+        />
+        {data && (
+          <button
+            className="btn-secondary mr-auto"
+            onClick={() => {
+              const rows = [
+                { البيان: 'مبيعات خاضعة للضريبة', القيمة: data.taxable_sales },
+                { البيان: 'ضريبة المبيعات (Output VAT)', القيمة: data.output_vat },
+                { البيان: 'ضريبة مرتجعات مبيعات', القيمة: data.output_vat_refunded },
+                { البيان: 'صافي ضريبة المبيعات', القيمة: data.net_output_vat },
+                { البيان: 'مشتريات خاضعة للضريبة', القيمة: data.taxable_purchases },
+                { البيان: 'ضريبة المشتريات (Input VAT)', القيمة: data.input_vat },
+                { البيان: 'صافي المستحق', القيمة: data.net_vat_due },
+              ];
+              import('@/lib/exportExcel').then((m) =>
+                m.exportToExcel(`vat-return-${from}-${to}`, rows, 'VAT'),
+              );
+            }}
+          >
+            تصدير Excel
+          </button>
+        )}
+      </div>
+
+      {isLoading ? (
+        <div className="py-12 text-center text-slate-400">جارٍ التحميل...</div>
+      ) : !data ? null : (
+        <>
+          <div className="grid md:grid-cols-3 gap-3">
+            <KpiTile
+              label="ضريبة المبيعات"
+              value={EGP(data.output_vat)}
+              color="emerald"
+              hint={`من ${data.invoice_count} فاتورة`}
+            />
+            <KpiTile
+              label="ضريبة المشتريات"
+              value={EGP(data.input_vat)}
+              color="rose"
+              hint={`من ${data.purchase_count} فاتورة`}
+            />
+            <KpiTile
+              label={data.net_vat_due >= 0 ? 'مستحق للمصلحة' : 'استرداد'}
+              value={EGP(Math.abs(data.net_vat_due))}
+              color={data.net_vat_due >= 0 ? 'rose' : 'emerald'}
+              hint={data.status}
+            />
+          </div>
+
+          <div className="border border-slate-200 rounded-lg overflow-hidden">
+            <table className="min-w-full text-sm">
+              <thead className="bg-slate-50 text-xs font-bold text-slate-600">
+                <tr>
+                  <th className="text-right px-3 py-2">البند</th>
+                  <th className="text-right px-3 py-2">القيمة</th>
+                </tr>
+              </thead>
+              <tbody>
+                <VatRow label="مبيعات خاضعة للضريبة (بدون ضريبة)" value={data.taxable_sales} />
+                <VatRow label="ضريبة المبيعات المحصَّلة" value={data.output_vat} color="text-emerald-700" />
+                <VatRow label="ضريبة مرتجعات مبيعات (تخصم)" value={-data.output_vat_refunded} color="text-slate-500" />
+                <VatRow label="صافي ضريبة المبيعات" value={data.net_output_vat} bold />
+                <VatRow label="مشتريات خاضعة للضريبة (بدون ضريبة)" value={data.taxable_purchases} />
+                <VatRow label="ضريبة المشتريات القابلة للخصم" value={-data.input_vat} color="text-rose-700" />
+                <VatRow label="صافي المستحق للمصلحة" value={data.net_vat_due} bold highlight />
+              </tbody>
+            </table>
+          </div>
+
+          <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-600">
+            💡 هذا الإقرار يجمّع الضريبة من حساب <b>(214) ضرائب مستحقة</b> مباشرة
+            من القيود المرحَّلة. للاعتماد الرسمي لدى مصلحة الضرائب، صدّر Excel
+            واستخدمه مع نموذج الإقرار الشهري.
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function VatRow({
+  label,
+  value,
+  color,
+  bold,
+  highlight,
+}: {
+  label: string;
+  value: number;
+  color?: string;
+  bold?: boolean;
+  highlight?: boolean;
+}) {
+  return (
+    <tr
+      className={`border-t border-slate-100 ${
+        highlight ? 'bg-amber-50 font-black' : bold ? 'bg-slate-50 font-bold' : ''
+      }`}
+    >
+      <td className="px-3 py-2">{label}</td>
+      <td
+        className={`px-3 py-2 font-mono ${color || 'text-slate-800'} ${
+          bold ? 'font-black' : ''
+        }`}
+      >
+        {EGP(Math.abs(value))}
+      </td>
+    </tr>
   );
 }
 

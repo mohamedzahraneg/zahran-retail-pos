@@ -33,6 +33,7 @@ import {
 import { AccountingPostingService } from './posting.service';
 import { AccountingReportsService } from './reports.service';
 import { FixedAssetsService, FixedAssetDto } from './fixed-assets.service';
+import { AccountingAnalyticsService } from './analytics.service';
 import { Permissions } from '../common/decorators/roles.decorator';
 import {
   CurrentUser,
@@ -96,6 +97,7 @@ export class ChartOfAccountsController {
     private readonly posting: AccountingPostingService,
     private readonly reports: AccountingReportsService,
     private readonly fixedAssets: FixedAssetsService,
+    private readonly analytics: AccountingAnalyticsService,
   ) {}
 
   // ── Chart of Accounts ──────────────────────────────────────────────
@@ -320,5 +322,97 @@ export class ChartOfAccountsController {
   @Permissions('accounts.depreciation')
   removeFixedAsset(@Param('id') id: string) {
     return this.fixedAssets.remove(id);
+  }
+
+  // ── Analytics ────────────────────────────────────────────────────────
+
+  @Get('analytics/daily-performance')
+  @Permissions('accounts.chart.view')
+  dailyPerformance(@Query('from') from: string, @Query('to') to: string) {
+    return this.analytics.dailyPerformance({ from, to });
+  }
+
+  @Get('analytics/hourly-heatmap')
+  @Permissions('accounts.chart.view')
+  hourlyHeatmap(@Query('from') from: string, @Query('to') to: string) {
+    return this.analytics.hourlyHeatmap({ from, to });
+  }
+
+  @Get('analytics/top-products')
+  @Permissions('accounts.chart.view')
+  topProducts(
+    @Query('from') from: string,
+    @Query('to') to: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.analytics.topProducts({
+      from,
+      to,
+      limit: limit ? Number(limit) : undefined,
+    });
+  }
+
+  @Get('analytics/top-customers')
+  @Permissions('accounts.chart.view')
+  topCustomers(
+    @Query('from') from: string,
+    @Query('to') to: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.analytics.topCustomers({
+      from,
+      to,
+      limit: limit ? Number(limit) : undefined,
+    });
+  }
+
+  @Get('analytics/top-salespeople')
+  @Permissions('accounts.chart.view')
+  topSalespeople(
+    @Query('from') from: string,
+    @Query('to') to: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.analytics.topSalespeople({
+      from,
+      to,
+      limit: limit ? Number(limit) : undefined,
+    });
+  }
+
+  @Get('analytics/expense-breakdown')
+  @Permissions('accounts.chart.view')
+  expenseBreakdown(@Query('from') from: string, @Query('to') to: string) {
+    return this.analytics.expenseBreakdown({ from, to });
+  }
+
+  @Get('analytics/indicators')
+  @Permissions('accounts.chart.view')
+  indicators(@Query('from') from: string, @Query('to') to: string) {
+    return this.analytics.smartIndicators({ from, to });
+  }
+
+  @Get('analytics/recommendations')
+  @Permissions('accounts.chart.view')
+  recommendations(@Query('from') from: string, @Query('to') to: string) {
+    return this.analytics.smartRecommendations({ from, to });
+  }
+
+  @Get('analytics/cashflow-waterfall')
+  @Permissions('accounts.chart.view')
+  cashflowWaterfall(
+    @Query('from') from: string,
+    @Query('to') to: string,
+  ) {
+    return this.analytics.cashFlowWaterfall({ from, to });
+  }
+
+  // ── VAT return ──────────────────────────────────────────────────────
+
+  @Get('reports/vat-return')
+  @Permissions('accounts.chart.view')
+  @ApiOperation({ summary: 'إقرار ضريبة القيمة المضافة' })
+  vatReturn(@Query('from') from: string, @Query('to') to: string) {
+    return this.analytics.vatReturn({ from, to });
   }
 }
