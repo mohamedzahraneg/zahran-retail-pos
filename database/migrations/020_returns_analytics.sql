@@ -42,7 +42,7 @@ SELECT
               FROM invoice_items ii
               JOIN invoices i ON i.id = ii.invoice_id
              WHERE i.status = 'paid'
-               AND i.issued_at >= NOW() - INTERVAL '30 days') sold,
+               AND COALESCE(i.completed_at, i.created_at) >= NOW() - INTERVAL '30 days') sold,
            (SELECT COALESCE(SUM(ri.quantity),0) AS qty
               FROM return_items ri
               JOIN returns r ON r.id = ri.return_id
