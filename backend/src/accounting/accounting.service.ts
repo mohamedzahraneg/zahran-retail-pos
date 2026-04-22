@@ -152,32 +152,71 @@ export class AccountingService {
           !!employeeUserId, // treat matched expenses as advances
         ],
       );
-      // If the expense is cash-backed, post a matching cashbox txn so the
-      // shift's expected closing accounts for the outflow.
+      // Cash-backed expense: deduct from the cashbox directly (don't
+      // depend on fn_record_cashbox_txn which used to fail silently on
+      // some installs, so expenses vanished from cashbox balance).
       if (cashboxId && (dto.payment_method || 'cash') === 'cash') {
-        await em
-          .query(
-            `SELECT fn_record_cashbox_txn($1,'out',$2,'expense','expense',$3,$4,$5)`,
+        const [cb] = await em.query(
+          `SELECT current_balance FROM cashboxes WHERE id = $1 FOR UPDATE`,
+          [cashboxId],
+        );
+        if (cb) {
+          const newBalance =
+            Number(cb.current_balance || 0) - Number(dto.amount);
+          await em.query(
+            `
+            INSERT INTO cashbox_transactions
+              (cashbox_id, direction, amount, category, reference_type,
+               reference_id, balance_after, user_id, notes)
+            VALUES ($1,'out'::txn_direction,$2,'expense',
+                    'expense'::entity_type,$3,$4,$5,$6)
+            `,
             [
               cashboxId,
               Number(dto.amount),
               row.id,
+              newBalance,
               userId,
               `مصروف ${row.expense_no || ''}`,
             ],
-          )
-          .catch(() => {
-            // Silent — if the function fails (e.g. missing), the expense is
-            // still saved. Shift summary falls back to reading expenses
-            // directly.
-          });
+          );
+          await em.query(
+            `UPDATE cashboxes SET current_balance = $1, updated_at = NOW()
+              WHERE id = $2`,
+            [newBalance, cashboxId],
+          );
+        }
       }
 
-      // Spawn approval rows if the amount triggers any rule.
+      // Spawn approval rows if the amount triggers any rule. If no
+      // rule matches, auto-approve the expense so the GL posting fires.
+      let autoApproved = true;
       if (this.approvals) {
-        await this.approvals
+        const spawned = await this.approvals
           .spawnForExpense(row.id, Number(dto.amount), em)
-          .catch(() => undefined);
+          .catch(() => ({ spawned: 0 } as any));
+        if (spawned && spawned.spawned > 0) {
+          autoApproved = false;
+        }
+      }
+
+      if (autoApproved) {
+        // Flip is_approved + stamp the approver so the expense shows on
+        // every report that filters by is_approved=TRUE.
+        await em.query(
+          `UPDATE expenses SET is_approved = TRUE, approved_by = $1,
+              updated_at = NOW() WHERE id = $2`,
+          [userId, row.id],
+        );
+        row.is_approved = true;
+        row.approved_by = userId;
+
+        // Auto-post to the GL (shows up in شجرة الحسابات + التقارير).
+        if (this.posting) {
+          await this.posting
+            .postExpense(row.id, userId, em)
+            .catch(() => undefined);
+        }
       }
 
       return row;
