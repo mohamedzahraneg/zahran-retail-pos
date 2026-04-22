@@ -44,6 +44,7 @@ import { CustomerGroupsModule } from './customer-groups/customer-groups.module';
 import { CategoriesModule } from './categories/categories.module';
 import { AttendanceModule } from './attendance/attendance.module';
 import { EmployeesModule } from './employees/employees.module';
+import { ChartOfAccountsModule } from './chart-of-accounts/chart-of-accounts.module';
 import { ServeStaticModule } from '@nestjs/serve-static';
 import { join } from 'path';
 
@@ -110,6 +111,7 @@ class HealthController {
     RecurringExpensesModule,
     CustomerGroupsModule,
     CategoriesModule,
+    ChartOfAccountsModule,
   ],
   controllers: [HealthController],
   providers: [

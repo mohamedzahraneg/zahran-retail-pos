@@ -28,6 +28,7 @@ import StockCount from '@/pages/StockCount';
 import Coupons from '@/pages/Coupons';
 import Alerts from '@/pages/Alerts';
 import Accounting from '@/pages/Accounting';
+import Accounts from '@/pages/Accounts';
 import RecurringExpenses from '@/pages/RecurringExpenses';
 import CustomerGroups from '@/pages/CustomerGroups';
 import Settings from '@/pages/Settings';
@@ -127,6 +128,14 @@ export default function App() {
         <Route path="coupons" element={<Coupons />} />
         <Route path="alerts" element={<Alerts />} />
         <Route path="accounting" element={<Accounting />} />
+        <Route
+          path="accounts"
+          element={
+            <ProtectedRoute permissions={['accounts.chart.view']}>
+              <Accounts />
+            </ProtectedRoute>
+          }
+        />
         <Route
           path="recurring-expenses"
           element={
