@@ -671,6 +671,16 @@ export class ChartOfAccountsController {
     });
   }
 
+  @Post('audit/factory-reset')
+  @Permissions('accounts.journal.void')
+  @ApiOperation({
+    summary:
+      'إعادة تهيئة المصنع — مسح كل البيانات التشغيلية التجريبية (فواتير/مصروفات/دفعات/قيود/حركات). يحفظ الكتالوج والمستخدمين والشجرة.',
+  })
+  factoryReset(@Body() body: { keep_stock?: boolean }) {
+    return this.recon.factoryReset({ keep_stock: !!body?.keep_stock });
+  }
+
   // ── Migrations ──────────────────────────────────────────────────────
 
   @Get('audit/migrations')

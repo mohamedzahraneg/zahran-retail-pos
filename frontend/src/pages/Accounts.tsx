@@ -770,6 +770,7 @@ function JournalTab() {
         />
         {canPost && (
           <div className="flex gap-2 mr-auto flex-wrap">
+            <FactoryResetButton />
             <FullCleanupButton />
             <BackfillButton />
             <button
@@ -904,6 +905,58 @@ function BackfillButton() {
       title="ترحيل تلقائي للعمليات القديمة"
     >
       {mutation.isPending ? '⏳ جاري الترحيل...' : '🔄 ترحيل تلقائي'}
+    </button>
+  );
+}
+
+function FactoryResetButton() {
+  const qc = useQueryClient();
+  const mutation = useMutation({
+    mutationFn: () => accountsApi.factoryReset(false),
+    onSuccess: (r) => {
+      const summary = Object.entries(r.wiped || {})
+        .filter(([, n]) => (n as number) > 0)
+        .map(([k, n]) => `${k}: ${n}`)
+        .join(' · ');
+      toast.success(
+        `تم مسح البيانات التجريبية\n${summary || 'لا شيء للمسح'}\n\n${r.note}`,
+        { duration: 12000 },
+      );
+      qc.invalidateQueries();
+    },
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.message || 'فشل المسح'),
+  });
+  return (
+    <button
+      className="btn-primary bg-gradient-to-l from-rose-700 to-rose-900 hover:from-rose-800 hover:to-rose-950 text-white"
+      onClick={() => {
+        const phrase = 'امسح الكل';
+        const typed = prompt(
+          '🚨 إعادة تهيئة المصنع — حذف نهائي لكل البيانات التشغيلية:\n\n' +
+            '• كل الفواتير والمصروفات والدفعات والمرتجعات والمشتريات\n' +
+            '• كل قيود دفتر الأستاذ\n' +
+            '• كل حركات الخزنة والورديات\n' +
+            '• أرصدة الخزائن والعملاء والموردين تعود إلى صفر\n' +
+            '• المخزون يُصفَّر\n\n' +
+            'ما يُحفظ:\n' +
+            '• كتالوج المنتجات والتصنيفات\n' +
+            '• سجلات العملاء والموردين\n' +
+            '• شجرة الحسابات\n' +
+            '• المستخدمون والصلاحيات\n' +
+            '• قائمة البنوك والمحافظ\n\n' +
+            `للتأكيد اكتب: ${phrase}`,
+        );
+        if (typed === phrase) {
+          mutation.mutate();
+        } else if (typed !== null) {
+          toast.error('تم الإلغاء — الكلمة غير صحيحة');
+        }
+      }}
+      disabled={mutation.isPending}
+      title="مسح شامل للبيانات التشغيلية التجريبية — يتطلب تأكيد بالكتابة"
+    >
+      {mutation.isPending ? '⏳ جارٍ المسح...' : '🚨 إعادة تهيئة المصنع'}
     </button>
   );
 }

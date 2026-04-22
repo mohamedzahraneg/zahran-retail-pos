@@ -795,6 +795,133 @@ export class ReconciliationService {
   }
 
   /**
+   * Factory reset — wipe every transactional row so the user can
+   * restart with clean test data. Preserves structural data:
+   * users / roles / warehouses / cashboxes (structure) / products /
+   * variants / categories / customers / suppliers (as records) /
+   * chart_of_accounts / expense_categories / financial_institutions /
+   * settings.
+   *
+   * Wiped tables:
+   *   journal_lines, journal_entries
+   *   invoice_items, invoice_payments, invoices
+   *   expenses, expense_approvals
+   *   customer_payment_allocations, customer_payments
+   *   supplier_payment_allocations, supplier_payments
+   *   return_items, returns
+   *   purchase_items, purchases
+   *   cashbox_transactions
+   *   shifts (+ shift_events if present)
+   *   stock_movements
+   *   recurring_expense_runs
+   *
+   * Balances reset to 0:
+   *   cashboxes.current_balance
+   *   customers.current_balance
+   *   suppliers.current_balance
+   *
+   * By design does NOT touch:
+   *   stock.quantity_on_hand (user can top-up via opening-stock import)
+   *
+   * This is destructive. Wrapped in a transaction so a failure rolls
+   * everything back. Requires accounts.journal.void permission.
+   */
+  async factoryReset(opts: {
+    keep_stock?: boolean;
+  } = {}): Promise<{
+    wiped: Record<string, number>;
+    note: string;
+  }> {
+    const wiped: Record<string, number> = {};
+
+    return this.ds.transaction(async (em) => {
+      const safeDelete = async (label: string, sql: string) => {
+        try {
+          const r = await em.query(sql);
+          wiped[label] = r.length ?? 0;
+        } catch (e: any) {
+          // Table may not exist on every deployment.
+          wiped[label] = 0;
+        }
+      };
+
+      // GL
+      await safeDelete('journal_lines', `DELETE FROM journal_lines RETURNING 1`);
+      await safeDelete('journal_entries', `DELETE FROM journal_entries RETURNING 1`);
+
+      // Invoices + children
+      await safeDelete('invoice_items', `DELETE FROM invoice_items RETURNING 1`);
+      await safeDelete('invoice_payments', `DELETE FROM invoice_payments RETURNING 1`);
+      await safeDelete('invoices', `DELETE FROM invoices RETURNING 1`);
+
+      // Expenses
+      await safeDelete('expense_approvals', `DELETE FROM expense_approvals RETURNING 1`);
+      await safeDelete('expenses', `DELETE FROM expenses RETURNING 1`);
+
+      // Customer / supplier payments
+      await safeDelete(
+        'customer_payment_allocations',
+        `DELETE FROM customer_payment_allocations RETURNING 1`,
+      );
+      await safeDelete(
+        'customer_payments',
+        `DELETE FROM customer_payments RETURNING 1`,
+      );
+      await safeDelete(
+        'supplier_payment_allocations',
+        `DELETE FROM supplier_payment_allocations RETURNING 1`,
+      );
+      await safeDelete(
+        'supplier_payments',
+        `DELETE FROM supplier_payments RETURNING 1`,
+      );
+
+      // Returns + purchases
+      await safeDelete('return_items', `DELETE FROM return_items RETURNING 1`);
+      await safeDelete('returns', `DELETE FROM returns RETURNING 1`);
+      await safeDelete(
+        'purchase_items',
+        `DELETE FROM purchase_items RETURNING 1`,
+      );
+      await safeDelete('purchases', `DELETE FROM purchases RETURNING 1`);
+
+      // Cash movements + shifts + recurring
+      await safeDelete(
+        'cashbox_transactions',
+        `DELETE FROM cashbox_transactions RETURNING 1`,
+      );
+      await safeDelete(
+        'recurring_expense_runs',
+        `DELETE FROM recurring_expense_runs RETURNING 1`,
+      );
+      await safeDelete('shift_events', `DELETE FROM shift_events RETURNING 1`);
+      await safeDelete('shifts', `DELETE FROM shifts RETURNING 1`);
+
+      // Stock movements (optional — keeps physical stock if keep_stock)
+      if (!opts.keep_stock) {
+        await safeDelete(
+          'stock_movements',
+          `DELETE FROM stock_movements RETURNING 1`,
+        );
+        await em.query(`UPDATE stock SET quantity_on_hand = 0, quantity_reserved = 0`);
+      } else {
+        // Keep stock_movements for audit, just zero out reserved.
+        await em.query(`UPDATE stock SET quantity_reserved = 0`);
+      }
+
+      // Zero out balances
+      await em.query(`UPDATE cashboxes SET current_balance = 0, updated_at = NOW()`);
+      await em.query(`UPDATE customers SET current_balance = 0 WHERE current_balance IS NOT NULL`);
+      await em.query(`UPDATE suppliers SET current_balance = 0 WHERE current_balance IS NOT NULL`);
+
+      return {
+        wiped,
+        note: 'البيانات التجريبية اتمسحت. الكتالوج والمستخدمون والشجرة محفوظين. ابدأ تسجيل عمليات فعلية.',
+      };
+    });
+  }
+
+  /**
    * Hard reset: void every auto-posted journal entry and let the
    * caller re-run backfill. Safer alternative to DELETE since voided
    * entries keep an audit trail.

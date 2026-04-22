@@ -397,6 +397,11 @@ export const accountsApi = {
       backfill: any;
     }>(api.post('/accounts/audit/full-cleanup', {})),
 
+  factoryReset: (keepStock = false) =>
+    unwrap<{ wiped: Record<string, number>; note: string }>(
+      api.post('/accounts/audit/factory-reset', { keep_stock: keepStock }),
+    ),
+
   migrationsStatus: () =>
     unwrap<{
       dir: string;
