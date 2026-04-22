@@ -73,15 +73,15 @@ BEGIN
 
     IF EXISTS (SELECT 1 FROM information_schema.columns
                 WHERE table_name='roles' AND column_name='permissions') THEN
-      UPDATE roles SET permissions = ARRAY(
+      UPDATE roles r SET permissions = ARRAY(
         SELECT DISTINCT code FROM (
-          SELECT UNNEST(COALESCE(permissions, ARRAY[]::text[])) AS code
+          SELECT UNNEST(COALESCE(r.permissions, ARRAY[]::text[])) AS code
           UNION
           SELECT p.code FROM permissions p
            WHERE p.code IN ('accounts.budget','accounts.cost_centers')
-             AND roles.code IN ('admin','accountant')
+             AND r.code IN ('admin','accountant')
         ) u ORDER BY code
-      ) WHERE code IN ('admin','accountant');
+      ) WHERE r.code IN ('admin','accountant');
     END IF;
   END IF;
 END$$;

@@ -36,7 +36,12 @@ export class FixedAssetsService {
     private readonly posting: AccountingPostingService,
   ) {}
 
-  list() {
+  async list() {
+    const [exists] = await this.ds.query(
+      `SELECT EXISTS (SELECT 1 FROM information_schema.tables
+        WHERE table_name='fixed_asset_schedules') AS present`,
+    );
+    if (!exists?.present) return [];
     return this.ds.query(
       `
       SELECT f.*,

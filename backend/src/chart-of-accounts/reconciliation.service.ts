@@ -32,21 +32,19 @@ export class ReconciliationService {
    *   drift_gl          — computed_balance − gl_balance
    */
   async auditCashboxes() {
-    // `kind` comes from migration 049. If that hasn't run yet, return
-    // NULL so the UI can still show balances.
-    const [hasKind] = await this.ds.query(
-      `SELECT EXISTS (
-         SELECT 1 FROM information_schema.columns
-          WHERE table_name='cashboxes' AND column_name='kind'
-       ) AS present`,
+    // Defensively build the query so it works on any migration state.
+    const [cols] = await this.ds.query(
+      `SELECT
+         EXISTS (SELECT 1 FROM information_schema.columns
+                  WHERE table_name='cashboxes' AND column_name='kind') AS has_kind,
+         EXISTS (SELECT 1 FROM information_schema.columns
+                  WHERE table_name='cashboxes' AND column_name='currency') AS has_currency,
+         EXISTS (SELECT 1 FROM information_schema.columns
+                  WHERE table_name='chart_of_accounts' AND column_name='cashbox_id') AS has_coa_cb`,
     );
-    const kindCol = hasKind?.present ? 'cb.kind' : `'cash'::text`;
-    const [hasCoaCashbox] = await this.ds.query(
-      `SELECT EXISTS (
-         SELECT 1 FROM information_schema.columns
-          WHERE table_name='chart_of_accounts' AND column_name='cashbox_id'
-       ) AS present`,
-    );
+    const kindCol = cols?.has_kind ? 'cb.kind' : `'cash'::text`;
+    const currencyCol = cols?.has_currency ? 'cb.currency' : `'EGP'::text`;
+    const hasCoaCashbox = { present: cols?.has_coa_cb };
     const glSubquery = hasCoaCashbox?.present
       ? `COALESCE((
           SELECT SUM(jl.debit - jl.credit)
@@ -67,7 +65,7 @@ export class ReconciliationService {
       : `NULL`;
     return this.ds.query(`
       SELECT
-        cb.id, cb.name_ar, ${kindCol} AS kind, cb.currency, cb.is_active,
+        cb.id, cb.name_ar, ${kindCol} AS kind, ${currencyCol} AS currency, cb.is_active,
         cb.current_balance::numeric(14,2)  AS stored_balance,
         COALESCE((
           SELECT SUM(CASE WHEN direction = 'in' THEN amount ELSE -amount END)

@@ -42,7 +42,12 @@ export class FxService {
     private readonly posting: AccountingPostingService,
   ) {}
 
-  list(currency?: string, limit = 500) {
+  async list(currency?: string, limit = 500) {
+    const [exists] = await this.ds.query(
+      `SELECT EXISTS (SELECT 1 FROM information_schema.tables
+        WHERE table_name='currency_rates') AS present`,
+    );
+    if (!exists?.present) return [];
     const args: any[] = [];
     const conds: string[] = [];
     if (currency) {
