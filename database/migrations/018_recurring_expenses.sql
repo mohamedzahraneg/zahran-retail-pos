@@ -145,7 +145,7 @@ SELECT
     re.warehouse_id,
     re.category_id,
     ec.name_ar   AS category_name,
-    w.name       AS warehouse_name,
+    w.name_ar    AS warehouse_name,
     CASE
         WHEN re.next_run_date <= CURRENT_DATE THEN 'due'
         WHEN re.next_run_date <= CURRENT_DATE + (re.notify_days_before || ' days')::INTERVAL THEN 'upcoming'
