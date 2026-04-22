@@ -27,14 +27,12 @@ import StockTransfers from '@/pages/StockTransfers';
 import StockCount from '@/pages/StockCount';
 import Coupons from '@/pages/Coupons';
 import Alerts from '@/pages/Alerts';
-import Accounting from '@/pages/Accounting';
 import Accounts from '@/pages/Accounts';
 import Cashboxes from '@/pages/Cashboxes';
 import BankReconciliation from '@/pages/BankReconciliation';
 import Analytics from '@/pages/Analytics';
 import Budgets from '@/pages/Budgets';
 import FinancialControls from '@/pages/FinancialControls';
-import AccountsAudit from '@/pages/AccountsAudit';
 import OpeningBalance from '@/pages/OpeningBalance';
 import RecurringExpenses from '@/pages/RecurringExpenses';
 import CustomerGroups from '@/pages/CustomerGroups';
@@ -134,9 +132,11 @@ export default function App() {
         <Route path="stock-count" element={<StockCount />} />
         <Route path="coupons" element={<Coupons />} />
         <Route path="alerts" element={<Alerts />} />
-        {/* Legacy /accounting redirects to the unified /accounts page. */}
+        {/* Legacy /accounting redirects to the unified /accounts page.
+            The older standalone Accounting.tsx page has been retired — any
+            existing links now point at /accounts where the merged UI lives. */}
         <Route path="accounting" element={<Navigate to="/accounts" replace />} />
-        <Route path="accounting-legacy" element={<Accounting />} />
+        <Route path="accounting-legacy" element={<Navigate to="/accounts" replace />} />
         <Route
           path="accounts"
           element={
@@ -193,14 +193,11 @@ export default function App() {
             </ProtectedRoute>
           }
         />
-        <Route
-          path="accounts-audit"
-          element={
-            <ProtectedRoute permissions={['accounts.chart.view']}>
-              <AccountsAudit />
-            </ProtectedRoute>
-          }
-        />
+        {/* /accounts-audit was the destructive-maintenance page (force-post,
+            dedupe, factory-reset). Retired — the repairs it triggered now
+            run automatically on boot via database/migrations/056. Any old
+            link lands on the regular /accounts page. */}
+        <Route path="accounts-audit" element={<Navigate to="/accounts" replace />} />
         <Route
           path="opening-balance"
           element={

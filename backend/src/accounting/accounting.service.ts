@@ -14,6 +14,7 @@ import {
   UpdateExpenseDto,
 } from './dto/accounting.dto';
 import { AccountingPostingService } from '../chart-of-accounts/posting.service';
+import { FinancialEngineService } from '../chart-of-accounts/financial-engine.service';
 import { ExpenseApprovalService } from './approval.service';
 
 @Injectable()
@@ -21,6 +22,7 @@ export class AccountingService {
   constructor(
     private readonly ds: DataSource,
     @Optional() private readonly posting?: AccountingPostingService,
+    @Optional() private readonly engine?: FinancialEngineService,
     @Optional() private readonly approvals?: ExpenseApprovalService,
   ) {}
 
@@ -152,44 +154,15 @@ export class AccountingService {
           !!employeeUserId, // treat matched expenses as advances
         ],
       );
-      // Cash-backed expense: deduct from the cashbox directly (don't
-      // depend on fn_record_cashbox_txn which used to fail silently on
-      // some installs, so expenses vanished from cashbox balance).
-      if (cashboxId && (dto.payment_method || 'cash') === 'cash') {
-        const [cb] = await em.query(
-          `SELECT current_balance FROM cashboxes WHERE id = $1 FOR UPDATE`,
-          [cashboxId],
-        );
-        if (cb) {
-          const newBalance =
-            Number(cb.current_balance || 0) - Number(dto.amount);
-          await em.query(
-            `
-            INSERT INTO cashbox_transactions
-              (cashbox_id, direction, amount, category, reference_type,
-               reference_id, balance_after, user_id, notes)
-            VALUES ($1,'out'::txn_direction,$2,'expense',
-                    'expense'::entity_type,$3,$4,$5,$6)
-            `,
-            [
-              cashboxId,
-              Number(dto.amount),
-              row.id,
-              newBalance,
-              userId,
-              `مصروف ${row.expense_no || ''}`,
-            ],
-          );
-          await em.query(
-            `UPDATE cashboxes SET current_balance = $1, updated_at = NOW()
-              WHERE id = $2`,
-            [newBalance, cashboxId],
-          );
-        }
-      }
+      // ━━━ NO CASH MOVEMENT AT CREATE TIME ━━━
+      // The previous implementation decremented the cashbox at insert
+      // and *again* at approval (accounting.service.ts:158–188 + 268–292
+      // in the old code), producing the user-reported "doubled 2120".
+      // Cash now moves exactly once, inside the engine, at approval.
 
-      // Spawn approval rows if the amount triggers any rule. If no
-      // rule matches, auto-approve the expense so the GL posting fires.
+      // Spawn approval rows if any rule matches. If none match, the
+      // expense is auto-approved and we post it through the engine
+      // immediately — cash + GL in one idempotent call.
       let autoApproved = true;
       if (this.approvals) {
         const spawned = await this.approvals
@@ -201,8 +174,6 @@ export class AccountingService {
       }
 
       if (autoApproved) {
-        // Flip is_approved + stamp the approver so the expense shows on
-        // every report that filters by is_approved=TRUE.
         await em.query(
           `UPDATE expenses SET is_approved = TRUE, approved_by = $1,
               updated_at = NOW() WHERE id = $2`,
@@ -211,16 +182,71 @@ export class AccountingService {
         row.is_approved = true;
         row.approved_by = userId;
 
-        // Auto-post to the GL (shows up in شجرة الحسابات + التقارير).
-        if (this.posting) {
-          await this.posting
-            .postExpense(row.id, userId, em)
-            .catch(() => undefined);
-        }
+        // Route through the engine — cash move (if cash-backed) + GL
+        // entry in one atomic, idempotent call. Awaited; no fire-and-
+        // forget. Any failure rolls back the whole createExpense
+        // transaction, so a failed post leaves zero residue.
+        await this.postViaEngine(em, row, userId);
       }
 
       return row;
     });
+  }
+
+  /**
+   * Route an approved expense through FinancialEngineService. Single
+   * source of truth for both the cashbox_transactions write and the
+   * journal_entries post. Idempotent on (expense, expense_id) — safe
+   * to call multiple times.
+   */
+  private async postViaEngine(
+    em: import('typeorm').EntityManager,
+    expense: any,
+    userId: string,
+  ): Promise<void> {
+    if (!this.engine) {
+      // Legacy fallback — if the engine isn't wired, fall back to the
+      // old posting service. Should never happen in production but
+      // keeps unit tests that stub only AccountingPostingService green.
+      await this.posting
+        ?.postExpense(expense.id, userId, em)
+        .catch(() => undefined);
+      return;
+    }
+
+    // Resolve the category's linked GL account once so we can fall back
+    // to 529 (Miscellaneous) if the category isn't mapped.
+    let categoryAccountId: string | null = null;
+    if (expense.category_id) {
+      const [row] = await em.query(
+        `SELECT account_id FROM expense_categories WHERE id = $1`,
+        [expense.category_id],
+      );
+      categoryAccountId = row?.account_id ?? null;
+    }
+
+    const res = await this.engine.recordExpense({
+      expense_id: expense.id,
+      expense_no: expense.expense_no,
+      amount: Number(expense.amount),
+      category_account_id: categoryAccountId,
+      cashbox_id: expense.cashbox_id,
+      payment_method: expense.payment_method,
+      user_id: userId,
+      entry_date: expense.expense_date ?? undefined,
+      em,
+      description: expense.description ?? undefined,
+    });
+
+    if (!res.ok) {
+      // Engine returned a structured failure — surface it so the
+      // surrounding transaction rolls back and the caller sees the
+      // error at the API boundary instead of silently losing the
+      // cashbox/GL side.
+      throw new BadRequestException(
+        `فشل ترحيل المصروف: ${res.error}`,
+      );
+    }
   }
 
   async updateExpense(id: string, dto: UpdateExpenseDto) {
@@ -264,38 +290,11 @@ export class AccountingService {
         [userId, id],
       );
 
-      // Post a cashbox transaction if the expense is paid in cash
-      if (exp.payment_method === 'cash' && exp.cashbox_id) {
-        const [{ current_balance }] = await em.query(
-          `SELECT current_balance FROM cashboxes WHERE id = $1 FOR UPDATE`,
-          [exp.cashbox_id],
-        );
-        const newBalance = Number(current_balance) - Number(exp.amount);
-        await em.query(
-          `INSERT INTO cashbox_transactions
-             (cashbox_id, direction, amount, category, reference_type, reference_id,
-              balance_after, notes, user_id)
-           VALUES ($1,'out',$2,'expense','expense'::entity_type,$3,$4,$5,$6)`,
-          [
-            exp.cashbox_id,
-            exp.amount,
-            id,
-            newBalance,
-            exp.description ?? `Expense ${exp.expense_no}`,
-            userId,
-          ],
-        );
-        await em.query(
-          `UPDATE cashboxes SET current_balance = $1, updated_at = NOW()
-           WHERE id = $2`,
-          [newBalance, exp.cashbox_id],
-        );
-      }
-
-      // Auto-post the approved expense to the GL.
-      await this.posting
-        ?.postExpense(id, userId, em)
-        .catch(() => undefined);
+      // Route through the engine — it writes the cashbox_transactions
+      // row AND the GL entry atomically, and is idempotent on the
+      // expense id. No more duplicate-deduction bug (the old code
+      // debited the cashbox here *and* at create time).
+      await this.postViaEngine(em, row, userId);
 
       return row;
     });

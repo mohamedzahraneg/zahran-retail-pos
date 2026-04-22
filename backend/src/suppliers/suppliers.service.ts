@@ -2,10 +2,12 @@ import {
   BadRequestException,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, ILike, Repository } from 'typeorm';
 import { SupplierEntity } from './entities/supplier.entity';
+import { AccountingPostingService } from '../chart-of-accounts/posting.service';
 
 @Injectable()
 export class SuppliersService {
@@ -13,6 +15,8 @@ export class SuppliersService {
     @InjectRepository(SupplierEntity)
     private readonly repo: Repository<SupplierEntity>,
     private readonly ds: DataSource,
+    @Optional()
+    private readonly posting?: AccountingPostingService,
   ) {}
 
   list(q?: string) {
@@ -149,10 +153,14 @@ export class SuppliersService {
   }
 
   /**
-   * Pay a supplier — allocates the payment across unpaid purchases in FIFO
-   * order (oldest first). Any remainder that exceeds outstanding balance
-   * is rejected. Updates purchases.paid_amount/status, supplier balance,
-   * and writes a supplier_ledger row.
+   * DEPRECATED — kept as a redirect so older frontend builds keep
+   * working. All new code must call POST /cash-desk/supplier-payments
+   * instead. This method now builds the FIFO allocation plan and
+   * delegates to the unified supplier_payments INSERT path (same as
+   * PurchasesService.pay). See bug C3 in the reverse-engineering audit
+   * for why the old in-place SQL here was unsafe (it wrote to
+   * supplier balance + supplier_ledger directly without moving cash
+   * or posting GL, producing "cashbox shows 20,905 vs 18,250").
    */
   async payGeneral(
     supplierId: string,
@@ -161,6 +169,7 @@ export class SuppliersService {
       payment_method: string;
       reference_number?: string;
       notes?: string;
+      cashbox_id?: string;
     },
     userId: string,
   ) {
@@ -174,9 +183,14 @@ export class SuppliersService {
       );
       if (!supplier) throw new NotFoundException('المورد غير موجود');
 
-      // FIFO allocation against unpaid received purchases
+      // FIFO allocation plan — compute which purchases get what, but
+      // don't write anything to purchase_payments. The allocations are
+      // stored in supplier_payment_allocations instead and applied by
+      // trigger.
       const purchases = await m.query(
-        `SELECT * FROM purchases
+        `SELECT id, grand_total, paid_amount,
+                COALESCE(remaining_amount, grand_total - paid_amount) AS unpaid
+           FROM purchases
           WHERE supplier_id = $1
             AND status IN ('received','partial')
           ORDER BY invoice_date, created_at`,
@@ -185,77 +199,93 @@ export class SuppliersService {
 
       let remaining = Number(payload.amount);
       const allocations: Array<{ purchase_id: string; applied: number }> = [];
-
       for (const p of purchases) {
-        if (remaining <= 0) break;
-        const unpaid = Number(p.remaining_amount);
-        if (unpaid <= 0) continue;
-        const apply = Math.min(remaining, unpaid);
-
-        await m.query(
-          `INSERT INTO purchase_payments
-             (purchase_id, payment_method, amount, reference_number, notes, paid_by)
-           VALUES ($1, $2::payment_method_code, $3, $4, $5, $6)`,
-          [
-            p.id,
-            payload.payment_method,
-            apply,
-            payload.reference_number ?? null,
-            payload.notes ?? null,
-            userId,
-          ],
-        );
-
-        const newPaid = Number(p.paid_amount) + apply;
-        const newStatus =
-          newPaid >= Number(p.grand_total) ? 'paid' : 'partial';
-        await m.query(
-          `UPDATE purchases SET paid_amount = $1, status = $2, updated_at = NOW()
-            WHERE id = $3`,
-          [newPaid, newStatus, p.id],
-        );
-
+        if (remaining <= 0.01) break;
+        const u = Number(p.unpaid);
+        if (u <= 0) continue;
+        const apply = Math.min(remaining, u);
         allocations.push({ purchase_id: p.id, applied: apply });
         remaining -= apply;
       }
+      const overpaid = Math.max(0, Math.round(remaining * 100) / 100);
 
-      // Overpayment is allowed — anything past the outstanding amount
-      // becomes a negative (credit) balance on the supplier so it can
-      // offset the next purchase automatically.
-      const overpaid = remaining > 0 ? remaining : 0;
+      // Resolve cashbox (explicit or user's open shift).
+      let cashboxId = payload.cashbox_id ?? null;
+      if (!cashboxId) {
+        const [openShift] = await m.query(
+          `SELECT cashbox_id FROM shifts
+            WHERE opened_by = $1 AND status = 'open'
+            ORDER BY opened_at DESC LIMIT 1`,
+          [userId],
+        );
+        cashboxId = openShift?.cashbox_id ?? null;
+      }
+      if (!cashboxId) {
+        throw new BadRequestException(
+          'لا توجد خزنة محددة أو وردية مفتوحة — لا يمكن تسجيل سداد بدون خزنة',
+        );
+      }
 
-      // supplier balance down + ledger row
-      await m.query(
-        `UPDATE suppliers SET current_balance = current_balance - $1,
-                updated_at = NOW() WHERE id = $2`,
-        [payload.amount, supplierId],
+      // Single unified INSERT — trigger handles cash + supplier side.
+      const [{ seq }] = await m.query(
+        `SELECT nextval('seq_supplier_payment_no') AS seq`,
       );
-      const [{ current_balance }] = await m.query(
-        `SELECT current_balance FROM suppliers WHERE id = $1`,
-        [supplierId],
-      );
-      await m.query(
-        `INSERT INTO supplier_ledger
-            (supplier_id, direction, amount, reference_type, reference_id,
-             balance_after, notes, user_id)
-         VALUES ($1,'out', $2, 'payment', NULL, $3, $4, $5)`,
+      const paymentNo = `CP-${String(seq).padStart(6, '0')}`;
+      const [sp] = await m.query(
+        `INSERT INTO supplier_payments
+           (payment_no, supplier_id, cashbox_id,
+            payment_method, amount, reference_number, notes, paid_by)
+         VALUES ($1, $2, $3, $4::payment_method_code, $5, $6, $7, $8)
+         RETURNING id`,
         [
+          paymentNo,
           supplierId,
+          cashboxId,
+          payload.payment_method,
           payload.amount,
-          current_balance,
+          payload.reference_number ?? null,
           (payload.notes ?? `سداد للمورد ${supplier.name}`) +
             (overpaid > 0
-              ? ` — زيادة ${overpaid.toFixed(2)} ج.م محفوظة كرصيد مستحق لنا`
+              ? ` — زيادة ${overpaid.toFixed(2)} ج.م محفوظة كرصيد`
               : ''),
           userId,
         ],
+      );
+
+      // Write allocations — trigger updates purchases rows.
+      for (const a of allocations) {
+        await m.query(
+          `INSERT INTO supplier_payment_allocations
+             (payment_id, purchase_id, amount)
+           VALUES ($1, $2, $3)`,
+          [sp.id, a.purchase_id, a.applied],
+        );
+      }
+
+      // Post GL — awaited.
+      if (this.posting) {
+        const res = (await this.posting.postSupplierPayment(
+          sp.id,
+          userId,
+          m,
+        )) as any;
+        if (res && res.error) {
+          throw new BadRequestException(
+            `فشل ترحيل السداد للحسابات: ${res.error}`,
+          );
+        }
+      }
+
+      const [{ current_balance }] = await m.query(
+        `SELECT current_balance FROM suppliers WHERE id = $1`,
+        [supplierId],
       );
 
       return {
         paid: true,
         amount: payload.amount,
         allocations,
-        overpaid: Math.round(overpaid * 100) / 100,
+        overpaid,
         new_balance: Number(current_balance),
       };
     });

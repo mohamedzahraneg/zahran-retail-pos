@@ -10,6 +10,7 @@ import { BudgetsService } from './budgets.service';
 import { CostCentersService } from './cost-centers.service';
 import { FxService } from './fx.service';
 import { ReconciliationService } from './reconciliation.service';
+import { FinancialEngineService } from './financial-engine.service';
 
 @Global()
 @Module({
@@ -24,6 +25,7 @@ import { ReconciliationService } from './reconciliation.service';
     CostCentersService,
     FxService,
     ReconciliationService,
+    FinancialEngineService,
   ],
   controllers: [ChartOfAccountsController],
   exports: [
@@ -37,6 +39,7 @@ import { ReconciliationService } from './reconciliation.service';
     CostCentersService,
     FxService,
     ReconciliationService,
+    FinancialEngineService,
   ],
 })
 export class ChartOfAccountsModule {}

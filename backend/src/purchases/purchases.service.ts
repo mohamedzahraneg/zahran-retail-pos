@@ -270,6 +270,27 @@ export class PurchasesService {
   // --------------------------------------------------------------------------
   //  Pay
   // --------------------------------------------------------------------------
+  /**
+   * Pay against a specific purchase invoice.
+   *
+   * REFACTORED: previously wrote directly to `purchase_payments`,
+   * `suppliers.current_balance`, and `supplier_ledger` — leaving the
+   * cashbox untouched and the GL unposted (bug C3 in the audit:
+   * "cashbox shows 20,905 vs 18,250"). The system already had a
+   * correct path at POST /cash-desk/supplier-payments. Every purchase-
+   * level payment now funnels through that same unified path:
+   *
+   *   1. INSERT `supplier_payments` — trigger `trg_supplier_payment_apply`
+   *      (migration 014) atomically moves cash + updates supplier
+   *      balance + writes supplier_ledger
+   *   2. INSERT `supplier_payment_allocations` against this purchase —
+   *      trigger `trg_supplier_alloc_recompute` updates
+   *      purchases.paid_amount/status
+   *   3. Await `postSupplierPayment` → GL: DR 211 · CR Cash
+   *
+   * cashbox_id is resolved from the caller's open shift so the
+   * existing public DTO (no cashbox_id field) keeps working.
+   */
   async pay(id: string, dto: AddPurchasePaymentDto, userId: string) {
     return this.ds.transaction(async (m) => {
       const [p] = await m.query(
@@ -284,56 +305,74 @@ export class PurchasesService {
         throw new BadRequestException('المبلغ المدفوع أكبر من المتبقي');
       }
 
-      await m.query(
-        `
-        INSERT INTO purchase_payments
-            (purchase_id, payment_method, amount, reference_number, notes, paid_by)
-        VALUES ($1, $2::payment_method_code, $3, $4, $5, $6)
-        `,
-        [id, dto.payment_method, dto.amount, dto.reference_number ?? null, dto.notes ?? null, userId],
+      // Resolve cashbox from the user's open shift — the DTO doesn't
+      // ship one and every payment must land in a real cashbox.
+      const [openShift] = await m.query(
+        `SELECT cashbox_id FROM shifts
+          WHERE opened_by = $1 AND status = 'open'
+          ORDER BY opened_at DESC LIMIT 1`,
+        [userId],
       );
+      const cashboxId = openShift?.cashbox_id ?? null;
+      if (!cashboxId) {
+        throw new BadRequestException(
+          'لا توجد وردية مفتوحة — افتح وردية قبل تسجيل السداد',
+        );
+      }
 
-      const newPaid = Number(p.paid_amount) + dto.amount;
-      const status =
-        newPaid >= Number(p.grand_total) ? 'paid' : 'partial';
+      const [{ seq }] = await m.query(
+        `SELECT nextval('seq_supplier_payment_no') AS seq`,
+      );
+      const paymentNo = `CP-${String(seq).padStart(6, '0')}`;
 
-      await m.query(
-        `UPDATE purchases
-            SET paid_amount = $1,
-                status = $2,
-                updated_at = NOW()
-          WHERE id = $3`,
-        [newPaid, status, id],
-      );
-
-      // supplier balance down, ledger entry
-      await m.query(
-        `UPDATE suppliers
-            SET current_balance = current_balance - $1,
-                updated_at = NOW()
-          WHERE id = $2`,
-        [dto.amount, p.supplier_id],
-      );
-      const [{ current_balance }] = await m.query(
-        `SELECT current_balance FROM suppliers WHERE id = $1`,
-        [p.supplier_id],
-      );
-      await m.query(
-        `INSERT INTO supplier_ledger
-            (supplier_id, direction, amount, reference_type, reference_id,
-             balance_after, notes, user_id)
-          VALUES ($1,'out', $2, 'purchase', $3, $4, $5, $6)`,
+      // Single INSERT — the trigger cascades the cash + supplier side.
+      const [sp] = await m.query(
+        `INSERT INTO supplier_payments
+           (payment_no, supplier_id, cashbox_id, warehouse_id,
+            payment_method, amount, reference_number, notes, paid_by)
+         VALUES ($1, $2, $3, $4, $5::payment_method_code, $6, $7, $8, $9)
+         RETURNING id`,
         [
+          paymentNo,
           p.supplier_id,
+          cashboxId,
+          p.warehouse_id,
+          dto.payment_method,
           dto.amount,
-          id,
-          current_balance,
-          `سداد فاتورة ${p.purchase_no}`,
+          dto.reference_number ?? null,
+          dto.notes ?? `سداد فاتورة ${p.purchase_no}`,
           userId,
         ],
       );
 
-      return { paid_amount: newPaid, status };
+      // Allocate this payment against the specific purchase so the
+      // purchases row reflects it via trg_supplier_alloc_recompute.
+      await m.query(
+        `INSERT INTO supplier_payment_allocations
+           (payment_id, purchase_id, amount)
+         VALUES ($1, $2, $3)`,
+        [sp.id, id, dto.amount],
+      );
+
+      // Post GL — awaited so a failure rolls back the whole payment.
+      if (this.posting) {
+        const res = (await this.posting.postSupplierPayment(
+          sp.id,
+          userId,
+          m,
+        )) as any;
+        if (res && res.error) {
+          throw new BadRequestException(
+            `فشل ترحيل السداد للحسابات: ${res.error}`,
+          );
+        }
+      }
+
+      const [{ paid_amount, status }] = await m.query(
+        `SELECT paid_amount, status FROM purchases WHERE id = $1`,
+        [id],
+      );
+      return { paid_amount: Number(paid_amount), status };
     });
   }
 

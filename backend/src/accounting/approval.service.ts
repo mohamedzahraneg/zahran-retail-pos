@@ -2,8 +2,10 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
+  Optional,
 } from '@nestjs/common';
 import { DataSource } from 'typeorm';
+import { FinancialEngineService } from '../chart-of-accounts/financial-engine.service';
 
 export interface CreateRuleDto {
   name_ar: string;
@@ -28,7 +30,10 @@ export interface CreateRuleDto {
  */
 @Injectable()
 export class ExpenseApprovalService {
-  constructor(private readonly ds: DataSource) {}
+  constructor(
+    private readonly ds: DataSource,
+    @Optional() private readonly engine?: FinancialEngineService,
+  ) {}
 
   // ── Rule management ────────────────────────────────────────────────
 
@@ -249,13 +254,51 @@ export class ExpenseApprovalService {
           [a.expense_id, reason || 'رفض اعتماد متعدد المستويات'],
         );
       } else if (pending === 0) {
-        // All levels approved.
+        // ━━━ All levels approved — now move the money ━━━
+        // The previous implementation just flipped is_approved=TRUE and
+        // walked away, leaving the expense with NO cashbox movement and
+        // NO journal entry (user symptom: "تم ترحيل 0 مصروف despite N").
+        // We now flip the flag AND route through the engine so cash +
+        // GL both happen atomically with this decision.
         await em.query(
           `UPDATE expenses
               SET is_approved = TRUE, approved_by = $2, updated_at = NOW()
             WHERE id = $1`,
           [a.expense_id, userId],
         );
+
+        // Fetch the fresh expense row + category account link so the
+        // engine has everything it needs.
+        const [exp] = await em.query(
+          `SELECT e.*, ec.account_id AS category_account_id
+             FROM expenses e
+             LEFT JOIN expense_categories ec ON ec.id = e.category_id
+            WHERE e.id = $1`,
+          [a.expense_id],
+        );
+
+        if (exp && this.engine) {
+          const res = await this.engine.recordExpense({
+            expense_id: exp.id,
+            expense_no: exp.expense_no,
+            amount: Number(exp.amount),
+            category_account_id: exp.category_account_id ?? null,
+            cashbox_id: exp.cashbox_id,
+            payment_method: exp.payment_method,
+            user_id: userId,
+            entry_date: exp.expense_date ?? undefined,
+            em,
+            description: exp.description ?? undefined,
+          });
+          if (!res.ok) {
+            // Structured failure — roll back the approval by throwing.
+            // Better the approver sees an error than we silently skip
+            // the posting and leave another orphan.
+            throw new BadRequestException(
+              `تم رفض الاعتماد لأن ترحيل المصروف فشل: ${res.error}`,
+            );
+          }
+        }
       }
       return {
         status,

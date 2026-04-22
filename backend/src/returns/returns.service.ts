@@ -286,26 +286,13 @@ export class ReturnsService {
         }
       }
 
-      // Ledger entry (best-effort; don't block the refund if schema differs)
-      await em.query(
-        `
-        INSERT INTO general_ledger_entries
-          (entry_type, reference_type, reference_id,
-           debit_account, credit_account, amount, description, created_by)
-        VALUES
-          ('refund','return',$1,
-           'returns_expense','cash',$2,$3,$4)
-        ON CONFLICT DO NOTHING
-        `,
-        [
-          id,
-          Number(ret.net_refund),
-          `Refund for return ${ret.return_no} via ${dto.refund_method}`,
-          userId,
-        ],
-      ).catch(() => {
-        /* if the ledger table/cols differ we don't want to block the refund */
-      });
+      // NOTE: the old code wrote to a `general_ledger_entries` table
+      // that never existed in any migration — the `.catch(() => {})`
+      // above silently swallowed the error on every run. Removed as
+      // part of the financial-engine consolidation (audit finding C5).
+      // The real GL posting for returns happens via
+      // AccountingPostingService.postReturn() when the return is
+      // approved — see approve() earlier in this file.
 
       return this.findOne(id);
     });

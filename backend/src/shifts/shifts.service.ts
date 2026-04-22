@@ -7,6 +7,7 @@ import {
 import { DataSource } from 'typeorm';
 import { OpenShiftDto, CloseShiftDto } from './dto/shift.dto';
 import { AccountingPostingService } from '../chart-of-accounts/posting.service';
+import { FinancialEngineService } from '../chart-of-accounts/financial-engine.service';
 
 /**
  * Cashier shift (وردية) service.
@@ -30,6 +31,7 @@ export class ShiftsService {
   constructor(
     private readonly ds: DataSource,
     @Optional() private readonly posting?: AccountingPostingService,
+    @Optional() private readonly engine?: FinancialEngineService,
   ) {}
 
   async open(dto: OpenShiftDto, userId: string) {
@@ -349,17 +351,41 @@ export class ShiftsService {
         id,
       ],
     );
-    // Auto-post shift variance to GL (surplus → 421, deficit → 531).
-    // Fire-and-forget: we already returned the shift, posting failure
-    // shouldn't block the close.
-    this.posting?.postShiftClose(id, userId).catch(() => undefined);
+    // Auto-post shift variance — BOTH cashbox_transactions AND the GL
+    // entry. The old code was fire-and-forget AND only wrote the GL
+    // side; cashboxes.current_balance was never aligned with the
+    // counted cash, so every surplus/deficit drifted the two (audit
+    // finding H1). Awaiting is the correct behaviour — if the GL post
+    // fails the caller should know.
+    const variance = Number(dto.actual_closing) - summary.expected_closing;
+    if (Math.abs(variance) >= 0.01 && this.engine) {
+      const res = await this.engine.recordShiftVariance({
+        shift_id: id,
+        shift_no: updated?.shift_no,
+        cashbox_id: shift.cashbox_id,
+        variance,
+        user_id: userId,
+      });
+      if (!res.ok) {
+        // Log but don't throw — the shift is already closed in the DB
+        // and the physical variance is recorded on the shift row
+        // itself. The reconciliation layer will retry.
+        // eslint-disable-next-line no-console
+        console.error(`shift variance post failed: ${res.error}`);
+      }
+    } else {
+      // Legacy fallback (engine not wired): use the old posting service.
+      await this.posting
+        ?.postShiftClose(id, userId)
+        .catch(() => undefined);
+    }
 
     return {
       ...updated,
       summary: {
         ...summary,
         actual_closing: Number(dto.actual_closing),
-        variance: Number(dto.actual_closing) - summary.expected_closing,
+        variance,
       },
     };
   }
