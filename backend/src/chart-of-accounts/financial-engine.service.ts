@@ -928,9 +928,23 @@ export class FinancialEngineService {
     const abs = Math.abs(args.diff);
     const isGain = args.diff > 0;
     const description = `إعادة تقييم عملة: ${args.name}`;
-    // Reference id encodes cashbox + as_of so same-day revaluations of
-    // different cashboxes don't collide under the idempotency guard.
-    const refId = `${args.cashbox_id}:${args.as_of}`;
+
+    // journal_entries.reference_id is a UUID column, so we can't just
+    // concat "cashbox:date" into it — that's not a valid UUID and the
+    // INSERT would fail. Use a deterministic UUID-v5 hash of the
+    // composite (cashbox × as_of) instead. Same inputs → same UUID →
+    // idempotency guard still works per (cashbox, date). Different
+    // inputs collide with ~0 probability.
+    const runner = args.em
+      ? (sql: string, p?: any[]) => args.em!.query(sql, p)
+      : (sql: string, p?: any[]) => this.ds.query(sql, p);
+    const [{ ref_id: refId }] = await runner(
+      `SELECT uuid_generate_v5(
+         uuid_ns_dns(),
+         'fx_revaluation:' || $1::text || ':' || $2::text
+       ) AS ref_id`,
+      [args.cashbox_id, args.as_of],
+    );
 
     return this.recordTransaction({
       kind: 'manual_adjustment',
@@ -1035,10 +1049,23 @@ export class FinancialEngineService {
         description: 'رأس المال / الرصيد المرحَّل',
       });
 
+    // Same UUID-type trap as FX — derive a deterministic UUID from the
+    // date so replays collapse under the idempotency guard.
+    const runner = args.em
+      ? (sql: string, p?: any[]) => args.em!.query(sql, p)
+      : (sql: string, p?: any[]) => this.ds.query(sql, p);
+    const [{ ref_id: openingRefId }] = await runner(
+      `SELECT uuid_generate_v5(
+         uuid_ns_dns(),
+         'opening_balance:' || $1::text
+       ) AS ref_id`,
+      [args.entry_date],
+    );
+
     const res = await this.recordTransaction({
       kind: 'opening_balance',
       reference_type: 'opening_balance',
-      reference_id: args.entry_date, // one opening balance per system
+      reference_id: openingRefId, // deterministic per entry_date
       entry_date: args.entry_date,
       description: 'قيد افتتاحي',
       gl_lines: lines,
