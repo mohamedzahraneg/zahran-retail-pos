@@ -966,10 +966,12 @@ export class AccountingPostingService {
       ? (sql: string, params?: any[]) => em.query(sql, params)
       : (sql: string, params?: any[]) => this.ds.query(sql, params);
     try {
-      // Idempotency guard.
+      // Idempotency guard — only count LIVE entries (posted, non-void).
+      // A voided entry from a previous reset should NOT block re-posting.
       const [existing] = await q(
         `SELECT id FROM journal_entries
           WHERE reference_type = $1 AND reference_id = $2
+            AND is_posted = TRUE AND is_void = FALSE
           LIMIT 1`,
         [refType, refId],
       );
