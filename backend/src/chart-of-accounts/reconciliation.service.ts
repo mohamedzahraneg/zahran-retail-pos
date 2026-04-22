@@ -306,6 +306,79 @@ export class ReconciliationService {
   }
 
   /**
+   * Nuke cancelled invoices and everything attached to them — hard
+   * delete. Used to clean the slate after voids accumulated over time
+   * and bloated the reports.
+   *
+   * Deletes:
+   *   - the invoice itself (CASCADE takes invoice_items + invoice_payments)
+   *   - its journal_entries (both the original + any reversal)
+   *   - its cashbox_transactions
+   *
+   * The source documents for non-cancelled invoices are never touched.
+   */
+  async purgeCancelledInvoices(): Promise<{
+    invoices_deleted: number;
+    journal_entries_deleted: number;
+    cashbox_txns_deleted: number;
+  }> {
+    return this.ds.transaction(async (em) => {
+      const cancelled = await em.query(
+        `SELECT id FROM invoices WHERE status = 'cancelled'`,
+      );
+      if (!cancelled.length) {
+        return {
+          invoices_deleted: 0,
+          journal_entries_deleted: 0,
+          cashbox_txns_deleted: 0,
+        };
+      }
+      const ids = cancelled.map((r: any) => r.id);
+
+      // Journal entries tied to these invoices (both invoice posts + any
+      // reversal entries that point at them via reversal_of).
+      const je = await em.query(
+        `
+        DELETE FROM journal_entries
+         WHERE (reference_type = 'invoice' AND reference_id = ANY($1::uuid[]))
+            OR reversal_of IN (
+              SELECT id FROM journal_entries
+               WHERE reference_type = 'invoice'
+                 AND reference_id = ANY($1::uuid[])
+            )
+        RETURNING id
+        `,
+        [ids],
+      );
+
+      // Cashbox transactions linked to the cancelled invoices (either
+      // directly via reference_id or via invoice_payments).
+      const ct = await em.query(
+        `
+        DELETE FROM cashbox_transactions
+         WHERE reference_type = 'invoice'
+           AND reference_id = ANY($1::uuid[])
+        RETURNING id
+        `,
+        [ids],
+      );
+
+      // invoice_payments auto-cascades with invoices; same for
+      // invoice_items.
+      const inv = await em.query(
+        `DELETE FROM invoices WHERE id = ANY($1::uuid[]) RETURNING id`,
+        [ids],
+      );
+
+      return {
+        invoices_deleted: inv.length,
+        journal_entries_deleted: je.length,
+        cashbox_txns_deleted: ct.length,
+      };
+    });
+  }
+
+  /**
    * Hard reset: void every auto-posted journal entry and let the
    * caller re-run backfill. Safer alternative to DELETE since voided
    * entries keep an audit trail.

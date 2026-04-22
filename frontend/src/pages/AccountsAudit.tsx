@@ -134,15 +134,28 @@ export default function AccountsAudit() {
       invalidateAll();
     },
   });
+  const purgeMut = useMutation({
+    mutationFn: () => accountsApi.purgeCancelled(),
+    onSuccess: (r) => {
+      toast.success(
+        `تم حذف ${r.invoices_deleted} فاتورة ملغاة · ${r.journal_entries_deleted} قيد · ${r.cashbox_txns_deleted} حركة خزنة`,
+        { duration: 6000 },
+      );
+      invalidateAll();
+    },
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.message || 'فشل الحذف'),
+  });
 
   const fullRebuild = async () => {
     if (
       !confirm(
-        '⚠ إعادة بناء كاملة:\n\n١. إلغاء كل القيود التلقائية الحالية\n٢. ترحيلها من جديد من المصادر الأصلية\n٣. إعادة حساب كل أرصدة الخزائن\n\nهذا لا يلغي أي فاتورة أو مصروف — فقط يعيد بناء القيود المحاسبية. متابعة؟',
+        '⚠ إعادة بناء كاملة:\n\n١. حذف نهائي للفواتير الملغاة + قيودها\n٢. إلغاء كل القيود التلقائية الحالية\n٣. ترحيلها من جديد من المصادر الأصلية\n٤. إعادة حساب كل أرصدة الخزائن\n\nالفواتير النشطة والمصروفات لا تُحذف — فقط الملغاة. متابعة؟',
       )
     )
       return;
     try {
+      await purgeMut.mutateAsync();
       await resetMut.mutateAsync();
       await backfillMut.mutateAsync();
       await recomputeAll.mutateAsync();
@@ -295,7 +308,7 @@ export default function AccountsAudit() {
         <div className="flex items-center gap-2 mb-3 font-black">
           <Wrench size={18} className="text-indigo-600" /> إجراءات الإصلاح
         </div>
-        <div className="grid md:grid-cols-3 gap-3">
+        <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-3">
           <ActionCard
             title="١. ترحيل تلقائي للقديم"
             detail="يقرأ الفواتير والمصروفات والدفعات والورديات والمرتجعات والمشتريات من المصادر الأصلية وينشئ لها قيود GL (يتجاهل اللي موجود بالفعل)"
@@ -315,14 +328,31 @@ export default function AccountsAudit() {
             label="إعادة الحساب"
           />
           <ActionCard
-            title="٣. إعادة بناء كاملة ⚠"
-            detail="يلغي كل القيود التلقائية الحالية ثم يعيد ترحيلها + يعيد حساب كل الأرصدة. استخدمه لو الأرقام متعارضة جداً"
+            title="٣. حذف الفواتير الملغاة"
+            detail="يحذف نهائياً كل الفواتير التي حالتها cancelled + قيودها المحاسبية + حركات خزنتها. الفواتير النشطة لا تُمس. مفيد لتنظيف بيانات قديمة تشوّش الأرقام"
+            color="amber"
+            onClick={() => {
+              if (
+                confirm(
+                  'هل أنت متأكد من حذف كل الفواتير الملغاة + قيودها نهائياً؟\n\nالفواتير النشطة والمصروفات والدفعات لن تُمس.',
+                )
+              )
+                purgeMut.mutate();
+            }}
+            loading={purgeMut.isPending}
+            icon={<Wrench size={14} />}
+            label="تنظيف الملغاة"
+          />
+          <ActionCard
+            title="٤. إعادة بناء كاملة ⚠"
+            detail="ينفذ الخطوات ١+٢+٣ بالترتيب الصحيح: يحذف الملغاة → يعيد ترحيل الباقي → يعيد حساب الأرصدة. الحل الشامل لأي انحراف"
             color="rose"
             onClick={fullRebuild}
             loading={
               resetMut.isPending ||
               backfillMut.isPending ||
-              recomputeAll.isPending
+              recomputeAll.isPending ||
+              purgeMut.isPending
             }
             icon={<Wrench size={14} />}
             label="إعادة بناء كامل"

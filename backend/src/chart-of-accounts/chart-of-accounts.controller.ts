@@ -619,6 +619,16 @@ export class ChartOfAccountsController {
     return this.recon.resetAutoPostedEntries();
   }
 
+  @Post('audit/purge-cancelled')
+  @Permissions('accounts.journal.void')
+  @ApiOperation({
+    summary:
+      'حذف نهائي للفواتير الملغاة + قيودها + حركات الخزنة المرتبطة',
+  })
+  purgeCancelled() {
+    return this.recon.purgeCancelledInvoices();
+  }
+
   // ── Migrations ──────────────────────────────────────────────────────
 
   @Get('audit/migrations')

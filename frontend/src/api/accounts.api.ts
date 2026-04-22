@@ -344,6 +344,13 @@ export const accountsApi = {
       api.post('/accounts/audit/reset-auto-entries', {}),
     ),
 
+  purgeCancelled: () =>
+    unwrap<{
+      invoices_deleted: number;
+      journal_entries_deleted: number;
+      cashbox_txns_deleted: number;
+    }>(api.post('/accounts/audit/purge-cancelled', {})),
+
   migrationsStatus: () =>
     unwrap<{
       dir: string;
