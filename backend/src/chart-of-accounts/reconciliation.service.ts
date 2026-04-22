@@ -293,6 +293,51 @@ export class ReconciliationService {
     return { cashbox_id: cashboxId, new_balance: computed };
   }
 
+  /**
+   * Deduplicate cashbox_transactions: when the same source document
+   * (invoice / expense / payment / …) appears in multiple rows with
+   * the same direction + amount on the same cashbox, keep the oldest
+   * and delete the rest. Handles the "مبيعات سابقة backfill" duplicates
+   * a prior manual import introduced.
+   *
+   * Opening-balance and manual-adjustment rows (no reference_id) are
+   * never touched — those can't be regenerated from source docs.
+   */
+  async dedupeCashboxTransactions(): Promise<{
+    duplicates_removed: number;
+    groups: number;
+  }> {
+    const r = await this.ds.query(
+      `
+      WITH dupes AS (
+        SELECT id,
+               ROW_NUMBER() OVER (
+                 PARTITION BY cashbox_id, reference_type, reference_id,
+                              direction, amount
+                 ORDER BY created_at ASC, id ASC
+               ) AS rn
+          FROM cashbox_transactions
+         WHERE reference_id IS NOT NULL
+      )
+      DELETE FROM cashbox_transactions
+       WHERE id IN (SELECT id FROM dupes WHERE rn > 1)
+      RETURNING id
+      `,
+    );
+    const [{ groups }] = await this.ds.query(
+      `
+      SELECT COUNT(*)::int AS groups
+        FROM (
+          SELECT cashbox_id, reference_type, reference_id, direction, amount
+            FROM cashbox_transactions
+           WHERE reference_id IS NOT NULL
+           GROUP BY 1, 2, 3, 4, 5
+        ) x
+      `,
+    );
+    return { duplicates_removed: r.length, groups };
+  }
+
   /** Rebuild all active cashbox balances. */
   async recomputeAllCashboxes() {
     const boxes = await this.ds.query(

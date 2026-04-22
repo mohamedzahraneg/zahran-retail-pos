@@ -648,6 +648,16 @@ export class ChartOfAccountsController {
     return this.recon.forcePostInvoices(this.posting, user.userId);
   }
 
+  @Post('audit/dedupe-cashbox')
+  @Permissions('accounts.journal.post')
+  @ApiOperation({
+    summary:
+      'إزالة الحركات المكررة في cashbox_transactions (نفس الفاتورة/المصروف مسجّل مرتين)',
+  })
+  dedupeCashbox() {
+    return this.recon.dedupeCashboxTransactions();
+  }
+
   // ── Migrations ──────────────────────────────────────────────────────
 
   @Get('audit/migrations')

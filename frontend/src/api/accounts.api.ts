@@ -381,6 +381,11 @@ export const accountsApi = {
       }>;
     }>(api.post('/accounts/audit/force-post-invoices', {})),
 
+  dedupeCashbox: () =>
+    unwrap<{ duplicates_removed: number; groups: number }>(
+      api.post('/accounts/audit/dedupe-cashbox', {}),
+    ),
+
   migrationsStatus: () =>
     unwrap<{
       dir: string;

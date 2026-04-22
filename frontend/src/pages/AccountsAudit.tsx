@@ -157,6 +157,19 @@ export default function AccountsAudit() {
       toast.error(e?.response?.data?.message || 'فشل الترحيل'),
   });
 
+  const dedupeMut = useMutation({
+    mutationFn: () => accountsApi.dedupeCashbox(),
+    onSuccess: (r) => {
+      toast.success(
+        `تم حذف ${r.duplicates_removed} حركة مكررة من cashbox_transactions`,
+        { duration: 6000 },
+      );
+      invalidateAll();
+    },
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.message || 'فشل الحذف'),
+  });
+
   const forcePostInvoicesMut = useMutation({
     mutationFn: () => accountsApi.forcePostInvoices(),
     onSuccess: (r) => {
@@ -196,7 +209,7 @@ export default function AccountsAudit() {
   const fullRebuild = async () => {
     if (
       !confirm(
-        '⚠ إعادة بناء كاملة:\n\n١. حذف نهائي للفواتير الملغاة + قيودها\n٢. إلغاء كل القيود التلقائية الحالية\n٣. ترحيلها من جديد من المصادر الأصلية\n٤. إعادة حساب كل أرصدة الخزائن\n\nالفواتير النشطة والمصروفات لا تُحذف — فقط الملغاة. متابعة؟',
+        '⚠ إعادة بناء كاملة:\n\n١. حذف نهائي للفواتير الملغاة + قيودها\n٢. إلغاء كل القيود التلقائية الحالية\n٣. ترحيلها من جديد من المصادر الأصلية\n٤. إزالة الحركات المكررة من cashbox_transactions\n٥. إعادة حساب كل أرصدة الخزائن\n\nالفواتير النشطة والمصروفات لا تُحذف — فقط الملغاة والمكررات. متابعة؟',
       )
     )
       return;
@@ -204,6 +217,7 @@ export default function AccountsAudit() {
       await purgeMut.mutateAsync();
       await resetMut.mutateAsync();
       await backfillMut.mutateAsync();
+      await dedupeMut.mutateAsync();
       await recomputeAll.mutateAsync();
       await refetchSummary();
       toast.success('تمت إعادة البناء بنجاح ✓', { duration: 6000 });
@@ -374,20 +388,20 @@ export default function AccountsAudit() {
             label="إعادة الحساب"
           />
           <ActionCard
-            title="٣. حذف الفواتير الملغاة"
-            detail="يحذف نهائياً كل الفواتير التي حالتها cancelled + قيودها المحاسبية + حركات خزنتها. الفواتير النشطة لا تُمس. مفيد لتنظيف بيانات قديمة تشوّش الأرقام"
+            title="٣. إزالة الحركات المكررة"
+            detail="بعض الحركات في cashbox_transactions مسجّلة مرتين لنفس الفاتورة/المصروف (مثلاً backfill مبيعات سابقة). هذا الإجراء يحتفظ بواحدة ويحذف المكررات — يصلح مضاعفة الرصيد"
             color="amber"
             onClick={() => {
               if (
                 confirm(
-                  'هل أنت متأكد من حذف كل الفواتير الملغاة + قيودها نهائياً؟\n\nالفواتير النشطة والمصروفات والدفعات لن تُمس.',
+                  'إزالة كل الحركات المكررة من cashbox_transactions؟\n\nيحتفظ بأقدم حركة لكل مرجع ويحذف الباقي.',
                 )
               )
-                purgeMut.mutate();
+                dedupeMut.mutate();
             }}
-            loading={purgeMut.isPending}
+            loading={dedupeMut.isPending}
             icon={<Wrench size={14} />}
-            label="تنظيف الملغاة"
+            label="إزالة المكررات"
           />
           <ActionCard
             title="٤. إعادة بناء كاملة ⚠"
