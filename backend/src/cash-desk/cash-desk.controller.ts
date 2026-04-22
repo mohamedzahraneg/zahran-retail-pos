@@ -7,7 +7,7 @@ import {
   Post,
   Query,
 } from '@nestjs/common';
-import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import {
   IsDateString,
   IsIn,
@@ -73,6 +73,13 @@ class CashboxUpdateDto extends CashboxCreateDto {
   declare kind: 'cash' | 'bank' | 'ewallet' | 'check';
 }
 
+class TransferDto {
+  @IsUUID() from_cashbox_id: string;
+  @IsUUID() to_cashbox_id: string;
+  @IsNumber() @Min(0.01) amount: number;
+  @IsOptional() @IsString() notes?: string;
+}
+
 @ApiBearerAuth()
 @ApiTags('cash-desk')
 @Permissions('cashdesk.view')
@@ -114,6 +121,14 @@ export class CashDeskController {
   @Permissions('cashdesk.manage_accounts')
   removeCashbox(@Param('id', ParseUUIDPipe) id: string) {
     return this.svc.removeCashbox(id);
+  }
+
+  @Post('transfer')
+  @Roles('admin', 'manager', 'accountant')
+  @Permissions('cashdesk.view')
+  @ApiOperation({ summary: 'تحويل نقدية بين خزنتين' })
+  transfer(@Body() dto: TransferDto, @CurrentUser() user: JwtUser) {
+    return this.svc.transferBetweenCashboxes(dto, user.userId);
   }
 
   @Get('cashflow/today')

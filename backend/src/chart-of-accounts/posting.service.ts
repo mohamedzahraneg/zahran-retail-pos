@@ -243,6 +243,36 @@ export class AccountingPostingService {
     });
   }
 
+  /** Cashbox-to-cashbox transfer → DR destination-cash, CR source-cash. */
+  async postCashboxTransfer(
+    txnId: string,
+    fromCashboxId: string,
+    toCashboxId: string,
+    amount: number,
+    description: string,
+    userId: string,
+    em?: EntityManager,
+  ) {
+    return this.safe('cashbox_transfer', txnId, em, async (q) => {
+      if (!(amount > 0)) return null;
+      const fromAcc = await this.cashboxAccountId(q, fromCashboxId);
+      const toAcc = await this.cashboxAccountId(q, toCashboxId);
+      if (!fromAcc || !toAcc) return null;
+      const today = new Date().toISOString().slice(0, 10);
+      return this.createEntry(q, {
+        entry_date: today,
+        description,
+        reference_type: 'cashbox_transfer',
+        reference_id: txnId,
+        lines: [
+          { account_id: toAcc, debit: amount, credit: 0, cashbox_id: toCashboxId },
+          { account_id: fromAcc, debit: 0, credit: amount, cashbox_id: fromCashboxId },
+        ],
+        created_by: userId,
+      });
+    });
+  }
+
   /** Manual cashbox deposit/withdrawal — posts capital adjustments. */
   async postCashboxDeposit(
     txnId: string,

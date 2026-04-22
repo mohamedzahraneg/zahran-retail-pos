@@ -31,6 +31,7 @@ import {
   CreateJournalEntryDto,
 } from './journal.service';
 import { AccountingPostingService } from './posting.service';
+import { AccountingReportsService } from './reports.service';
 import { Permissions } from '../common/decorators/roles.decorator';
 import {
   CurrentUser,
@@ -92,6 +93,7 @@ export class ChartOfAccountsController {
     private readonly coa: ChartOfAccountsService,
     private readonly journal: JournalService,
     private readonly posting: AccountingPostingService,
+    private readonly reports: AccountingReportsService,
   ) {}
 
   // ── Chart of Accounts ──────────────────────────────────────────────
@@ -205,5 +207,32 @@ export class ChartOfAccountsController {
       since: body?.since,
       userId: user.userId,
     });
+  }
+
+  // ── Reports ─────────────────────────────────────────────────────────
+
+  @Get('chart/:id/ledger')
+  @Permissions('accounts.chart.view')
+  @ApiOperation({ summary: 'كشف حساب — كل قيود حساب معين' })
+  accountLedger(
+    @Param('id') id: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    return this.reports.accountLedger(id, from, to);
+  }
+
+  @Get('reports/income-statement')
+  @Permissions('accounts.chart.view')
+  @ApiOperation({ summary: 'قائمة الدخل' })
+  incomeStatement(@Query('from') from: string, @Query('to') to: string) {
+    return this.reports.incomeStatement(from, to);
+  }
+
+  @Get('reports/balance-sheet')
+  @Permissions('accounts.chart.view')
+  @ApiOperation({ summary: 'الميزانية العمومية' })
+  balanceSheet(@Query('as_of') as_of: string) {
+    return this.reports.balanceSheet(as_of);
   }
 }

@@ -15,6 +15,9 @@ import {
   Lock,
   TreePine,
   Scale,
+  TrendingUp,
+  PieChart,
+  Eye,
 } from 'lucide-react';
 
 import {
@@ -50,7 +53,7 @@ const TYPE_COLORS: Record<AccountType, string> = {
   expense: 'bg-amber-100 text-amber-800 border-amber-200',
 };
 
-type Tab = 'tree' | 'journal' | 'trial';
+type Tab = 'tree' | 'journal' | 'trial' | 'income' | 'balance';
 
 export default function Accounts() {
   const [tab, setTab] = useState<Tab>('tree');
@@ -88,11 +91,25 @@ export default function Accounts() {
             icon={<Scale className="w-4 h-4" />}
             label="ميزان المراجعة"
           />
+          <TabBtn
+            active={tab === 'income'}
+            onClick={() => setTab('income')}
+            icon={<TrendingUp className="w-4 h-4" />}
+            label="قائمة الدخل"
+          />
+          <TabBtn
+            active={tab === 'balance'}
+            onClick={() => setTab('balance')}
+            icon={<PieChart className="w-4 h-4" />}
+            label="الميزانية العمومية"
+          />
         </div>
         <div className="p-4">
           {tab === 'tree' && <ChartTree />}
           {tab === 'journal' && <JournalTab />}
           {tab === 'trial' && <TrialBalanceTab />}
+          {tab === 'income' && <IncomeStatementTab />}
+          {tab === 'balance' && <BalanceSheetTab />}
         </div>
       </div>
     </div>
@@ -136,6 +153,7 @@ function ChartTree() {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [createFor, setCreateFor] = useState<Account | null | 'root'>(null);
   const [editing, setEditing] = useState<Account | null>(null);
+  const [ledgerFor, setLedgerFor] = useState<Account | null>(null);
   const [filterType, setFilterType] = useState<AccountType | ''>('');
   const [q, setQ] = useState('');
 
@@ -248,6 +266,7 @@ function ChartTree() {
             canManage={canManage}
             onAddChild={(p) => setCreateFor(p)}
             onEdit={(a) => setEditing(a)}
+            onView={(a) => setLedgerFor(a)}
           />
         ))}
         {(tree['__root__'] || []).length === 0 && (
@@ -270,6 +289,14 @@ function ChartTree() {
           onClose={() => setEditing(null)}
         />
       )}
+      {ledgerFor && (
+        <AccountLedgerDrawer
+          accountId={ledgerFor.id}
+          accountCode={ledgerFor.code}
+          accountName={ledgerFor.name_ar}
+          onClose={() => setLedgerFor(null)}
+        />
+      )}
     </div>
   );
 }
@@ -282,6 +309,7 @@ function AccountRow({
   canManage,
   onAddChild,
   onEdit,
+  onView,
 }: {
   account: Account;
   childrenByParent: Record<string, Account[]>;
@@ -290,6 +318,7 @@ function AccountRow({
   canManage: boolean;
   onAddChild: (a: Account) => void;
   onEdit: (a: Account) => void;
+  onView: (a: Account) => void;
 }) {
   const qc = useQueryClient();
   const kids = childrenByParent[account.id] || [];
@@ -366,38 +395,47 @@ function AccountRow({
         >
           {EGP(balance)}
         </span>
-        {canManage && (
-          <div className="flex gap-1 shrink-0">
-            <button
-              onClick={() => onAddChild(account)}
-              className="p-1 hover:bg-slate-200 rounded text-slate-500"
-              title="إضافة حساب فرعي"
-            >
-              <Plus size={14} />
-            </button>
-            <button
-              onClick={() => onEdit(account)}
-              className="p-1 hover:bg-slate-200 rounded text-slate-500"
-              title="تعديل"
-            >
-              <Edit3 size={14} />
-            </button>
-            {!account.is_system && (
+        <div className="flex gap-1 shrink-0">
+          <button
+            onClick={() => onView(account)}
+            className="p-1 hover:bg-slate-200 rounded text-slate-500"
+            title="كشف حساب"
+          >
+            <Eye size={14} />
+          </button>
+          {canManage && (
+            <>
               <button
-                onClick={() => {
-                  if (confirm(`حذف الحساب "${account.name_ar}"؟`)) {
-                    del.mutate();
-                  }
-                }}
-                className="p-1 hover:bg-rose-100 rounded text-rose-600"
-                title="حذف"
-                disabled={del.isPending}
+                onClick={() => onAddChild(account)}
+                className="p-1 hover:bg-slate-200 rounded text-slate-500"
+                title="إضافة حساب فرعي"
               >
-                <Trash2 size={14} />
+                <Plus size={14} />
               </button>
-            )}
-          </div>
-        )}
+              <button
+                onClick={() => onEdit(account)}
+                className="p-1 hover:bg-slate-200 rounded text-slate-500"
+                title="تعديل"
+              >
+                <Edit3 size={14} />
+              </button>
+              {!account.is_system && (
+                <button
+                  onClick={() => {
+                    if (confirm(`حذف الحساب "${account.name_ar}"؟`)) {
+                      del.mutate();
+                    }
+                  }}
+                  className="p-1 hover:bg-rose-100 rounded text-rose-600"
+                  title="حذف"
+                  disabled={del.isPending}
+                >
+                  <Trash2 size={14} />
+                </button>
+              )}
+            </>
+          )}
+        </div>
       </div>
       {isOpen &&
         kids.map((kid) => (
@@ -410,6 +448,7 @@ function AccountRow({
             canManage={canManage}
             onAddChild={onAddChild}
             onEdit={onEdit}
+            onView={onView}
           />
         ))}
     </>
@@ -1288,6 +1327,498 @@ function TrialBalanceTab() {
             ))}
           </tbody>
         </table>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Income Statement
+// ═══════════════════════════════════════════════════════════════════════
+
+function IncomeStatementTab() {
+  const todayISO = new Date().toISOString().slice(0, 10);
+  const monthStart = todayISO.slice(0, 7) + '-01';
+  const [from, setFrom] = useState(monthStart);
+  const [to, setTo] = useState(todayISO);
+
+  const { data, isLoading } = useQuery({
+    queryKey: ['income-statement', from, to],
+    queryFn: () => accountsApi.incomeStatement({ from, to }),
+  });
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-3 flex-wrap">
+        <label className="text-sm">من</label>
+        <input
+          type="date"
+          value={from}
+          onChange={(e) => setFrom(e.target.value)}
+          className="input w-40"
+        />
+        <label className="text-sm">إلى</label>
+        <input
+          type="date"
+          value={to}
+          onChange={(e) => setTo(e.target.value)}
+          className="input w-40"
+        />
+      </div>
+      {isLoading ? (
+        <div className="py-12 text-center text-slate-400">جارٍ التحميل...</div>
+      ) : !data ? null : (
+        <>
+          <div className="grid md:grid-cols-3 gap-3">
+            <KpiTile
+              label="إجمالي الإيرادات"
+              value={EGP(data.total_revenue)}
+              color="emerald"
+            />
+            <KpiTile
+              label="إجمالي المصروفات"
+              value={EGP(data.total_expenses)}
+              color="rose"
+            />
+            <KpiTile
+              label={data.net_profit >= 0 ? 'صافي الربح' : 'صافي الخسارة'}
+              value={EGP(Math.abs(data.net_profit))}
+              color={data.net_profit >= 0 ? 'indigo' : 'rose'}
+            />
+          </div>
+
+          <div className="border border-slate-200 rounded-lg overflow-hidden">
+            <ReportTree
+              nodes={data.accounts.filter((a) => a.account_type === 'revenue')}
+              heading="الإيرادات"
+              color="text-emerald-700"
+            />
+            <ReportTree
+              nodes={data.accounts.filter((a) => a.account_type === 'expense')}
+              heading="المصروفات"
+              color="text-rose-700"
+            />
+            <div className="p-3 bg-slate-50 border-t-2 border-slate-300 flex items-center justify-between font-black">
+              <span>صافي الربح / (الخسارة)</span>
+              <span
+                className={`font-mono ${
+                  data.net_profit >= 0 ? 'text-indigo-700' : 'text-rose-700'
+                }`}
+              >
+                {data.net_profit >= 0 ? '' : '('}
+                {EGP(Math.abs(data.net_profit))}
+                {data.net_profit >= 0 ? '' : ')'}
+              </span>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Balance Sheet
+// ═══════════════════════════════════════════════════════════════════════
+
+function BalanceSheetTab() {
+  const todayISO = new Date().toISOString().slice(0, 10);
+  const [asOf, setAsOf] = useState(todayISO);
+
+  const { data, isLoading } = useQuery({
+    queryKey: ['balance-sheet', asOf],
+    queryFn: () => accountsApi.balanceSheet({ as_of: asOf }),
+  });
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-3 flex-wrap">
+        <label className="text-sm">بتاريخ</label>
+        <input
+          type="date"
+          value={asOf}
+          onChange={(e) => setAsOf(e.target.value)}
+          className="input w-40"
+        />
+        {data && (
+          <span
+            className={`chip mr-auto ${
+              data.balanced
+                ? 'bg-emerald-100 text-emerald-700'
+                : 'bg-rose-100 text-rose-700'
+            }`}
+          >
+            {data.balanced ? '✓ الميزانية متوازنة' : '⚠ الميزانية غير متوازنة'}
+          </span>
+        )}
+      </div>
+      {isLoading ? (
+        <div className="py-12 text-center text-slate-400">جارٍ التحميل...</div>
+      ) : !data ? null : (
+        <>
+          <div className="grid md:grid-cols-3 gap-3">
+            <KpiTile label="إجمالي الأصول" value={EGP(data.total_assets)} color="emerald" />
+            <KpiTile label="إجمالي الخصوم" value={EGP(data.total_liabilities)} color="rose" />
+            <KpiTile
+              label="إجمالي حقوق الملكية"
+              value={EGP(data.total_equity)}
+              color="indigo"
+              hint={`منها ربح/خسارة الفترة: ${EGP(data.period_net_profit)}`}
+            />
+          </div>
+          <div className="grid md:grid-cols-2 gap-3">
+            <div className="border border-slate-200 rounded-lg overflow-hidden">
+              <ReportTree
+                nodes={data.accounts.filter((a) => a.account_type === 'asset')}
+                heading="الأصول"
+                color="text-emerald-700"
+              />
+            </div>
+            <div className="border border-slate-200 rounded-lg overflow-hidden">
+              <ReportTree
+                nodes={data.accounts.filter((a) => a.account_type === 'liability')}
+                heading="الخصوم"
+                color="text-rose-700"
+              />
+              <ReportTree
+                nodes={data.accounts.filter((a) => a.account_type === 'equity')}
+                heading="حقوق الملكية"
+                color="text-indigo-700"
+                extraRows={[
+                  {
+                    label: 'ربح / خسارة الفترة',
+                    amount: data.period_net_profit,
+                  },
+                ]}
+              />
+              <div className="p-3 bg-slate-50 border-t-2 border-slate-300 flex items-center justify-between font-black text-sm">
+                <span>الخصوم + حقوق الملكية</span>
+                <span className="font-mono">
+                  {EGP(data.total_liabilities + data.total_equity)}
+                </span>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Shared report widgets
+// ═══════════════════════════════════════════════════════════════════════
+
+function KpiTile({
+  label,
+  value,
+  color,
+  hint,
+}: {
+  label: string;
+  value: string;
+  color: 'emerald' | 'rose' | 'indigo';
+  hint?: string;
+}) {
+  const cls = {
+    emerald: 'bg-emerald-50 border-emerald-200 text-emerald-800',
+    rose: 'bg-rose-50 border-rose-200 text-rose-800',
+    indigo: 'bg-indigo-50 border-indigo-200 text-indigo-800',
+  }[color];
+  return (
+    <div className={`card p-4 border-2 ${cls}`}>
+      <div className="text-xs font-bold opacity-80">{label}</div>
+      <div className="font-black text-2xl font-mono mt-1">{value}</div>
+      {hint && <div className="text-[11px] opacity-70 mt-0.5">{hint}</div>}
+    </div>
+  );
+}
+
+function ReportTree({
+  nodes,
+  heading,
+  color,
+  extraRows,
+}: {
+  nodes: Array<{
+    id: string;
+    code: string;
+    name_ar: string;
+    parent_id: string | null;
+    is_leaf: boolean;
+    amount: number;
+  }>;
+  heading: string;
+  color: string;
+  extraRows?: Array<{ label: string; amount: number }>;
+}) {
+  const [ledgerFor, setLedgerFor] = useState<{
+    id: string;
+    code: string;
+    name: string;
+  } | null>(null);
+  const byParent: Record<string, any[]> = {};
+  const idSet = new Set(nodes.map((n) => n.id));
+  for (const n of nodes) {
+    const key =
+      n.parent_id && idSet.has(n.parent_id) ? n.parent_id : '__root__';
+    (byParent[key] ||= []).push(n);
+  }
+
+  const total = (byParent['__root__'] || []).reduce(
+    (s, n) => s + Number(n.amount || 0),
+    0,
+  );
+  const extraSum =
+    extraRows?.reduce((s, r) => s + Number(r.amount || 0), 0) || 0;
+
+  const Row = ({ node, level }: { node: any; level: number }) => {
+    const kids = byParent[node.id] || [];
+    return (
+      <>
+        <div
+          className={`flex items-center gap-2 py-1.5 px-3 border-b border-slate-100 hover:bg-slate-50 text-sm ${
+            node.is_leaf ? 'cursor-pointer' : ''
+          }`}
+          style={{ paddingInlineStart: 12 + level * 20 }}
+          onClick={() =>
+            node.is_leaf &&
+            setLedgerFor({ id: node.id, code: node.code, name: node.name_ar })
+          }
+        >
+          <span className="font-mono text-xs text-slate-500 w-12">
+            {node.code}
+          </span>
+          <span className={`flex-1 ${node.is_leaf ? '' : 'font-bold'}`}>
+            {node.name_ar}
+          </span>
+          {node.is_leaf && (
+            <Eye size={12} className="text-slate-400 opacity-0 group-hover:opacity-100" />
+          )}
+          <span
+            className={`font-mono font-bold tabular-nums ${
+              node.is_leaf ? '' : color
+            }`}
+          >
+            {EGP(node.amount)}
+          </span>
+        </div>
+        {kids.map((k) => (
+          <Row key={k.id} node={k} level={level + 1} />
+        ))}
+      </>
+    );
+  };
+
+  return (
+    <>
+      <div className="p-3 bg-slate-50 font-black text-sm border-b border-slate-200">
+        {heading}
+      </div>
+      {(byParent['__root__'] || []).map((n) => (
+        <Row key={n.id} node={n} level={0} />
+      ))}
+      {extraRows?.map((r, i) => (
+        <div
+          key={i}
+          className="flex items-center justify-between py-1.5 px-3 border-b border-slate-100 text-sm italic text-slate-600"
+          style={{ paddingInlineStart: 32 }}
+        >
+          <span>{r.label}</span>
+          <span className="font-mono">{EGP(r.amount)}</span>
+        </div>
+      ))}
+      <div
+        className={`flex items-center justify-between py-2 px-3 bg-slate-50 border-t border-slate-300 font-black ${color}`}
+      >
+        <span>الإجمالي</span>
+        <span className="font-mono">{EGP(total + extraSum)}</span>
+      </div>
+
+      {ledgerFor && (
+        <AccountLedgerDrawer
+          accountId={ledgerFor.id}
+          accountCode={ledgerFor.code}
+          accountName={ledgerFor.name}
+          onClose={() => setLedgerFor(null)}
+        />
+      )}
+    </>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Account Ledger drawer
+// ═══════════════════════════════════════════════════════════════════════
+
+function AccountLedgerDrawer({
+  accountId,
+  accountCode,
+  accountName,
+  onClose,
+}: {
+  accountId: string;
+  accountCode: string;
+  accountName: string;
+  onClose: () => void;
+}) {
+  const todayISO = new Date().toISOString().slice(0, 10);
+  const monthStart = todayISO.slice(0, 7) + '-01';
+  const [from, setFrom] = useState(monthStart);
+  const [to, setTo] = useState(todayISO);
+
+  const { data, isLoading } = useQuery({
+    queryKey: ['ledger', accountId, from, to],
+    queryFn: () => accountsApi.accountLedger(accountId, { from, to }),
+  });
+
+  return (
+    <div className="fixed inset-0 bg-slate-900/50 z-50 flex items-start justify-center p-4">
+      <div className="bg-white rounded-2xl w-full max-w-5xl max-h-[90vh] overflow-y-auto">
+        <div className="flex items-center justify-between p-5 border-b border-slate-100 sticky top-0 bg-white z-10">
+          <h3 className="font-black text-lg text-slate-800">
+            كشف حساب: <span className="font-mono">{accountCode}</span>{' '}
+            {accountName}
+          </h3>
+          <button
+            onClick={onClose}
+            className="p-1 hover:bg-slate-100 rounded"
+          >
+            <X size={20} />
+          </button>
+        </div>
+        <div className="p-5 space-y-3">
+          <div className="flex items-center gap-3 flex-wrap">
+            <label className="text-sm">من</label>
+            <input
+              type="date"
+              value={from}
+              onChange={(e) => setFrom(e.target.value)}
+              className="input w-40"
+            />
+            <label className="text-sm">إلى</label>
+            <input
+              type="date"
+              value={to}
+              onChange={(e) => setTo(e.target.value)}
+              className="input w-40"
+            />
+          </div>
+
+          {isLoading ? (
+            <div className="py-12 text-center text-slate-400">
+              جارٍ التحميل...
+            </div>
+          ) : !data ? null : (
+            <>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                <div className="card p-3 border border-slate-200 bg-slate-50">
+                  <div className="text-xs text-slate-500">الرصيد الافتتاحي</div>
+                  <div className="font-mono font-bold">
+                    {EGP(data.opening_balance)}
+                  </div>
+                </div>
+                <div className="card p-3 border border-slate-200 bg-emerald-50">
+                  <div className="text-xs text-slate-500">إجمالي مدين</div>
+                  <div className="font-mono font-bold text-emerald-700">
+                    {EGP(data.total_debit)}
+                  </div>
+                </div>
+                <div className="card p-3 border border-slate-200 bg-rose-50">
+                  <div className="text-xs text-slate-500">إجمالي دائن</div>
+                  <div className="font-mono font-bold text-rose-700">
+                    {EGP(data.total_credit)}
+                  </div>
+                </div>
+                <div className="card p-3 border-2 border-indigo-300 bg-indigo-50">
+                  <div className="text-xs text-slate-500">الرصيد الختامي</div>
+                  <div className="font-mono font-black text-indigo-700">
+                    {EGP(data.closing_balance)}
+                  </div>
+                </div>
+              </div>
+
+              <div className="border border-slate-200 rounded-lg overflow-hidden">
+                <table className="min-w-full text-sm">
+                  <thead className="bg-slate-50 text-xs font-bold text-slate-600">
+                    <tr>
+                      <th className="text-right px-3 py-2">التاريخ</th>
+                      <th className="text-right px-3 py-2">رقم القيد</th>
+                      <th className="text-right px-3 py-2">البيان</th>
+                      <th className="text-right px-3 py-2">المصدر</th>
+                      <th className="text-right px-3 py-2">مدين</th>
+                      <th className="text-right px-3 py-2">دائن</th>
+                      <th className="text-right px-3 py-2">الرصيد</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr className="border-t border-slate-100 bg-slate-50/60">
+                      <td colSpan={6} className="px-3 py-2 font-bold text-xs text-slate-500">
+                        الرصيد الافتتاحي
+                      </td>
+                      <td className="px-3 py-2 font-mono font-bold">
+                        {EGP(data.opening_balance)}
+                      </td>
+                    </tr>
+                    {data.lines.length === 0 ? (
+                      <tr>
+                        <td
+                          colSpan={7}
+                          className="text-center py-10 text-slate-400"
+                        >
+                          لا توجد حركات في هذه الفترة
+                        </td>
+                      </tr>
+                    ) : (
+                      data.lines.map((l) => (
+                        <tr
+                          key={l.id}
+                          className="border-t border-slate-100 hover:bg-slate-50/60"
+                        >
+                          <td className="px-3 py-2 text-xs font-mono">
+                            {l.entry_date}
+                          </td>
+                          <td className="px-3 py-2 font-mono font-bold text-brand-700">
+                            {l.entry_no}
+                          </td>
+                          <td className="px-3 py-2 max-w-xs truncate">
+                            {l.description || l.entry_description || '—'}
+                          </td>
+                          <td className="px-3 py-2 text-xs text-slate-500">
+                            {l.reference_type || '—'}
+                          </td>
+                          <td className="px-3 py-2 font-mono font-bold text-emerald-700">
+                            {l.debit > 0 ? EGP(l.debit) : '—'}
+                          </td>
+                          <td className="px-3 py-2 font-mono font-bold text-rose-700">
+                            {l.credit > 0 ? EGP(l.credit) : '—'}
+                          </td>
+                          <td className="px-3 py-2 font-mono font-bold">
+                            {EGP(l.running_balance)}
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                    <tr className="bg-slate-50 border-t-2 border-slate-300 font-black">
+                      <td colSpan={4} className="px-3 py-2">
+                        الإجمالي
+                      </td>
+                      <td className="px-3 py-2 font-mono text-emerald-700">
+                        {EGP(data.total_debit)}
+                      </td>
+                      <td className="px-3 py-2 font-mono text-rose-700">
+                        {EGP(data.total_credit)}
+                      </td>
+                      <td className="px-3 py-2 font-mono">
+                        {EGP(data.closing_balance)}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+        </div>
       </div>
     </div>
   );

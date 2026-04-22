@@ -335,6 +335,117 @@ export class CashDeskService {
     return row;
   }
 
+  /**
+   * Move cash between two cashboxes. Creates two cashbox_transactions
+   * (one out, one in), updates both balances, and emits a single linked
+   * journal entry: DR destination-cash, CR source-cash.
+   */
+  async transferBetweenCashboxes(
+    dto: {
+      from_cashbox_id: string;
+      to_cashbox_id: string;
+      amount: number;
+      notes?: string;
+    },
+    userId: string,
+  ) {
+    if (dto.from_cashbox_id === dto.to_cashbox_id) {
+      throw new BadRequestException('لا يمكن التحويل بين نفس الخزنة');
+    }
+    const amount = Number(dto.amount);
+    if (!(amount > 0)) {
+      throw new BadRequestException('المبلغ يجب أن يكون أكبر من صفر');
+    }
+
+    return this.ds.transaction(async (em) => {
+      // Lock both rows so concurrent transfers don't double-spend.
+      const [from] = await em.query(
+        `SELECT id, current_balance, name_ar FROM cashboxes
+          WHERE id = $1 FOR UPDATE`,
+        [dto.from_cashbox_id],
+      );
+      const [to] = await em.query(
+        `SELECT id, current_balance, name_ar FROM cashboxes
+          WHERE id = $1 FOR UPDATE`,
+        [dto.to_cashbox_id],
+      );
+      if (!from) throw new NotFoundException('الخزنة المرسلة غير موجودة');
+      if (!to) throw new NotFoundException('الخزنة المستقبلة غير موجودة');
+      if (Number(from.current_balance) < amount) {
+        throw new BadRequestException(
+          `رصيد الخزنة "${from.name_ar}" غير كافٍ (${from.current_balance})`,
+        );
+      }
+
+      const note = dto.notes || `تحويل من ${from.name_ar} إلى ${to.name_ar}`;
+      const newFromBal = Number(from.current_balance) - amount;
+      const newToBal = Number(to.current_balance) + amount;
+
+      // OUT leg
+      const [outTxn] = await em.query(
+        `
+        INSERT INTO cashbox_transactions
+          (cashbox_id, direction, amount, category,
+           reference_type, balance_after, user_id, notes)
+        VALUES ($1,'out'::txn_direction,$2,'transfer',
+                'cashbox'::entity_type,$3,$4,$5)
+        RETURNING id
+        `,
+        [dto.from_cashbox_id, amount, newFromBal, userId, `خارج: ${note}`],
+      );
+      // IN leg
+      const [inTxn] = await em.query(
+        `
+        INSERT INTO cashbox_transactions
+          (cashbox_id, direction, amount, category,
+           reference_type, reference_id, balance_after, user_id, notes)
+        VALUES ($1,'in'::txn_direction,$2,'transfer',
+                'cashbox'::entity_type,$3,$4,$5,$6)
+        RETURNING id
+        `,
+        [
+          dto.to_cashbox_id,
+          amount,
+          outTxn.id, // link the in-leg back to the out-leg
+          newToBal,
+          userId,
+          `داخل: ${note}`,
+        ],
+      );
+
+      await em.query(
+        `UPDATE cashboxes SET current_balance = $2, updated_at = NOW() WHERE id = $1`,
+        [dto.from_cashbox_id, newFromBal],
+      );
+      await em.query(
+        `UPDATE cashboxes SET current_balance = $2, updated_at = NOW() WHERE id = $1`,
+        [dto.to_cashbox_id, newToBal],
+      );
+
+      // Single journal entry: DR destination, CR source.
+      await this.posting
+        ?.postCashboxTransfer(
+          outTxn.id,
+          dto.from_cashbox_id,
+          dto.to_cashbox_id,
+          amount,
+          note,
+          userId,
+          em,
+        )
+        .catch(() => undefined);
+
+      return {
+        transferred: true,
+        amount,
+        from_balance: newFromBal,
+        to_balance: newToBal,
+        from_txn_id: outTxn.id,
+        to_txn_id: inTxn.id,
+      };
+    });
+  }
+
   async removeCashbox(id: string) {
     // Safe-delete: require no open shifts & no movements.
     const [{ txn_count }] = await this.ds.query(

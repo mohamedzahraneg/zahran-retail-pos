@@ -18,6 +18,7 @@ import {
   Search,
   Power,
   PowerOff,
+  ArrowRightLeft,
 } from 'lucide-react';
 
 import {
@@ -64,6 +65,7 @@ export default function Cashboxes() {
   const [q, setQ] = useState('');
   const [showCreate, setShowCreate] = useState<CashboxKind | null>(null);
   const [editing, setEditing] = useState<Cashbox | null>(null);
+  const [showTransfer, setShowTransfer] = useState(false);
 
   const { data: boxes = [], isLoading } = useQuery({
     queryKey: ['cashboxes', 'all'],
@@ -112,9 +114,17 @@ export default function Cashboxes() {
             نقدي · حسابات بنكية · محافظ إلكترونية · شيكات
           </p>
         </div>
-        {canManage && (
-          <div className="flex gap-2 flex-wrap">
-            {(['cash', 'bank', 'ewallet', 'check'] as CashboxKind[]).map((k) => {
+        <div className="flex gap-2 flex-wrap">
+          <button
+            className="btn-primary"
+            onClick={() => setShowTransfer(true)}
+            disabled={boxes.filter((b) => b.is_active).length < 2}
+            title="تحويل نقدية بين خزنتين"
+          >
+            <ArrowRightLeft size={16} /> تحويل بين الخزائن
+          </button>
+          {canManage &&
+            (['cash', 'bank', 'ewallet', 'check'] as CashboxKind[]).map((k) => {
               const Icon = KIND_ICON[k];
               return (
                 <button
@@ -128,8 +138,7 @@ export default function Cashboxes() {
                 </button>
               );
             })}
-          </div>
-        )}
+        </div>
       </div>
 
       {/* KPI summary */}
@@ -220,6 +229,184 @@ export default function Cashboxes() {
           onClose={() => setEditing(null)}
         />
       )}
+      {showTransfer && (
+        <TransferModal
+          boxes={boxes.filter((b) => b.is_active)}
+          onClose={() => setShowTransfer(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+function TransferModal({
+  boxes,
+  onClose,
+}: {
+  boxes: Cashbox[];
+  onClose: () => void;
+}) {
+  const qc = useQueryClient();
+  const [fromId, setFromId] = useState('');
+  const [toId, setToId] = useState('');
+  const [amount, setAmount] = useState('');
+  const [notes, setNotes] = useState('');
+
+  const from = boxes.find((b) => b.id === fromId);
+  const to = boxes.find((b) => b.id === toId);
+  const amt = Number(amount) || 0;
+  const insufficient = !!from && amt > Number(from.current_balance || 0);
+
+  const mutation = useMutation({
+    mutationFn: () =>
+      cashDeskApi.transfer({
+        from_cashbox_id: fromId,
+        to_cashbox_id: toId,
+        amount: amt,
+        notes: notes || undefined,
+      }),
+    onSuccess: () => {
+      toast.success(`تم تحويل ${amt.toLocaleString('en-US')} ج.م`);
+      qc.invalidateQueries({ queryKey: ['cashboxes'] });
+      qc.invalidateQueries({ queryKey: ['cashflow-today'] });
+      onClose();
+    },
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.message || 'فشل التحويل'),
+  });
+
+  const canSubmit =
+    fromId && toId && fromId !== toId && amt > 0 && !insufficient;
+
+  return (
+    <div className="fixed inset-0 bg-slate-900/50 z-50 flex items-center justify-center p-4">
+      <div className="bg-white rounded-2xl w-full max-w-xl max-h-[90vh] overflow-y-auto">
+        <div className="flex items-center justify-between p-5 border-b border-slate-100">
+          <h3 className="font-black text-lg flex items-center gap-2">
+            <ArrowRightLeft size={20} /> تحويل نقدية بين الخزائن
+          </h3>
+          <button onClick={onClose} className="p-1 hover:bg-slate-100 rounded">
+            <X size={20} />
+          </button>
+        </div>
+        <div className="p-5 space-y-4">
+          <div className="grid md:grid-cols-2 gap-3">
+            <label className="block">
+              <span className="text-xs font-bold text-slate-600 mb-1 block">
+                من خزنة
+              </span>
+              <select
+                className="input"
+                value={fromId}
+                onChange={(e) => setFromId(e.target.value)}
+              >
+                <option value="">—</option>
+                {boxes.map((b) => (
+                  <option key={b.id} value={b.id}>
+                    {b.name_ar} (
+                    {Number(b.current_balance).toLocaleString('en-US')} ج.م)
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="block">
+              <span className="text-xs font-bold text-slate-600 mb-1 block">
+                إلى خزنة
+              </span>
+              <select
+                className="input"
+                value={toId}
+                onChange={(e) => setToId(e.target.value)}
+              >
+                <option value="">—</option>
+                {boxes
+                  .filter((b) => b.id !== fromId)
+                  .map((b) => (
+                    <option key={b.id} value={b.id}>
+                      {b.name_ar} (
+                      {Number(b.current_balance).toLocaleString('en-US')} ج.م)
+                    </option>
+                  ))}
+              </select>
+            </label>
+          </div>
+
+          <label className="block">
+            <span className="text-xs font-bold text-slate-600 mb-1 block">
+              المبلغ
+            </span>
+            <input
+              type="number"
+              step="0.01"
+              className="input text-lg font-bold"
+              value={amount}
+              onChange={(e) => setAmount(e.target.value)}
+              placeholder="0.00"
+              autoFocus
+            />
+          </label>
+          {insufficient && from && (
+            <div className="text-xs text-rose-600 bg-rose-50 border border-rose-200 rounded p-2">
+              رصيد "{from.name_ar}" غير كافٍ — المتاح{' '}
+              {Number(from.current_balance).toLocaleString('en-US')} ج.م
+            </div>
+          )}
+
+          <label className="block">
+            <span className="text-xs font-bold text-slate-600 mb-1 block">
+              ملاحظات
+            </span>
+            <textarea
+              className="input"
+              rows={2}
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              placeholder="سبب التحويل / مرجع"
+            />
+          </label>
+
+          {from && to && amt > 0 && !insufficient && (
+            <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg text-sm">
+              <div className="font-bold mb-1">ملخص العملية</div>
+              <div className="flex items-center justify-between">
+                <span>{from.name_ar}:</span>
+                <span className="font-mono">
+                  {Number(from.current_balance).toLocaleString('en-US')} →{' '}
+                  <b className="text-rose-700">
+                    {(Number(from.current_balance) - amt).toLocaleString(
+                      'en-US',
+                    )}
+                  </b>
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span>{to.name_ar}:</span>
+                <span className="font-mono">
+                  {Number(to.current_balance).toLocaleString('en-US')} →{' '}
+                  <b className="text-emerald-700">
+                    {(Number(to.current_balance) + amt).toLocaleString(
+                      'en-US',
+                    )}
+                  </b>
+                </span>
+              </div>
+            </div>
+          )}
+
+          <div className="flex gap-2 pt-2 border-t border-slate-100">
+            <button
+              className="btn-primary flex-1"
+              disabled={!canSubmit || mutation.isPending}
+              onClick={() => mutation.mutate()}
+            >
+              تنفيذ التحويل
+            </button>
+            <button className="btn-secondary" onClick={onClose}>
+              إلغاء
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

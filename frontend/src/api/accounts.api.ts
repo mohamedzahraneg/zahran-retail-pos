@@ -160,4 +160,85 @@ export const accountsApi = {
     unwrap<
       Record<string, { found: number; posted: number }>
     >(api.post('/accounts/journal/backfill', params || {})),
+
+  // ── Reports ─────────────────────────────────────────────────────────
+
+  accountLedger: (accountId: string, params?: { from?: string; to?: string }) =>
+    unwrap<AccountLedger>(
+      api.get(`/accounts/chart/${accountId}/ledger`, { params }),
+    ),
+
+  incomeStatement: (params: { from: string; to: string }) =>
+    unwrap<IncomeStatement>(
+      api.get('/accounts/reports/income-statement', { params }),
+    ),
+
+  balanceSheet: (params: { as_of: string }) =>
+    unwrap<BalanceSheet>(
+      api.get('/accounts/reports/balance-sheet', { params }),
+    ),
 };
+
+// ── Report types ──────────────────────────────────────────────────────
+
+export interface AccountLedgerLine {
+  id: string;
+  line_no: number;
+  debit: number;
+  credit: number;
+  description: string | null;
+  entry_no: string;
+  entry_date: string;
+  entry_description: string | null;
+  reference_type: string | null;
+  reference_id: string | null;
+  running_balance: number;
+}
+
+export interface AccountLedger {
+  account: {
+    id: string;
+    code: string;
+    name_ar: string;
+    account_type: AccountType;
+    normal_balance: NormalBalance;
+  };
+  opening_balance: number;
+  closing_balance: number;
+  total_debit: number;
+  total_credit: number;
+  from: string | null;
+  to: string | null;
+  lines: AccountLedgerLine[];
+}
+
+export interface ReportAccountNode {
+  id: string;
+  code: string;
+  name_ar: string;
+  account_type: AccountType;
+  normal_balance: NormalBalance;
+  parent_id: string | null;
+  is_leaf: boolean;
+  amount: number;
+}
+
+export interface IncomeStatement {
+  from: string;
+  to: string;
+  accounts: ReportAccountNode[];
+  total_revenue: number;
+  total_expenses: number;
+  net_profit: number;
+}
+
+export interface BalanceSheet {
+  as_of: string;
+  accounts: ReportAccountNode[];
+  total_assets: number;
+  total_liabilities: number;
+  book_equity: number;
+  period_net_profit: number;
+  total_equity: number;
+  balanced: boolean;
+}

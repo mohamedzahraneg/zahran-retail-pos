@@ -207,6 +207,19 @@ export const cashDeskApi = {
       api.post(`/cash-desk/cashboxes/${id}/delete`, {}),
     ),
 
+  transfer: (payload: {
+    from_cashbox_id: string;
+    to_cashbox_id: string;
+    amount: number;
+    notes?: string;
+  }) =>
+    unwrap<{
+      transferred: true;
+      amount: number;
+      from_balance: number;
+      to_balance: number;
+    }>(api.post('/cash-desk/transfer', payload)),
+
   cashflowToday: () =>
     unwrap<CashflowToday[]>(api.get('/cash-desk/cashflow/today')),
 
