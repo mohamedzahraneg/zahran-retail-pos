@@ -42,11 +42,16 @@ export class AccountingPostingService {
    */
   async postInvoice(invoiceId: string, userId: string, em?: EntityManager) {
     return this.safe('invoice', invoiceId, em, async (q) => {
+      // Invoices don't carry a cashbox_id directly — resolve via the
+      // shift they were rung up on (shifts.cashbox_id).
       const [inv] = await q(
         `SELECT i.id, i.invoice_no, i.grand_total, i.paid_amount,
                 i.tax_amount, i.completed_at, i.created_at, i.status,
-                i.customer_id, i.cashbox_id
-           FROM invoices i WHERE i.id = $1`,
+                i.customer_id,
+                s.cashbox_id AS cashbox_id
+           FROM invoices i
+           LEFT JOIN shifts s ON s.id = i.shift_id
+          WHERE i.id = $1`,
         [invoiceId],
       );
       if (!inv) return null;
@@ -131,9 +136,10 @@ export class AccountingPostingService {
         `SELECT r.id, r.return_no, r.total_refund, r.restocking_fee,
                 r.net_refund, r.status, r.refunded_at, r.approved_at,
                 r.requested_at, r.refund_method, r.original_invoice_id,
-                i.cashbox_id
+                s.cashbox_id AS cashbox_id
            FROM returns r
            LEFT JOIN invoices i ON i.id = r.original_invoice_id
+           LEFT JOIN shifts s   ON s.id = i.shift_id
           WHERE r.id = $1`,
         [returnId],
       );
