@@ -86,24 +86,46 @@ export class MigrationsService implements OnModuleInit {
 
   /** Run anything in database/migrations/ that hasn't been applied. */
   private async applyPending() {
+    return this.runPending();
+  }
+
+  /**
+   * Public wrapper — lets a manual admin endpoint trigger the
+   * migration runner at any time. Returns a per-file status so the
+   * UI can show exactly what happened.
+   *
+   * Unlike the startup run, this keeps going after an individual
+   * failure so one bad file doesn't block the rest.
+   */
+  async runPending(): Promise<{
+    dir: string;
+    applied: string[];
+    failed: Array<{ file: string; error: string }>;
+    already: string[];
+  }> {
     const dir = this.migrationsDir();
+    const out = {
+      dir,
+      applied: [] as string[],
+      failed: [] as Array<{ file: string; error: string }>,
+      already: [] as string[],
+    };
     if (!fs.existsSync(dir)) {
       this.logger.warn(`migrations dir not found: ${dir} — skipping`);
-      return;
+      return out;
     }
-    const applied = new Set<string>(
+    await this.ensureBookkeeping();
+    const appliedSet = new Set<string>(
       (
         await this.ds.query(`SELECT filename FROM schema_migrations`)
       ).map((r: any) => r.filename),
     );
     const files = this.listMigrationFiles();
-    const pending = files.filter((f) => !applied.has(f));
-    if (!pending.length) {
-      this.logger.log(`schema up to date (${files.length} files tracked)`);
-      return;
-    }
-    this.logger.log(`applying ${pending.length} pending migration(s)...`);
-    for (const f of pending) {
+    for (const f of files) {
+      if (appliedSet.has(f)) {
+        out.already.push(f);
+        continue;
+      }
       const full = path.join(dir, f);
       const sql = fs.readFileSync(full, 'utf8');
       const checksum = crypto.createHash('sha1').update(sql).digest('hex');
@@ -117,13 +139,37 @@ export class MigrationsService implements OnModuleInit {
             [f, checksum],
           );
         });
+        out.applied.push(f);
         this.logger.log(`  ✓ ${f}`);
       } catch (err: any) {
-        this.logger.error(`  ✗ ${f} — ${err?.message ?? err}`);
-        throw err;
+        const msg = err?.message ?? String(err);
+        out.failed.push({ file: f, error: msg });
+        this.logger.error(`  ✗ ${f} — ${msg}`);
+        // Keep going — one bad file shouldn't block later ones on a
+        // manual run.
       }
     }
-    this.logger.log(`migrations complete ✓`);
+    this.logger.log(
+      `migrations: ${out.applied.length} applied · ${out.failed.length} failed · ${out.already.length} already done`,
+    );
+    return out;
+  }
+
+  /** Status report — what the runner sees without running anything. */
+  async status() {
+    await this.ensureBookkeeping();
+    const appliedRows = await this.ds.query(
+      `SELECT filename, applied_at FROM schema_migrations ORDER BY filename`,
+    );
+    const files = this.listMigrationFiles();
+    const applied = new Set(appliedRows.map((r: any) => r.filename));
+    const pending = files.filter((f) => !applied.has(f));
+    return {
+      dir: this.migrationsDir(),
+      total_files: files.length,
+      applied: appliedRows,
+      pending,
+    };
   }
 
   private migrationsDir() {

@@ -33,7 +33,13 @@ export interface CreateBudgetDto {
 export class BudgetsService {
   constructor(private readonly ds: DataSource) {}
 
-  list() {
+  async list() {
+    // Migration 052 may not be applied yet on legacy installs.
+    const [exists] = await this.ds.query(
+      `SELECT EXISTS (SELECT 1 FROM information_schema.tables
+        WHERE table_name='budgets') AS present`,
+    );
+    if (!exists?.present) return [];
     return this.ds.query(
       `
       SELECT b.*, u.full_name AS created_by_name,

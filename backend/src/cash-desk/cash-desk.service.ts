@@ -274,25 +274,57 @@ export class CashDeskService {
         );
   }
 
-  listCashboxes(includeInactive = false) {
+  async listCashboxes(includeInactive = false) {
+    // Migration 049 added cashboxes.kind + financial_institutions. If
+    // it hasn't run yet on this DB, fall back to a simple query so
+    // the UI doesn't 500.
+    const [m049] = await this.ds.query(
+      `SELECT
+         EXISTS (SELECT 1 FROM information_schema.columns
+                  WHERE table_name='cashboxes' AND column_name='kind') AS has_kind,
+         EXISTS (SELECT 1 FROM information_schema.tables
+                  WHERE table_name='financial_institutions') AS has_fi`,
+    );
+    if (m049?.has_kind && m049?.has_fi) {
+      return this.ds.query(
+        `
+        SELECT cb.*, cb.name_ar AS name,
+               fi.name_ar        AS institution_name,
+               fi.name_en        AS institution_name_en,
+               fi.website_domain AS institution_domain,
+               fi.color_hex      AS institution_color,
+               fi.kind           AS institution_kind
+          FROM cashboxes cb
+          LEFT JOIN financial_institutions fi ON fi.code = cb.institution_code
+         ${includeInactive ? '' : 'WHERE cb.is_active = true'}
+         ORDER BY cb.kind, cb.name_ar
+        `,
+      );
+    }
+    // Fallback — pre-migration schema.
     return this.ds.query(
-      `
-      SELECT cb.*, cb.name_ar AS name,
-             fi.name_ar        AS institution_name,
-             fi.name_en        AS institution_name_en,
-             fi.website_domain AS institution_domain,
-             fi.color_hex      AS institution_color,
-             fi.kind           AS institution_kind
-        FROM cashboxes cb
-        LEFT JOIN financial_institutions fi ON fi.code = cb.institution_code
-       ${includeInactive ? '' : 'WHERE cb.is_active = true'}
-       ORDER BY cb.kind, cb.name_ar
-      `,
+      `SELECT cb.*, cb.name_ar AS name,
+              'cash' AS kind,
+              NULL AS institution_name,
+              NULL AS institution_name_en,
+              NULL AS institution_domain,
+              NULL AS institution_color,
+              NULL AS institution_kind
+         FROM cashboxes cb
+        ${includeInactive ? '' : 'WHERE cb.is_active = true'}
+        ORDER BY cb.name_ar`,
     );
   }
 
   /** Full list of bank / wallet presets — powers the picker in the UI. */
-  listInstitutions(kind?: 'bank' | 'ewallet' | 'check_issuer') {
+  async listInstitutions(kind?: 'bank' | 'ewallet' | 'check_issuer') {
+    // Gracefully degrade if migration 049 hasn't run.
+    const [exists] = await this.ds.query(
+      `SELECT EXISTS (SELECT 1 FROM information_schema.tables
+        WHERE table_name='financial_institutions') AS present`,
+    );
+    if (!exists?.present) return [];
+
     const conds: string[] = ['is_active = true'];
     const args: any[] = [];
     if (kind) {

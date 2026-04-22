@@ -16,6 +16,7 @@ import {
   CreditCard,
   Zap,
   Wrench,
+  Database,
 } from 'lucide-react';
 
 import { accountsApi, CashboxAuditRow, InvoiceAuditRow } from '@/api/accounts.api';
@@ -46,6 +47,31 @@ export default function AccountsAudit() {
     queryKey: ['audit-summary'],
     queryFn: () => accountsApi.auditSummary(),
     refetchInterval: 60_000,
+  });
+  const { data: migStatus, refetch: refetchMig } = useQuery({
+    queryKey: ['migrations-status'],
+    queryFn: () => accountsApi.migrationsStatus(),
+  });
+  const runMigrationsMut = useMutation({
+    mutationFn: () => accountsApi.runMigrations(),
+    onSuccess: (r) => {
+      const parts: string[] = [];
+      if (r.applied.length) parts.push(`تم تطبيق ${r.applied.length}`);
+      if (r.failed.length) parts.push(`فشل ${r.failed.length}`);
+      if (r.already.length) parts.push(`مُطبَّق مسبقاً ${r.already.length}`);
+      if (r.failed.length > 0) {
+        toast.error(
+          `الهجرات: ${parts.join(' · ')}\nأول خطأ: ${r.failed[0].error}`,
+          { duration: 10000 },
+        );
+      } else {
+        toast.success(`الهجرات: ${parts.join(' · ')}`, { duration: 6000 });
+      }
+      refetchMig();
+      refetchSummary();
+    },
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.message || 'فشل التشغيل'),
   });
   const { data: cashboxes = [] } = useQuery({
     queryKey: ['audit-cashboxes'],
@@ -148,6 +174,89 @@ export default function AccountsAudit() {
           وأدوات لإصلاحه بضغطة زر
         </p>
       </div>
+
+      {/* Migrations — highest priority if any are pending */}
+      {migStatus && (
+        <div
+          className={`card p-4 border-2 ${
+            migStatus.pending.length > 0
+              ? 'border-rose-300 bg-rose-50'
+              : 'border-emerald-200 bg-emerald-50/50'
+          }`}
+        >
+          <div className="flex items-start gap-3">
+            <Database
+              size={20}
+              className={
+                migStatus.pending.length > 0
+                  ? 'text-rose-600'
+                  : 'text-emerald-600'
+              }
+            />
+            <div className="flex-1">
+              <div className="font-black text-slate-800">
+                هجرات قاعدة البيانات
+              </div>
+              <div className="text-xs text-slate-600 mt-1">
+                إجمالي الملفات: {migStatus.total_files} · مطبّق:{' '}
+                {migStatus.applied.length} · <b>معلّق:{' '}
+                {migStatus.pending.length}</b>
+              </div>
+              {migStatus.pending.length > 0 && (
+                <>
+                  <div className="mt-2 text-xs text-rose-700 font-bold">
+                    ⚠ التالي معلّق ولا بد من تشغيله لتعمل الصفحات الجديدة:
+                  </div>
+                  <ul className="mt-1 text-xs text-slate-600 font-mono max-h-32 overflow-auto">
+                    {migStatus.pending.map((p) => (
+                      <li key={p}>• {p}</li>
+                    ))}
+                  </ul>
+                </>
+              )}
+            </div>
+            <button
+              className={
+                migStatus.pending.length > 0
+                  ? 'btn-primary bg-rose-600 hover:bg-rose-700'
+                  : 'btn-secondary'
+              }
+              disabled={runMigrationsMut.isPending}
+              onClick={() => runMigrationsMut.mutate()}
+            >
+              {runMigrationsMut.isPending ? (
+                <>
+                  <RefreshCw size={14} className="animate-spin" /> جارٍ
+                  التشغيل...
+                </>
+              ) : (
+                <>
+                  <Database size={14} /> تشغيل الهجرات الآن
+                </>
+              )}
+            </button>
+          </div>
+          {runMigrationsMut.data && (
+            <div className="mt-3 pt-3 border-t border-slate-200 text-xs space-y-1">
+              {runMigrationsMut.data.applied.length > 0 && (
+                <div className="text-emerald-700">
+                  ✓ تم تطبيق: {runMigrationsMut.data.applied.join(', ')}
+                </div>
+              )}
+              {runMigrationsMut.data.failed.length > 0 && (
+                <div className="text-rose-700">
+                  ✗ فشل:
+                  {runMigrationsMut.data.failed.map((f) => (
+                    <div key={f.file} className="mr-3">
+                      <span className="font-mono">{f.file}</span>: {f.error}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Summary KPIs */}
       <div className="grid md:grid-cols-4 gap-3">

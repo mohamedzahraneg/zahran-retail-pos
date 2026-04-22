@@ -428,17 +428,17 @@ export class AccountingAnalyticsService {
       });
     }
 
-    // 5. Low stock — below reorder point.
+    // 5. Low stock — below reorder point (column lives on `stock`).
     const lowStock = await this.ds.query(
       `
-      SELECT p.name_ar, pv.barcode, s.quantity_on_hand, pv.reorder_point
+      SELECT p.name_ar, pv.barcode, s.quantity_on_hand, s.reorder_point
         FROM stock s
         JOIN product_variants pv ON pv.id = s.variant_id
         JOIN products p ON p.id = pv.product_id
        WHERE pv.is_active = TRUE
-         AND pv.reorder_point > 0
-         AND s.quantity_on_hand <= pv.reorder_point
-       ORDER BY (pv.reorder_point - s.quantity_on_hand) DESC
+         AND s.reorder_point > 0
+         AND s.quantity_on_hand <= s.reorder_point
+       ORDER BY (s.reorder_point - s.quantity_on_hand) DESC
        LIMIT 5
       `,
     );

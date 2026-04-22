@@ -17,7 +17,12 @@ export interface CreateCostCenterDto {
 export class CostCentersService {
   constructor(private readonly ds: DataSource) {}
 
-  list(includeInactive = false) {
+  async list(includeInactive = false) {
+    const [exists] = await this.ds.query(
+      `SELECT EXISTS (SELECT 1 FROM information_schema.tables
+        WHERE table_name='cost_centers') AS present`,
+    );
+    if (!exists?.present) return [];
     return this.ds.query(
       `
       SELECT cc.*, w.name_ar AS warehouse_name,

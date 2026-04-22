@@ -343,6 +343,22 @@ export const accountsApi = {
     unwrap<{ voided: number }>(
       api.post('/accounts/audit/reset-auto-entries', {}),
     ),
+
+  migrationsStatus: () =>
+    unwrap<{
+      dir: string;
+      total_files: number;
+      applied: Array<{ filename: string; applied_at: string }>;
+      pending: string[];
+    }>(api.get('/accounts/audit/migrations')),
+
+  runMigrations: () =>
+    unwrap<{
+      dir: string;
+      applied: string[];
+      failed: Array<{ file: string; error: string }>;
+      already: string[];
+    }>(api.post('/accounts/audit/run-migrations', {})),
 };
 
 // ── Audit types ──────────────────────────────────────────────────

@@ -32,7 +32,12 @@ export class ExpenseApprovalService {
 
   // ── Rule management ────────────────────────────────────────────────
 
-  listRules() {
+  async listRules() {
+    const [exists] = await this.ds.query(
+      `SELECT EXISTS (SELECT 1 FROM information_schema.tables
+        WHERE table_name='expense_approval_rules') AS present`,
+    );
+    if (!exists?.present) return [];
     return this.ds.query(
       `SELECT * FROM expense_approval_rules ORDER BY is_active DESC, level, min_amount`,
     );
@@ -155,6 +160,11 @@ export class ExpenseApprovalService {
 
   /** Inbox for a specific user — respects their role. */
   async inboxFor(userId: string) {
+    const [exists] = await this.ds.query(
+      `SELECT EXISTS (SELECT 1 FROM information_schema.tables
+        WHERE table_name='expense_approvals') AS present`,
+    );
+    if (!exists?.present) return [];
     // Load user role(s)
     const [user] = await this.ds.query(
       `SELECT u.id, r.code AS role FROM users u

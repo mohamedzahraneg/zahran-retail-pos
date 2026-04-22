@@ -32,26 +32,50 @@ export class ReconciliationService {
    *   drift_gl          — computed_balance − gl_balance
    */
   async auditCashboxes() {
-    return this.ds.query(`
-      SELECT
-        cb.id, cb.name_ar, cb.kind, cb.currency, cb.is_active,
-        cb.current_balance::numeric(14,2)  AS stored_balance,
-        COALESCE((
-          SELECT SUM(CASE WHEN direction = 'in' THEN amount ELSE -amount END)
-            FROM cashbox_transactions WHERE cashbox_id = cb.id
-        ), 0)::numeric(14,2) AS computed_balance,
-        COALESCE((
+    // `kind` comes from migration 049. If that hasn't run yet, return
+    // NULL so the UI can still show balances.
+    const [hasKind] = await this.ds.query(
+      `SELECT EXISTS (
+         SELECT 1 FROM information_schema.columns
+          WHERE table_name='cashboxes' AND column_name='kind'
+       ) AS present`,
+    );
+    const kindCol = hasKind?.present ? 'cb.kind' : `'cash'::text`;
+    const [hasCoaCashbox] = await this.ds.query(
+      `SELECT EXISTS (
+         SELECT 1 FROM information_schema.columns
+          WHERE table_name='chart_of_accounts' AND column_name='cashbox_id'
+       ) AS present`,
+    );
+    const glSubquery = hasCoaCashbox?.present
+      ? `COALESCE((
           SELECT SUM(jl.debit - jl.credit)
             FROM journal_lines jl
             JOIN journal_entries je ON je.id = jl.entry_id
             JOIN chart_of_accounts a ON a.id = jl.account_id
            WHERE a.cashbox_id = cb.id
              AND je.is_posted = TRUE AND je.is_void = FALSE
-        ), 0)::numeric(14,2) AS gl_balance,
-        (SELECT a.id FROM chart_of_accounts a
-          WHERE a.cashbox_id = cb.id AND a.is_active = TRUE LIMIT 1) AS gl_account_id,
-        (SELECT a.code FROM chart_of_accounts a
-          WHERE a.cashbox_id = cb.id AND a.is_active = TRUE LIMIT 1) AS gl_account_code
+        ), 0)::numeric(14,2)`
+      : `0::numeric(14,2)`;
+    const glIdSubquery = hasCoaCashbox?.present
+      ? `(SELECT a.id FROM chart_of_accounts a
+           WHERE a.cashbox_id = cb.id AND a.is_active = TRUE LIMIT 1)`
+      : `NULL`;
+    const glCodeSubquery = hasCoaCashbox?.present
+      ? `(SELECT a.code FROM chart_of_accounts a
+           WHERE a.cashbox_id = cb.id AND a.is_active = TRUE LIMIT 1)`
+      : `NULL`;
+    return this.ds.query(`
+      SELECT
+        cb.id, cb.name_ar, ${kindCol} AS kind, cb.currency, cb.is_active,
+        cb.current_balance::numeric(14,2)  AS stored_balance,
+        COALESCE((
+          SELECT SUM(CASE WHEN direction = 'in' THEN amount ELSE -amount END)
+            FROM cashbox_transactions WHERE cashbox_id = cb.id
+        ), 0)::numeric(14,2) AS computed_balance,
+        ${glSubquery} AS gl_balance,
+        ${glIdSubquery} AS gl_account_id,
+        ${glCodeSubquery} AS gl_account_code
       FROM cashboxes cb
       WHERE cb.is_active = TRUE
       ORDER BY cb.name_ar

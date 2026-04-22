@@ -44,6 +44,7 @@ import {
 } from './cost-centers.service';
 import { FxService, UpsertRateDto } from './fx.service';
 import { ReconciliationService } from './reconciliation.service';
+import { MigrationsService } from '../database/migrations.service';
 import { Permissions } from '../common/decorators/roles.decorator';
 import {
   CurrentUser,
@@ -112,6 +113,7 @@ export class ChartOfAccountsController {
     private readonly costCenters: CostCentersService,
     private readonly fx: FxService,
     private readonly recon: ReconciliationService,
+    private readonly migrations: MigrationsService,
   ) {}
 
   // ── Chart of Accounts ──────────────────────────────────────────────
@@ -615,5 +617,23 @@ export class ChartOfAccountsController {
   })
   resetAutoEntries() {
     return this.recon.resetAutoPostedEntries();
+  }
+
+  // ── Migrations ──────────────────────────────────────────────────────
+
+  @Get('audit/migrations')
+  @Permissions('accounts.chart.view')
+  @ApiOperation({ summary: 'حالة هجرات قاعدة البيانات' })
+  migrationsStatus() {
+    return this.migrations.status();
+  }
+
+  @Post('audit/run-migrations')
+  @Permissions('accounts.journal.post')
+  @ApiOperation({
+    summary: 'تشغيل الهجرات المعلّقة يدوياً',
+  })
+  runMigrations() {
+    return this.migrations.runPending();
   }
 }
