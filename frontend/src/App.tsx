@@ -10,7 +10,8 @@ import Customers from '@/pages/Customers';
 import Reservations from '@/pages/Reservations';
 import Returns from '@/pages/Returns';
 import ReturnsAnalytics from '@/pages/ReturnsAnalytics';
-import CashDesk from '@/pages/CashDesk';
+// CashDesk is embedded inside Cashboxes.tsx — the /cash-desk URL is
+// kept only as a redirect for old bookmarks.
 import Suppliers from '@/pages/Suppliers';
 import SupplierDetail from '@/pages/SupplierDetail';
 import Purchases from '@/pages/Purchases';
@@ -101,7 +102,8 @@ export default function App() {
             </ProtectedRoute>
           }
         />
-        <Route path="cash-desk" element={<CashDesk />} />
+        {/* Legacy cash-desk URL — redirects to the unified /cashboxes page. */}
+        <Route path="cash-desk" element={<Navigate to="/cashboxes" replace />} />
         <Route path="reservations" element={<Reservations />} />
         <Route path="returns" element={<Returns />} />
         <Route

@@ -50,7 +50,13 @@ const METHOD_ICONS: Record<PaymentMethod, any> = {
 
 type Tab = 'receipts' | 'payments' | 'movements';
 
-export default function CashDesk() {
+/**
+ * `embedded=true` is used when CashDesk is rendered inside the
+ * /cashboxes page. It hides the big page header / KPI grid / "active
+ * cashboxes" list (the host page already shows better versions of
+ * those) and keeps only the action buttons + the 3 tabs.
+ */
+export default function CashDesk({ embedded = false }: { embedded?: boolean }) {
   const [tab, setTab] = useState<Tab>('receipts');
   const [showReceipt, setShowReceipt] = useState(false);
   const [showSupplierPay, setShowSupplierPay] = useState(false);
@@ -136,66 +142,101 @@ export default function CashDesk() {
     );
   }, [payments, q]);
 
+  // Suppress unused-var warnings when embedded — they still power the
+  // KPI / cashbox-list sections that are hidden below.
+  void totals;
+  void variances;
+  void cashboxes;
+
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between flex-wrap gap-3">
-        <div>
-          <h2 className="text-2xl font-black text-slate-800 flex items-center gap-2">
-            <Wallet className="text-brand-600" /> الصندوق
-          </h2>
-          <p className="text-sm text-slate-500 mt-1">
-            استلام مقبوضات العملاء ودفع مستحقات الموردين
-          </p>
+      {/* Header — hidden when embedded in /cashboxes (host page shows it) */}
+      {!embedded && (
+        <div className="flex items-center justify-between flex-wrap gap-3">
+          <div>
+            <h2 className="text-2xl font-black text-slate-800 flex items-center gap-2">
+              <Wallet className="text-brand-600" /> الصندوق
+            </h2>
+            <p className="text-sm text-slate-500 mt-1">
+              استلام مقبوضات العملاء ودفع مستحقات الموردين
+            </p>
+          </div>
+          <div className="flex gap-2">
+            <button className="btn-primary" onClick={() => setShowReceipt(true)}>
+              <ArrowDownCircle size={18} /> استلام من عميل
+            </button>
+            <button
+              className="btn-secondary"
+              onClick={() => setShowSupplierPay(true)}
+            >
+              <ArrowUpCircle size={18} /> دفع لمورد
+            </button>
+            <button
+              className="btn-secondary"
+              onClick={() => setShowDeposit(true)}
+              title="إيداع يدوي — رصيد افتتاحي أو تمويل"
+            >
+              <Plus size={18} /> إيداع/رصيد افتتاحي
+            </button>
+          </div>
         </div>
-        <div className="flex gap-2">
+      )}
+
+      {/* Embedded action bar — primary operations when header is hidden */}
+      {embedded && (
+        <div className="card p-3 flex flex-wrap gap-2 bg-slate-50">
+          <div className="text-sm font-bold text-slate-700 mr-auto self-center">
+            عمليات سريعة:
+          </div>
           <button className="btn-primary" onClick={() => setShowReceipt(true)}>
-            <ArrowDownCircle size={18} /> استلام من عميل
+            <ArrowDownCircle size={16} /> استلام من عميل
           </button>
           <button
             className="btn-secondary"
             onClick={() => setShowSupplierPay(true)}
           >
-            <ArrowUpCircle size={18} /> دفع لمورد
+            <ArrowUpCircle size={16} /> دفع لمورد
           </button>
           <button
             className="btn-secondary"
             onClick={() => setShowDeposit(true)}
             title="إيداع يدوي — رصيد افتتاحي أو تمويل"
           >
-            <Plus size={18} /> إيداع/رصيد افتتاحي
+            <Plus size={16} /> إيداع يدوي
           </button>
         </div>
-      </div>
+      )}
 
-      {/* KPIs */}
-      <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-4">
-        <KpiCard
-          title="الرصيد الحالي"
-          value={EGP(totals.currentBalance)}
-          icon={<Wallet className="text-brand-600" />}
-          color="bg-brand-50"
-          hint="إجمالي كل الخزائن النشطة"
-        />
-        <KpiCard
-          title="داخل اليوم"
-          value={EGP(totals.inflowsToday)}
-          icon={<ArrowDownCircle className="text-emerald-600" />}
-          color="bg-emerald-50"
-          hint="مبيعات كاش + مقبوضات + إيداعات"
-        />
-        <KpiCard
-          title="خارج اليوم"
-          value={EGP(totals.outflowsToday)}
-          icon={<ArrowUpCircle className="text-rose-600" />}
-          color="bg-rose-50"
-          hint="مصروفات + دفعات موردين + سحب"
-        />
-        <VarianceCard variances={variances} />
-      </div>
+      {/* KPIs — hidden when embedded (host has richer per-kind tiles) */}
+      {!embedded && (
+        <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-4">
+          <KpiCard
+            title="الرصيد الحالي"
+            value={EGP(totals.currentBalance)}
+            icon={<Wallet className="text-brand-600" />}
+            color="bg-brand-50"
+            hint="إجمالي كل الخزائن النشطة"
+          />
+          <KpiCard
+            title="داخل اليوم"
+            value={EGP(totals.inflowsToday)}
+            icon={<ArrowDownCircle className="text-emerald-600" />}
+            color="bg-emerald-50"
+            hint="مبيعات كاش + مقبوضات + إيداعات"
+          />
+          <KpiCard
+            title="خارج اليوم"
+            value={EGP(totals.outflowsToday)}
+            icon={<ArrowUpCircle className="text-rose-600" />}
+            color="bg-rose-50"
+            hint="مصروفات + دفعات موردين + سحب"
+          />
+          <VarianceCard variances={variances} />
+        </div>
+      )}
 
-      {/* Cashboxes List */}
-      {cashboxes.length > 0 && (
+      {/* Cashboxes List — hidden when embedded (host page has the grid) */}
+      {!embedded && cashboxes.length > 0 && (
         <div className="card p-4">
           <div className="flex items-center justify-between mb-3">
             <div className="text-sm font-bold text-slate-700">

@@ -94,7 +94,6 @@ const groups: NavGroup[] = [
       { to: '/budgets', label: 'الموازنات والمراكز', icon: Target, roles: ['admin', 'accountant'], permission: 'accounts.budget' },
       { to: '/financial-controls', label: 'ضوابط مالية', icon: ShieldCheck, roles: ['admin', 'manager', 'accountant'], permission: 'accounts.approval.decide' },
       { to: '/accounts-audit', label: 'مراجعة وتدقيق', icon: Shield, roles: ['admin', 'accountant'], permission: 'accounts.chart.view' },
-      { to: '/cash-desk', label: 'الصندوق', icon: Wallet, roles: ['admin', 'manager', 'accountant'], permission: 'cashdesk.view' },
       { to: '/cashboxes', label: 'الخزائن والبنوك', icon: Wallet, roles: ['admin', 'manager', 'accountant'], permission: 'cashdesk.view' },
       { to: '/bank-reconciliation', label: 'تسوية بنكية', icon: Scale, roles: ['admin', 'accountant'], permission: 'accounts.reconcile' },
       { to: '/recurring-expenses', label: 'المصاريف الدورية', icon: Repeat, roles: ['admin', 'manager', 'accountant'], permission: 'recurring_expenses.manage' },
