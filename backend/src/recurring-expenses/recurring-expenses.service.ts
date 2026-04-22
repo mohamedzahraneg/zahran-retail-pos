@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { AccountingPostingService } from '../chart-of-accounts/posting.service';
+import { FinancialEngineService } from '../chart-of-accounts/financial-engine.service';
 
 export type Frequency =
   | 'daily'
@@ -48,6 +49,7 @@ export class RecurringExpensesService {
   constructor(
     private readonly ds: DataSource,
     @Optional() private readonly posting?: AccountingPostingService,
+    @Optional() private readonly engine?: FinancialEngineService,
   ) {}
 
   async list(opts: {
@@ -280,34 +282,13 @@ export class RecurringExpensesService {
         );
         expenseId = exp.id;
 
-        // Cashbox side effect — only if auto_paid
-        if (tpl.auto_paid && tpl.cashbox_id && tpl.payment_method === 'cash') {
-          const [cb] = await em.query(
-            `SELECT current_balance FROM cashboxes WHERE id = $1`,
-            [tpl.cashbox_id],
-          );
-          const newBal = Number(cb.current_balance) - Number(tpl.amount);
-          await em.query(
-            `UPDATE cashboxes SET current_balance = $2, updated_at = NOW() WHERE id = $1`,
-            [tpl.cashbox_id, newBal],
-          );
-          await em.query(
-            `
-            INSERT INTO cashbox_transactions
-              (cashbox_id, direction, amount, category,
-               reference_type, reference_id, balance_after, notes, user_id)
-            VALUES ($1,'out',$2,'expense','expense',$3,$4,$5,$6)
-            `,
-            [
-              tpl.cashbox_id,
-              tpl.amount,
-              expenseId,
-              newBal,
-              `مصروف دوري: ${tpl.name_ar}`,
-              userId,
-            ],
-          );
-        }
+        // NOTE: Cash movement is no longer written here. When the
+        // recurring template is auto-posted (auto_post=true AND
+        // require_approval=false) we route through FinancialEngineService
+        // below — it handles cash + GL atomically and idempotently. This
+        // eliminates the direct `UPDATE cashboxes` + paired `INSERT
+        // cashbox_transactions` pattern, keeping the engine as the
+        // single writer of cashbox state.
 
         await em.query(
           `
@@ -348,11 +329,43 @@ export class RecurringExpensesService {
         [tpl.id, scheduledFor, next_d],
       );
 
-      // Auto-post to GL if the template was auto-approved.
+      // Post through the engine when the template is auto-approved.
+      // This is the ONE place that moves cash + writes the GL entry
+      // for auto-paid recurring expenses. If require_approval=TRUE the
+      // expense waits in the approval inbox and ExpenseApprovalService.
+      // decide() will eventually drive the same engine call.
       if (expenseId && tpl.auto_post && !tpl.require_approval) {
-        await this.posting
-          ?.postExpense(expenseId, userId, em)
-          .catch(() => undefined);
+        const [catRow2] = await em.query(
+          `SELECT account_id FROM expense_categories WHERE id = $1`,
+          [tpl.category_id],
+        );
+        if (this.engine) {
+          const res = await this.engine.recordExpense({
+            expense_id: expenseId,
+            expense_no: seqNo,
+            amount: Number(tpl.amount),
+            category_account_id: catRow2?.account_id ?? null,
+            cashbox_id:
+              tpl.auto_paid && tpl.payment_method === 'cash'
+                ? tpl.cashbox_id
+                : null,
+            payment_method: tpl.payment_method ?? 'cash',
+            user_id: userId,
+            entry_date: scheduledFor,
+            em,
+            description: `مصروف دوري: ${tpl.name_ar}`,
+          });
+          if (!res.ok) {
+            throw new Error(
+              `فشل ترحيل المصروف الدوري: ${res.error}`,
+            );
+          }
+        } else if (this.posting) {
+          // Legacy fallback — no engine wired.
+          await this.posting
+            .postExpense(expenseId, userId, em)
+            .catch(() => undefined);
+        }
       }
 
       return { generated: true, expense_id: expenseId, next_run_date: next_d };

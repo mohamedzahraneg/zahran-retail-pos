@@ -331,76 +331,18 @@ export const accountsApi = {
     unwrap<{ customer: any[]; supplier: any[] }>(
       api.get('/accounts/audit/payments', { params: { limit } }),
     ),
-  recomputeCashbox: (id: string) =>
-    unwrap<{ cashbox_id: string; new_balance: number }>(
-      api.post(`/accounts/audit/recompute-cashbox/${id}`, {}),
-    ),
-  recomputeAllCashboxes: () =>
-    unwrap<{ updated: number; results: any[] }>(
-      api.post('/accounts/audit/recompute-cashboxes', {}),
-    ),
-  resetAutoEntries: () =>
-    unwrap<{ voided: number }>(
-      api.post('/accounts/audit/reset-auto-entries', {}),
-    ),
-
-  purgeCancelled: () =>
-    unwrap<{
-      invoices_deleted: number;
-      journal_entries_deleted: number;
-      cashbox_txns_deleted: number;
-    }>(api.post('/accounts/audit/purge-cancelled', {})),
-
-  forcePostExpenses: () =>
-    unwrap<{
-      found: number;
-      posted: number;
-      skipped: number;
-      failed: number;
-      results: Array<{
-        expense_id: string;
-        expense_no: string | null;
-        amount: string;
-        status: 'posted' | 'skipped' | 'failed';
-        reason?: string;
-      }>;
-    }>(api.post('/accounts/audit/force-post-expenses', {})),
-
-  forcePostInvoices: () =>
-    unwrap<{
-      found: number;
-      posted: number;
-      skipped: number;
-      failed: number;
-      results: Array<{
-        invoice_id: string;
-        invoice_no: string | null;
-        grand_total: string;
-        status: 'posted' | 'skipped' | 'failed';
-        reason?: string;
-      }>;
-    }>(api.post('/accounts/audit/force-post-invoices', {})),
-
-  dedupeCashbox: () =>
-    unwrap<{ duplicates_removed: number; groups: number }>(
-      api.post('/accounts/audit/dedupe-cashbox', {}),
-    ),
-
-  fullCleanup: () =>
-    unwrap<{
-      cancelled_invoices_deleted: number;
-      journal_entries_wiped: number;
-      cashboxes_consolidated: number;
-      duplicates_removed: number;
-      main_cashbox_id: string | null;
-      main_cashbox_balance: number;
-      backfill: any;
-    }>(api.post('/accounts/audit/full-cleanup', {})),
-
-  factoryReset: (keepStock = false) =>
-    unwrap<{ wiped: Record<string, number>; note: string }>(
-      api.post('/accounts/audit/factory-reset', { keep_stock: keepStock }),
-    ),
+  // ────────────────────────────────────────────────────────────────
+  //  Retired API wrappers — the corresponding backend endpoints were
+  //  removed along with the AccountsAudit page. Repairs those methods
+  //  used to drive (recompute, dedupe, force-post, reset, purge, full-
+  //  cleanup, factory-reset, quick-start, run-migrations) now happen
+  //  automatically on backend boot via migration 056.
+  //
+  //  Removed methods: recomputeCashbox, recomputeAllCashboxes,
+  //  resetAutoEntries, purgeCancelled, forcePostExpenses,
+  //  forcePostInvoices, dedupeCashbox, fullCleanup, factoryReset,
+  //  dedupeJournal, recomputePartyBalances, quickStart, runMigrations.
+  // ────────────────────────────────────────────────────────────────
 
   dataSnapshot: () =>
     unwrap<Record<string, any[]>>(
@@ -413,22 +355,6 @@ export const accountsApi = {
       expense_lines: any[];
       opening_balances: any[];
     }>(api.get('/accounts/audit/review-report')),
-
-  dedupeJournal: () =>
-    unwrap<{ duplicates_voided: number; groups: number }>(
-      api.post('/accounts/audit/dedupe-journal', {}),
-    ),
-
-  recomputePartyBalances: () =>
-    unwrap<{ customers_updated: number; suppliers_updated: number }>(
-      api.post('/accounts/audit/recompute-party-balances', {}),
-    ),
-
-  quickStart: () =>
-    unwrap<{
-      snapshot: Record<string, any[]>;
-      reset: { wiped: Record<string, number>; note: string };
-    }>(api.post('/accounts/audit/quick-start', {})),
 
   postOpeningBalance: (payload: {
     entry_date: string;
@@ -454,14 +380,6 @@ export const accountsApi = {
       applied: Array<{ filename: string; applied_at: string }>;
       pending: string[];
     }>(api.get('/accounts/audit/migrations')),
-
-  runMigrations: () =>
-    unwrap<{
-      dir: string;
-      applied: string[];
-      failed: Array<{ file: string; error: string }>;
-      already: string[];
-    }>(api.post('/accounts/audit/run-migrations', {})),
 };
 
 // ── Audit types ──────────────────────────────────────────────────

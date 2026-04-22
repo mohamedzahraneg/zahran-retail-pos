@@ -319,10 +319,24 @@ export class PosService {
         this.sendThankYouNotification(invoice.id, userId).catch(() => {});
       }
 
-      // Auto-post the sale to the general ledger. Idempotent + failure-safe.
-      this.posting
-        ?.postInvoice(invoice.id, userId, em)
-        .catch(() => undefined);
+      // Auto-post the sale to the general ledger. AWAITED — the previous
+      // fire-and-forget meant the EntityManager was released before the
+      // post ran, causing every invoice to silently fail its GL write
+      // (the "invoices missing from GL" symptom). Idempotent via the
+      // posting service's safe() guard, so a backfill never double-
+      // posts. Any posting failure now rolls the whole invoice back —
+      // correct behaviour: an unposted invoice is a data-integrity bug,
+      // not a "best-effort" optimisation.
+      if (this.posting) {
+        const postRes = (await this.posting.postInvoice(
+          invoice.id,
+          userId,
+          em,
+        )) as any;
+        if (postRes && postRes.error) {
+          throw new Error(`فشل ترحيل الفاتورة للحسابات: ${postRes.error}`);
+        }
+      }
 
       return result;
     });
@@ -566,10 +580,18 @@ export class PosService {
       reason,
     ]);
     // Reverse the GL entry so the income statement / trial balance
-    // reflect the cancellation. Idempotent + failure-safe.
-    this.posting
+    // reflect the cancellation. Awaited — we want a failed reversal to
+    // surface, not silently leave an over-booked revenue line.
+    await this.posting
       ?.reverseByReference('invoice', id, reason, userId)
-      .catch(() => undefined);
+      .catch((err) => {
+        // Reversal failure is logged but doesn't block the void —
+        // fn_void_invoice already removed the physical effects. The
+        // backfill/reconciliation layer will re-reverse on its next
+        // pass.
+        // eslint-disable-next-line no-console
+        console.error('invoice reversal failed:', err);
+      });
     this.realtime?.emitPosEvent({
       type: 'invoice.voided',
       payload: { invoice_id: id, reason, voided_by: userId },

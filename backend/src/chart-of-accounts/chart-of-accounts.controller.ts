@@ -596,85 +596,31 @@ export class ChartOfAccountsController {
     return this.recon.auditPayments(limit ? Number(limit) : undefined);
   }
 
-  @Post('audit/recompute-cashbox/:id')
-  @Permissions('accounts.journal.post')
-  @ApiOperation({ summary: 'إعادة حساب رصيد خزنة من حركاتها' })
-  recomputeCashbox(@Param('id') id: string) {
-    return this.recon.recomputeCashboxBalance(id);
-  }
-
-  @Post('audit/recompute-cashboxes')
-  @Permissions('accounts.journal.post')
-  recomputeAllCashboxes() {
-    return this.recon.recomputeAllCashboxes();
-  }
-
-  @Post('audit/reset-auto-entries')
-  @Permissions('accounts.journal.void')
-  @ApiOperation({
-    summary:
-      'إلغاء كل القيود التلقائية لإعادة بنائها — خطر، استخدم مع الـ backfill',
-  })
-  resetAutoEntries() {
-    return this.recon.resetAutoPostedEntries();
-  }
-
-  @Post('audit/purge-cancelled')
-  @Permissions('accounts.journal.void')
-  @ApiOperation({
-    summary:
-      'حذف نهائي للفواتير الملغاة + قيودها + حركات الخزنة المرتبطة',
-  })
-  purgeCancelled() {
-    return this.recon.purgeCancelledInvoices();
-  }
-
-  @Post('audit/force-post-expenses')
-  @Permissions('accounts.journal.post')
-  @ApiOperation({
-    summary:
-      'ترحيل قسري لكل المصروفات المعتمدة التي لم يتم ترحيلها مع تشخيص الأخطاء',
-  })
-  forcePostExpenses(@CurrentUser() user: JwtUser) {
-    return this.recon.forcePostApprovedExpenses(this.posting, user.userId);
-  }
-
-  @Post('audit/force-post-invoices')
-  @Permissions('accounts.journal.post')
-  @ApiOperation({
-    summary: 'ترحيل قسري لكل الفواتير التي لم يتم ترحيلها',
-  })
-  forcePostInvoices(@CurrentUser() user: JwtUser) {
-    return this.recon.forcePostInvoices(this.posting, user.userId);
-  }
-
-  @Post('audit/dedupe-cashbox')
-  @Permissions('accounts.journal.post')
-  @ApiOperation({
-    summary:
-      'إزالة الحركات المكررة في cashbox_transactions (نفس الفاتورة/المصروف مسجّل مرتين)',
-  })
-  dedupeCashbox() {
-    return this.recon.dedupeCashboxTransactions();
-  }
-
-  @Post('audit/dedupe-journal')
-  @Permissions('accounts.journal.post')
-  @ApiOperation({
-    summary: 'إلغاء قيود GL المكررة لنفس الفاتورة/المصروف',
-  })
-  dedupeJournal() {
-    return this.recon.dedupeJournalEntries();
-  }
-
-  @Post('audit/recompute-party-balances')
-  @Permissions('accounts.journal.post')
-  @ApiOperation({
-    summary: 'إعادة حساب أرصدة العملاء والموردين من المصادر',
-  })
-  recomputePartyBalances() {
-    return this.recon.recomputePartyBalances();
-  }
+  // ──────────────────────────────────────────────────────────────────
+  //  Opening balance wizard — the ONE user-facing POST kept under /audit
+  //  because the wizard at /opening-balance depends on it. Everything
+  //  else that used to live here (recompute-*, reset-*, dedupe-*,
+  //  force-post-*, purge-*, full-cleanup, factory-reset, quick-start,
+  //  run-migrations) has been removed.
+  //
+  //  Justification:
+  //    - Destructive maintenance buttons were explicitly rejected by
+  //      the product owner ("الغي الزرار وجود الزرار مش صح").
+  //    - The non-destructive repairs those endpoints used to drive
+  //      (dedupe, recompute-balances) now run automatically on boot
+  //      via database/migrations/056_auto_accounts_repair.sql.
+  //    - Idempotent financial flows (FinancialEngineService) mean
+  //      "force-post" is no longer needed — every in-flight operation
+  //      posts on its own path; a replay via the idempotency guard is
+  //      safe but never necessary.
+  //    - Running migrations manually is not something the UI should
+  //      expose; the boot-time runner handles it.
+  //
+  //  The read-only GET /audit/* endpoints above (summary, cashboxes,
+  //  invoices, expenses, payments, data-snapshot, review-report,
+  //  migrations-status) are kept — those are observability, not
+  //  mutations.
+  // ──────────────────────────────────────────────────────────────────
 
   @Post('audit/opening-balance')
   @Permissions('accounts.journal.post')
@@ -700,44 +646,11 @@ export class ChartOfAccountsController {
     return this.recon.postOpeningBalance(body, user.userId);
   }
 
-  @Post('audit/full-cleanup')
-  @Permissions('accounts.journal.void')
-  @ApiOperation({
-    summary:
-      'تنظيف شامل: حذف الملغاة + مسح كل قيود GL + توحيد الخزائن + إزالة التكرارات + ترحيل + إعادة حساب',
-  })
-  fullCleanup(@CurrentUser() user: JwtUser) {
-    return this.recon.fullCleanup({
-      posting: this.posting,
-      userId: user.userId,
-    });
-  }
-
-  @Post('audit/factory-reset')
-  @Permissions('accounts.journal.void')
-  @ApiOperation({
-    summary:
-      'إعادة تهيئة المصنع — مسح كل البيانات التشغيلية التجريبية (فواتير/مصروفات/دفعات/قيود/حركات). يحفظ الكتالوج والمستخدمين والشجرة.',
-  })
-  factoryReset(@Body() body: { keep_stock?: boolean }) {
-    return this.recon.factoryReset({ keep_stock: !!body?.keep_stock });
-  }
-
-  @Post('audit/quick-start')
-  @Permissions('accounts.journal.void')
-  @ApiOperation({
-    summary:
-      'بداية نظيفة — نسخة احتياطية + مسح شامل في استدعاء واحد. ثم يظل على المستخدم فتح الحسابات.',
-  })
-  quickStart() {
-    return this.recon.quickStart();
-  }
-
   @Get('audit/data-snapshot')
   @Permissions('accounts.chart.view')
   @ApiOperation({
     summary:
-      'صورة كاملة من المبيعات والمصروفات والدفعات — للتصدير كنسخة احتياطية قبل أي عملية جذرية',
+      'صورة كاملة من المبيعات والمصروفات والدفعات — للتصدير كنسخة احتياطية',
   })
   dataSnapshot() {
     return this.recon.dataSnapshot();
@@ -747,27 +660,16 @@ export class ChartOfAccountsController {
   @Permissions('accounts.chart.view')
   @ApiOperation({
     summary:
-      'تقرير مراجعة مركّز (بنود الفواتير + المصروفات + الرصيد الافتتاحي) — للتصدير قبل المسح',
+      'تقرير مراجعة مركّز (بنود الفواتير + المصروفات + الرصيد الافتتاحي)',
   })
   reviewReport() {
     return this.recon.reviewReport();
   }
 
-  // ── Migrations ──────────────────────────────────────────────────────
-
   @Get('audit/migrations')
   @Permissions('accounts.chart.view')
-  @ApiOperation({ summary: 'حالة هجرات قاعدة البيانات' })
+  @ApiOperation({ summary: 'حالة هجرات قاعدة البيانات (قراءة فقط)' })
   migrationsStatus() {
     return this.migrations.status();
-  }
-
-  @Post('audit/run-migrations')
-  @Permissions('accounts.journal.post')
-  @ApiOperation({
-    summary: 'تشغيل الهجرات المعلّقة يدوياً',
-  })
-  runMigrations() {
-    return this.migrations.runPending();
   }
 }
