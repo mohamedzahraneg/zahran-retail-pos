@@ -311,17 +311,21 @@ BEGIN
         n_items := 1 + (abs(hashtext('n' || i)) % 4);  -- 1..4 lines
 
         FOR j IN 1..n_items LOOP
-            -- pick a random variant with stock
+            -- Pick a variant with AT LEAST 2 units (we may sell 1 or 2).
+            -- The old version required only `> 0` which let the seed
+            -- try to sell 2 out of a stock of 1 → stock → -1 → trips
+            -- the `quantity_on_hand >= 0` CHECK constraint on CI.
             SELECT pv.id, pv.selling_price, pv.cost_price,
                    p.name_ar, pv.sku,
-                   co.name_ar, sz.size_label
+                   co.name_ar, sz.size_label,
+                   st.quantity_on_hand
             INTO v_variants
             FROM product_variants pv
             JOIN products p  ON p.id = pv.product_id
             JOIN colors co   ON co.id = pv.color_id
             LEFT JOIN sizes sz ON sz.id = pv.size_id
             JOIN stock st    ON st.variant_id = pv.id AND st.warehouse_id = v_wh_id
-            WHERE pv.is_active AND st.quantity_on_hand > 0
+            WHERE pv.is_active AND st.quantity_on_hand >= 2
             ORDER BY md5(i::text || j::text || pv.id::text)
             LIMIT 1;
 
@@ -330,7 +334,10 @@ BEGIN
             v_variant_id := v_variants.id;
             v_unit_price := v_variants.selling_price;
             v_unit_cost  := v_variants.cost_price;
-            v_qty        := 1 + (abs(hashtext('q' || i || j)) % 2);   -- 1 or 2
+            v_qty        := LEAST(
+              1 + (abs(hashtext('q' || i || j)) % 2),    -- 1 or 2
+              v_variants.quantity_on_hand                -- never more than what's in stock
+            );
 
             v_line_total := v_qty * v_unit_price;
 
@@ -346,12 +353,12 @@ BEGIN
                  v_qty, v_unit_cost, v_unit_price,
                  v_line_total, v_line_total);
 
-            -- deduct stock + ledger
-            UPDATE stock
-               SET quantity_on_hand = quantity_on_hand - v_qty,
-                   updated_at = NOW()
-             WHERE variant_id = v_variant_id AND warehouse_id = v_wh_id;
-
+            -- Ledger only — the `trg_apply_stock_movement` trigger
+            -- (migration 011) already decrements stock.quantity_on_hand
+            -- from each stock_movements row. The old seed had a manual
+            -- UPDATE stock right before the INSERT, which made stock
+            -- decrement TWICE per sale — eventually pushing rows past
+            -- 0 and tripping the `quantity_on_hand >= 0` CHECK.
             INSERT INTO stock_movements
                 (variant_id, warehouse_id, movement_type, direction,
                  quantity, unit_cost, reference_type, reference_id, user_id)
