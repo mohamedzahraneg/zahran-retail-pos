@@ -945,6 +945,104 @@ export class ReconciliationService {
   }
 
   /**
+   * Focused pre-reset review report — three lean datasets, joined and
+   * denormalized so the operator can glance through an Excel and
+   * confirm everything is captured before a destructive reset:
+   *
+   *   1) sales_lines   — one row per (invoice × product line) with code,
+   *                      product, qty, unit_price, line_total
+   *   2) expense_lines — one row per expense with code, date, category,
+   *                      description, amount
+   *   3) opening_balances — per-cashbox opening balance (from the
+   *                      earliest `opening_balance` / `opening` / deposit
+   *                      transaction we can find, falling back to
+   *                      cashboxes.opening_balance if set)
+   */
+  async reviewReport(): Promise<{
+    sales_lines: any[];
+    expense_lines: any[];
+    opening_balances: any[];
+  }> {
+    const safeList = async (sql: string): Promise<any[]> => {
+      try {
+        return await this.ds.query(sql);
+      } catch {
+        return [];
+      }
+    };
+
+    const sales_lines = await safeList(`
+      SELECT
+        i.invoice_no                              AS "رقم الفاتورة",
+        COALESCE(i.completed_at::date::text,
+                 i.created_at::date::text)        AS "التاريخ",
+        COALESCE(c.full_name, '-')                AS "العميل",
+        COALESCE(pv.barcode, '-')                 AS "الكود",
+        COALESCE(p.name_ar, '-')                  AS "المنتج",
+        ii.quantity                               AS "الكمية",
+        ii.unit_price                             AS "سعر الوحدة",
+        ii.discount_amount                        AS "الخصم",
+        ii.line_total                             AS "إجمالي البند",
+        i.status                                  AS "حالة الفاتورة"
+      FROM invoice_items ii
+      JOIN invoices i               ON i.id  = ii.invoice_id
+      LEFT JOIN product_variants pv ON pv.id = ii.variant_id
+      LEFT JOIN products p          ON p.id  = pv.product_id
+      LEFT JOIN customers c         ON c.id  = i.customer_id
+      WHERE i.status <> 'cancelled'
+      ORDER BY COALESCE(i.completed_at, i.created_at) ASC, i.invoice_no
+    `);
+
+    const expense_lines = await safeList(`
+      SELECT
+        e.expense_no                       AS "رقم المصروف",
+        e.expense_date::text               AS "التاريخ",
+        COALESCE(ec.name_ar, '-')          AS "التصنيف (البند)",
+        COALESCE(e.description, '-')       AS "الوصف",
+        COALESCE(e.vendor_name, '-')       AS "المورد/الجهة",
+        e.amount                           AS "المبلغ",
+        e.payment_method                   AS "طريقة الدفع",
+        COALESCE(cb.name_ar, '-')          AS "الخزنة",
+        CASE WHEN e.is_approved THEN 'نعم' ELSE 'لا' END AS "معتمد"
+      FROM expenses e
+      LEFT JOIN expense_categories ec ON ec.id = e.category_id
+      LEFT JOIN cashboxes cb          ON cb.id = e.cashbox_id
+      ORDER BY e.expense_date ASC, e.expense_no
+    `);
+
+    // Opening balance per cashbox — prefer the explicit
+    // cashboxes.opening_balance column when migration 055 applied it,
+    // otherwise pull from the earliest opening-tagged cashbox_transaction.
+    const opening_balances = await safeList(`
+      SELECT
+        cb.name_ar                                 AS "الخزنة",
+        COALESCE(cb.opening_balance, 0)::numeric(14,2) AS "الرصيد الافتتاحي المسجل",
+        (
+          SELECT ct.amount
+            FROM cashbox_transactions ct
+           WHERE ct.cashbox_id = cb.id
+             AND ct.category IN ('opening_balance','opening')
+           ORDER BY ct.created_at ASC
+           LIMIT 1
+        )                                          AS "أول إيداع افتتاحي",
+        (
+          SELECT ct.created_at::date::text
+            FROM cashbox_transactions ct
+           WHERE ct.cashbox_id = cb.id
+             AND ct.category IN ('opening_balance','opening')
+           ORDER BY ct.created_at ASC
+           LIMIT 1
+        )                                          AS "تاريخ الإيداع",
+        cb.current_balance                         AS "الرصيد الحالي"
+      FROM cashboxes cb
+      WHERE cb.is_active = TRUE
+      ORDER BY cb.name_ar
+    `);
+
+    return { sales_lines, expense_lines, opening_balances };
+  }
+
+  /**
    * Factory reset — wipe every transactional row so the user can
    * restart with clean test data. Preserves structural data:
    * users / roles / warehouses / cashboxes (structure) / products /

@@ -770,6 +770,7 @@ function JournalTab() {
         />
         {canPost && (
           <div className="flex gap-2 mr-auto flex-wrap">
+            <ReviewReportButton />
             <ExportBackupButton />
             <FactoryResetButton />
             <FullCleanupButton />
@@ -906,6 +907,39 @@ function BackfillButton() {
       title="ترحيل تلقائي للعمليات القديمة"
     >
       {mutation.isPending ? '⏳ جاري الترحيل...' : '🔄 ترحيل تلقائي'}
+    </button>
+  );
+}
+
+function ReviewReportButton() {
+  const mutation = useMutation({
+    mutationFn: () => accountsApi.reviewReport(),
+    onSuccess: async (data) => {
+      const { exportMultiSheet } = await import('@/lib/exportExcel');
+      const sheets = [
+        { name: 'بنود فواتير المبيعات', rows: data.sales_lines || [] },
+        { name: 'المصروفات', rows: data.expense_lines || [] },
+        { name: 'الرصيد الافتتاحي', rows: data.opening_balances || [] },
+      ];
+      const today = new Date().toISOString().slice(0, 10);
+      exportMultiSheet(`zahran-review-${today}`, sheets);
+      const total = sheets.reduce((s, sh) => s + sh.rows.length, 0);
+      toast.success(
+        `تم تصدير تقرير المراجعة — ${data.sales_lines.length} بند مبيعات · ${data.expense_lines.length} مصروف · ${data.opening_balances.length} خزنة (${total} صف)`,
+        { duration: 8000 },
+      );
+    },
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.message || 'فشل التصدير'),
+  });
+  return (
+    <button
+      className="btn-primary bg-indigo-600 hover:bg-indigo-700"
+      onClick={() => mutation.mutate()}
+      disabled={mutation.isPending}
+      title="تقرير مركّز بالمنتجات المباعة + المصروفات + الأرصدة الافتتاحية — قبل المسح"
+    >
+      {mutation.isPending ? '⏳ جارٍ التحضير...' : '📋 تقرير المراجعة قبل المسح'}
     </button>
   );
 }

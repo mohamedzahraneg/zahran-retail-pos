@@ -691,6 +691,16 @@ export class ChartOfAccountsController {
     return this.recon.dataSnapshot();
   }
 
+  @Get('audit/review-report')
+  @Permissions('accounts.chart.view')
+  @ApiOperation({
+    summary:
+      'تقرير مراجعة مركّز (بنود الفواتير + المصروفات + الرصيد الافتتاحي) — للتصدير قبل المسح',
+  })
+  reviewReport() {
+    return this.recon.reviewReport();
+  }
+
   // ── Migrations ──────────────────────────────────────────────────────
 
   @Get('audit/migrations')

@@ -407,6 +407,13 @@ export const accountsApi = {
       api.get('/accounts/audit/data-snapshot'),
     ),
 
+  reviewReport: () =>
+    unwrap<{
+      sales_lines: any[];
+      expense_lines: any[];
+      opening_balances: any[];
+    }>(api.get('/accounts/audit/review-report')),
+
   migrationsStatus: () =>
     unwrap<{
       dir: string;
