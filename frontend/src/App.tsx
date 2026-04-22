@@ -35,6 +35,7 @@ import Analytics from '@/pages/Analytics';
 import Budgets from '@/pages/Budgets';
 import FinancialControls from '@/pages/FinancialControls';
 import AccountsAudit from '@/pages/AccountsAudit';
+import OpeningBalance from '@/pages/OpeningBalance';
 import RecurringExpenses from '@/pages/RecurringExpenses';
 import CustomerGroups from '@/pages/CustomerGroups';
 import Settings from '@/pages/Settings';
@@ -197,6 +198,14 @@ export default function App() {
           element={
             <ProtectedRoute permissions={['accounts.chart.view']}>
               <AccountsAudit />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="opening-balance"
+          element={
+            <ProtectedRoute permissions={['accounts.journal.post']}>
+              <OpeningBalance />
             </ProtectedRoute>
           }
         />

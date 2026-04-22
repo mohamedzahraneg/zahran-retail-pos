@@ -91,6 +91,7 @@ const groups: NavGroup[] = [
       // Unified accounts page — tree, journal, reports, budgets, FX,
       // approvals all live inside as tabs.
       { to: '/accounts', label: 'الحسابات', icon: BookOpen, roles: ['admin', 'manager', 'accountant'], permission: 'accounts.chart.view' },
+      { to: '/opening-balance', label: 'فتح الحسابات', icon: BookOpen, roles: ['admin', 'accountant'], permission: 'accounts.journal.post' },
       { to: '/analytics', label: 'التحليلات الذكية', icon: Sparkles, roles: ['admin', 'manager', 'accountant'], permission: 'accounts.chart.view' },
       { to: '/cash-desk', label: 'الصندوق اليومي', icon: Wallet, roles: ['admin', 'manager', 'accountant', 'cashier'], permission: 'cashdesk.view' },
       { to: '/cashboxes', label: 'الخزائن والبنوك', icon: Wallet, roles: ['admin', 'manager', 'accountant'], permission: 'cashdesk.manage_accounts' },

@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 
 /**
@@ -291,6 +291,321 @@ export class ReconciliationService {
       [cashboxId, computed],
     );
     return { cashbox_id: cashboxId, new_balance: computed };
+  }
+
+  /**
+   * Deduplicate journal entries — same source document posted as
+   * multiple LIVE entries (happens when backfill runs while an old
+   * duplicate is still posted non-void). Keeps the oldest LIVE
+   * entry per (reference_type, reference_id) and voids the rest.
+   */
+  async dedupeJournalEntries(): Promise<{
+    duplicates_voided: number;
+    groups: number;
+  }> {
+    const r = await this.ds.query(
+      `
+      WITH live AS (
+        SELECT id, reference_type, reference_id, created_at,
+               ROW_NUMBER() OVER (
+                 PARTITION BY reference_type, reference_id
+                 ORDER BY created_at ASC, id ASC
+               ) AS rn
+          FROM journal_entries
+         WHERE reference_type IS NOT NULL
+           AND reference_id   IS NOT NULL
+           AND reference_type <> 'reversal'
+           AND is_posted      = TRUE
+           AND is_void        = FALSE
+      )
+      UPDATE journal_entries je
+         SET is_void     = TRUE,
+             void_reason = 'auto dedupe — duplicate of older entry',
+             voided_at   = NOW()
+        FROM live
+       WHERE je.id = live.id
+         AND live.rn > 1
+      RETURNING je.id
+      `,
+    );
+    const [{ groups }] = await this.ds.query(
+      `
+      SELECT COUNT(DISTINCT (reference_type, reference_id))::int AS groups
+        FROM journal_entries
+       WHERE reference_type IS NOT NULL
+         AND reference_id   IS NOT NULL
+         AND reference_type <> 'reversal'
+         AND is_posted      = TRUE
+         AND is_void        = FALSE
+      `,
+    );
+    return { duplicates_voided: r.length, groups };
+  }
+
+  /**
+   * Recompute customers.current_balance and suppliers.current_balance
+   * from the underlying source tables (invoices − payments and
+   * purchases − payments). Triggers may be missing or broken on
+   * legacy installs; this is the safe rebuild.
+   */
+  async recomputePartyBalances(): Promise<{
+    customers_updated: number;
+    suppliers_updated: number;
+  }> {
+    // Customers: current_balance = Σ unpaid invoices − Σ non-void deposits
+    const cust = await this.ds.query(
+      `
+      WITH agg AS (
+        SELECT c.id AS customer_id,
+               COALESCE((
+                 SELECT SUM(i.grand_total - COALESCE(i.paid_amount, 0))
+                   FROM invoices i
+                  WHERE i.customer_id = c.id
+                    AND COALESCE(i.status::text,'') NOT IN ('cancelled','void','draft')
+               ), 0) AS outstanding,
+               COALESCE((
+                 SELECT SUM(cp.amount)
+                   FROM customer_payments cp
+                  WHERE cp.customer_id = c.id
+                    AND cp.is_void = FALSE
+                    AND cp.kind = 'deposit'
+               ), 0) AS deposits
+          FROM customers c
+      )
+      UPDATE customers c
+         SET current_balance = (agg.outstanding - agg.deposits)::numeric(14,2)
+        FROM agg
+       WHERE c.id = agg.customer_id
+      RETURNING c.id
+      `,
+    );
+
+    const supp = await this.ds.query(
+      `
+      WITH agg AS (
+        SELECT s.id AS supplier_id,
+               COALESCE((
+                 SELECT SUM(p.grand_total - COALESCE(p.paid_amount, 0))
+                   FROM purchases p
+                  WHERE p.supplier_id = s.id
+                    AND COALESCE(p.status::text,'') NOT IN ('cancelled','draft')
+               ), 0) AS owed
+          FROM suppliers s
+      )
+      UPDATE suppliers s
+         SET current_balance = agg.owed::numeric(14,2)
+        FROM agg
+       WHERE s.id = agg.supplier_id
+      RETURNING s.id
+      `,
+    );
+
+    return {
+      customers_updated: cust.length,
+      suppliers_updated: supp.length,
+    };
+  }
+
+  /**
+   * Post an opening-balance journal entry — the single starting point
+   * for a fresh deployment. Writes one balanced entry that sets:
+   *
+   *   DR Cash (1111) ← cash_in_hand
+   *   DR Receivables (1121) ← customer_dues
+   *   DR Inventory (1131) ← inventory_value
+   *   DR Fixed assets (121) ← fixed_assets
+   *   CR Suppliers (211) ← supplier_dues
+   *   CR Capital (31) ← plug (everything else balances into owner's equity)
+   *
+   * Also sets cashboxes.opening_balance + current_balance, and creates
+   * an opening cashbox_transaction so the cash side of reports agrees.
+   */
+  async postOpeningBalance(
+    args: {
+      entry_date: string; // YYYY-MM-DD
+      cash_in_hand?: number;
+      customer_dues?: number;
+      supplier_dues?: number;
+      inventory_value?: number;
+      fixed_assets?: number;
+      capital?: number; // optional explicit capital; otherwise plug
+      cashbox_id?: string;
+      notes?: string;
+    },
+    userId: string,
+  ): Promise<{
+    entry_id: string | null;
+    cashbox_id: string | null;
+    plug_to_capital: number;
+  }> {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(args.entry_date || '')) {
+      throw new BadRequestException('تاريخ غير صحيح');
+    }
+
+    const values = {
+      cash: Number(args.cash_in_hand || 0),
+      recv: Number(args.customer_dues || 0),
+      inv: Number(args.inventory_value || 0),
+      fa: Number(args.fixed_assets || 0),
+      supp: Number(args.supplier_dues || 0),
+      cap: args.capital != null ? Number(args.capital) : null,
+    };
+    const totalDebit = values.cash + values.recv + values.inv + values.fa;
+    // If user didn't specify capital, plug = debit − supplier payable.
+    const plug =
+      values.cap != null ? values.cap : totalDebit - values.supp;
+    const totalCredit = values.supp + plug;
+
+    if (Math.abs(totalDebit - totalCredit) > 0.01) {
+      throw new BadRequestException(
+        `القيد غير متوازن: مدين ${totalDebit} ≠ دائن ${totalCredit}`,
+      );
+    }
+    if (totalDebit < 0.01) {
+      throw new BadRequestException('قيد فارغ');
+    }
+
+    return this.ds.transaction(async (em) => {
+      // Resolve accounts.
+      const codes = ['1111', '1121', '1131', '121', '211', '31'];
+      const accRows = await em.query(
+        `SELECT code, id FROM chart_of_accounts WHERE code = ANY($1::text[])`,
+        [codes],
+      );
+      const acc: Record<string, string> = {};
+      for (const r of accRows) acc[r.code] = r.id;
+      const missing = codes.filter((c) => !acc[c]);
+      if (missing.length) {
+        throw new BadRequestException(
+          `حسابات GL ناقصة: ${missing.join(', ')}`,
+        );
+      }
+
+      // Cashbox — prefer the supplied one, else any active cashbox.
+      let cashboxId = args.cashbox_id ?? null;
+      if (!cashboxId) {
+        const [cb] = await em.query(
+          `SELECT id FROM cashboxes WHERE is_active = TRUE ORDER BY created_at LIMIT 1`,
+        );
+        cashboxId = cb?.id ?? null;
+      }
+      if (!cashboxId && values.cash > 0) {
+        throw new BadRequestException(
+          'لا توجد خزنة نشطة لإدخال الرصيد الافتتاحي النقدي',
+        );
+      }
+
+      // Check we haven't already posted an opening entry.
+      const [existing] = await em.query(
+        `SELECT id FROM journal_entries
+          WHERE reference_type = 'opening_balance'
+            AND is_posted = TRUE AND is_void = FALSE
+          LIMIT 1`,
+      );
+      if (existing) {
+        throw new BadRequestException(
+          'تم تسجيل رصيد افتتاحي مسبقاً. احذف القيد الحالي قبل تسجيل جديد.',
+        );
+      }
+
+      // Build the entry
+      const [{ seq }] = await em.query(
+        `SELECT nextval('seq_journal_entry_no') AS seq`,
+      );
+      const entryNo = `JE-${args.entry_date.slice(0, 4)}-${String(seq).padStart(6, '0')}`;
+      const [entry] = await em.query(
+        `
+        INSERT INTO journal_entries
+          (entry_no, entry_date, description, reference_type, reference_id,
+           is_posted, posted_by, posted_at, created_by)
+        VALUES ($1, $2, 'قيد افتتاحي', 'opening_balance', NULL,
+                FALSE, $3, NULL, $3)
+        RETURNING id
+        `,
+        [entryNo, args.entry_date, userId],
+      );
+
+      let n = 1;
+      const pushLine = async (
+        accountId: string,
+        debit: number,
+        credit: number,
+        desc: string,
+        extra?: { cashbox_id?: string },
+      ) => {
+        if (debit === 0 && credit === 0) return;
+        await em.query(
+          `INSERT INTO journal_lines
+             (entry_id, line_no, account_id, debit, credit, description, cashbox_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [
+            entry.id,
+            n++,
+            accountId,
+            debit,
+            credit,
+            desc,
+            extra?.cashbox_id ?? null,
+          ],
+        );
+      };
+
+      await pushLine(
+        acc['1111'],
+        values.cash,
+        0,
+        'نقدية افتتاحية',
+        { cashbox_id: cashboxId ?? undefined },
+      );
+      await pushLine(acc['1121'], values.recv, 0, 'ذمم عملاء افتتاحية');
+      await pushLine(acc['1131'], values.inv, 0, 'مخزون افتتاحي');
+      await pushLine(acc['121'], values.fa, 0, 'أصول ثابتة افتتاحية');
+      await pushLine(acc['211'], 0, values.supp, 'ذمم موردين افتتاحية');
+      await pushLine(acc['31'], 0, plug, 'رأس المال / الرصيد المرحَّل');
+
+      await em.query(
+        `UPDATE journal_entries SET is_posted = TRUE, posted_at = NOW() WHERE id = $1`,
+        [entry.id],
+      );
+
+      // Cash side: record on the cashbox so reports agree.
+      if (cashboxId && values.cash > 0) {
+        const [cb] = await em.query(
+          `SELECT current_balance FROM cashboxes WHERE id = $1 FOR UPDATE`,
+          [cashboxId],
+        );
+        const newBalance = Number(cb?.current_balance || 0) + values.cash;
+        await em.query(
+          `
+          INSERT INTO cashbox_transactions
+            (cashbox_id, direction, amount, category, reference_type,
+             balance_after, user_id, notes, created_at)
+          VALUES ($1, 'in'::txn_direction, $2, 'opening_balance',
+                  'cashbox'::entity_type, $3, $4, $5,
+                  ($6::date + TIME '10:00') AT TIME ZONE 'Africa/Cairo')
+          `,
+          [
+            cashboxId,
+            values.cash,
+            newBalance,
+            userId,
+            'رصيد افتتاحي للخزنة',
+            args.entry_date,
+          ],
+        );
+        await em.query(
+          `UPDATE cashboxes SET current_balance = $1, opening_balance = $2, updated_at = NOW()
+            WHERE id = $3`,
+          [newBalance, values.cash, cashboxId],
+        );
+      }
+
+      return {
+        entry_id: entry.id,
+        cashbox_id: cashboxId,
+        plug_to_capital: plug,
+      };
+    });
   }
 
   /**

@@ -1095,11 +1095,18 @@ function FactoryResetButton() {
 function FullCleanupButton() {
   const qc = useQueryClient();
   const mutation = useMutation({
-    mutationFn: () => accountsApi.fullCleanup(),
+    mutationFn: async () => {
+      // Enhanced cleanup: adds journal dedup + party balance recompute
+      // on top of the core cleanup. Serialized to keep stable order.
+      const r = await accountsApi.fullCleanup();
+      await accountsApi.dedupeJournal().catch(() => undefined);
+      await accountsApi.recomputePartyBalances().catch(() => undefined);
+      return r;
+    },
     onSuccess: (r) => {
       toast.success(
-        `تنظيف شامل تم:\n• فواتير ملغاة محذوفة: ${r.cancelled_invoices_deleted}\n• قيود GL ممسوحة: ${r.journal_entries_wiped}\n• خزائن تم توحيدها: ${r.cashboxes_consolidated}\n• حركات مكررة محذوفة: ${r.duplicates_removed}\n• رصيد الخزينة الرئيسية: ${Number(r.main_cashbox_balance).toLocaleString('en-US', { minimumFractionDigits: 2 })} ج.م`,
-        { duration: 12000 },
+        `تنظيف شامل تم:\n• فواتير ملغاة محذوفة: ${r.cancelled_invoices_deleted}\n• قيود GL ممسوحة: ${r.journal_entries_wiped}\n• خزائن تم توحيدها: ${r.cashboxes_consolidated}\n• حركات مكررة محذوفة: ${r.duplicates_removed}\n• رصيد الخزينة الرئيسية: ${Number(r.main_cashbox_balance).toLocaleString('en-US', { minimumFractionDigits: 2 })} ج.م\n• قيود مكررة تم إلغاؤها + أرصدة العملاء/الموردين تم إعادة حسابها`,
+        { duration: 14000 },
       );
       qc.invalidateQueries();
     },

@@ -658,6 +658,48 @@ export class ChartOfAccountsController {
     return this.recon.dedupeCashboxTransactions();
   }
 
+  @Post('audit/dedupe-journal')
+  @Permissions('accounts.journal.post')
+  @ApiOperation({
+    summary: 'إلغاء قيود GL المكررة لنفس الفاتورة/المصروف',
+  })
+  dedupeJournal() {
+    return this.recon.dedupeJournalEntries();
+  }
+
+  @Post('audit/recompute-party-balances')
+  @Permissions('accounts.journal.post')
+  @ApiOperation({
+    summary: 'إعادة حساب أرصدة العملاء والموردين من المصادر',
+  })
+  recomputePartyBalances() {
+    return this.recon.recomputePartyBalances();
+  }
+
+  @Post('audit/opening-balance')
+  @Permissions('accounts.journal.post')
+  @ApiOperation({
+    summary:
+      'تسجيل الرصيد الافتتاحي دفعة واحدة (نقد/ذمم/موردين/مخزون/أصول → رأس المال)',
+  })
+  openingBalance(
+    @Body()
+    body: {
+      entry_date: string;
+      cash_in_hand?: number;
+      customer_dues?: number;
+      supplier_dues?: number;
+      inventory_value?: number;
+      fixed_assets?: number;
+      capital?: number;
+      cashbox_id?: string;
+      notes?: string;
+    },
+    @CurrentUser() user: JwtUser,
+  ) {
+    return this.recon.postOpeningBalance(body, user.userId);
+  }
+
   @Post('audit/full-cleanup')
   @Permissions('accounts.journal.void')
   @ApiOperation({

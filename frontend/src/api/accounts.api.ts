@@ -414,6 +414,33 @@ export const accountsApi = {
       opening_balances: any[];
     }>(api.get('/accounts/audit/review-report')),
 
+  dedupeJournal: () =>
+    unwrap<{ duplicates_voided: number; groups: number }>(
+      api.post('/accounts/audit/dedupe-journal', {}),
+    ),
+
+  recomputePartyBalances: () =>
+    unwrap<{ customers_updated: number; suppliers_updated: number }>(
+      api.post('/accounts/audit/recompute-party-balances', {}),
+    ),
+
+  postOpeningBalance: (payload: {
+    entry_date: string;
+    cash_in_hand?: number;
+    customer_dues?: number;
+    supplier_dues?: number;
+    inventory_value?: number;
+    fixed_assets?: number;
+    capital?: number;
+    cashbox_id?: string;
+    notes?: string;
+  }) =>
+    unwrap<{
+      entry_id: string | null;
+      cashbox_id: string | null;
+      plug_to_capital: number;
+    }>(api.post('/accounts/audit/opening-balance', payload)),
+
   migrationsStatus: () =>
     unwrap<{
       dir: string;
