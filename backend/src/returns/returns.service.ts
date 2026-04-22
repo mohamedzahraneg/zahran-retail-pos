@@ -3,6 +3,7 @@ import {
   ConflictException,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
@@ -15,6 +16,7 @@ import {
   RefundReturnDto,
   RejectReturnDto,
 } from './dto/return.dto';
+import { AccountingPostingService } from '../chart-of-accounts/posting.service';
 
 @Injectable()
 export class ReturnsService {
@@ -22,6 +24,7 @@ export class ReturnsService {
     @InjectRepository(ReturnEntity)
     private readonly repo: Repository<ReturnEntity>,
     private readonly ds: DataSource,
+    @Optional() private readonly posting?: AccountingPostingService,
   ) {}
 
   // ==========================================================================
@@ -214,6 +217,11 @@ export class ReturnsService {
         `,
         [id, userId, dto.notes ? `\n[Approved] ${dto.notes}` : ''],
       );
+
+      // Auto-post the return to the GL (reverse sale + restore inventory).
+      await this.posting
+        ?.postReturn(id, userId, em)
+        .catch(() => undefined);
 
       return this.findOne(id);
     });

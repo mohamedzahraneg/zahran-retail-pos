@@ -164,6 +164,10 @@ export class CashDeskService {
        WHERE id = $1`,
       [id, reason, userId],
     );
+    // Reverse the GL entry so receivables and cash balance rebound.
+    await this.posting
+      ?.reverseByReference('customer_payment', id, reason, userId)
+      .catch(() => undefined);
     return { voided: true };
   }
 

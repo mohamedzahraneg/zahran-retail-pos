@@ -565,6 +565,11 @@ export class PosService {
       userId,
       reason,
     ]);
+    // Reverse the GL entry so the income statement / trial balance
+    // reflect the cancellation. Idempotent + failure-safe.
+    this.posting
+      ?.reverseByReference('invoice', id, reason, userId)
+      .catch(() => undefined);
     this.realtime?.emitPosEvent({
       type: 'invoice.voided',
       payload: { invoice_id: id, reason, voided_by: userId },

@@ -31,13 +31,21 @@ export class AccountingPostingService {
   // Public API — one method per event type
   // ═══════════════════════════════════════════════════════════════════
 
-  /** Sales invoice → DR Cash/Receivables  CR Sales Revenue */
+  /**
+   * Sales invoice → full double entry:
+   *   DR Cash/Receivables (grand_total)
+   *   CR Sales Revenue (subtotal after discount, excl. tax)
+   *   CR VAT Payable (tax_amount)   — only when > 0
+   *   DR COGS (sum of line cost × qty)
+   *   CR Inventory (same amount)
+   * All in one balanced entry.
+   */
   async postInvoice(invoiceId: string, userId: string, em?: EntityManager) {
     return this.safe('invoice', invoiceId, em, async (q) => {
       const [inv] = await q(
         `SELECT i.id, i.invoice_no, i.grand_total, i.paid_amount,
-                i.completed_at, i.created_at, i.status, i.customer_id,
-                i.cashbox_id
+                i.tax_amount, i.completed_at, i.created_at, i.status,
+                i.customer_id, i.cashbox_id
            FROM invoices i WHERE i.id = $1`,
         [invoiceId],
       );
@@ -50,22 +58,45 @@ export class AccountingPostingService {
       const total = Number(inv.grand_total || 0);
       const paid = Number(inv.paid_amount || 0);
       const unpaid = Math.max(0, total - paid);
+      const tax = Number(inv.tax_amount || 0);
+      const revenue = Math.max(0, total - tax);
       if (total < 0.01) return null;
+
+      // Sum the cost side from invoice_items.
+      const [costRow] = await q(
+        `SELECT COALESCE(SUM(quantity * unit_cost), 0)::numeric(14,2) AS cogs
+           FROM invoice_items WHERE invoice_id = $1`,
+        [invoiceId],
+      );
+      const cogs = Number(costRow?.cogs || 0);
 
       const entryDate = this.dateOnly(inv.completed_at || inv.created_at);
       const cashAcc = await this.cashboxAccountId(q, inv.cashbox_id);
       const salesAcc = await this.accountIdByCode(q, '411');
       const recvAcc = await this.accountIdByCode(q, '1121');
+      const vatAcc = tax > 0 ? await this.accountIdByCode(q, '214') : null;
+      const cogsAcc = cogs > 0 ? await this.accountIdByCode(q, '51') : null;
+      const invAcc = cogs > 0 ? await this.accountIdByCode(q, '1131') : null;
 
       const lines: PostingLine[] = [];
+      // Cash side
       if (paid > 0 && cashAcc) {
         lines.push({ account_id: cashAcc, debit: paid, credit: 0, description: `فاتورة ${inv.invoice_no}` });
       }
       if (unpaid > 0 && recvAcc) {
         lines.push({ account_id: recvAcc, debit: unpaid, credit: 0, description: `آجل ${inv.invoice_no}` });
       }
-      if (salesAcc) {
-        lines.push({ account_id: salesAcc, debit: 0, credit: total, description: `إيراد ${inv.invoice_no}` });
+      // Revenue + tax split
+      if (salesAcc && revenue > 0) {
+        lines.push({ account_id: salesAcc, debit: 0, credit: revenue, description: `إيراد ${inv.invoice_no}` });
+      }
+      if (vatAcc && tax > 0) {
+        lines.push({ account_id: vatAcc, debit: 0, credit: tax, description: `ضريبة ${inv.invoice_no}` });
+      }
+      // Cost side — only when we have cost data
+      if (cogsAcc && invAcc && cogs > 0) {
+        lines.push({ account_id: cogsAcc, debit: cogs, credit: 0, description: `تكلفة ${inv.invoice_no}` });
+        lines.push({ account_id: invAcc, debit: 0, credit: cogs, description: `خصم مخزون ${inv.invoice_no}` });
       }
       if (lines.length < 2) return null;
 
@@ -78,6 +109,293 @@ export class AccountingPostingService {
         created_by: userId,
       });
     });
+  }
+
+  /**
+   * Customer return → reverses the sale:
+   *   DR Sales Returns (49)       = net_refund (gross minus restocking)
+   *   DR Restocking Fee revenue?  → kept in-house; we credit 'other revenue' (422)
+   *   CR Cash/Receivables         = net_refund + restocking
+   *   DR Inventory (1131)         = cost of items returned to stock
+   *   CR COGS (51)                = same
+   */
+  async postReturn(returnId: string, userId: string, em?: EntityManager) {
+    return this.safe('return', returnId, em, async (q) => {
+      const [r] = await q(
+        `SELECT r.id, r.return_no, r.total_refund, r.restocking_fee,
+                r.net_refund, r.status, r.refunded_at, r.approved_at,
+                r.requested_at, r.refund_method, r.original_invoice_id,
+                i.cashbox_id
+           FROM returns r
+           LEFT JOIN invoices i ON i.id = r.original_invoice_id
+          WHERE r.id = $1`,
+        [returnId],
+      );
+      if (!r) return null;
+      if (r.status !== 'approved' && r.status !== 'refunded') return null;
+      const gross = Number(r.total_refund || 0);
+      const fee = Number(r.restocking_fee || 0);
+      const net = Number(r.net_refund || gross - fee);
+      if (gross < 0.01) return null;
+
+      // Cost of items that went back to stock (back_to_stock=true + resellable).
+      const [costRow] = await q(
+        `SELECT COALESCE(SUM(ri.quantity *
+            COALESCE(ii.unit_cost, (SELECT cost_price FROM product_variants WHERE id = ri.variant_id), 0)
+         ), 0)::numeric(14,2) AS cost
+           FROM return_items ri
+           LEFT JOIN invoice_items ii ON ii.id = ri.original_invoice_item_id
+          WHERE ri.return_id = $1 AND ri.back_to_stock = TRUE`,
+        [returnId],
+      );
+      const restockCost = Number(costRow?.cost || 0);
+
+      const entryDate = this.dateOnly(
+        r.refunded_at || r.approved_at || r.requested_at,
+      );
+      const returnsAcc = await this.accountIdByCode(q, '49');  // مرتدات المبيعات
+      const cashAcc = await this.cashboxAccountId(q, r.cashbox_id);
+      const feeAcc =
+        fee > 0 ? await this.accountIdByCode(q, '422') : null; // misc revenue
+      const cogsAcc =
+        restockCost > 0 ? await this.accountIdByCode(q, '51') : null;
+      const invAcc =
+        restockCost > 0 ? await this.accountIdByCode(q, '1131') : null;
+
+      const lines: PostingLine[] = [];
+      if (returnsAcc && gross > 0) {
+        lines.push({
+          account_id: returnsAcc,
+          debit: gross,
+          credit: 0,
+          description: `مرتجع ${r.return_no}`,
+        });
+      }
+      if (feeAcc && fee > 0) {
+        // Restocking fee kept by the company — credit revenue.
+        lines.push({
+          account_id: feeAcc,
+          debit: 0,
+          credit: fee,
+          description: `رسوم إعادة جرد ${r.return_no}`,
+        });
+      }
+      if (cashAcc && net > 0) {
+        lines.push({
+          account_id: cashAcc,
+          debit: 0,
+          credit: net,
+          description: `رد نقدي ${r.return_no}`,
+        });
+      }
+      // Inventory side
+      if (invAcc && cogsAcc && restockCost > 0) {
+        lines.push({
+          account_id: invAcc,
+          debit: restockCost,
+          credit: 0,
+          description: `إرجاع مخزون ${r.return_no}`,
+        });
+        lines.push({
+          account_id: cogsAcc,
+          debit: 0,
+          credit: restockCost,
+          description: `عكس تكلفة ${r.return_no}`,
+        });
+      }
+      if (lines.length < 2) return null;
+
+      return this.createEntry(q, {
+        entry_date: entryDate,
+        description: `قيد مرتجع ${r.return_no}`,
+        reference_type: 'return',
+        reference_id: returnId,
+        lines,
+        created_by: userId,
+      });
+    });
+  }
+
+  /**
+   * Purchase received → capitalizes inventory:
+   *   DR Inventory (1131) = subtotal (ex-tax)
+   *   DR VAT Receivable (214 contra) = tax_amount  — we record as negative liability
+   *   CR Suppliers Payable (211) or Cash = grand_total
+   */
+  async postPurchase(purchaseId: string, userId: string, em?: EntityManager) {
+    return this.safe('purchase', purchaseId, em, async (q) => {
+      const [p] = await q(
+        `SELECT id, purchase_no, subtotal, tax_amount, shipping_cost,
+                grand_total, paid_amount, status, received_at, invoice_date
+           FROM purchases WHERE id = $1`,
+        [purchaseId],
+      );
+      if (!p) return null;
+      if (p.status !== 'received' && p.status !== 'partial' && p.status !== 'paid') {
+        return null;
+      }
+      const total = Number(p.grand_total || 0);
+      const paid = Number(p.paid_amount || 0);
+      const tax = Number(p.tax_amount || 0);
+      const shipping = Number(p.shipping_cost || 0);
+      const inventoryCost = Math.max(0, total - tax); // shipping already in subtotal
+      if (total < 0.01) return null;
+
+      const entryDate = this.dateOnly(p.received_at || p.invoice_date);
+      const invAcc = await this.accountIdByCode(q, '1131');
+      const vatAcc = tax > 0 ? await this.accountIdByCode(q, '214') : null;
+      const suppAcc = await this.accountIdByCode(q, '211');
+      // We don't know the cashbox here — PO model doesn't track it.
+      // If fully paid at receive time, caller can post the supplier payment separately.
+
+      const lines: PostingLine[] = [];
+      if (invAcc && inventoryCost > 0) {
+        lines.push({
+          account_id: invAcc,
+          debit: inventoryCost,
+          credit: 0,
+          description: `مخزون ${p.purchase_no}`,
+        });
+      }
+      if (vatAcc && tax > 0) {
+        // DR VAT Payable — reduces the liability (net reclaim).
+        lines.push({
+          account_id: vatAcc,
+          debit: tax,
+          credit: 0,
+          description: `ضريبة شراء ${p.purchase_no}`,
+        });
+      }
+      if (suppAcc && total > 0) {
+        lines.push({
+          account_id: suppAcc,
+          debit: 0,
+          credit: total,
+          description: `مستحق مورد ${p.purchase_no}`,
+        });
+      }
+      // Add shipping to other-expenses if tracked inline (optional)
+      if (shipping > 0) {
+        // shipping is already baked into subtotal; nothing extra here.
+      }
+      if (lines.length < 2) return null;
+
+      return this.createEntry(q, {
+        entry_date: entryDate,
+        description: `قيد مشتريات ${p.purchase_no}`,
+        reference_type: 'purchase',
+        reference_id: purchaseId,
+        lines,
+        created_by: userId,
+      });
+    });
+  }
+
+  /**
+   * Reverse a posted journal entry by creating a mirror entry with
+   * debits and credits swapped. Used when the originating document is
+   * voided (invoice cancelled, customer payment voided, return rejected
+   * after approval, …).
+   */
+  async reverseByReference(
+    refType: string,
+    refId: string,
+    reason: string,
+    userId: string,
+    em?: EntityManager,
+  ) {
+    const q: QueryFn = em
+      ? (sql: string, params?: any[]) => em.query(sql, params)
+      : (sql: string, params?: any[]) => this.ds.query(sql, params);
+    try {
+      // Find the original posted entry.
+      const [orig] = await q(
+        `SELECT id, entry_no FROM journal_entries
+          WHERE reference_type = $1 AND reference_id = $2
+            AND is_posted = TRUE AND is_void = FALSE
+            AND reversal_of IS NULL
+          ORDER BY created_at ASC LIMIT 1`,
+        [refType, refId],
+      );
+      if (!orig) return null;
+
+      // Check we haven't already reversed it.
+      const [existingRev] = await q(
+        `SELECT id FROM journal_entries
+          WHERE reversal_of = $1 AND is_posted = TRUE AND is_void = FALSE
+          LIMIT 1`,
+        [orig.id],
+      );
+      if (existingRev) return { skipped: true, entry_id: existingRev.id };
+
+      const origLines = await q(
+        `SELECT account_id, debit, credit, description, cashbox_id, warehouse_id, line_no
+           FROM journal_lines WHERE entry_id = $1 ORDER BY line_no`,
+        [orig.id],
+      );
+      if (!origLines.length) return null;
+
+      const today = new Date().toISOString().slice(0, 10);
+      const [{ seq }] = await q(
+        `SELECT nextval('seq_journal_entry_no') AS seq`,
+      );
+      const entryNo = `JE-${today.slice(0, 4)}-${String(seq).padStart(6, '0')}`;
+
+      const [rev] = await q(
+        `
+        INSERT INTO journal_entries
+          (entry_no, entry_date, description, reference_type, reference_id,
+           reversal_of, is_posted, posted_by, posted_at, created_by)
+        VALUES ($1,$2,$3,'reversal',$4,$5,FALSE,$6,NULL,$6)
+        RETURNING id
+        `,
+        [
+          entryNo,
+          today,
+          `عكس قيد ${orig.entry_no}: ${reason}`,
+          refId,
+          orig.id,
+          userId,
+        ],
+      );
+
+      let n = 1;
+      for (const l of origLines) {
+        await q(
+          `INSERT INTO journal_lines
+             (entry_id, line_no, account_id, debit, credit, description, cashbox_id, warehouse_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+          [
+            rev.id,
+            n++,
+            l.account_id,
+            Number(l.credit || 0), // swap
+            Number(l.debit || 0), // swap
+            l.description,
+            l.cashbox_id,
+            l.warehouse_id,
+          ],
+        );
+      }
+
+      // Flip original to void + post reversal.
+      await q(
+        `UPDATE journal_entries SET is_void = TRUE, void_reason = $2,
+           voided_by = $3, voided_at = NOW()
+         WHERE id = $1`,
+        [orig.id, reason, userId],
+      );
+      await q(
+        `UPDATE journal_entries SET is_posted = TRUE, posted_at = NOW() WHERE id = $1`,
+        [rev.id],
+      );
+      return { entry_id: rev.id, reversed_of: orig.id };
+    } catch (err: any) {
+      this.logger.error(
+        `reverse ${refType}/${refId} failed: ${err?.message ?? err}`,
+      );
+      return { error: err?.message ?? String(err) };
+    }
   }
 
   /** Customer payment → DR Cash/Bank  CR Receivables */
@@ -371,6 +689,22 @@ export class AccountingPostingService {
     );
     await run('shifts', shifts, (id) =>
       this.postShiftClose(id, opts.userId),
+    );
+
+    const returns = await q(
+      `SELECT id FROM returns WHERE status IN ('approved','refunded') AND requested_at >= $1 ORDER BY requested_at`,
+      [since],
+    );
+    await run('returns', returns, (id) =>
+      this.postReturn(id, opts.userId),
+    );
+
+    const purchases = await q(
+      `SELECT id FROM purchases WHERE status IN ('received','partial','paid') AND COALESCE(received_at, invoice_date::timestamptz) >= $1 ORDER BY received_at NULLS LAST, invoice_date`,
+      [since],
+    );
+    await run('purchases', purchases, (id) =>
+      this.postPurchase(id, opts.userId),
     );
 
     return out;

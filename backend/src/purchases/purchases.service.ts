@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import {
@@ -9,6 +10,7 @@ import {
   CreatePurchaseDto,
   ListPurchasesDto,
 } from './dto/purchase.dto';
+import { AccountingPostingService } from '../chart-of-accounts/posting.service';
 
 /**
  * Purchases module — supplier purchase orders + receiving.
@@ -22,7 +24,10 @@ import {
  */
 @Injectable()
 export class PurchasesService {
-  constructor(private readonly ds: DataSource) {}
+  constructor(
+    private readonly ds: DataSource,
+    @Optional() private readonly posting?: AccountingPostingService,
+  ) {}
 
   // --------------------------------------------------------------------------
   //  List / get
@@ -254,6 +259,9 @@ export class PurchasesService {
           WHERE id = $2`,
         [userId, id],
       );
+
+      // Auto-post inventory capitalization to the GL.
+      await this.posting?.postPurchase(id, userId, m).catch(() => undefined);
 
       return this.getOne(id);
     });
