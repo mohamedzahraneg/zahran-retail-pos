@@ -14,6 +14,10 @@ import {
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { AccountingService } from './accounting.service';
 import {
+  ExpenseApprovalService,
+  CreateRuleDto,
+} from './approval.service';
+import {
   CreateExpenseCategoryDto,
   CreateExpenseDto,
   ListExpensesDto,
@@ -31,7 +35,79 @@ import { Roles, Permissions } from '../common/decorators/roles.decorator';
 @Permissions('accounting.view')
 @Controller('accounting')
 export class AccountingController {
-  constructor(private readonly service: AccountingService) {}
+  constructor(
+    private readonly service: AccountingService,
+    private readonly approvals: ExpenseApprovalService,
+  ) {}
+
+  // ─── Expense approvals ───────────────────────────────────────────────
+
+  @Get('approvals/rules')
+  @Permissions('accounts.approval.manage')
+  listApprovalRules() {
+    return this.approvals.listRules();
+  }
+
+  @Post('approvals/rules')
+  @Permissions('accounts.approval.manage')
+  createApprovalRule(@Body() dto: CreateRuleDto) {
+    return this.approvals.createRule(dto);
+  }
+
+  @Patch('approvals/rules/:id')
+  @Permissions('accounts.approval.manage')
+  updateApprovalRule(
+    @Param('id') id: string,
+    @Body() dto: Partial<CreateRuleDto> & { is_active?: boolean },
+  ) {
+    return this.approvals.updateRule(id, dto);
+  }
+
+  @Delete('approvals/rules/:id')
+  @Permissions('accounts.approval.manage')
+  removeApprovalRule(@Param('id') id: string) {
+    return this.approvals.removeRule(id);
+  }
+
+  @Get('approvals/inbox')
+  @Permissions('accounts.approval.decide')
+  approvalInbox(@Req() req: any) {
+    return this.approvals.inboxFor(req.user.sub ?? req.user.id ?? req.user.userId);
+  }
+
+  @Post('approvals/:id/approve')
+  @Permissions('accounts.approval.decide')
+  approve(
+    @Param('id') id: string,
+    @Body() body: { note?: string },
+    @Req() req: any,
+  ) {
+    return this.approvals.approve(
+      id,
+      req.user.sub ?? req.user.id ?? req.user.userId,
+      body?.note,
+    );
+  }
+
+  @Post('approvals/:id/reject')
+  @Permissions('accounts.approval.decide')
+  reject(
+    @Param('id') id: string,
+    @Body() body: { reason: string },
+    @Req() req: any,
+  ) {
+    return this.approvals.reject(
+      id,
+      req.user.sub ?? req.user.id ?? req.user.userId,
+      body?.reason,
+    );
+  }
+
+  @Get('approvals/expense/:id')
+  @Permissions('accounting.view')
+  approvalsForExpense(@Param('id') id: string) {
+    return this.approvals.listForExpense(id);
+  }
 
   // ─── Categories ──────────────────────────────────────────────────────
   @Get('categories')

@@ -259,7 +259,161 @@ export const accountsApi = {
   // ── VAT ──────────────────────────────────────────────────────────
   vatReturn: (params: { from: string; to: string }) =>
     unwrap<VatReturn>(api.get('/accounts/reports/vat-return', { params })),
+
+  // ── Budgets ──────────────────────────────────────────────────────
+  listBudgets: () => unwrap<Budget[]>(api.get('/accounts/budgets')),
+  getBudget: (id: string) =>
+    unwrap<BudgetDetail>(api.get(`/accounts/budgets/${id}`)),
+  createBudget: (payload: CreateBudgetPayload) =>
+    unwrap<BudgetDetail>(api.post('/accounts/budgets', payload)),
+  updateBudget: (id: string, payload: UpdateBudgetPayload) =>
+    unwrap<BudgetDetail>(api.patch(`/accounts/budgets/${id}`, payload)),
+  removeBudget: (id: string) =>
+    unwrap<any>(api.delete(`/accounts/budgets/${id}`)),
+  budgetVariance: (id: string, params?: { cost_center_id?: string }) =>
+    unwrap<BudgetVariance>(
+      api.get(`/accounts/budgets/${id}/variance`, { params }),
+    ),
+
+  // ── Cost centers ─────────────────────────────────────────────────
+  listCostCenters: (includeInactive = false) =>
+    unwrap<CostCenter[]>(
+      api.get('/accounts/cost-centers', {
+        params: includeInactive ? { include_inactive: 'true' } : undefined,
+      }),
+    ),
+  createCostCenter: (payload: CreateCostCenterPayload) =>
+    unwrap<CostCenter>(api.post('/accounts/cost-centers', payload)),
+  updateCostCenter: (id: string, payload: Partial<CreateCostCenterPayload> & { is_active?: boolean }) =>
+    unwrap<CostCenter>(api.patch(`/accounts/cost-centers/${id}`, payload)),
+  removeCostCenter: (id: string) =>
+    unwrap<any>(api.delete(`/accounts/cost-centers/${id}`)),
+
+  // ── FX ─────────────────────────────────────────────────────────────
+  listRates: (params?: { currency?: string; limit?: number }) =>
+    unwrap<CurrencyRate[]>(api.get('/accounts/fx/rates', { params })),
+  upsertRate: (payload: UpsertRatePayload) =>
+    unwrap<CurrencyRate>(api.post('/accounts/fx/rates', payload)),
+  removeRate: (id: string) =>
+    unwrap<any>(api.delete(`/accounts/fx/rates/${id}`)),
+  revalue: (as_of: string) =>
+    unwrap<{
+      as_of: string;
+      results: Array<{
+        cashbox_id: string;
+        name?: string;
+        currency?: string;
+        rate?: number;
+        balance_fc?: number;
+        target_egp?: number;
+        book_egp?: number;
+        diff?: number;
+        posted?: boolean;
+        skipped?: boolean;
+        reason?: string;
+      }>;
+    }>(api.post('/accounts/fx/revalue', { as_of })),
 };
+
+export interface CurrencyRate {
+  id: string;
+  currency: string;
+  rate_date: string;
+  rate_to_egp: string;
+  source: string | null;
+  notes: string | null;
+  created_by_name: string | null;
+  created_at: string;
+}
+
+export interface UpsertRatePayload {
+  currency: string;
+  rate_date: string;
+  rate_to_egp: number;
+  source?: string;
+  notes?: string;
+}
+
+// ── Budget + Cost Center types ──────────────────────────────────────
+
+export interface Budget {
+  id: string;
+  name_ar: string;
+  fiscal_year: number;
+  is_active: boolean;
+  created_by: string | null;
+  created_by_name: string | null;
+  line_count: number;
+  total_annual: string;
+  created_at: string;
+}
+
+export interface BudgetLine {
+  id: string;
+  budget_id: string;
+  account_id: string;
+  account_code: string;
+  account_name: string;
+  account_type: AccountType;
+  month: number;
+  amount: string;
+}
+
+export interface BudgetDetail extends Budget {
+  lines: BudgetLine[];
+}
+
+export interface CreateBudgetPayload {
+  name_ar: string;
+  fiscal_year: number;
+  lines?: Array<{ account_id: string; month: number; amount: number }>;
+}
+
+export interface UpdateBudgetPayload {
+  name_ar?: string;
+  is_active?: boolean;
+  lines?: Array<{ account_id: string; month: number; amount: number }>;
+}
+
+export interface BudgetVarianceRow {
+  account_id: string;
+  code: string;
+  name_ar: string;
+  account_type: AccountType;
+  months: Record<string, { budget: number; actual: number }>;
+  budget_total: number;
+  actual_total: number;
+  variance: number;
+  variance_pct: number | null;
+}
+
+export interface BudgetVariance {
+  budget: Budget;
+  cost_center_id: string | null;
+  rows: BudgetVarianceRow[];
+  totals: { budget: number; actual: number; variance: number };
+}
+
+export interface CostCenter {
+  id: string;
+  code: string;
+  name_ar: string;
+  name_en: string | null;
+  parent_id: string | null;
+  parent_code: string | null;
+  parent_name: string | null;
+  warehouse_id: string | null;
+  warehouse_name: string | null;
+  is_active: boolean;
+}
+
+export interface CreateCostCenterPayload {
+  code: string;
+  name_ar: string;
+  name_en?: string;
+  parent_id?: string;
+  warehouse_id?: string;
+}
 
 // ── Analytics types ──────────────────────────────────────────────────
 

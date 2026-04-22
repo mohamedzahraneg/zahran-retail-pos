@@ -34,6 +34,15 @@ import { AccountingPostingService } from './posting.service';
 import { AccountingReportsService } from './reports.service';
 import { FixedAssetsService, FixedAssetDto } from './fixed-assets.service';
 import { AccountingAnalyticsService } from './analytics.service';
+import {
+  BudgetsService,
+  CreateBudgetDto,
+} from './budgets.service';
+import {
+  CostCentersService,
+  CreateCostCenterDto,
+} from './cost-centers.service';
+import { FxService, UpsertRateDto } from './fx.service';
 import { Permissions } from '../common/decorators/roles.decorator';
 import {
   CurrentUser,
@@ -98,6 +107,9 @@ export class ChartOfAccountsController {
     private readonly reports: AccountingReportsService,
     private readonly fixedAssets: FixedAssetsService,
     private readonly analytics: AccountingAnalyticsService,
+    private readonly budgets: BudgetsService,
+    private readonly costCenters: CostCentersService,
+    private readonly fx: FxService,
   ) {}
 
   // ── Chart of Accounts ──────────────────────────────────────────────
@@ -424,5 +436,126 @@ export class ChartOfAccountsController {
     body: { periods: Array<{ from: string; to: string; label: string }> },
   ) {
     return this.reports.trialBalanceComparison(body.periods || []);
+  }
+
+  // ── Budgets ─────────────────────────────────────────────────────────
+
+  @Get('budgets')
+  @Permissions('accounts.budget')
+  listBudgets() {
+    return this.budgets.list();
+  }
+
+  @Get('budgets/:id')
+  @Permissions('accounts.budget')
+  getBudget(@Param('id') id: string) {
+    return this.budgets.get(id);
+  }
+
+  @Post('budgets')
+  @Permissions('accounts.budget')
+  createBudget(
+    @Body() dto: CreateBudgetDto,
+    @CurrentUser() user: JwtUser,
+  ) {
+    return this.budgets.create(dto, user.userId);
+  }
+
+  @Patch('budgets/:id')
+  @Permissions('accounts.budget')
+  updateBudget(
+    @Param('id') id: string,
+    @Body()
+    dto: {
+      name_ar?: string;
+      is_active?: boolean;
+      lines?: Array<{ account_id: string; month: number; amount: number }>;
+    },
+  ) {
+    return this.budgets.update(id, dto);
+  }
+
+  @Delete('budgets/:id')
+  @Permissions('accounts.budget')
+  removeBudget(@Param('id') id: string) {
+    return this.budgets.remove(id);
+  }
+
+  @Delete('budgets/:id/lines/:lineId')
+  @Permissions('accounts.budget')
+  removeBudgetLine(@Param('id') id: string, @Param('lineId') lineId: string) {
+    return this.budgets.removeLine(id, lineId);
+  }
+
+  @Get('budgets/:id/variance')
+  @Permissions('accounts.budget')
+  @ApiOperation({ summary: 'موازنة vs فعلي' })
+  budgetVariance(
+    @Param('id') id: string,
+    @Query('cost_center_id') cost_center_id?: string,
+  ) {
+    return this.budgets.variance(id, { cost_center_id });
+  }
+
+  // ── Cost Centers ────────────────────────────────────────────────────
+
+  @Get('cost-centers')
+  @Permissions('accounts.chart.view')
+  listCostCenters(@Query('include_inactive') inc?: string) {
+    return this.costCenters.list(inc === 'true' || inc === '1');
+  }
+
+  @Post('cost-centers')
+  @Permissions('accounts.cost_centers')
+  createCostCenter(@Body() dto: CreateCostCenterDto) {
+    return this.costCenters.create(dto);
+  }
+
+  @Patch('cost-centers/:id')
+  @Permissions('accounts.cost_centers')
+  updateCostCenter(
+    @Param('id') id: string,
+    @Body() dto: Partial<CreateCostCenterDto> & { is_active?: boolean },
+  ) {
+    return this.costCenters.update(id, dto);
+  }
+
+  @Delete('cost-centers/:id')
+  @Permissions('accounts.cost_centers')
+  removeCostCenter(@Param('id') id: string) {
+    return this.costCenters.remove(id);
+  }
+
+  // ── FX ────────────────────────────────────────────────────────────
+
+  @Get('fx/rates')
+  @Permissions('accounts.chart.view')
+  listRates(
+    @Query('currency') currency?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.fx.list(currency, limit ? Number(limit) : undefined);
+  }
+
+  @Post('fx/rates')
+  @Permissions('accounts.fx')
+  upsertRate(@Body() dto: UpsertRateDto, @CurrentUser() user: JwtUser) {
+    return this.fx.upsert(dto, user.userId);
+  }
+
+  @Delete('fx/rates/:id')
+  @Permissions('accounts.fx')
+  removeRate(@Param('id') id: string) {
+    return this.fx.remove(id);
+  }
+
+  @Post('fx/revalue')
+  @Permissions('accounts.fx')
+  @ApiOperation({ summary: 'إعادة تقييم العملات الأجنبية' })
+  revalue(
+    @Body() body: { as_of: string },
+    @CurrentUser() user: JwtUser,
+  ) {
+    return this.fx.revalue(body.as_of, user.userId);
   }
 }

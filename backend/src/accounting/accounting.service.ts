@@ -14,12 +14,14 @@ import {
   UpdateExpenseDto,
 } from './dto/accounting.dto';
 import { AccountingPostingService } from '../chart-of-accounts/posting.service';
+import { ExpenseApprovalService } from './approval.service';
 
 @Injectable()
 export class AccountingService {
   constructor(
     private readonly ds: DataSource,
     @Optional() private readonly posting?: AccountingPostingService,
+    @Optional() private readonly approvals?: ExpenseApprovalService,
   ) {}
 
   // ─── Expense Categories ──────────────────────────────────────────────
@@ -170,6 +172,14 @@ export class AccountingService {
             // directly.
           });
       }
+
+      // Spawn approval rows if the amount triggers any rule.
+      if (this.approvals) {
+        await this.approvals
+          .spawnForExpense(row.id, Number(dto.amount), em)
+          .catch(() => undefined);
+      }
+
       return row;
     });
   }

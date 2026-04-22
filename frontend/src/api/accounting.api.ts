@@ -185,4 +185,77 @@ export const accountingApi = {
 
   kpis: (params?: { date?: string; from?: string; to?: string }) =>
     unwrap<AccountingKPIs>(api.get('/accounting/kpis', { params })),
+
+  // ── Expense approval workflow ───────────────────────────────────
+  listApprovalRules: () =>
+    unwrap<ApprovalRule[]>(api.get('/accounting/approvals/rules')),
+  createApprovalRule: (payload: CreateApprovalRulePayload) =>
+    unwrap<ApprovalRule>(api.post('/accounting/approvals/rules', payload)),
+  updateApprovalRule: (id: string, payload: Partial<CreateApprovalRulePayload> & { is_active?: boolean }) =>
+    unwrap<ApprovalRule>(api.patch(`/accounting/approvals/rules/${id}`, payload)),
+  removeApprovalRule: (id: string) =>
+    unwrap<any>(api.delete(`/accounting/approvals/rules/${id}`)),
+  approvalInbox: () =>
+    unwrap<ApprovalInboxItem[]>(api.get('/accounting/approvals/inbox')),
+  approveApproval: (id: string, note?: string) =>
+    unwrap<any>(api.post(`/accounting/approvals/${id}/approve`, { note })),
+  rejectApproval: (id: string, reason: string) =>
+    unwrap<any>(api.post(`/accounting/approvals/${id}/reject`, { reason })),
+  approvalsForExpense: (expenseId: string) =>
+    unwrap<ApprovalRow[]>(api.get(`/accounting/approvals/expense/${expenseId}`)),
 };
+
+export interface ApprovalRule {
+  id: string;
+  name_ar: string;
+  min_amount: string;
+  max_amount: string | null;
+  required_role: string;
+  level: number;
+  is_active: boolean;
+  notes: string | null;
+}
+
+export interface CreateApprovalRulePayload {
+  name_ar: string;
+  min_amount: number;
+  max_amount?: number | null;
+  required_role: string;
+  level: number;
+  notes?: string;
+}
+
+export interface ApprovalInboxItem {
+  id: string;
+  expense_id: string;
+  level: number;
+  required_role: string;
+  status: 'pending' | 'approved' | 'rejected';
+  created_at: string;
+  expense_no: string;
+  amount: string;
+  expense_date: string;
+  description: string | null;
+  vendor_name: string | null;
+  payment_method: string;
+  category_name: string | null;
+  category_code: string | null;
+  warehouse_name: string | null;
+  created_by_name: string | null;
+  rule_name: string;
+}
+
+export interface ApprovalRow {
+  id: string;
+  expense_id: string;
+  rule_id: string;
+  level: number;
+  required_role: string;
+  status: 'pending' | 'approved' | 'rejected';
+  decided_by: string | null;
+  decided_by_name: string | null;
+  decided_at: string | null;
+  reason: string | null;
+  created_at: string;
+  rule_name: string | null;
+}

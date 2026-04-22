@@ -32,6 +32,8 @@ import Accounts from '@/pages/Accounts';
 import Cashboxes from '@/pages/Cashboxes';
 import BankReconciliation from '@/pages/BankReconciliation';
 import Analytics from '@/pages/Analytics';
+import Budgets from '@/pages/Budgets';
+import FinancialControls from '@/pages/FinancialControls';
 import RecurringExpenses from '@/pages/RecurringExpenses';
 import CustomerGroups from '@/pages/CustomerGroups';
 import Settings from '@/pages/Settings';
@@ -160,6 +162,30 @@ export default function App() {
           element={
             <ProtectedRoute permissions={['accounts.chart.view']}>
               <Analytics />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="budgets"
+          element={
+            <ProtectedRoute
+              permissions={['accounts.budget', 'accounts.cost_centers']}
+            >
+              <Budgets />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="financial-controls"
+          element={
+            <ProtectedRoute
+              permissions={[
+                'accounts.approval.decide',
+                'accounts.approval.manage',
+                'accounts.fx',
+              ]}
+            >
+              <FinancialControls />
             </ProtectedRoute>
           }
         />

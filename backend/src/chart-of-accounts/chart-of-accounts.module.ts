@@ -6,6 +6,9 @@ import { AccountingPostingService } from './posting.service';
 import { AccountingReportsService } from './reports.service';
 import { FixedAssetsService } from './fixed-assets.service';
 import { AccountingAnalyticsService } from './analytics.service';
+import { BudgetsService } from './budgets.service';
+import { CostCentersService } from './cost-centers.service';
+import { FxService } from './fx.service';
 
 @Global()
 @Module({
@@ -16,6 +19,9 @@ import { AccountingAnalyticsService } from './analytics.service';
     AccountingReportsService,
     FixedAssetsService,
     AccountingAnalyticsService,
+    BudgetsService,
+    CostCentersService,
+    FxService,
   ],
   controllers: [ChartOfAccountsController],
   exports: [
@@ -25,6 +31,9 @@ import { AccountingAnalyticsService } from './analytics.service';
     AccountingReportsService,
     FixedAssetsService,
     AccountingAnalyticsService,
+    BudgetsService,
+    CostCentersService,
+    FxService,
   ],
 })
 export class ChartOfAccountsModule {}
