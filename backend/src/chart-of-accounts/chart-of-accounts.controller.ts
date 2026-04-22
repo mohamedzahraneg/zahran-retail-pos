@@ -672,4 +672,36 @@ export class ChartOfAccountsController {
   migrationsStatus() {
     return this.migrations.status();
   }
+
+  // ──────────────────────────────────────────────────────────────────
+  //  Reconciliation diagnostics — read-only + sanctioned rebuilds
+  // ──────────────────────────────────────────────────────────────────
+
+  @Get('audit/cash-vs-gl')
+  @Permissions('accounts.chart.view')
+  @ApiOperation({
+    summary:
+      'مقارنة رصيد كل خزنة بين ٣ مصادر: cashboxes.current_balance، سجل الحركات، دفتر الأستاذ',
+  })
+  cashVsGl() {
+    return this.recon.compareCashVsGl();
+  }
+
+  /**
+   * Rebuild `cashboxes.current_balance` from the transaction log — the
+   * ONE sanctioned path that writes the column outside the engine.
+   * Read-only at the logical level: it just copies the ledger sum
+   * into the derived column. Migration 058's trigger allows this
+   * call because the service sets `app.engine_context = 'on'`
+   * inside the transaction.
+   */
+  @Post('audit/rebuild-cashbox-balance/:id')
+  @Permissions('accounts.journal.post')
+  @ApiOperation({
+    summary:
+      'إعادة بناء رصيد خزنة من حركاتها (يجمع في ـ خارج) ويكتب الناتج في current_balance',
+  })
+  rebuildCashboxBalance(@Param('id') id: string) {
+    return this.recon.rebuildCashboxBalance(id);
+  }
 }

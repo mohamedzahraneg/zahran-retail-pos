@@ -1,5 +1,6 @@
-import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, Optional } from '@nestjs/common';
 import { DataSource } from 'typeorm';
+import { FinancialEngineService } from './financial-engine.service';
 
 /**
  * System-wide audit + repair for the accounting layer.
@@ -20,7 +21,10 @@ import { DataSource } from 'typeorm';
 export class ReconciliationService {
   private readonly logger = new Logger('Reconciliation');
 
-  constructor(private readonly ds: DataSource) {}
+  constructor(
+    private readonly ds: DataSource,
+    @Optional() private readonly engine?: FinancialEngineService,
+  ) {}
 
   /**
    * Per-cashbox audit:
@@ -272,8 +276,12 @@ export class ReconciliationService {
   /**
    * Recompute a cashbox's current_balance from its transaction log.
    * Uses the sum of (in − out) as the authoritative value.
+   *
+   * NOTE: this is one of only TWO sanctioned paths that write to
+   * cashboxes.current_balance (the other is fn_record_cashbox_txn).
+   * Migration 058 protects the column from all other writers.
    */
-  async recomputeCashboxBalance(cashboxId: string) {
+  async rebuildCashboxBalance(cashboxId: string) {
     const [r] = await this.ds.query(
       `
       SELECT COALESCE(SUM(
@@ -285,12 +293,101 @@ export class ReconciliationService {
       [cashboxId],
     );
     const computed = Number(r?.computed || 0);
-    await this.ds.query(
-      `UPDATE cashboxes SET current_balance = $2, updated_at = NOW()
-        WHERE id = $1`,
-      [cashboxId, computed],
-    );
+    // Raise the session flag so migration 058's trigger allows the
+    // write — this is a sanctioned rebuild, not a stray mutation.
+    await this.ds.transaction(async (em) => {
+      await em.query(`SET LOCAL app.engine_context = 'on'`);
+      await em.query(
+        `UPDATE cashboxes SET current_balance = $2, updated_at = NOW()
+          WHERE id = $1`,
+        [cashboxId, computed],
+      );
+    });
     return { cashbox_id: cashboxId, new_balance: computed };
+  }
+
+  /** Legacy alias so callers that used the old name keep working. */
+  async recomputeCashboxBalance(cashboxId: string) {
+    return this.rebuildCashboxBalance(cashboxId);
+  }
+
+  /**
+   * Compare cash (cashbox_transactions ledger) vs GL (posted
+   * journal_lines on the cashbox's linked asset account). Any drift
+   * between the two is a data-integrity alarm. Read-only.
+   *
+   *   txn_balance = Σ(in − out) from cashbox_transactions
+   *   gl_balance  = Σ(debit − credit) on the GL asset account
+   *   stored_balance = cashboxes.current_balance
+   *
+   * Healthy system: txn_balance = gl_balance = stored_balance.
+   */
+  async compareCashVsGl(): Promise<
+    Array<{
+      cashbox_id: string;
+      name_ar: string;
+      currency: string;
+      kind: string;
+      gl_account_code: string | null;
+      stored_balance: number;
+      txn_balance: number;
+      gl_balance: number;
+      drift_stored_vs_txn: number;
+      drift_txn_vs_gl: number;
+      status: 'ok' | 'drift';
+    }>
+  > {
+    const rows = await this.ds.query(
+      `
+      SELECT
+        cb.id                                      AS cashbox_id,
+        cb.name_ar,
+        COALESCE(cb.currency, 'EGP')               AS currency,
+        COALESCE(cb.kind, 'cash')                  AS kind,
+        (SELECT a.code FROM chart_of_accounts a
+          WHERE a.cashbox_id = cb.id AND a.is_active LIMIT 1)
+                                                   AS gl_account_code,
+        cb.current_balance::numeric(14,2)          AS stored_balance,
+        COALESCE((
+          SELECT SUM(CASE WHEN direction = 'in' THEN amount ELSE -amount END)
+            FROM cashbox_transactions
+           WHERE cashbox_id = cb.id
+        ), 0)::numeric(14,2)                       AS txn_balance,
+        COALESCE((
+          SELECT SUM(jl.debit - jl.credit)
+            FROM journal_lines jl
+            JOIN journal_entries je ON je.id = jl.entry_id
+            JOIN chart_of_accounts a ON a.id = jl.account_id
+           WHERE a.cashbox_id = cb.id
+             AND je.is_posted AND NOT je.is_void
+        ), 0)::numeric(14,2)                       AS gl_balance
+      FROM cashboxes cb
+      WHERE cb.is_active = TRUE
+      ORDER BY cb.name_ar
+      `,
+    );
+    return rows.map((r: any) => {
+      const stored = Number(r.stored_balance);
+      const txn = Number(r.txn_balance);
+      const gl = Number(r.gl_balance);
+      const driftStoredTxn = Math.round((stored - txn) * 100) / 100;
+      const driftTxnGl = Math.round((txn - gl) * 100) / 100;
+      const hasDrift =
+        Math.abs(driftStoredTxn) > 0.01 || Math.abs(driftTxnGl) > 0.01;
+      return {
+        cashbox_id: r.cashbox_id,
+        name_ar: r.name_ar,
+        currency: r.currency,
+        kind: r.kind,
+        gl_account_code: r.gl_account_code,
+        stored_balance: stored,
+        txn_balance: txn,
+        gl_balance: gl,
+        drift_stored_vs_txn: driftStoredTxn,
+        drift_txn_vs_gl: driftTxnGl,
+        status: hasDrift ? ('drift' as const) : ('ok' as const),
+      };
+    });
   }
 
   /**
@@ -482,21 +579,6 @@ export class ReconciliationService {
     }
 
     return this.ds.transaction(async (em) => {
-      // Resolve accounts.
-      const codes = ['1111', '1121', '1131', '121', '211', '31'];
-      const accRows = await em.query(
-        `SELECT code, id FROM chart_of_accounts WHERE code = ANY($1::text[])`,
-        [codes],
-      );
-      const acc: Record<string, string> = {};
-      for (const r of accRows) acc[r.code] = r.id;
-      const missing = codes.filter((c) => !acc[c]);
-      if (missing.length) {
-        throw new BadRequestException(
-          `حسابات GL ناقصة: ${missing.join(', ')}`,
-        );
-      }
-
       // Cashbox — prefer the supplied one, else any active cashbox.
       let cashboxId = args.cashbox_id ?? null;
       if (!cashboxId) {
@@ -511,7 +593,10 @@ export class ReconciliationService {
         );
       }
 
-      // Check we haven't already posted an opening entry.
+      // Check we haven't already posted an opening entry (guards
+      // against the user calling the wizard twice by mistake; the
+      // engine's idempotency guard handles the same-date case, but a
+      // different-date duplicate opening would also be wrong).
       const [existing] = await em.query(
         `SELECT id FROM journal_entries
           WHERE reference_type = 'opening_balance'
@@ -524,102 +609,43 @@ export class ReconciliationService {
         );
       }
 
-      // Build the entry
-      const [{ seq }] = await em.query(
-        `SELECT nextval('seq_journal_entry_no') AS seq`,
-      );
-      const entryNo = `JE-${args.entry_date.slice(0, 4)}-${String(seq).padStart(6, '0')}`;
-      const [entry] = await em.query(
-        `
-        INSERT INTO journal_entries
-          (entry_no, entry_date, description, reference_type, reference_id,
-           is_posted, posted_by, posted_at, created_by)
-        VALUES ($1, $2, 'قيد افتتاحي', 'opening_balance', NULL,
-                FALSE, $3, NULL, $3)
-        RETURNING id
-        `,
-        [entryNo, args.entry_date, userId],
-      );
-
-      let n = 1;
-      const pushLine = async (
-        accountId: string,
-        debit: number,
-        credit: number,
-        desc: string,
-        extra?: { cashbox_id?: string },
-      ) => {
-        if (debit === 0 && credit === 0) return;
-        await em.query(
-          `INSERT INTO journal_lines
-             (entry_id, line_no, account_id, debit, credit, description, cashbox_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-          [
-            entry.id,
-            n++,
-            accountId,
-            debit,
-            credit,
-            desc,
-            extra?.cashbox_id ?? null,
-          ],
+      if (!this.engine) {
+        throw new BadRequestException('FinancialEngineService غير متاح');
+      }
+      const res = await this.engine.recordOpeningBalance({
+        cash_in_hand: values.cash,
+        customer_dues: values.recv,
+        inventory_value: values.inv,
+        fixed_assets: values.fa,
+        supplier_dues: values.supp,
+        capital: values.cap,
+        cashbox_id: cashboxId,
+        entry_date: args.entry_date,
+        user_id: userId,
+        em,
+      });
+      if (!res.ok) {
+        throw new BadRequestException(
+          `فشل تسجيل الرصيد الافتتاحي: ${res.error}`,
         );
-      };
+      }
 
-      await pushLine(
-        acc['1111'],
-        values.cash,
-        0,
-        'نقدية افتتاحية',
-        { cashbox_id: cashboxId ?? undefined },
-      );
-      await pushLine(acc['1121'], values.recv, 0, 'ذمم عملاء افتتاحية');
-      await pushLine(acc['1131'], values.inv, 0, 'مخزون افتتاحي');
-      await pushLine(acc['121'], values.fa, 0, 'أصول ثابتة افتتاحية');
-      await pushLine(acc['211'], 0, values.supp, 'ذمم موردين افتتاحية');
-      await pushLine(acc['31'], 0, plug, 'رأس المال / الرصيد المرحَّل');
-
-      await em.query(
-        `UPDATE journal_entries SET is_posted = TRUE, posted_at = NOW() WHERE id = $1`,
-        [entry.id],
-      );
-
-      // Cash side: record on the cashbox so reports agree.
+      // Stamp the cashbox's opening_balance column for reports that
+      // care about it (this is a metadata update, not a balance
+      // mutation — the running balance came from the engine's cash
+      // movement above).
       if (cashboxId && values.cash > 0) {
-        const [cb] = await em.query(
-          `SELECT current_balance FROM cashboxes WHERE id = $1 FOR UPDATE`,
-          [cashboxId],
-        );
-        const newBalance = Number(cb?.current_balance || 0) + values.cash;
         await em.query(
-          `
-          INSERT INTO cashbox_transactions
-            (cashbox_id, direction, amount, category, reference_type,
-             balance_after, user_id, notes, created_at)
-          VALUES ($1, 'in'::txn_direction, $2, 'opening_balance',
-                  'cashbox'::entity_type, $3, $4, $5,
-                  ($6::date + TIME '10:00') AT TIME ZONE 'Africa/Cairo')
-          `,
-          [
-            cashboxId,
-            values.cash,
-            newBalance,
-            userId,
-            'رصيد افتتاحي للخزنة',
-            args.entry_date,
-          ],
-        );
-        await em.query(
-          `UPDATE cashboxes SET current_balance = $1, opening_balance = $2, updated_at = NOW()
-            WHERE id = $3`,
-          [newBalance, values.cash, cashboxId],
+          `UPDATE cashboxes SET opening_balance = $1, updated_at = NOW()
+            WHERE id = $2`,
+          [values.cash, cashboxId],
         );
       }
 
       return {
-        entry_id: entry.id,
+        entry_id: 'skipped' in res ? res.entry_id : res.entry_id,
         cashbox_id: cashboxId,
-        plug_to_capital: plug,
+        plug_to_capital: res.plug_to_capital ?? plug,
       };
     });
   }

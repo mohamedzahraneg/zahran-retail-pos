@@ -111,6 +111,21 @@ export class AccountingService {
         );
         cashboxId = openShift?.cashbox_id || null;
       }
+
+      // ━━━ CRITICAL INVARIANT ━━━
+      // A cash-paid expense MUST move cash when approved. Without a
+      // cashbox the engine would silently post the credit side to
+      // 210 (Accounts Payable) instead of cash — the expense would be
+      // "approved" without any cash leaving the drawer, which violates
+      // the core financial contract of the system. Reject at create
+      // time so the user gets a clear, fixable error instead of a
+      // phantom expense downstream.
+      const paymentMethod = dto.payment_method ?? 'cash';
+      if (paymentMethod === 'cash' && !cashboxId) {
+        throw new BadRequestException(
+          'مصروف نقدي يتطلب خزنة مفتوحة — افتح وردية أو حدد خزنة',
+        );
+      }
       // If the expense category's code matches an active employee's
       // employee_no, auto-tag the expense so it shows up in that
       // employee's profile (advances ledger) — the expense category
