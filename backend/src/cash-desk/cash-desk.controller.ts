@@ -42,6 +42,37 @@ class CashDepositDto {
   @IsOptional() @IsDateString() txn_date?: string;
 }
 
+class CashboxCreateDto {
+  @IsString() @MinLength(1) name_ar: string;
+  @IsIn(['cash', 'bank', 'ewallet', 'check']) kind:
+    | 'cash'
+    | 'bank'
+    | 'ewallet'
+    | 'check';
+  @IsOptional() @IsUUID() warehouse_id?: string;
+  @IsOptional() @IsString() currency?: string;
+  @IsOptional() @IsNumber() @Min(0) opening_balance?: number;
+  @IsOptional() @IsString() color?: string;
+  @IsOptional() @IsString() institution_code?: string;
+  @IsOptional() @IsString() bank_branch?: string;
+  @IsOptional() @IsString() account_number?: string;
+  @IsOptional() @IsString() iban?: string;
+  @IsOptional() @IsString() swift_code?: string;
+  @IsOptional() @IsString() account_holder_name?: string;
+  @IsOptional() @IsString() account_manager_name?: string;
+  @IsOptional() @IsString() account_manager_phone?: string;
+  @IsOptional() @IsString() account_manager_email?: string;
+  @IsOptional() @IsString() wallet_phone?: string;
+  @IsOptional() @IsString() wallet_owner_name?: string;
+  @IsOptional() @IsString() check_issuer_name?: string;
+  @IsOptional() @IsString() notes?: string;
+}
+
+class CashboxUpdateDto extends CashboxCreateDto {
+  declare name_ar: string;
+  declare kind: 'cash' | 'bank' | 'ewallet' | 'check';
+}
+
 @ApiBearerAuth()
 @ApiTags('cash-desk')
 @Permissions('cashdesk.view')
@@ -50,8 +81,39 @@ export class CashDeskController {
   constructor(private readonly svc: CashDeskService) {}
 
   @Get('cashboxes')
-  cashboxes() {
-    return this.svc.listCashboxes();
+  cashboxes(@Query('include_inactive') includeInactive?: string) {
+    return this.svc.listCashboxes(
+      includeInactive === 'true' || includeInactive === '1',
+    );
+  }
+
+  @Get('institutions')
+  institutions(@Query('kind') kind?: 'bank' | 'ewallet' | 'check_issuer') {
+    return this.svc.listInstitutions(kind);
+  }
+
+  @Post('cashboxes')
+  @Roles('admin', 'manager', 'accountant')
+  @Permissions('cashdesk.manage_accounts')
+  createCashbox(@Body() dto: CashboxCreateDto) {
+    return this.svc.createCashbox(dto);
+  }
+
+  @Post('cashboxes/:id')
+  @Roles('admin', 'manager', 'accountant')
+  @Permissions('cashdesk.manage_accounts')
+  updateCashbox(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CashboxUpdateDto,
+  ) {
+    return this.svc.updateCashbox(id, dto);
+  }
+
+  @Post('cashboxes/:id/delete')
+  @Roles('admin', 'manager', 'accountant')
+  @Permissions('cashdesk.manage_accounts')
+  removeCashbox(@Param('id', ParseUUIDPipe) id: string) {
+    return this.svc.removeCashbox(id);
   }
 
   @Get('cashflow/today')

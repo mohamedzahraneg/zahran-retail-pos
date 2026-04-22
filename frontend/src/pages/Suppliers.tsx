@@ -1312,7 +1312,7 @@ function QuickPayModal({
 
   const { data: cashboxes = [] } = useQuery({
     queryKey: ['cashboxes'],
-    queryFn: cashDeskApi.cashboxes,
+    queryFn: () => cashDeskApi.cashboxes(),
   });
   const [cashboxId, setCashboxId] = useState('');
 

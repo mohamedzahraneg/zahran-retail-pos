@@ -544,7 +544,7 @@ function OpenShiftModal({
 
   const { data: cashboxes = [] } = useQuery({
     queryKey: ['cashboxes'],
-    queryFn: cashDeskApi.cashboxes,
+    queryFn: () => cashDeskApi.cashboxes(),
   });
 
   const mutation = useMutation({

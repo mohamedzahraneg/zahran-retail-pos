@@ -86,6 +86,7 @@ const groups: NavGroup[] = [
       { to: '/accounting', label: 'الحسابات', icon: Calculator, roles: ['admin', 'manager', 'accountant'], permission: 'accounting.view' },
       { to: '/accounts', label: 'شجرة الحسابات', icon: BookOpen, roles: ['admin', 'manager', 'accountant'], permission: 'accounts.chart.view' },
       { to: '/cash-desk', label: 'الصندوق', icon: Wallet, roles: ['admin', 'manager', 'accountant'], permission: 'cashdesk.view' },
+      { to: '/cashboxes', label: 'الخزائن والبنوك', icon: Wallet, roles: ['admin', 'manager', 'accountant'], permission: 'cashdesk.view' },
       { to: '/recurring-expenses', label: 'المصاريف الدورية', icon: Repeat, roles: ['admin', 'manager', 'accountant'], permission: 'recurring_expenses.manage' },
     ],
   },

@@ -29,6 +29,7 @@ import Coupons from '@/pages/Coupons';
 import Alerts from '@/pages/Alerts';
 import Accounting from '@/pages/Accounting';
 import Accounts from '@/pages/Accounts';
+import Cashboxes from '@/pages/Cashboxes';
 import RecurringExpenses from '@/pages/RecurringExpenses';
 import CustomerGroups from '@/pages/CustomerGroups';
 import Settings from '@/pages/Settings';
@@ -133,6 +134,14 @@ export default function App() {
           element={
             <ProtectedRoute permissions={['accounts.chart.view']}>
               <Accounts />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="cashboxes"
+          element={
+            <ProtectedRoute permissions={['cashdesk.view']}>
+              <Cashboxes />
             </ProtectedRoute>
           }
         />

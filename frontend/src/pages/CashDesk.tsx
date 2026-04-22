@@ -26,6 +26,7 @@ import {
   CashboxMovement,
 } from '@/api/cash-desk.api';
 import { AlertCircle, ArrowLeftRight } from 'lucide-react';
+import { InstitutionLogo } from '@/components/InstitutionLogo';
 import { customersApi, Customer } from '@/api/customers.api';
 import { suppliersApi, Supplier } from '@/api/suppliers.api';
 
@@ -60,7 +61,7 @@ export default function CashDesk() {
 
   const { data: cashboxes = [] } = useQuery({
     queryKey: ['cashboxes'],
-    queryFn: cashDeskApi.cashboxes,
+    queryFn: () => cashDeskApi.cashboxes(),
   });
 
   const { data: cashflow = [] } = useQuery({
@@ -195,18 +196,43 @@ export default function CashDesk() {
       {/* Cashboxes List */}
       {cashboxes.length > 0 && (
         <div className="card p-4">
-          <div className="text-sm font-bold text-slate-700 mb-3">الخزائن النشطة</div>
+          <div className="flex items-center justify-between mb-3">
+            <div className="text-sm font-bold text-slate-700">
+              الخزائن النشطة
+            </div>
+            <a
+              href="/cashboxes"
+              className="text-xs text-brand-600 hover:underline"
+            >
+              إدارة الخزائن ←
+            </a>
+          </div>
           <div className="grid md:grid-cols-3 gap-3">
-            {cashboxes.map((cb) => (
+            {cashboxes.map((cb: any) => (
               <div
                 key={cb.id}
-                className="p-3 rounded-lg border border-slate-200 bg-slate-50/40"
+                className="p-3 rounded-lg border border-slate-200 bg-slate-50/40 flex items-center gap-3"
               >
-                <div className="text-xs text-slate-500">{cb.name}</div>
-                <div className="font-black text-lg text-slate-800">
-                  {EGP(cb.current_balance)}
+                <InstitutionLogo
+                  domain={cb.institution_domain}
+                  kind={cb.kind}
+                  color={cb.institution_color}
+                  label={cb.institution_name || cb.name}
+                  size="md"
+                />
+                <div className="flex-1 min-w-0">
+                  <div className="text-xs text-slate-500 truncate">
+                    {cb.name}
+                  </div>
+                  {cb.institution_name && (
+                    <div className="text-[11px] text-slate-400 truncate">
+                      {cb.institution_name}
+                    </div>
+                  )}
+                  <div className="font-black text-lg text-slate-800">
+                    {EGP(cb.current_balance)}
+                  </div>
                 </div>
-                <div className="text-[11px] text-slate-400 mt-1">{cb.currency}</div>
               </div>
             ))}
           </div>

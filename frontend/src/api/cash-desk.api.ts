@@ -3,14 +3,86 @@ import { api, unwrap } from './client';
 export type PaymentMethod = 'cash' | 'card' | 'instapay' | 'bank_transfer';
 export type CustomerPaymentKind = 'settle_invoices' | 'deposit' | 'refund';
 
+export type CashboxKind = 'cash' | 'bank' | 'ewallet' | 'check';
+
 export interface Cashbox {
   id: string;
   name: string;
+  name_ar: string;
   warehouse_id: string | null;
   currency: string;
   current_balance: string;
+  opening_balance?: string;
   is_active: boolean;
+
+  // Type + linked institution (null for plain cash)
+  kind: CashboxKind;
+  institution_code: string | null;
+  institution_name: string | null;
+  institution_name_en: string | null;
+  institution_domain: string | null;
+  institution_color: string | null;
+  institution_kind: 'bank' | 'ewallet' | 'check_issuer' | null;
+
+  // Bank fields
+  bank_branch: string | null;
+  account_number: string | null;
+  iban: string | null;
+  swift_code: string | null;
+  account_holder_name: string | null;
+  account_manager_name: string | null;
+  account_manager_phone: string | null;
+  account_manager_email: string | null;
+
+  // Wallet fields
+  wallet_phone: string | null;
+  wallet_owner_name: string | null;
+
+  // Check field
+  check_issuer_name: string | null;
+
+  color: string | null;
+  notes?: string | null;
 }
+
+export interface FinancialInstitution {
+  code: string;
+  kind: 'bank' | 'ewallet' | 'check_issuer';
+  name_ar: string;
+  name_en: string;
+  short_code: string | null;
+  website_domain: string | null;
+  color_hex: string | null;
+  sort_order: number;
+  is_active: boolean;
+  is_system: boolean;
+}
+
+export interface CreateCashboxPayload {
+  name_ar: string;
+  kind: CashboxKind;
+  warehouse_id?: string;
+  currency?: string;
+  opening_balance?: number;
+  color?: string;
+  institution_code?: string;
+  bank_branch?: string;
+  account_number?: string;
+  iban?: string;
+  swift_code?: string;
+  account_holder_name?: string;
+  account_manager_name?: string;
+  account_manager_phone?: string;
+  account_manager_email?: string;
+  wallet_phone?: string;
+  wallet_owner_name?: string;
+  check_issuer_name?: string;
+  notes?: string;
+}
+
+export type UpdateCashboxPayload = Partial<CreateCashboxPayload> & {
+  is_active?: boolean;
+};
 
 export interface CashflowToday {
   cashbox_id: string;
@@ -110,7 +182,30 @@ export interface CreateSupplierPaymentPayload {
 }
 
 export const cashDeskApi = {
-  cashboxes: () => unwrap<Cashbox[]>(api.get('/cash-desk/cashboxes')),
+  cashboxes: (includeInactive = false) =>
+    unwrap<Cashbox[]>(
+      api.get('/cash-desk/cashboxes', {
+        params: includeInactive ? { include_inactive: 'true' } : undefined,
+      }),
+    ),
+
+  institutions: (kind?: 'bank' | 'ewallet' | 'check_issuer') =>
+    unwrap<FinancialInstitution[]>(
+      api.get('/cash-desk/institutions', {
+        params: kind ? { kind } : undefined,
+      }),
+    ),
+
+  createCashbox: (payload: CreateCashboxPayload) =>
+    unwrap<Cashbox>(api.post('/cash-desk/cashboxes', payload)),
+
+  updateCashbox: (id: string, payload: UpdateCashboxPayload) =>
+    unwrap<Cashbox>(api.post(`/cash-desk/cashboxes/${id}`, payload)),
+
+  removeCashbox: (id: string) =>
+    unwrap<{ deleted?: boolean; soft_deleted?: boolean; reason?: string }>(
+      api.post(`/cash-desk/cashboxes/${id}/delete`, {}),
+    ),
 
   cashflowToday: () =>
     unwrap<CashflowToday[]>(api.get('/cash-desk/cashflow/today')),

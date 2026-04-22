@@ -434,7 +434,7 @@ function AccountFormModal({
 
   const { data: cashboxes = [] } = useQuery({
     queryKey: ['cashboxes'],
-    queryFn: cashDeskApi.cashboxes,
+    queryFn: () => cashDeskApi.cashboxes(),
   });
 
   const mutation = useMutation({
@@ -555,7 +555,7 @@ function AccountEditModal({
   });
   const { data: cashboxes = [] } = useQuery({
     queryKey: ['cashboxes'],
-    queryFn: cashDeskApi.cashboxes,
+    queryFn: () => cashDeskApi.cashboxes(),
   });
 
   const mutation = useMutation({
