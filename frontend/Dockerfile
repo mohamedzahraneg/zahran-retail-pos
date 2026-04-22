@@ -34,6 +34,9 @@ COPY --from=builder /app/dist /usr/share/nginx/html
 EXPOSE 80
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=5 \
-  CMD wget -qO- http://localhost/ > /dev/null || exit 1
+  CMD wget -q --spider http://127.0.0.1/ || exit 1
+# 127.0.0.1 (IPv4 explicit) — `localhost` in Alpine can resolve to ::1
+# first, causing false "unhealthy" states. Same pattern as the api
+# healthcheck fixed in PR #22.
 
 CMD ["nginx", "-g", "daemon off;"]
