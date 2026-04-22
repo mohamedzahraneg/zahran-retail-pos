@@ -658,6 +658,19 @@ export class ChartOfAccountsController {
     return this.recon.dedupeCashboxTransactions();
   }
 
+  @Post('audit/full-cleanup')
+  @Permissions('accounts.journal.void')
+  @ApiOperation({
+    summary:
+      'تنظيف شامل: حذف الملغاة + مسح كل قيود GL + توحيد الخزائن + إزالة التكرارات + ترحيل + إعادة حساب',
+  })
+  fullCleanup(@CurrentUser() user: JwtUser) {
+    return this.recon.fullCleanup({
+      posting: this.posting,
+      userId: user.userId,
+    });
+  }
+
   // ── Migrations ──────────────────────────────────────────────────────
 
   @Get('audit/migrations')

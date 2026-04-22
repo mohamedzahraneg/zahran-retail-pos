@@ -93,7 +93,9 @@ const groups: NavGroup[] = [
       { to: '/analytics', label: 'التحليلات الذكية', icon: Sparkles, roles: ['admin', 'manager', 'accountant'], permission: 'accounts.chart.view' },
       { to: '/budgets', label: 'الموازنات والمراكز', icon: Target, roles: ['admin', 'accountant'], permission: 'accounts.budget' },
       { to: '/financial-controls', label: 'ضوابط مالية', icon: ShieldCheck, roles: ['admin', 'manager', 'accountant'], permission: 'accounts.approval.decide' },
-      { to: '/accounts-audit', label: 'مراجعة وتدقيق', icon: Shield, roles: ['admin', 'accountant'], permission: 'accounts.chart.view' },
+      // مراجعة وتدقيق: accessible via the "صيانة شاملة" button inside
+      // /accounts so power users can still run it without a dedicated
+      // sidebar entry.
       { to: '/cashboxes', label: 'الخزائن والبنوك', icon: Wallet, roles: ['admin', 'manager', 'accountant'], permission: 'cashdesk.view' },
       { to: '/bank-reconciliation', label: 'تسوية بنكية', icon: Scale, roles: ['admin', 'accountant'], permission: 'accounts.reconcile' },
       { to: '/recurring-expenses', label: 'المصاريف الدورية', icon: Repeat, roles: ['admin', 'manager', 'accountant'], permission: 'recurring_expenses.manage' },

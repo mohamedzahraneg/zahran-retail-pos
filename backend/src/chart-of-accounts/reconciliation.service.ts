@@ -654,6 +654,147 @@ export class ReconciliationService {
   }
 
   /**
+   * Comprehensive one-click cleanup — the user-requested "سلاح نووي"
+   * for resetting accounting state after a messy import:
+   *
+   *   1. Hard-delete every cancelled invoice + its GL + its cashbox txns
+   *   2. Hard-delete ALL journal_entries / journal_lines (not just void)
+   *   3. Consolidate every active cashbox into a single
+   *      "الخزينة الرئيسية" — move every cashbox_transaction over,
+   *      deactivate the others
+   *   4. Dedupe cashbox_transactions (same invoice/expense in two rows)
+   *   5. Re-post all surviving sources (invoices / expenses / payments
+   *      / returns / purchases / shifts) to the fresh GL
+   *   6. Recompute the main cashbox balance from its transactions
+   *
+   * Non-negotiable preserved data: active invoices, expenses,
+   * customer/supplier payments, suppliers, customers, products, stock.
+   */
+  async fullCleanup(opts: {
+    posting: {
+      backfill: (args: {
+        since?: string;
+        userId: string;
+      }) => Promise<any>;
+    };
+    userId: string;
+  }): Promise<{
+    cancelled_invoices_deleted: number;
+    journal_entries_wiped: number;
+    cashboxes_consolidated: number;
+    duplicates_removed: number;
+    main_cashbox_id: string | null;
+    main_cashbox_balance: number;
+    backfill: any;
+  }> {
+    const log: any = {
+      cancelled_invoices_deleted: 0,
+      journal_entries_wiped: 0,
+      cashboxes_consolidated: 0,
+      duplicates_removed: 0,
+      main_cashbox_id: null,
+      main_cashbox_balance: 0,
+      backfill: null,
+    };
+
+    // ── (1) Purge cancelled invoices + their traces ───────────────
+    const purged = await this.purgeCancelledInvoices();
+    log.cancelled_invoices_deleted = purged.invoices_deleted;
+
+    // ── (2) Hard-wipe the entire GL. Not "void" — DELETE. The caller
+    //       has asked for a clean slate and will re-post via backfill.
+    const jl = await this.ds.query(`DELETE FROM journal_lines RETURNING id`);
+    const je = await this.ds.query(
+      `DELETE FROM journal_entries RETURNING id`,
+    );
+    log.journal_entries_wiped = je.length;
+
+    // ── (3) Consolidate all active cashboxes into a single
+    //       "الخزينة الرئيسية". Preserve existing if one already exists
+    //       with that exact name, else create/rename the first active.
+    const [existing] = await this.ds.query(
+      `SELECT id FROM cashboxes
+        WHERE is_active = TRUE AND name_ar = 'الخزينة الرئيسية'
+        LIMIT 1`,
+    );
+    let mainId: string | null = existing?.id ?? null;
+    if (!mainId) {
+      // Pick the first active cashbox and rename it.
+      const [first] = await this.ds.query(
+        `SELECT id FROM cashboxes WHERE is_active = TRUE
+          ORDER BY created_at ASC LIMIT 1`,
+      );
+      if (first) {
+        await this.ds.query(
+          `UPDATE cashboxes SET name_ar = 'الخزينة الرئيسية', updated_at = NOW()
+            WHERE id = $1`,
+          [first.id],
+        );
+        mainId = first.id;
+      }
+    }
+
+    if (mainId) {
+      // Point every cashbox_transaction at the main.
+      const others = await this.ds.query(
+        `SELECT id FROM cashboxes WHERE id <> $1 AND is_active = TRUE`,
+        [mainId],
+      );
+      if (others.length) {
+        const otherIds = others.map((o: any) => o.id);
+        await this.ds.query(
+          `UPDATE cashbox_transactions SET cashbox_id = $1
+            WHERE cashbox_id = ANY($2::uuid[])`,
+          [mainId, otherIds],
+        );
+        // Deactivate the other cashboxes so no new postings land there.
+        await this.ds.query(
+          `UPDATE cashboxes SET is_active = FALSE, updated_at = NOW()
+            WHERE id = ANY($1::uuid[])`,
+          [otherIds],
+        );
+        log.cashboxes_consolidated = others.length;
+      }
+
+      // Point the GL link to the main cashbox so postings resolve
+      // correctly after backfill. Clears any old links first.
+      const [coaMain] = await this.ds.query(
+        `SELECT id FROM chart_of_accounts WHERE code = '1111' LIMIT 1`,
+      );
+      if (coaMain) {
+        await this.ds.query(
+          `UPDATE chart_of_accounts SET cashbox_id = NULL
+            WHERE cashbox_id IS NOT NULL`,
+        );
+        await this.ds.query(
+          `UPDATE chart_of_accounts SET cashbox_id = $1
+            WHERE id = $2`,
+          [mainId, coaMain.id],
+        );
+      }
+      log.main_cashbox_id = mainId;
+    }
+
+    // ── (4) Dedupe cashbox_transactions ────────────────────────────
+    const dedupe = await this.dedupeCashboxTransactions();
+    log.duplicates_removed = dedupe.duplicates_removed;
+
+    // ── (5) Re-post everything from source documents ──────────────
+    log.backfill = await opts.posting.backfill({
+      since: '2020-01-01',
+      userId: opts.userId,
+    });
+
+    // ── (6) Recompute the main cashbox balance ────────────────────
+    if (mainId) {
+      const r = await this.recomputeCashboxBalance(mainId);
+      log.main_cashbox_balance = r.new_balance;
+    }
+    void jl;
+    return log;
+  }
+
+  /**
    * Hard reset: void every auto-posted journal entry and let the
    * caller re-run backfill. Safer alternative to DELETE since voided
    * entries keep an audit trail.

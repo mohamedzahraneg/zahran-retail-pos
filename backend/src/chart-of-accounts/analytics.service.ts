@@ -262,9 +262,13 @@ export class AccountingAnalyticsService {
         WHERE COALESCE(status::text, '') NOT IN ('cancelled', 'draft', 'void')
           AND grand_total > COALESCE(paid_amount, 0)`,
     );
+    // Authoritative cash balance = sum of all cashbox_transactions.
+    // Avoids stale current_balance that drifts over time.
     const [cash] = await this.ds.query(
-      `SELECT COALESCE(SUM(current_balance), 0)::numeric(14,2) AS cash_on_hand
-         FROM cashboxes WHERE is_active = TRUE`,
+      `SELECT COALESCE(SUM(
+         CASE WHEN direction = 'in' THEN amount ELSE -amount END
+       ), 0)::numeric(14,2) AS cash_on_hand
+         FROM cashbox_transactions`,
     );
 
     const revenue = Number(rev?.revenue || 0);

@@ -386,6 +386,17 @@ export const accountsApi = {
       api.post('/accounts/audit/dedupe-cashbox', {}),
     ),
 
+  fullCleanup: () =>
+    unwrap<{
+      cancelled_invoices_deleted: number;
+      journal_entries_wiped: number;
+      cashboxes_consolidated: number;
+      duplicates_removed: number;
+      main_cashbox_id: string | null;
+      main_cashbox_balance: number;
+      backfill: any;
+    }>(api.post('/accounts/audit/full-cleanup', {})),
+
   migrationsStatus: () =>
     unwrap<{
       dir: string;

@@ -769,7 +769,8 @@ function JournalTab() {
           className="input w-40"
         />
         {canPost && (
-          <div className="flex gap-2 mr-auto">
+          <div className="flex gap-2 mr-auto flex-wrap">
+            <FullCleanupButton />
             <BackfillButton />
             <button
               className="btn-primary"
@@ -904,6 +905,40 @@ function BackfillButton() {
       title="ترحيل تلقائي للعمليات القديمة"
     >
       {mutation.isPending ? '⏳ جاري الترحيل...' : '🔄 ترحيل تلقائي'}
+    </button>
+  );
+}
+
+function FullCleanupButton() {
+  const qc = useQueryClient();
+  const mutation = useMutation({
+    mutationFn: () => accountsApi.fullCleanup(),
+    onSuccess: (r) => {
+      toast.success(
+        `تنظيف شامل تم:\n• فواتير ملغاة محذوفة: ${r.cancelled_invoices_deleted}\n• قيود GL ممسوحة: ${r.journal_entries_wiped}\n• خزائن تم توحيدها: ${r.cashboxes_consolidated}\n• حركات مكررة محذوفة: ${r.duplicates_removed}\n• رصيد الخزينة الرئيسية: ${Number(r.main_cashbox_balance).toLocaleString('en-US', { minimumFractionDigits: 2 })} ج.م`,
+        { duration: 12000 },
+      );
+      qc.invalidateQueries();
+    },
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.message || 'فشل التنظيف'),
+  });
+  return (
+    <button
+      className="btn-primary bg-rose-600 hover:bg-rose-700"
+      onClick={() => {
+        if (
+          confirm(
+            '⚠ تنظيف شامل — عملية جذرية:\n\n١. حذف نهائي للفواتير الملغاة + قيودها\n٢. مسح كل قيود دفتر الأستاذ القديمة (DELETE كامل)\n٣. توحيد كل الخزائن في خزينة رئيسية واحدة\n٤. إزالة الحركات المكررة\n٥. إعادة ترحيل كل شيء من المصادر الأصلية\n٦. إعادة حساب رصيد الخزينة الرئيسية\n\nالفواتير النشطة + المصروفات + الدفعات محفوظة. متابعة؟',
+          )
+        ) {
+          mutation.mutate();
+        }
+      }}
+      disabled={mutation.isPending}
+      title="تنظيف كامل لقواعد البيانات المحاسبية"
+    >
+      {mutation.isPending ? '⏳ جارٍ التنظيف الشامل...' : '🧹 تنظيف شامل'}
     </button>
   );
 }
