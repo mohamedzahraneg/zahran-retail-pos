@@ -601,6 +601,95 @@ export class CashDeskService {
     return { rows, summary };
   }
 
+  /**
+   * Auto-match a parsed bank statement to cashbox transactions.
+   *
+   * Input is a plain array — the frontend parses any CSV shape into
+   * `{ date, amount, direction, reference? }` and sends here. We match
+   * each statement line to exactly one open cashbox transaction if:
+   *   - same direction
+   *   - same absolute amount (±1 piaster)
+   *   - within ±2 days of the statement date
+   * and mark the matched txns reconciled in a single pass. Conflicts
+   * (multiple candidates) are reported instead of being auto-matched.
+   */
+  async autoMatchStatement(
+    cashboxId: string,
+    statementLines: Array<{
+      date: string;
+      amount: number;
+      direction: 'in' | 'out';
+      reference?: string;
+    }>,
+    userId: string,
+  ) {
+    if (!cashboxId) throw new BadRequestException('cashbox_id مطلوب');
+    if (!Array.isArray(statementLines) || !statementLines.length) {
+      return { matched: 0, ambiguous: 0, unmatched: 0, results: [] };
+    }
+    const results: Array<{
+      statement_line: any;
+      matched_id: string | null;
+      status: 'matched' | 'ambiguous' | 'unmatched';
+      candidates?: number;
+    }> = [];
+
+    for (const line of statementLines) {
+      const amt = Number(line.amount);
+      if (!amt || !line.date || !line.direction) {
+        results.push({ statement_line: line, matched_id: null, status: 'unmatched' });
+        continue;
+      }
+      const candidates = await this.ds.query(
+        `
+        SELECT id FROM cashbox_transactions
+         WHERE cashbox_id = $1
+           AND is_reconciled = FALSE
+           AND direction = $2::txn_direction
+           AND ABS(amount - $3::numeric) < 0.01
+           AND ABS(EXTRACT(EPOCH FROM
+                 ((created_at AT TIME ZONE 'Africa/Cairo')::date - $4::date))) <= 2 * 86400
+         LIMIT 5
+        `,
+        [cashboxId, line.direction, amt, line.date],
+      );
+      if (candidates.length === 1) {
+        await this.ds.query(
+          `UPDATE cashbox_transactions
+              SET is_reconciled = TRUE, reconciled_at = NOW(),
+                  reconciled_by = $2, statement_reference = $3
+            WHERE id = $1`,
+          [candidates[0].id, userId, line.reference ?? null],
+        );
+        results.push({
+          statement_line: line,
+          matched_id: candidates[0].id,
+          status: 'matched',
+        });
+      } else if (candidates.length > 1) {
+        results.push({
+          statement_line: line,
+          matched_id: null,
+          status: 'ambiguous',
+          candidates: candidates.length,
+        });
+      } else {
+        results.push({
+          statement_line: line,
+          matched_id: null,
+          status: 'unmatched',
+        });
+      }
+    }
+
+    return {
+      matched: results.filter((r) => r.status === 'matched').length,
+      ambiguous: results.filter((r) => r.status === 'ambiguous').length,
+      unmatched: results.filter((r) => r.status === 'unmatched').length,
+      results,
+    };
+  }
+
   async markReconciled(
     txnIds: string[],
     reference: string | null,

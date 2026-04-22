@@ -491,6 +491,47 @@ export class AccountingReportsService {
     return this.aggregateAging(rows, buckets, 'supplier_id', 'supplier_name', 'supplier_code');
   }
 
+  /**
+   * Trial balance comparison across multiple periods.
+   * `periods` is an array of { from, to, label } — each column renders
+   * the balance per account. Deltas computed per adjacent pair.
+   */
+  async trialBalanceComparison(
+    periods: Array<{ from: string; to: string; label: string }>,
+  ) {
+    const accounts = await this.ds.query(
+      `SELECT id, code, name_ar, account_type, normal_balance
+         FROM chart_of_accounts
+        WHERE is_active = TRUE AND is_leaf = TRUE
+        ORDER BY code`,
+    );
+    const columns: Array<{ label: string; balances: Record<string, number> }> =
+      [];
+    for (const p of periods) {
+      const rows = await this.ds.query(
+        `
+        SELECT a.id,
+               CASE a.normal_balance
+                 WHEN 'debit' THEN COALESCE(SUM(jl.debit - jl.credit), 0)
+                 ELSE              COALESCE(SUM(jl.credit - jl.debit), 0)
+               END::numeric(14,2) AS balance
+          FROM chart_of_accounts a
+          LEFT JOIN journal_lines jl ON jl.account_id = a.id
+          LEFT JOIN journal_entries je ON je.id = jl.entry_id
+           AND je.is_posted = TRUE AND je.is_void = FALSE
+           AND je.entry_date BETWEEN $1::date AND $2::date
+         WHERE a.is_active = TRUE AND a.is_leaf = TRUE
+         GROUP BY a.id
+        `,
+        [p.from, p.to],
+      );
+      const bal: Record<string, number> = {};
+      for (const r of rows) bal[r.id] = Number(r.balance || 0);
+      columns.push({ label: p.label, balances: bal });
+    }
+    return { accounts, columns };
+  }
+
   private aggregateAging(
     rows: any[],
     buckets: Array<{ label: string; min: number; max: number }>,

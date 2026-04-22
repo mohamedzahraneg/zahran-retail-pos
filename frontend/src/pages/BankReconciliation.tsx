@@ -8,6 +8,7 @@ import {
   Landmark,
   CheckSquare,
   Square,
+  Upload,
 } from 'lucide-react';
 
 import { cashDeskApi, ReconciliationRow } from '@/api/cash-desk.api';
@@ -55,6 +56,82 @@ export default function BankReconciliation() {
 
   const rows = data?.rows || [];
   const summary = data?.summary;
+
+  const autoMatchMut = useMutation({
+    mutationFn: (lines: any[]) =>
+      cashDeskApi.autoMatchStatement({ cashbox_id: cashboxId, lines }),
+    onSuccess: (r) => {
+      toast.success(
+        `تم مطابقة ${r.matched} تلقائياً · ${r.ambiguous} متعددة · ${r.unmatched} بدون مطابقة`,
+      );
+      qc.invalidateQueries({ queryKey: ['reconciliation'] });
+    },
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.message || 'فشل الاستيراد'),
+  });
+
+  const onCsvUpload = (file: File) => {
+    if (!cashboxId) {
+      toast.error('اختر حساب بنكي أولاً');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const text = String(e.target?.result || '');
+      // Naive CSV parse — expect header: date,amount,direction[,reference]
+      //   date    YYYY-MM-DD
+      //   amount  positive number
+      //   direction  in / out  (or credit/debit)
+      const rows = text
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .filter(Boolean);
+      if (rows.length < 2) {
+        toast.error('الملف فارغ أو غير صالح');
+        return;
+      }
+      const header = rows[0].split(',').map((h) => h.trim().toLowerCase());
+      const idx = {
+        date: header.indexOf('date'),
+        amount: header.indexOf('amount'),
+        direction: header.indexOf('direction'),
+        reference: header.indexOf('reference'),
+      };
+      if (idx.date < 0 || idx.amount < 0 || idx.direction < 0) {
+        toast.error(
+          'صيغة غير صحيحة — الأعمدة المطلوبة: date, amount, direction (اختياري: reference)',
+        );
+        return;
+      }
+      const lines: any[] = [];
+      for (const r of rows.slice(1)) {
+        const cols = r.split(',').map((c) => c.trim());
+        const dir = (cols[idx.direction] || '').toLowerCase();
+        const normalized: 'in' | 'out' =
+          dir === 'in' || dir === 'credit' || dir === 'cr' ? 'in' : 'out';
+        const amt = Number(cols[idx.amount]);
+        if (!cols[idx.date] || !(amt > 0)) continue;
+        lines.push({
+          date: cols[idx.date],
+          amount: Math.abs(amt),
+          direction: normalized,
+          reference: idx.reference >= 0 ? cols[idx.reference] : undefined,
+        });
+      }
+      if (!lines.length) {
+        toast.error('لا توجد صفوف صالحة');
+        return;
+      }
+      if (
+        !confirm(
+          `سيتم استيراد ${lines.length} حركة ومحاولة المطابقة التلقائية. متابعة؟`,
+        )
+      )
+        return;
+      autoMatchMut.mutate(lines);
+    };
+    reader.readAsText(file, 'utf-8');
+  };
 
   const markMut = useMutation({
     mutationFn: () =>
@@ -113,6 +190,32 @@ export default function BankReconciliation() {
       </div>
 
       <div className="card p-4 space-y-3">
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <div className="text-sm font-bold">
+            🔍 التسوية اليدوية أو رفع كشف بنك CSV
+          </div>
+          <label className="btn-secondary cursor-pointer">
+            <Upload size={14} /> استيراد كشف CSV
+            <input
+              type="file"
+              accept=".csv,text/csv"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) onCsvUpload(f);
+                e.target.value = '';
+              }}
+            />
+          </label>
+        </div>
+        <div className="text-[11px] text-slate-500">
+          صيغة CSV المتوقعة:{' '}
+          <code className="bg-slate-100 px-1 rounded">
+            date,amount,direction[,reference]
+          </code>{' '}
+          — direction يقبل: in/out أو credit/debit. المطابقة بالتاريخ (±يومين)
+          والمبلغ.
+        </div>
         <div className="grid md:grid-cols-4 gap-3">
           <label className="block">
             <span className="text-xs font-bold text-slate-600 mb-1 block">

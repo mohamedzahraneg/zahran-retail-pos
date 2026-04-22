@@ -268,6 +268,27 @@ export const cashDeskApi = {
       api.post('/cash-desk/reconciliation/unmark', { txn_ids }),
     ),
 
+  autoMatchStatement: (payload: {
+    cashbox_id: string;
+    lines: Array<{
+      date: string;
+      amount: number;
+      direction: 'in' | 'out';
+      reference?: string;
+    }>;
+  }) =>
+    unwrap<{
+      matched: number;
+      ambiguous: number;
+      unmatched: number;
+      results: Array<{
+        statement_line: any;
+        matched_id: string | null;
+        status: 'matched' | 'ambiguous' | 'unmatched';
+        candidates?: number;
+      }>;
+    }>(api.post('/cash-desk/reconciliation/auto-match', payload)),
+
   cashflowToday: () =>
     unwrap<CashflowToday[]>(api.get('/cash-desk/cashflow/today')),
 

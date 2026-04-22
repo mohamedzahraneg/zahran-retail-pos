@@ -415,4 +415,14 @@ export class ChartOfAccountsController {
   vatReturn(@Query('from') from: string, @Query('to') to: string) {
     return this.analytics.vatReturn({ from, to });
   }
+
+  @Post('reports/trial-balance-comparison')
+  @Permissions('accounts.chart.view')
+  @ApiOperation({ summary: 'ميزان مراجعة مقارن (فترات متعددة)' })
+  trialBalanceComparison(
+    @Body()
+    body: { periods: Array<{ from: string; to: string; label: string }> },
+  ) {
+    return this.reports.trialBalanceComparison(body.periods || []);
+  }
 }

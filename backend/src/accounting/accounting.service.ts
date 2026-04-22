@@ -450,11 +450,14 @@ export class AccountingService {
     const params: any[] = [dto.from, dto.to];
     if (dto.warehouse_id) params.push(dto.warehouse_id);
 
-    // Revenue (completed invoices) — use completed_at (sale date) in
-    // Africa/Cairo so the P&L matches the dashboard's today view.
+    // Revenue (completed invoices) — exclude VAT so it ties to the GL
+    // account (411 = grand_total − tax_amount). Tax is tracked
+    // separately via 214.
     const [revRow] = await this.ds.query(
       `SELECT
-         COALESCE(SUM(grand_total),0)::numeric                       AS revenue,
+         COALESCE(SUM(grand_total - tax_amount),0)::numeric          AS revenue,
+         COALESCE(SUM(tax_amount),0)::numeric                        AS tax,
+         COALESCE(SUM(grand_total),0)::numeric                       AS gross_sales,
          COALESCE(SUM(invoice_discount
                      + items_discount_total
                      + coupon_discount),0)::numeric                  AS discounts,
@@ -515,7 +518,9 @@ export class AccountingService {
     return {
       range: { from: dto.from, to: dto.to },
       warehouse_id: dto.warehouse_id ?? null,
-      revenue,
+      revenue,                               // net of VAT (matches GL 411)
+      gross_sales: Number(revRow.gross_sales), // including VAT (cash received)
+      tax: Number(revRow.tax),
       discounts: Number(revRow.discounts),
       invoice_count: revRow.invoice_count,
       returns,

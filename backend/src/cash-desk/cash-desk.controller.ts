@@ -164,6 +164,29 @@ export class CashDeskController {
     return this.svc.unmarkReconciled(body.txn_ids);
   }
 
+  @Post('reconciliation/auto-match')
+  @Permissions('accounts.reconcile')
+  @ApiOperation({ summary: 'مطابقة تلقائية لكشف بنك' })
+  autoMatch(
+    @Body()
+    body: {
+      cashbox_id: string;
+      lines: Array<{
+        date: string;
+        amount: number;
+        direction: 'in' | 'out';
+        reference?: string;
+      }>;
+    },
+    @CurrentUser() user: JwtUser,
+  ) {
+    return this.svc.autoMatchStatement(
+      body.cashbox_id,
+      body.lines || [],
+      user.userId,
+    );
+  }
+
   @Get('cashflow/today')
   cashflowToday() {
     return this.svc.cashflowToday();
