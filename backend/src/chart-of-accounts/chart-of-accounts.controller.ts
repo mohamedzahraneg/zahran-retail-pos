@@ -43,6 +43,7 @@ import {
   CreateCostCenterDto,
 } from './cost-centers.service';
 import { FxService, UpsertRateDto } from './fx.service';
+import { ReconciliationService } from './reconciliation.service';
 import { Permissions } from '../common/decorators/roles.decorator';
 import {
   CurrentUser,
@@ -110,6 +111,7 @@ export class ChartOfAccountsController {
     private readonly budgets: BudgetsService,
     private readonly costCenters: CostCentersService,
     private readonly fx: FxService,
+    private readonly recon: ReconciliationService,
   ) {}
 
   // ── Chart of Accounts ──────────────────────────────────────────────
@@ -557,5 +559,61 @@ export class ChartOfAccountsController {
     @CurrentUser() user: JwtUser,
   ) {
     return this.fx.revalue(body.as_of, user.userId);
+  }
+
+  // ── Reconciliation / audit ───────────────────────────────────────────
+
+  @Get('audit/summary')
+  @Permissions('accounts.chart.view')
+  @ApiOperation({ summary: 'ملخص انحرافات الحسابات' })
+  auditSummary() {
+    return this.recon.summary();
+  }
+
+  @Get('audit/cashboxes')
+  @Permissions('accounts.chart.view')
+  auditCashboxes() {
+    return this.recon.auditCashboxes();
+  }
+
+  @Get('audit/invoices')
+  @Permissions('accounts.chart.view')
+  auditInvoices(@Query('limit') limit?: string) {
+    return this.recon.auditInvoices(limit ? Number(limit) : undefined);
+  }
+
+  @Get('audit/expenses')
+  @Permissions('accounts.chart.view')
+  auditExpenses(@Query('limit') limit?: string) {
+    return this.recon.auditExpenses(limit ? Number(limit) : undefined);
+  }
+
+  @Get('audit/payments')
+  @Permissions('accounts.chart.view')
+  auditPayments(@Query('limit') limit?: string) {
+    return this.recon.auditPayments(limit ? Number(limit) : undefined);
+  }
+
+  @Post('audit/recompute-cashbox/:id')
+  @Permissions('accounts.journal.post')
+  @ApiOperation({ summary: 'إعادة حساب رصيد خزنة من حركاتها' })
+  recomputeCashbox(@Param('id') id: string) {
+    return this.recon.recomputeCashboxBalance(id);
+  }
+
+  @Post('audit/recompute-cashboxes')
+  @Permissions('accounts.journal.post')
+  recomputeAllCashboxes() {
+    return this.recon.recomputeAllCashboxes();
+  }
+
+  @Post('audit/reset-auto-entries')
+  @Permissions('accounts.journal.void')
+  @ApiOperation({
+    summary:
+      'إلغاء كل القيود التلقائية لإعادة بنائها — خطر، استخدم مع الـ backfill',
+  })
+  resetAutoEntries() {
+    return this.recon.resetAutoPostedEntries();
   }
 }

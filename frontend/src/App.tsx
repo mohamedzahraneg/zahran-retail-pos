@@ -34,6 +34,7 @@ import BankReconciliation from '@/pages/BankReconciliation';
 import Analytics from '@/pages/Analytics';
 import Budgets from '@/pages/Budgets';
 import FinancialControls from '@/pages/FinancialControls';
+import AccountsAudit from '@/pages/AccountsAudit';
 import RecurringExpenses from '@/pages/RecurringExpenses';
 import CustomerGroups from '@/pages/CustomerGroups';
 import Settings from '@/pages/Settings';
@@ -186,6 +187,14 @@ export default function App() {
               ]}
             >
               <FinancialControls />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="accounts-audit"
+          element={
+            <ProtectedRoute permissions={['accounts.chart.view']}>
+              <AccountsAudit />
             </ProtectedRoute>
           }
         />

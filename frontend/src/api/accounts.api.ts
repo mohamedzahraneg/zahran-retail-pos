@@ -313,7 +313,76 @@ export const accountsApi = {
         reason?: string;
       }>;
     }>(api.post('/accounts/fx/revalue', { as_of })),
+
+  // ── Audit ────────────────────────────────────────────────────────
+  auditSummary: () =>
+    unwrap<AuditSummary>(api.get('/accounts/audit/summary')),
+  auditCashboxes: () =>
+    unwrap<CashboxAuditRow[]>(api.get('/accounts/audit/cashboxes')),
+  auditInvoices: (limit = 50) =>
+    unwrap<InvoiceAuditRow[]>(
+      api.get('/accounts/audit/invoices', { params: { limit } }),
+    ),
+  auditExpenses: (limit = 50) =>
+    unwrap<any[]>(
+      api.get('/accounts/audit/expenses', { params: { limit } }),
+    ),
+  auditPayments: (limit = 50) =>
+    unwrap<{ customer: any[]; supplier: any[] }>(
+      api.get('/accounts/audit/payments', { params: { limit } }),
+    ),
+  recomputeCashbox: (id: string) =>
+    unwrap<{ cashbox_id: string; new_balance: number }>(
+      api.post(`/accounts/audit/recompute-cashbox/${id}`, {}),
+    ),
+  recomputeAllCashboxes: () =>
+    unwrap<{ updated: number; results: any[] }>(
+      api.post('/accounts/audit/recompute-cashboxes', {}),
+    ),
+  resetAutoEntries: () =>
+    unwrap<{ voided: number }>(
+      api.post('/accounts/audit/reset-auto-entries', {}),
+    ),
 };
+
+// ── Audit types ──────────────────────────────────────────────────
+
+export interface AuditSummary {
+  cashboxes: {
+    total: number;
+    txn_mismatch: number;
+    gl_mismatch: number;
+    max_txn_drift: number;
+    max_gl_drift: number;
+  };
+  invoices: { missing_count: number; missing_value: number };
+  expenses: { missing_count: number; missing_value: number };
+  payments: { missing_count: number };
+}
+
+export interface CashboxAuditRow {
+  id: string;
+  name_ar: string;
+  kind: string;
+  currency: string;
+  is_active: boolean;
+  stored_balance: string;
+  computed_balance: string;
+  gl_balance: string;
+  gl_account_id: string | null;
+  gl_account_code: string | null;
+}
+
+export interface InvoiceAuditRow {
+  id: string;
+  invoice_no: string;
+  status: string;
+  grand_total: string;
+  posted_debit: string;
+  drift: string;
+  completed_at: string | null;
+  created_at: string;
+}
 
 export interface CurrencyRate {
   id: string;

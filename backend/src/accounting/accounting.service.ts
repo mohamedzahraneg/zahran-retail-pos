@@ -702,16 +702,18 @@ export class AccountingService {
         WHERE expense_date BETWEEN $1::date AND $2::date`,
       [from, to],
     );
-    // Payments: money ACTUALLY received in the period — use the payment
-    // timestamp, not the invoice completion timestamp. Counting by
-    // invoice date double-dipped deposits and missed receipts that
-    // settled old invoices.
+    // Payments: money ACTUALLY received in the period. Uses the
+    // payment timestamp (not the invoice's completed_at). Excludes
+    // payments whose parent invoice was voided — those rows stay in
+    // the table for audit but shouldn't count toward today's cash in.
     const [payments] = await this.ds.query(
-      `SELECT COALESCE(SUM(amount), 0)::numeric(14,2) AS today_payments,
-              COUNT(*)::int                            AS payments_count
-         FROM invoice_payments
-        WHERE (created_at AT TIME ZONE 'Africa/Cairo')::date
-              BETWEEN $1::date AND $2::date`,
+      `SELECT COALESCE(SUM(ip.amount), 0)::numeric(14,2) AS today_payments,
+              COUNT(*)::int                               AS payments_count
+         FROM invoice_payments ip
+         JOIN invoices i ON i.id = ip.invoice_id
+        WHERE (ip.created_at AT TIME ZONE 'Africa/Cairo')::date
+              BETWEEN $1::date AND $2::date
+          AND COALESCE(i.status, 'paid') <> 'cancelled'`,
       [from, to],
     );
     // Shift variance across every CLOSED shift in the range.
