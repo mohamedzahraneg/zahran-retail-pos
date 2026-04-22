@@ -110,7 +110,11 @@ services:
     ports:
       - "${API_PORT:-3000}:3000"
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/health"]
+      # Use 127.0.0.1 (IPv4) explicitly — `localhost` inside the Alpine
+      # image resolves to ::1 (IPv6) first, but Nest binds to 0.0.0.0
+      # (IPv4 only), so a localhost healthcheck returns "Connection
+      # refused" even though the app is perfectly healthy.
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/health"]
       interval: 20s
       retries: 5
     profiles: ["full"]   # لا يُشغَّل افتراضياً لغاية إضافة backend/
