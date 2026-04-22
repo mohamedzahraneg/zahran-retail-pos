@@ -10,8 +10,7 @@ import Customers from '@/pages/Customers';
 import Reservations from '@/pages/Reservations';
 import Returns from '@/pages/Returns';
 import ReturnsAnalytics from '@/pages/ReturnsAnalytics';
-// CashDesk is embedded inside Cashboxes.tsx — the /cash-desk URL is
-// kept only as a redirect for old bookmarks.
+import CashDesk from '@/pages/CashDesk';
 import Suppliers from '@/pages/Suppliers';
 import SupplierDetail from '@/pages/SupplierDetail';
 import Purchases from '@/pages/Purchases';
@@ -102,8 +101,7 @@ export default function App() {
             </ProtectedRoute>
           }
         />
-        {/* Legacy cash-desk URL — redirects to the unified /cashboxes page. */}
-        <Route path="cash-desk" element={<Navigate to="/cashboxes" replace />} />
+        <Route path="cash-desk" element={<CashDesk />} />
         <Route path="reservations" element={<Reservations />} />
         <Route path="returns" element={<Returns />} />
         <Route
@@ -135,7 +133,9 @@ export default function App() {
         <Route path="stock-count" element={<StockCount />} />
         <Route path="coupons" element={<Coupons />} />
         <Route path="alerts" element={<Alerts />} />
-        <Route path="accounting" element={<Accounting />} />
+        {/* Legacy /accounting redirects to the unified /accounts page. */}
+        <Route path="accounting" element={<Navigate to="/accounts" replace />} />
+        <Route path="accounting-legacy" element={<Accounting />} />
         <Route
           path="accounts"
           element={

@@ -30,7 +30,9 @@ import {
 } from '@/api/cash-desk.api';
 import { InstitutionLogo } from '@/components/InstitutionLogo';
 import { useAuthStore } from '@/stores/auth.store';
-import CashDesk from './CashDesk';
+// The daily cash-desk operations (receipts / supplier pays / deposits)
+// live in their own page now — we no longer embed them here so this
+// screen stays focused on cashbox MANAGEMENT only.
 
 const EGP = (n: number | string) =>
   `${Number(n || 0).toLocaleString('en-US', {
@@ -216,14 +218,6 @@ export default function Cashboxes() {
           ))}
         </div>
       )}
-
-      {/* ─── Daily operations (merged from old /cash-desk page) ─── */}
-      <div className="pt-4 border-t border-slate-200">
-        <div className="text-base font-black text-slate-800 mb-3 flex items-center gap-2">
-          💼 العمليات اليومية — مقبوضات · مدفوعات · إيداع · حركات
-        </div>
-        <CashDesk embedded />
-      </div>
 
       {showCreate && (
         <CashboxFormModal

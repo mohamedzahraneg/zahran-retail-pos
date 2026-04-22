@@ -770,11 +770,7 @@ function JournalTab() {
         />
         {canPost && (
           <div className="flex gap-2 mr-auto flex-wrap">
-            <ReviewReportButton />
-            <ExportBackupButton />
-            <FactoryResetButton />
-            <FullCleanupButton />
-            <BackfillButton />
+            <AdminToolsMenu />
             <button
               className="btn-primary"
               onClick={() => setShowCreate(true)}
@@ -870,6 +866,61 @@ function JournalTab() {
           canVoid={canVoid}
           onClose={() => setViewing(null)}
         />
+      )}
+    </div>
+  );
+}
+
+/**
+ * All the rarely-used maintenance tools (backfill / factory reset /
+ * review / backup / full cleanup) tucked into a single dropdown so
+ * the day-to-day UI isn't polluted with six red buttons.
+ */
+function AdminToolsMenu() {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="relative">
+      <button
+        className="btn-secondary"
+        onClick={() => setOpen((v) => !v)}
+        title="أدوات الصيانة"
+      >
+        🛠 أدوات الصيانة
+      </button>
+      {open && (
+        <>
+          {/* click outside to close */}
+          <div
+            className="fixed inset-0 z-40"
+            onClick={() => setOpen(false)}
+          />
+          <div className="absolute top-full mt-1 left-0 z-50 bg-white border border-slate-200 rounded-lg shadow-lg p-2 min-w-[260px] space-y-1">
+            <div className="text-[11px] font-bold text-slate-500 px-2 pt-1 pb-0.5">
+              قبل المسح
+            </div>
+            <div onClick={() => setOpen(false)}>
+              <ReviewReportButton />
+            </div>
+            <div onClick={() => setOpen(false)}>
+              <ExportBackupButton />
+            </div>
+            <div className="text-[11px] font-bold text-slate-500 px-2 pt-2 pb-0.5 border-t border-slate-100">
+              صيانة الأرقام
+            </div>
+            <div onClick={() => setOpen(false)}>
+              <BackfillButton />
+            </div>
+            <div onClick={() => setOpen(false)}>
+              <FullCleanupButton />
+            </div>
+            <div className="text-[11px] font-bold text-rose-600 px-2 pt-2 pb-0.5 border-t border-slate-100">
+              ⚠ عمليات جذرية
+            </div>
+            <div onClick={() => setOpen(false)}>
+              <FactoryResetButton />
+            </div>
+          </div>
+        </>
       )}
     </div>
   );

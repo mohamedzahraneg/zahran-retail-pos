@@ -88,17 +88,17 @@ const groups: NavGroup[] = [
   {
     title: 'الحسابات والمالية',
     items: [
-      { to: '/accounting', label: 'الحسابات', icon: Calculator, roles: ['admin', 'manager', 'accountant'], permission: 'accounting.view' },
-      { to: '/accounts', label: 'شجرة الحسابات', icon: BookOpen, roles: ['admin', 'manager', 'accountant'], permission: 'accounts.chart.view' },
+      // Unified accounts page — tree, journal, reports, budgets, FX,
+      // approvals all live inside as tabs.
+      { to: '/accounts', label: 'الحسابات', icon: BookOpen, roles: ['admin', 'manager', 'accountant'], permission: 'accounts.chart.view' },
       { to: '/analytics', label: 'التحليلات الذكية', icon: Sparkles, roles: ['admin', 'manager', 'accountant'], permission: 'accounts.chart.view' },
-      { to: '/budgets', label: 'الموازنات والمراكز', icon: Target, roles: ['admin', 'accountant'], permission: 'accounts.budget' },
-      { to: '/financial-controls', label: 'ضوابط مالية', icon: ShieldCheck, roles: ['admin', 'manager', 'accountant'], permission: 'accounts.approval.decide' },
-      // مراجعة وتدقيق: accessible via the "صيانة شاملة" button inside
-      // /accounts so power users can still run it without a dedicated
-      // sidebar entry.
-      { to: '/cashboxes', label: 'الخزائن والبنوك', icon: Wallet, roles: ['admin', 'manager', 'accountant'], permission: 'cashdesk.view' },
-      { to: '/bank-reconciliation', label: 'تسوية بنكية', icon: Scale, roles: ['admin', 'accountant'], permission: 'accounts.reconcile' },
+      { to: '/cash-desk', label: 'الصندوق اليومي', icon: Wallet, roles: ['admin', 'manager', 'accountant', 'cashier'], permission: 'cashdesk.view' },
+      { to: '/cashboxes', label: 'الخزائن والبنوك', icon: Wallet, roles: ['admin', 'manager', 'accountant'], permission: 'cashdesk.manage_accounts' },
       { to: '/recurring-expenses', label: 'المصاريف الدورية', icon: Repeat, roles: ['admin', 'manager', 'accountant'], permission: 'recurring_expenses.manage' },
+      // /accounting (legacy), /budgets, /financial-controls,
+      // /bank-reconciliation, /accounts-audit — all routes still work
+      // but removed from sidebar to reduce cognitive load. Power users
+      // can still navigate by URL when needed.
     ],
   },
   {

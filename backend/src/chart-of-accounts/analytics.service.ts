@@ -203,11 +203,15 @@ export class AccountingAnalyticsService {
   }
 
   /**
-   * Smart indicators — a compact set of KPIs the Analytics page surfaces
-   * at the top. Every metric is computed from real data (no invented
-   * aggregates).
+   * Smart indicators — every metric derived from the GL + cashbox
+   * transactions, no source-table shortcuts. That way the analytics
+   * page always equals what the journal + cashbox actually contain
+   * and can't disagree with the chart of accounts.
    */
   async smartIndicators(params: { from: string; to: string }) {
+    // Revenue / COGS / counts still read from invoices because the
+    // GL doesn't carry invoice_count or avg ticket. Only used for
+    // context numbers, never for the accounting P&L totals.
     const [rev] = await this.ds.query(
       `
       SELECT COALESCE(SUM(grand_total - tax_amount),0)::numeric(14,2) AS revenue,
@@ -221,13 +225,21 @@ export class AccountingAnalyticsService {
       `,
       [params.from, params.to],
     );
-    // Expenses — count ALL expenses in the period, not just approved.
-    // Older installations may not flip is_approved reliably, and the
-    // KPI should match what the user actually sees on the expenses list.
+    // Expenses — pull from the GL (sum of debits on expense accounts
+    // during the period). That's the single source of truth after the
+    // factory-reset flow: anything that isn't posted to the GL
+    // simply doesn't count on the income statement, and the analytics
+    // agrees.
     const [exp] = await this.ds.query(
-      `SELECT COALESCE(SUM(amount),0)::numeric(14,2) AS expenses
-         FROM expenses
-        WHERE expense_date BETWEEN $1::date AND $2::date`,
+      `
+      SELECT COALESCE(SUM(jl.debit - jl.credit), 0)::numeric(14,2) AS expenses
+        FROM journal_lines jl
+        JOIN journal_entries je ON je.id = jl.entry_id
+        JOIN chart_of_accounts a ON a.id = jl.account_id
+       WHERE je.is_posted = TRUE AND je.is_void = FALSE
+         AND je.entry_date BETWEEN $1::date AND $2::date
+         AND a.account_type = 'expense'
+      `,
       [params.from, params.to],
     );
     const [ret] = await this.ds.query(
