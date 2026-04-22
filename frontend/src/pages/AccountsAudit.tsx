@@ -157,6 +157,29 @@ export default function AccountsAudit() {
       toast.error(e?.response?.data?.message || 'فشل الترحيل'),
   });
 
+  const forcePostInvoicesMut = useMutation({
+    mutationFn: () => accountsApi.forcePostInvoices(),
+    onSuccess: (r) => {
+      if (r.failed > 0) {
+        const first = r.results.find((x) => x.status === 'failed');
+        toast(
+          `ترحيل الفواتير: ${r.posted} نجح · ${r.failed} فشل · ${r.skipped} تم تجاهله${
+            first ? `\nأول سبب فشل: ${first.reason}` : ''
+          }`,
+          { icon: '⚠', duration: 10000 },
+        );
+      } else {
+        toast.success(
+          `تم ترحيل ${r.posted} فاتورة إلى دفتر الأستاذ`,
+          { duration: 6000 },
+        );
+      }
+      invalidateAll();
+    },
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.message || 'فشل الترحيل'),
+  });
+
   const purgeMut = useMutation({
     mutationFn: () => accountsApi.purgeCancelled(),
     onSuccess: (r) => {
@@ -479,6 +502,28 @@ export default function AccountsAudit() {
       </Section>
 
       {/* Invoices missing GL */}
+      {invoices.length > 0 && (
+        <div className="flex items-center justify-end">
+          <button
+            className="btn-primary bg-emerald-600 hover:bg-emerald-700"
+            onClick={() => {
+              if (
+                confirm(
+                  `ترحيل قسري لـ ${invoices.length} فاتورة إلى دفتر الأستاذ؟`,
+                )
+              ) {
+                forcePostInvoicesMut.mutate();
+              }
+            }}
+            disabled={forcePostInvoicesMut.isPending}
+          >
+            <Zap size={14} />{' '}
+            {forcePostInvoicesMut.isPending
+              ? 'جارٍ الترحيل...'
+              : `ترحيل كل الفواتير (${invoices.length})`}
+          </button>
+        </div>
+      )}
       <Section
         title={`فواتير بدون قيد GL (${invoices.length})`}
         icon={<FileText size={16} />}

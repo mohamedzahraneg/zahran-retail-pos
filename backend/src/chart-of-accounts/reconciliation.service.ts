@@ -441,6 +441,101 @@ export class ReconciliationService {
   }
 
   /**
+   * Force-post every invoice that doesn't have a live GL entry. Same
+   * pattern as forcePostApprovedExpenses — detailed per-row outcome
+   * so the user knows exactly why anything refused.
+   */
+  async forcePostInvoices(
+    posting: {
+      postInvoice: (id: string, userId: string) => Promise<any>;
+    },
+    userId: string,
+  ): Promise<{
+    found: number;
+    posted: number;
+    skipped: number;
+    failed: number;
+    results: Array<{
+      invoice_id: string;
+      invoice_no: string | null;
+      grand_total: string;
+      status: 'posted' | 'skipped' | 'failed';
+      reason?: string;
+    }>;
+  }> {
+    const rows = await this.ds.query(
+      `
+      SELECT i.id, i.invoice_no, i.grand_total
+        FROM invoices i
+       WHERE i.status IN ('paid','completed','partially_paid')
+         AND NOT EXISTS (
+           SELECT 1 FROM journal_entries je
+            WHERE je.reference_type = 'invoice'
+              AND je.reference_id = i.id
+              AND je.is_posted = TRUE AND je.is_void = FALSE
+         )
+       ORDER BY i.created_at ASC
+      `,
+    );
+    const out: any[] = [];
+    let posted = 0;
+    let skipped = 0;
+    let failed = 0;
+
+    for (const r of rows) {
+      try {
+        const r2 = await posting.postInvoice(r.id, userId);
+        if (r2 && (r2 as any).skipped) {
+          skipped++;
+          out.push({
+            invoice_id: r.id,
+            invoice_no: r.invoice_no,
+            grand_total: r.grand_total,
+            status: 'skipped' as const,
+            reason: 'already posted',
+          });
+        } else if (r2 && (r2 as any).error) {
+          failed++;
+          out.push({
+            invoice_id: r.id,
+            invoice_no: r.invoice_no,
+            grand_total: r.grand_total,
+            status: 'failed' as const,
+            reason: (r2 as any).error,
+          });
+        } else if (r2 && (r2 as any).entry_id) {
+          posted++;
+          out.push({
+            invoice_id: r.id,
+            invoice_no: r.invoice_no,
+            grand_total: r.grand_total,
+            status: 'posted' as const,
+          });
+        } else {
+          failed++;
+          out.push({
+            invoice_id: r.id,
+            invoice_no: r.invoice_no,
+            grand_total: r.grand_total,
+            status: 'failed' as const,
+            reason: 'cashbox/sales account missing',
+          });
+        }
+      } catch (err: any) {
+        failed++;
+        out.push({
+          invoice_id: r.id,
+          invoice_no: r.invoice_no,
+          grand_total: r.grand_total,
+          status: 'failed' as const,
+          reason: err?.message ?? String(err),
+        });
+      }
+    }
+    return { found: rows.length, posted, skipped, failed, results: out };
+  }
+
+  /**
    * Nuke cancelled invoices and everything attached to them — hard
    * delete. Used to clean the slate after voids accumulated over time
    * and bloated the reports.

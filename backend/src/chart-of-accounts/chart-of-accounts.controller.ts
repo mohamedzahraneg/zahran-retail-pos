@@ -639,6 +639,15 @@ export class ChartOfAccountsController {
     return this.recon.forcePostApprovedExpenses(this.posting, user.userId);
   }
 
+  @Post('audit/force-post-invoices')
+  @Permissions('accounts.journal.post')
+  @ApiOperation({
+    summary: 'ترحيل قسري لكل الفواتير التي لم يتم ترحيلها',
+  })
+  forcePostInvoices(@CurrentUser() user: JwtUser) {
+    return this.recon.forcePostInvoices(this.posting, user.userId);
+  }
+
   // ── Migrations ──────────────────────────────────────────────────────
 
   @Get('audit/migrations')

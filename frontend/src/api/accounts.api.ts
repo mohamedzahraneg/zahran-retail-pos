@@ -366,6 +366,21 @@ export const accountsApi = {
       }>;
     }>(api.post('/accounts/audit/force-post-expenses', {})),
 
+  forcePostInvoices: () =>
+    unwrap<{
+      found: number;
+      posted: number;
+      skipped: number;
+      failed: number;
+      results: Array<{
+        invoice_id: string;
+        invoice_no: string | null;
+        grand_total: string;
+        status: 'posted' | 'skipped' | 'failed';
+        reason?: string;
+      }>;
+    }>(api.post('/accounts/audit/force-post-invoices', {})),
+
   migrationsStatus: () =>
     unwrap<{
       dir: string;
