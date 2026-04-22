@@ -68,9 +68,32 @@ class CashboxCreateDto {
   @IsOptional() @IsString() notes?: string;
 }
 
-class CashboxUpdateDto extends CashboxCreateDto {
-  declare name_ar: string;
-  declare kind: 'cash' | 'bank' | 'ewallet' | 'check';
+/**
+ * Update is partial — every field optional so lightweight calls like
+ * `{ is_active: true }` don't fail validation.
+ */
+class CashboxUpdateDto {
+  @IsOptional() @IsString() @MinLength(1) name_ar?: string;
+  @IsOptional() @IsIn(['cash', 'bank', 'ewallet', 'check'])
+  kind?: 'cash' | 'bank' | 'ewallet' | 'check';
+  @IsOptional() @IsUUID() warehouse_id?: string;
+  @IsOptional() @IsString() currency?: string;
+  @IsOptional() @IsNumber() @Min(0) opening_balance?: number;
+  @IsOptional() @IsString() color?: string;
+  @IsOptional() @IsString() institution_code?: string;
+  @IsOptional() @IsString() bank_branch?: string;
+  @IsOptional() @IsString() account_number?: string;
+  @IsOptional() @IsString() iban?: string;
+  @IsOptional() @IsString() swift_code?: string;
+  @IsOptional() @IsString() account_holder_name?: string;
+  @IsOptional() @IsString() account_manager_name?: string;
+  @IsOptional() @IsString() account_manager_phone?: string;
+  @IsOptional() @IsString() account_manager_email?: string;
+  @IsOptional() @IsString() wallet_phone?: string;
+  @IsOptional() @IsString() wallet_owner_name?: string;
+  @IsOptional() @IsString() check_issuer_name?: string;
+  @IsOptional() @IsString() notes?: string;
+  @IsOptional() is_active?: boolean;
 }
 
 class TransferDto {

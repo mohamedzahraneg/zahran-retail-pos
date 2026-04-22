@@ -791,8 +791,7 @@ function JournalTab() {
                 <th className="text-right px-3 py-2">التاريخ</th>
                 <th className="text-right px-3 py-2">الوصف</th>
                 <th className="text-right px-3 py-2">المصدر</th>
-                <th className="text-right px-3 py-2">مدين</th>
-                <th className="text-right px-3 py-2">دائن</th>
+                <th className="text-right px-3 py-2">المبلغ</th>
                 <th className="text-right px-3 py-2">الحالة</th>
                 <th className="text-right px-3 py-2">المستخدم</th>
               </tr>
@@ -800,13 +799,13 @@ function JournalTab() {
             <tbody>
               {isLoading ? (
                 <tr>
-                  <td colSpan={8} className="text-center py-12 text-slate-400">
+                  <td colSpan={7} className="text-center py-12 text-slate-400">
                     جارٍ التحميل...
                   </td>
                 </tr>
               ) : entries.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="text-center py-12 text-slate-400">
+                  <td colSpan={7} className="text-center py-12 text-slate-400">
                     لا توجد قيود في هذه الفترة
                   </td>
                 </tr>
@@ -827,11 +826,11 @@ function JournalTab() {
                     <td className="px-3 py-2 text-xs text-slate-500">
                       {e.reference_type || 'يدوي'}
                     </td>
-                    <td className="px-3 py-2 font-mono font-bold text-emerald-700">
+                    <td
+                      className="px-3 py-2 font-mono font-bold text-slate-800"
+                      title="الإجمالي — في القيد المزدوج يساوي المدين = الدائن"
+                    >
                       {EGP(e.total_debit || 0)}
-                    </td>
-                    <td className="px-3 py-2 font-mono font-bold text-rose-700">
-                      {EGP(e.total_credit || 0)}
                     </td>
                     <td className="px-3 py-2">
                       {e.is_void ? (
