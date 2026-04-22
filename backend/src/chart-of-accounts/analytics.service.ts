@@ -221,11 +221,13 @@ export class AccountingAnalyticsService {
       `,
       [params.from, params.to],
     );
+    // Expenses — count ALL expenses in the period, not just approved.
+    // Older installations may not flip is_approved reliably, and the
+    // KPI should match what the user actually sees on the expenses list.
     const [exp] = await this.ds.query(
       `SELECT COALESCE(SUM(amount),0)::numeric(14,2) AS expenses
          FROM expenses
-        WHERE is_approved = TRUE
-          AND expense_date BETWEEN $1::date AND $2::date`,
+        WHERE expense_date BETWEEN $1::date AND $2::date`,
       [params.from, params.to],
     );
     const [ret] = await this.ds.query(
@@ -244,18 +246,21 @@ export class AccountingAnalyticsService {
          JOIN product_variants pv ON pv.id = s.variant_id
         WHERE pv.is_active = TRUE`,
     );
-    // Receivables + payables
+    // Receivables + payables — use COALESCE on paid_amount so rows with
+    // NULL don't get filtered out, and don't restrict by status enum
+    // (values vary across deployments: 'received' / 'partial' / 'paid' /
+    // 'completed' / 'pending' / …).
     const [recv] = await this.ds.query(
-      `SELECT COALESCE(SUM(grand_total - paid_amount), 0)::numeric(14,2) AS receivables
+      `SELECT COALESCE(SUM(grand_total - COALESCE(paid_amount, 0)), 0)::numeric(14,2) AS receivables
          FROM invoices
-        WHERE status IN ('paid','completed','partially_paid')
-          AND grand_total > paid_amount`,
+        WHERE COALESCE(status::text, '') NOT IN ('cancelled', 'draft', 'void')
+          AND grand_total > COALESCE(paid_amount, 0)`,
     );
     const [pay] = await this.ds.query(
-      `SELECT COALESCE(SUM(grand_total - paid_amount), 0)::numeric(14,2) AS payables
+      `SELECT COALESCE(SUM(grand_total - COALESCE(paid_amount, 0)), 0)::numeric(14,2) AS payables
          FROM purchases
-        WHERE status IN ('received','partial','paid')
-          AND grand_total > paid_amount`,
+        WHERE COALESCE(status::text, '') NOT IN ('cancelled', 'draft', 'void')
+          AND grand_total > COALESCE(paid_amount, 0)`,
     );
     const [cash] = await this.ds.query(
       `SELECT COALESCE(SUM(current_balance), 0)::numeric(14,2) AS cash_on_hand

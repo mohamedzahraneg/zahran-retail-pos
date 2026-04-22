@@ -163,18 +163,25 @@ BEGIN
       SELECT 1 FROM information_schema.columns
        WHERE table_name = 'roles' AND column_name = 'permissions'
     ) THEN
-      UPDATE roles
-         SET permissions = ARRAY(
-           SELECT DISTINCT code FROM (
-             SELECT UNNEST(COALESCE(permissions, ARRAY[]::text[])) AS code
-             UNION
-             SELECT 'cashdesk.manage_accounts' WHERE r.code IN ('admin', 'accountant', 'manager')
-           ) u
-           ORDER BY code
-         )
-        FROM roles r
-       WHERE roles.code = r.code
-         AND r.code IN ('admin', 'accountant', 'manager');
+      -- Use a loop so every reference is fully qualified (no ambiguous
+      -- `permissions` between the roles column and the permissions table).
+      DECLARE
+        r RECORD;
+      BEGIN
+        FOR r IN SELECT id, permissions FROM roles
+                  WHERE code IN ('admin', 'accountant', 'manager')
+        LOOP
+          UPDATE roles
+             SET permissions = ARRAY(
+               SELECT DISTINCT code FROM (
+                 SELECT UNNEST(COALESCE(r.permissions, ARRAY[]::text[])) AS code
+                 UNION
+                 SELECT 'cashdesk.manage_accounts'
+               ) u ORDER BY code
+             )
+           WHERE id = r.id;
+        END LOOP;
+      END;
     END IF;
   END IF;
 END$$;

@@ -454,14 +454,14 @@ export class AccountingReportsService {
         `
         SELECT i.id, i.invoice_no,
                COALESCE(i.completed_at, i.created_at)::date AS doc_date,
-               i.grand_total, i.paid_amount,
-               (i.grand_total - i.paid_amount)::numeric(14,2) AS outstanding,
+               i.grand_total, COALESCE(i.paid_amount, 0) AS paid_amount,
+               (i.grand_total - COALESCE(i.paid_amount, 0))::numeric(14,2) AS outstanding,
                ($1::date - COALESCE(i.completed_at, i.created_at)::date)::int AS age_days,
                c.id AS customer_id, c.code AS customer_code, c.full_name AS customer_name
           FROM invoices i
           LEFT JOIN customers c ON c.id = i.customer_id
-         WHERE i.status IN ('paid','completed','partially_paid')
-           AND i.grand_total > i.paid_amount
+         WHERE COALESCE(i.status::text, '') NOT IN ('cancelled', 'draft', 'void')
+           AND i.grand_total > COALESCE(i.paid_amount, 0)
            AND COALESCE(i.completed_at, i.created_at)::date <= $1::date
          ORDER BY age_days DESC
         `,
@@ -474,16 +474,16 @@ export class AccountingReportsService {
     const rows = await this.ds.query(
       `
       SELECT p.id, p.purchase_no,
-             COALESCE(p.received_at, p.invoice_date)::date AS doc_date,
-             p.grand_total, p.paid_amount,
-             (p.grand_total - p.paid_amount)::numeric(14,2) AS outstanding,
-             ($1::date - COALESCE(p.received_at, p.invoice_date)::date)::int AS age_days,
+             COALESCE(p.received_at::date, p.invoice_date) AS doc_date,
+             p.grand_total, COALESCE(p.paid_amount, 0) AS paid_amount,
+             (p.grand_total - COALESCE(p.paid_amount, 0))::numeric(14,2) AS outstanding,
+             ($1::date - COALESCE(p.received_at::date, p.invoice_date))::int AS age_days,
              s.id AS supplier_id, s.code AS supplier_code, s.name AS supplier_name
         FROM purchases p
         LEFT JOIN suppliers s ON s.id = p.supplier_id
-       WHERE p.status IN ('received','partial','paid')
-         AND p.grand_total > p.paid_amount
-         AND COALESCE(p.received_at, p.invoice_date)::date <= $1::date
+       WHERE COALESCE(p.status::text, '') NOT IN ('cancelled', 'draft', 'void')
+         AND p.grand_total > COALESCE(p.paid_amount, 0)
+         AND COALESCE(p.received_at::date, p.invoice_date) <= $1::date
        ORDER BY age_days DESC
       `,
       [asOfDate],
