@@ -681,6 +681,16 @@ export class ChartOfAccountsController {
     return this.recon.factoryReset({ keep_stock: !!body?.keep_stock });
   }
 
+  @Get('audit/data-snapshot')
+  @Permissions('accounts.chart.view')
+  @ApiOperation({
+    summary:
+      'صورة كاملة من المبيعات والمصروفات والدفعات — للتصدير كنسخة احتياطية قبل أي عملية جذرية',
+  })
+  dataSnapshot() {
+    return this.recon.dataSnapshot();
+  }
+
   // ── Migrations ──────────────────────────────────────────────────────
 
   @Get('audit/migrations')

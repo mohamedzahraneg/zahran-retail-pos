@@ -770,6 +770,7 @@ function JournalTab() {
         />
         {canPost && (
           <div className="flex gap-2 mr-auto flex-wrap">
+            <ExportBackupButton />
             <FactoryResetButton />
             <FullCleanupButton />
             <BackfillButton />
@@ -905,6 +906,51 @@ function BackfillButton() {
       title="ترحيل تلقائي للعمليات القديمة"
     >
       {mutation.isPending ? '⏳ جاري الترحيل...' : '🔄 ترحيل تلقائي'}
+    </button>
+  );
+}
+
+function ExportBackupButton() {
+  const mutation = useMutation({
+    mutationFn: () => accountsApi.dataSnapshot(),
+    onSuccess: async (data) => {
+      const { exportMultiSheet } = await import('@/lib/exportExcel');
+      // Arabic-friendly sheet names per table (Excel caps at 31 chars).
+      const labels: Record<string, string> = {
+        invoices: 'المبيعات',
+        invoice_items: 'بنود الفواتير',
+        invoice_payments: 'دفعات الفواتير',
+        expenses: 'المصروفات',
+        customer_payments: 'مقبوضات العملاء',
+        supplier_payments: 'مدفوعات الموردين',
+        returns: 'المرتجعات',
+        cashbox_transactions: 'حركات الخزنة',
+      };
+      const sheets = Object.entries(data)
+        .filter(([, rows]) => Array.isArray(rows))
+        .map(([k, rows]) => ({
+          name: labels[k] || k,
+          rows: (rows as any[]) || [],
+        }));
+      const today = new Date().toISOString().slice(0, 10);
+      exportMultiSheet(`zahran-backup-${today}`, sheets);
+      const totalRows = sheets.reduce((s, sh) => s + sh.rows.length, 0);
+      toast.success(
+        `تم تصدير ${sheets.length} ورقة — إجمالي ${totalRows} صف`,
+        { duration: 6000 },
+      );
+    },
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.message || 'فشل التصدير'),
+  });
+  return (
+    <button
+      className="btn-secondary bg-emerald-100 text-emerald-800 hover:bg-emerald-200 border-emerald-300"
+      onClick={() => mutation.mutate()}
+      disabled={mutation.isPending}
+      title="تصدير Excel يحتوي على كل المبيعات والمصروفات والدفعات والمرتجعات"
+    >
+      {mutation.isPending ? '⏳ جارٍ التصدير...' : '📥 تصدير نسخة احتياطية'}
     </button>
   );
 }

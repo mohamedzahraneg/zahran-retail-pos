@@ -402,6 +402,11 @@ export const accountsApi = {
       api.post('/accounts/audit/factory-reset', { keep_stock: keepStock }),
     ),
 
+  dataSnapshot: () =>
+    unwrap<Record<string, any[]>>(
+      api.get('/accounts/audit/data-snapshot'),
+    ),
+
   migrationsStatus: () =>
     unwrap<{
       dir: string;

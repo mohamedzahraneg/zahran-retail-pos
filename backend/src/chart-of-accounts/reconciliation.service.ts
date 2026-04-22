@@ -795,6 +795,156 @@ export class ReconciliationService {
   }
 
   /**
+   * Snapshot every row that matters before a destructive action.
+   * Returns a single payload the frontend turns into a multi-sheet
+   * Excel file — the user downloads it for safe-keeping / review.
+   *
+   * Includes enriched invoice / expense rows with the
+   * customer / supplier / category names so the downloaded file is
+   * readable without cross-referencing.
+   */
+  async dataSnapshot(): Promise<Record<string, any[]>> {
+    const safeList = async (sql: string): Promise<any[]> => {
+      try {
+        return await this.ds.query(sql);
+      } catch {
+        return [];
+      }
+    };
+
+    const invoices = await safeList(`
+      SELECT i.invoice_no, i.status,
+             i.grand_total, i.paid_amount, i.tax_amount, i.cogs_total,
+             i.subtotal, i.invoice_discount, i.items_discount_total,
+             i.coupon_discount,
+             COALESCE(i.completed_at::text, i.created_at::text) AS invoice_date,
+             c.code        AS customer_code,
+             c.full_name   AS customer_name,
+             c.phone       AS customer_phone,
+             u.full_name   AS cashier_name,
+             sp.full_name  AS salesperson_name,
+             w.name_ar     AS warehouse_name
+        FROM invoices i
+        LEFT JOIN customers c  ON c.id  = i.customer_id
+        LEFT JOIN users u      ON u.id  = i.cashier_id
+        LEFT JOIN users sp     ON sp.id = i.salesperson_id
+        LEFT JOIN warehouses w ON w.id  = i.warehouse_id
+       ORDER BY COALESCE(i.completed_at, i.created_at) DESC
+    `);
+
+    const invoiceItems = await safeList(`
+      SELECT i.invoice_no,
+             p.name_ar     AS product_name,
+             pv.barcode    AS sku,
+             ii.quantity, ii.unit_price, ii.unit_cost,
+             ii.discount_amount, ii.tax_amount,
+             ii.line_subtotal, ii.line_total
+        FROM invoice_items ii
+        JOIN invoices i ON i.id = ii.invoice_id
+        LEFT JOIN product_variants pv ON pv.id = ii.variant_id
+        LEFT JOIN products p          ON p.id  = pv.product_id
+       ORDER BY i.invoice_no, ii.id
+    `);
+
+    const invoicePayments = await safeList(`
+      SELECT i.invoice_no,
+             ip.payment_method, ip.amount,
+             ip.reference_number, ip.paid_at::text AS paid_at,
+             u.full_name AS received_by
+        FROM invoice_payments ip
+        JOIN invoices i  ON i.id  = ip.invoice_id
+        LEFT JOIN users u ON u.id = ip.received_by
+       ORDER BY ip.paid_at DESC
+    `);
+
+    const expenses = await safeList(`
+      SELECT e.expense_no, e.amount, e.expense_date::text AS expense_date,
+             e.payment_method, e.description, e.vendor_name,
+             e.is_approved,
+             ec.code     AS category_code,
+             ec.name_ar  AS category_name,
+             cb.name_ar  AS cashbox_name,
+             w.name_ar   AS warehouse_name,
+             u.full_name AS created_by_name
+        FROM expenses e
+        LEFT JOIN expense_categories ec ON ec.id = e.category_id
+        LEFT JOIN cashboxes cb          ON cb.id = e.cashbox_id
+        LEFT JOIN warehouses w          ON w.id  = e.warehouse_id
+        LEFT JOIN users u               ON u.id  = e.created_by
+       ORDER BY e.expense_date DESC, e.created_at DESC
+    `);
+
+    const customerPayments = await safeList(`
+      SELECT cp.payment_no, cp.amount, cp.kind, cp.payment_method,
+             cp.reference_number, cp.is_void,
+             cp.created_at::text AS paid_at,
+             c.full_name AS customer_name,
+             c.code      AS customer_code,
+             cb.name_ar  AS cashbox_name,
+             u.full_name AS received_by
+        FROM customer_payments cp
+        LEFT JOIN customers c  ON c.id  = cp.customer_id
+        LEFT JOIN cashboxes cb ON cb.id = cp.cashbox_id
+        LEFT JOIN users u      ON u.id  = cp.received_by
+       ORDER BY cp.created_at DESC
+    `);
+
+    const supplierPayments = await safeList(`
+      SELECT sp.payment_no, sp.amount, sp.payment_method,
+             sp.reference_number, sp.is_void,
+             sp.created_at::text AS paid_at,
+             s.name      AS supplier_name,
+             s.code      AS supplier_code,
+             cb.name_ar  AS cashbox_name,
+             u.full_name AS paid_by
+        FROM supplier_payments sp
+        LEFT JOIN suppliers s  ON s.id  = sp.supplier_id
+        LEFT JOIN cashboxes cb ON cb.id = sp.cashbox_id
+        LEFT JOIN users u      ON u.id  = sp.paid_by
+       ORDER BY sp.created_at DESC
+    `);
+
+    const returns = await safeList(`
+      SELECT r.return_no, r.status,
+             r.total_refund, r.restocking_fee, r.net_refund,
+             r.refund_method,
+             r.requested_at::text AS requested_at,
+             r.approved_at::text  AS approved_at,
+             r.refunded_at::text  AS refunded_at,
+             i.invoice_no AS original_invoice,
+             c.full_name  AS customer_name
+        FROM returns r
+        LEFT JOIN invoices i  ON i.id = r.original_invoice_id
+        LEFT JOIN customers c ON c.id = r.customer_id
+       ORDER BY r.requested_at DESC
+    `);
+
+    const cashboxTransactions = await safeList(`
+      SELECT ct.created_at::text AS created_at,
+             cb.name_ar     AS cashbox_name,
+             ct.direction, ct.amount, ct.category,
+             ct.reference_type, ct.reference_id,
+             ct.balance_after, ct.notes,
+             u.full_name    AS user_name
+        FROM cashbox_transactions ct
+        LEFT JOIN cashboxes cb ON cb.id = ct.cashbox_id
+        LEFT JOIN users u      ON u.id  = ct.user_id
+       ORDER BY ct.created_at DESC
+    `);
+
+    return {
+      invoices,
+      invoice_items: invoiceItems,
+      invoice_payments: invoicePayments,
+      expenses,
+      customer_payments: customerPayments,
+      supplier_payments: supplierPayments,
+      returns,
+      cashbox_transactions: cashboxTransactions,
+    };
+  }
+
+  /**
    * Factory reset — wipe every transactional row so the user can
    * restart with clean test data. Preserves structural data:
    * users / roles / warehouses / cashboxes (structure) / products /
