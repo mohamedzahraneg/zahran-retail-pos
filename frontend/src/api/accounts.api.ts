@@ -351,6 +351,21 @@ export const accountsApi = {
       cashbox_txns_deleted: number;
     }>(api.post('/accounts/audit/purge-cancelled', {})),
 
+  forcePostExpenses: () =>
+    unwrap<{
+      found: number;
+      posted: number;
+      skipped: number;
+      failed: number;
+      results: Array<{
+        expense_id: string;
+        expense_no: string | null;
+        amount: string;
+        status: 'posted' | 'skipped' | 'failed';
+        reason?: string;
+      }>;
+    }>(api.post('/accounts/audit/force-post-expenses', {})),
+
   migrationsStatus: () =>
     unwrap<{
       dir: string;

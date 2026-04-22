@@ -306,6 +306,141 @@ export class ReconciliationService {
   }
 
   /**
+   * Force-post every approved expense that doesn't have a GL entry
+   * yet. Reports per-expense result so the user can see exactly why
+   * any particular row failed.
+   */
+  async forcePostApprovedExpenses(
+    posting: {
+      postExpense: (id: string, userId: string) => Promise<any>;
+    },
+    userId: string,
+  ): Promise<{
+    found: number;
+    posted: number;
+    skipped: number;
+    failed: number;
+    results: Array<{
+      expense_id: string;
+      expense_no: string | null;
+      amount: string;
+      status: 'posted' | 'skipped' | 'failed';
+      reason?: string;
+    }>;
+  }> {
+    const rows = await this.ds.query(
+      `
+      SELECT e.id, e.expense_no, e.amount, e.cashbox_id, e.category_id,
+             e.expense_date, e.is_approved,
+             ec.account_id AS category_account_id
+        FROM expenses e
+        LEFT JOIN expense_categories ec ON ec.id = e.category_id
+       WHERE e.is_approved = TRUE
+         AND NOT EXISTS (
+           SELECT 1 FROM journal_entries je
+            WHERE je.reference_type = 'expense'
+              AND je.reference_id = e.id
+              AND je.is_posted = TRUE AND je.is_void = FALSE
+         )
+       ORDER BY e.expense_date ASC
+      `,
+    );
+    const out: any[] = [];
+    let posted = 0;
+    let skipped = 0;
+    let failed = 0;
+
+    // Resolve the fallback expense account once.
+    const [miscAcc] = await this.ds.query(
+      `SELECT id, code FROM chart_of_accounts WHERE code = '529' AND is_active = TRUE LIMIT 1`,
+    );
+
+    for (const r of rows) {
+      const amt = Number(r.amount);
+      // Pre-flight diagnosis — determine why postExpense might refuse.
+      const reasons: string[] = [];
+      if (!(amt > 0)) reasons.push('amount <= 0');
+      if (!r.category_account_id && !miscAcc?.id)
+        reasons.push('no expense account (category not linked + 529 missing)');
+
+      if (reasons.length) {
+        // Try to auto-link the category to 529 when the issue is a
+        // missing category.account_id and 529 exists.
+        if (
+          !r.category_account_id &&
+          miscAcc?.id &&
+          r.category_id
+        ) {
+          try {
+            await this.ds.query(
+              `UPDATE expense_categories SET account_id = $1 WHERE id = $2 AND account_id IS NULL`,
+              [miscAcc.id, r.category_id],
+            );
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+
+      try {
+        const r2 = await posting.postExpense(r.id, userId);
+        if (r2 && (r2 as any).skipped) {
+          skipped++;
+          out.push({
+            expense_id: r.id,
+            expense_no: r.expense_no,
+            amount: r.amount,
+            status: 'skipped' as const,
+            reason: 'already posted (duplicate guard)',
+          });
+        } else if (r2 && (r2 as any).error) {
+          failed++;
+          out.push({
+            expense_id: r.id,
+            expense_no: r.expense_no,
+            amount: r.amount,
+            status: 'failed' as const,
+            reason: (r2 as any).error,
+          });
+        } else if (r2 && (r2 as any).entry_id) {
+          posted++;
+          out.push({
+            expense_id: r.id,
+            expense_no: r.expense_no,
+            amount: r.amount,
+            status: 'posted' as const,
+          });
+        } else {
+          failed++;
+          out.push({
+            expense_id: r.id,
+            expense_no: r.expense_no,
+            amount: r.amount,
+            status: 'failed' as const,
+            reason: reasons.join('; ') || 'cashbox account missing or amount invalid',
+          });
+        }
+      } catch (err: any) {
+        failed++;
+        out.push({
+          expense_id: r.id,
+          expense_no: r.expense_no,
+          amount: r.amount,
+          status: 'failed' as const,
+          reason: err?.message ?? String(err),
+        });
+      }
+    }
+    return {
+      found: rows.length,
+      posted,
+      skipped,
+      failed,
+      results: out,
+    };
+  }
+
+  /**
    * Nuke cancelled invoices and everything attached to them — hard
    * delete. Used to clean the slate after voids accumulated over time
    * and bloated the reports.

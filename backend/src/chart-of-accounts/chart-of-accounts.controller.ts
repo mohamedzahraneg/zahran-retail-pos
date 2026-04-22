@@ -629,6 +629,16 @@ export class ChartOfAccountsController {
     return this.recon.purgeCancelledInvoices();
   }
 
+  @Post('audit/force-post-expenses')
+  @Permissions('accounts.journal.post')
+  @ApiOperation({
+    summary:
+      'ترحيل قسري لكل المصروفات المعتمدة التي لم يتم ترحيلها مع تشخيص الأخطاء',
+  })
+  forcePostExpenses(@CurrentUser() user: JwtUser) {
+    return this.recon.forcePostApprovedExpenses(this.posting, user.userId);
+  }
+
   // ── Migrations ──────────────────────────────────────────────────────
 
   @Get('audit/migrations')

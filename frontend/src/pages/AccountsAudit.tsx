@@ -134,6 +134,29 @@ export default function AccountsAudit() {
       invalidateAll();
     },
   });
+  const forcePostMut = useMutation({
+    mutationFn: () => accountsApi.forcePostExpenses(),
+    onSuccess: (r) => {
+      if (r.failed > 0) {
+        const first = r.results.find((x) => x.status === 'failed');
+        toast(
+          `ترحيل المصروفات: ${r.posted} نجح · ${r.failed} فشل · ${r.skipped} تم تجاهله${
+            first ? `\nأول سبب فشل: ${first.reason}` : ''
+          }`,
+          { icon: '⚠', duration: 10000 },
+        );
+      } else {
+        toast.success(
+          `تم ترحيل ${r.posted} مصروف إلى دفتر الأستاذ`,
+          { duration: 6000 },
+        );
+      }
+      invalidateAll();
+    },
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.message || 'فشل الترحيل'),
+  });
+
   const purgeMut = useMutation({
     mutationFn: () => accountsApi.purgeCancelled(),
     onSuccess: (r) => {
@@ -498,6 +521,28 @@ export default function AccountsAudit() {
       </Section>
 
       {/* Expenses missing GL */}
+      {expenses.length > 0 && (
+        <div className="flex items-center justify-end">
+          <button
+            className="btn-primary bg-emerald-600 hover:bg-emerald-700"
+            onClick={() => {
+              if (
+                confirm(
+                  `ترحيل قسري لـ ${expenses.length} مصروف إلى دفتر الأستاذ؟\n\nالنظام سيحاول ترحيل كل مصروف معتمد بدون GL، ويعرض أي فشل مع سببه.`,
+                )
+              ) {
+                forcePostMut.mutate();
+              }
+            }}
+            disabled={forcePostMut.isPending}
+          >
+            <Zap size={14} />{' '}
+            {forcePostMut.isPending
+              ? 'جارٍ الترحيل...'
+              : `ترحيل كل المصروفات (${expenses.length})`}
+          </button>
+        </div>
+      )}
       <Section
         title={`مصروفات بدون قيد (${expenses.length})`}
         icon={<Receipt size={16} />}
