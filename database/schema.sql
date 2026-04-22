@@ -187,4 +187,7 @@
 \echo '== 058 Engine Write Guards =='
 \ir migrations/058_engine_write_guards.sql
 
+\echo '== 059 Fix engine-context NULL trap =='
+\ir migrations/059_fix_engine_context_null_trap.sql
+
 \echo '== Schema installed successfully ✅ =='
