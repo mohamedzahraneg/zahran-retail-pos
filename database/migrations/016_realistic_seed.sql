@@ -346,12 +346,12 @@ BEGIN
                  v_qty, v_unit_cost, v_unit_price,
                  v_line_total, v_line_total);
 
-            -- deduct stock + ledger
-            UPDATE stock
-               SET quantity_on_hand = quantity_on_hand - v_qty,
-                   updated_at = NOW()
-             WHERE variant_id = v_variant_id AND warehouse_id = v_wh_id;
-
+            -- Ledger only — the `trg_apply_stock_movement` trigger
+            -- (migration 011) already decrements stock.quantity_on_hand
+            -- from each stock_movements row. The old seed had a manual
+            -- UPDATE stock right before the INSERT, which made stock
+            -- decrement TWICE per sale — eventually pushing rows past
+            -- 0 and tripping the `quantity_on_hand >= 0` CHECK.
             INSERT INTO stock_movements
                 (variant_id, warehouse_id, movement_type, direction,
                  quantity, unit_cost, reference_type, reference_id, user_id)
