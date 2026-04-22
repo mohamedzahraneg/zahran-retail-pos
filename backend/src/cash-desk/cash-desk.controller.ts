@@ -131,6 +131,39 @@ export class CashDeskController {
     return this.svc.transferBetweenCashboxes(dto, user.userId);
   }
 
+  // ── Bank reconciliation ────────────────────────────────────────────
+
+  @Get('reconciliation')
+  @Permissions('accounts.reconcile')
+  @ApiOperation({ summary: 'حركات للتسوية البنكية' })
+  listReconciliation(
+    @Query('cashbox_id', ParseUUIDPipe) cashbox_id: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('status') status?: 'all' | 'reconciled' | 'open',
+  ) {
+    return this.svc.listReconciliation({ cashbox_id, from, to, status });
+  }
+
+  @Post('reconciliation/mark')
+  @Permissions('accounts.reconcile')
+  markReconciled(
+    @Body() body: { txn_ids: string[]; reference?: string },
+    @CurrentUser() user: JwtUser,
+  ) {
+    return this.svc.markReconciled(
+      body.txn_ids,
+      body.reference ?? null,
+      user.userId,
+    );
+  }
+
+  @Post('reconciliation/unmark')
+  @Permissions('accounts.reconcile')
+  unmarkReconciled(@Body() body: { txn_ids: string[] }) {
+    return this.svc.unmarkReconciled(body.txn_ids);
+  }
+
   @Get('cashflow/today')
   cashflowToday() {
     return this.svc.cashflowToday();
@@ -185,6 +218,16 @@ export class CashDeskController {
     @CurrentUser() user: JwtUser,
   ) {
     return this.svc.voidCustomerPayment(id, user.userId, dto.reason);
+  }
+
+  @Post('supplier-payments/:id/void')
+  @Roles('admin', 'manager', 'accountant')
+  voidSupplier(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: VoidPaymentDto,
+    @CurrentUser() user: JwtUser,
+  ) {
+    return this.svc.voidSupplierPayment(id, user.userId, dto.reason);
   }
 
   // ── Supplier payments ───────────────────────────────────────────────

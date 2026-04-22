@@ -106,6 +106,20 @@ export interface ShiftVariances {
   matched_count: number;
 }
 
+export interface ReconciliationRow {
+  id: string;
+  cashbox_id: string;
+  direction: 'in' | 'out';
+  amount: string;
+  category: string;
+  balance_after: string;
+  notes: string | null;
+  created_at: string;
+  is_reconciled: boolean;
+  reconciled_at: string | null;
+  statement_reference: string | null;
+}
+
 export interface CashboxMovement {
   id: string;
   cashbox_id: string;
@@ -219,6 +233,40 @@ export const cashDeskApi = {
       from_balance: number;
       to_balance: number;
     }>(api.post('/cash-desk/transfer', payload)),
+
+  voidSupplierPayment: (id: string, reason: string) =>
+    unwrap<{ voided: boolean }>(
+      api.post(`/cash-desk/supplier-payments/${id}/void`, { reason }),
+    ),
+
+  // Bank reconciliation
+  reconciliation: (params: {
+    cashbox_id: string;
+    from?: string;
+    to?: string;
+    status?: 'all' | 'reconciled' | 'open';
+  }) =>
+    unwrap<{
+      rows: ReconciliationRow[];
+      summary: {
+        system_in: number;
+        system_out: number;
+        reconciled_in: number;
+        reconciled_out: number;
+        unreconciled_in: number;
+        unreconciled_out: number;
+      };
+    }>(api.get('/cash-desk/reconciliation', { params })),
+
+  markReconciled: (txn_ids: string[], reference?: string) =>
+    unwrap<{ updated: number }>(
+      api.post('/cash-desk/reconciliation/mark', { txn_ids, reference }),
+    ),
+
+  unmarkReconciled: (txn_ids: string[]) =>
+    unwrap<{ updated: number }>(
+      api.post('/cash-desk/reconciliation/unmark', { txn_ids }),
+    ),
 
   cashflowToday: () =>
     unwrap<CashflowToday[]>(api.get('/cash-desk/cashflow/today')),

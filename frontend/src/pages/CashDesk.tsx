@@ -25,8 +25,9 @@ import {
   SupplierPayment,
   CashboxMovement,
 } from '@/api/cash-desk.api';
-import { AlertCircle, ArrowLeftRight } from 'lucide-react';
+import { AlertCircle, ArrowLeftRight, Printer } from 'lucide-react';
 import { InstitutionLogo } from '@/components/InstitutionLogo';
+import { printVoucher } from '@/lib/printVoucher';
 import { customersApi, Customer } from '@/api/customers.api';
 import { suppliersApi, Supplier } from '@/api/suppliers.api';
 
@@ -646,15 +647,38 @@ function ReceiptsTable({
                 )}
               </Td>
               <Td>
-                {!isVoid && (
+                <div className="flex gap-1">
                   <button
-                    onClick={() => onVoid(r)}
-                    className="text-rose-600 hover:text-rose-800 p-1"
-                    title="إلغاء المقبوضة"
+                    onClick={() =>
+                      printVoucher({
+                        kind: 'receipt',
+                        doc_no: r.doc_no,
+                        date: new Date(r.created_at).toLocaleDateString(
+                          'en-GB',
+                          { timeZone: 'Africa/Cairo' },
+                        ),
+                        party_name: (r as any).customer_name || '—',
+                        amount: Number(r.amount),
+                        method: r.payment_method,
+                        reference: r.reference || undefined,
+                        notes: r.notes || undefined,
+                      })
+                    }
+                    className="text-slate-600 hover:text-slate-800 p-1"
+                    title="طباعة سند قبض"
                   >
-                    <Ban size={16} />
+                    <Printer size={16} />
                   </button>
-                )}
+                  {!isVoid && (
+                    <button
+                      onClick={() => onVoid(r)}
+                      className="text-rose-600 hover:text-rose-800 p-1"
+                      title="إلغاء المقبوضة"
+                    >
+                      <Ban size={16} />
+                    </button>
+                  )}
+                </div>
               </Td>
             </tr>
           );
@@ -667,9 +691,11 @@ function ReceiptsTable({
 function PaymentsTable({
   rows,
   loading,
+  onVoid,
 }: {
   rows: SupplierPayment[];
   loading: boolean;
+  onVoid?: (p: SupplierPayment) => void;
 }) {
   if (loading) {
     return (
@@ -695,6 +721,7 @@ function PaymentsTable({
           <Th>المبلغ</Th>
           <Th>المرجع</Th>
           <Th>الملاحظات</Th>
+          <Th></Th>
         </tr>
       </thead>
       <tbody>
@@ -719,6 +746,40 @@ function PaymentsTable({
               <Td className="text-xs text-slate-500">{r.reference || '—'}</Td>
               <Td className="text-xs text-slate-500 max-w-xs truncate">
                 {r.notes || '—'}
+              </Td>
+              <Td>
+                <div className="flex gap-1">
+                  <button
+                    onClick={() =>
+                      printVoucher({
+                        kind: 'payment',
+                        doc_no: r.doc_no,
+                        date: new Date(r.created_at).toLocaleDateString(
+                          'en-GB',
+                          { timeZone: 'Africa/Cairo' },
+                        ),
+                        party_name: (r as any).supplier_name || '—',
+                        amount: Number(r.amount),
+                        method: r.payment_method,
+                        reference: r.reference || undefined,
+                        notes: r.notes || undefined,
+                      })
+                    }
+                    className="text-slate-600 hover:text-slate-800 p-1"
+                    title="طباعة سند صرف"
+                  >
+                    <Printer size={16} />
+                  </button>
+                  {onVoid && (r as any).status !== 'void' && (
+                    <button
+                      onClick={() => onVoid(r)}
+                      className="text-rose-600 hover:text-rose-800 p-1"
+                      title="إلغاء الدفعة"
+                    >
+                      <Ban size={16} />
+                    </button>
+                  )}
+                </div>
               </Td>
             </tr>
           );

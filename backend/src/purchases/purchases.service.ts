@@ -360,6 +360,15 @@ export class PurchasesService {
       userId || null,
       'إلغاء فاتورة مشتريات',
     ]);
+    // Reverse the GL entry so inventory and supplier payables rebound.
+    await this.posting
+      ?.reverseByReference(
+        'purchase',
+        id,
+        'إلغاء فاتورة مشتريات',
+        userId || '',
+      )
+      .catch(() => undefined);
     return { cancelled: true, reversed: true };
   }
 

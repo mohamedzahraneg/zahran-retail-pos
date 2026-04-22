@@ -53,7 +53,15 @@ const TYPE_COLORS: Record<AccountType, string> = {
   expense: 'bg-amber-100 text-amber-800 border-amber-200',
 };
 
-type Tab = 'tree' | 'journal' | 'trial' | 'income' | 'balance';
+type Tab =
+  | 'tree'
+  | 'journal'
+  | 'trial'
+  | 'income'
+  | 'balance'
+  | 'aging'
+  | 'assets'
+  | 'closing';
 
 export default function Accounts() {
   const [tab, setTab] = useState<Tab>('tree');
@@ -103,6 +111,24 @@ export default function Accounts() {
             icon={<PieChart className="w-4 h-4" />}
             label="الميزانية العمومية"
           />
+          <TabBtn
+            active={tab === 'aging'}
+            onClick={() => setTab('aging')}
+            icon={<Scale className="w-4 h-4" />}
+            label="أعمار الديون"
+          />
+          <TabBtn
+            active={tab === 'assets'}
+            onClick={() => setTab('assets')}
+            icon={<Lock className="w-4 h-4" />}
+            label="الأصول الثابتة"
+          />
+          <TabBtn
+            active={tab === 'closing'}
+            onClick={() => setTab('closing')}
+            icon={<Ban className="w-4 h-4" />}
+            label="إقفال السنة"
+          />
         </div>
         <div className="p-4">
           {tab === 'tree' && <ChartTree />}
@@ -110,6 +136,9 @@ export default function Accounts() {
           {tab === 'trial' && <TrialBalanceTab />}
           {tab === 'income' && <IncomeStatementTab />}
           {tab === 'balance' && <BalanceSheetTab />}
+          {tab === 'aging' && <AgingTab />}
+          {tab === 'assets' && <FixedAssetsTab />}
+          {tab === 'closing' && <ClosingTab />}
         </div>
       </div>
     </div>
@@ -1820,6 +1849,534 @@ function AccountLedgerDrawer({
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Aging (receivable / payable)
+// ═══════════════════════════════════════════════════════════════════════
+
+function AgingTab() {
+  const [type, setType] = useState<'receivable' | 'payable'>('receivable');
+  const todayISO = new Date().toISOString().slice(0, 10);
+  const [asOf, setAsOf] = useState(todayISO);
+  const { data, isLoading } = useQuery({
+    queryKey: ['aging', type, asOf],
+    queryFn: () => accountsApi.aging({ type, as_of: asOf }),
+  });
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-3 flex-wrap">
+        <div className="flex gap-1 bg-slate-100 rounded-lg p-1">
+          <button
+            onClick={() => setType('receivable')}
+            className={`px-3 py-1 rounded-md text-sm font-bold ${
+              type === 'receivable'
+                ? 'bg-white shadow text-indigo-700'
+                : 'text-slate-600'
+            }`}
+          >
+            مستحقات على العملاء
+          </button>
+          <button
+            onClick={() => setType('payable')}
+            className={`px-3 py-1 rounded-md text-sm font-bold ${
+              type === 'payable'
+                ? 'bg-white shadow text-indigo-700'
+                : 'text-slate-600'
+            }`}
+          >
+            مستحقات للموردين
+          </button>
+        </div>
+        <label className="text-sm">بتاريخ</label>
+        <input
+          type="date"
+          value={asOf}
+          onChange={(e) => setAsOf(e.target.value)}
+          className="input w-40"
+        />
+      </div>
+      {isLoading ? (
+        <div className="py-12 text-center text-slate-400">جارٍ التحميل...</div>
+      ) : !data ? null : (
+        <>
+          <div className="grid md:grid-cols-5 gap-3">
+            {data.buckets.map((b) => (
+              <div
+                key={b}
+                className="card p-3 border border-slate-200 bg-slate-50"
+              >
+                <div className="text-xs text-slate-500">{b} يوم</div>
+                <div className="font-mono font-bold text-slate-800 mt-1">
+                  {EGP(data.totals[b] || 0)}
+                </div>
+              </div>
+            ))}
+            <div className="card p-3 border-2 border-indigo-300 bg-indigo-50">
+              <div className="text-xs text-slate-500">الإجمالي</div>
+              <div className="font-mono font-black text-indigo-700 mt-1">
+                {EGP(data.totals.total || 0)}
+              </div>
+            </div>
+          </div>
+
+          <div className="border border-slate-200 rounded-lg overflow-hidden">
+            <table className="min-w-full text-sm">
+              <thead className="bg-slate-50 text-xs font-bold text-slate-600">
+                <tr>
+                  <th className="text-right px-3 py-2">الكود</th>
+                  <th className="text-right px-3 py-2">
+                    {type === 'receivable' ? 'العميل' : 'المورد'}
+                  </th>
+                  {data.buckets.map((b) => (
+                    <th key={b} className="text-right px-3 py-2">
+                      {b}
+                    </th>
+                  ))}
+                  <th className="text-right px-3 py-2">الإجمالي</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.parties.length === 0 ? (
+                  <tr>
+                    <td
+                      colSpan={data.buckets.length + 3}
+                      className="text-center py-10 text-slate-400"
+                    >
+                      مفيش مستحقات
+                    </td>
+                  </tr>
+                ) : (
+                  data.parties.map((p) => (
+                    <tr
+                      key={p.id}
+                      className="border-t border-slate-100 hover:bg-slate-50"
+                    >
+                      <td className="px-3 py-2 font-mono text-xs">
+                        {p.code}
+                      </td>
+                      <td className="px-3 py-2 font-bold">{p.name}</td>
+                      {data.buckets.map((b) => (
+                        <td
+                          key={b}
+                          className="px-3 py-2 font-mono"
+                        >
+                          {p.buckets[b] > 0 ? EGP(p.buckets[b]) : '—'}
+                        </td>
+                      ))}
+                      <td className="px-3 py-2 font-mono font-black">
+                        {EGP(p.total)}
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Fixed Assets + Depreciation
+// ═══════════════════════════════════════════════════════════════════════
+
+function FixedAssetsTab() {
+  const qc = useQueryClient();
+  const hasPermission = useAuthStore((s) => s.hasPermission);
+  const canManage = hasPermission('accounts.depreciation');
+  const [showCreate, setShowCreate] = useState(false);
+
+  const { data: assets = [], isLoading } = useQuery({
+    queryKey: ['fixed-assets'],
+    queryFn: () => accountsApi.listFixedAssets(),
+  });
+
+  const runMut = useMutation({
+    mutationFn: () => accountsApi.runDepreciation(),
+    onSuccess: (r) => {
+      toast.success(`تم ترحيل ${r.posted_count} قسط إهلاك`);
+      qc.invalidateQueries({ queryKey: ['fixed-assets'] });
+      qc.invalidateQueries({ queryKey: ['journal'] });
+    },
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.message || 'فشل الترحيل'),
+  });
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <div className="text-sm text-slate-600">
+          إجمالي الأصول النشطة: {assets.filter((a) => a.is_active).length}
+        </div>
+        {canManage && (
+          <div className="flex gap-2">
+            <button
+              className="btn-secondary"
+              onClick={() => {
+                if (confirm('تشغيل ترحيل الإهلاك لهذا الشهر يدوياً؟'))
+                  runMut.mutate();
+              }}
+              disabled={runMut.isPending}
+            >
+              {runMut.isPending ? '⏳ جاري الترحيل' : '🔄 ترحيل إهلاك الشهر'}
+            </button>
+            <button
+              className="btn-primary"
+              onClick={() => setShowCreate(true)}
+            >
+              <Plus size={16} /> إضافة أصل ثابت
+            </button>
+          </div>
+        )}
+      </div>
+      {isLoading ? (
+        <div className="py-12 text-center text-slate-400">جارٍ التحميل...</div>
+      ) : (
+        <div className="border border-slate-200 rounded-lg overflow-hidden">
+          <table className="min-w-full text-sm">
+            <thead className="bg-slate-50 text-xs font-bold text-slate-600">
+              <tr>
+                <th className="text-right px-3 py-2">الاسم</th>
+                <th className="text-right px-3 py-2">الحساب</th>
+                <th className="text-right px-3 py-2">التكلفة</th>
+                <th className="text-right px-3 py-2">العمر (شهر)</th>
+                <th className="text-right px-3 py-2">القسط الشهري</th>
+                <th className="text-right px-3 py-2">تاريخ البدء</th>
+                <th className="text-right px-3 py-2">آخر شهر</th>
+                <th className="text-right px-3 py-2">الحالة</th>
+              </tr>
+            </thead>
+            <tbody>
+              {assets.length === 0 ? (
+                <tr>
+                  <td colSpan={8} className="text-center py-10 text-slate-400">
+                    لا توجد أصول — اضغط "إضافة أصل ثابت"
+                  </td>
+                </tr>
+              ) : (
+                assets.map((a) => {
+                  const cost = Number(a.cost);
+                  const salvage = Number(a.salvage_value);
+                  const monthly =
+                    a.useful_life_months > 0
+                      ? (cost - salvage) / a.useful_life_months
+                      : 0;
+                  return (
+                    <tr
+                      key={a.id}
+                      className={`border-t border-slate-100 ${
+                        a.is_active ? '' : 'opacity-60'
+                      }`}
+                    >
+                      <td className="px-3 py-2 font-bold">{a.name_ar}</td>
+                      <td className="px-3 py-2 text-xs">
+                        <span className="font-mono">{a.account_code}</span>{' '}
+                        {a.account_name}
+                      </td>
+                      <td className="px-3 py-2 font-mono">{EGP(cost)}</td>
+                      <td className="px-3 py-2">{a.useful_life_months}</td>
+                      <td className="px-3 py-2 font-mono text-indigo-700">
+                        {EGP(monthly)}
+                      </td>
+                      <td className="px-3 py-2 text-xs font-mono">
+                        {a.start_date}
+                      </td>
+                      <td className="px-3 py-2 text-xs font-mono">
+                        {a.last_posted_month || '—'}
+                      </td>
+                      <td className="px-3 py-2">
+                        {a.is_active ? (
+                          <span className="chip bg-emerald-100 text-emerald-700">
+                            نشط
+                          </span>
+                        ) : (
+                          <span className="chip bg-slate-100 text-slate-600">
+                            معطّل
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {showCreate && (
+        <FixedAssetModal onClose={() => setShowCreate(false)} />
+      )}
+    </div>
+  );
+}
+
+function FixedAssetModal({ onClose }: { onClose: () => void }) {
+  const qc = useQueryClient();
+  const todayISO = new Date().toISOString().slice(0, 10);
+  const [form, setForm] = useState({
+    name_ar: '',
+    account_id: '',
+    accum_dep_account_id: '',
+    cost: 0,
+    salvage_value: 0,
+    useful_life_months: 60,
+    start_date: todayISO,
+    notes: '',
+  });
+
+  const { data: accounts = [] } = useQuery({
+    queryKey: ['coa', false],
+    queryFn: () => accountsApi.list(false),
+  });
+  const fixedAccounts = accounts.filter(
+    (a) =>
+      a.account_type === 'asset' &&
+      a.is_leaf &&
+      (a.code.startsWith('12') ||
+        a.code.startsWith('121') ||
+        a.code.startsWith('122')),
+  );
+  const accumAccounts = accounts.filter(
+    (a) =>
+      a.account_type === 'asset' &&
+      a.is_leaf &&
+      a.code.startsWith('123'),
+  );
+
+  const mut = useMutation({
+    mutationFn: () =>
+      accountsApi.createFixedAsset({
+        name_ar: form.name_ar,
+        account_id: form.account_id,
+        accum_dep_account_id: form.accum_dep_account_id || undefined,
+        cost: form.cost,
+        salvage_value: form.salvage_value,
+        useful_life_months: form.useful_life_months,
+        start_date: form.start_date,
+        notes: form.notes || undefined,
+      }),
+    onSuccess: () => {
+      toast.success('تم إضافة الأصل الثابت');
+      qc.invalidateQueries({ queryKey: ['fixed-assets'] });
+      onClose();
+    },
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.message || 'فشل الحفظ'),
+  });
+
+  const monthly =
+    form.useful_life_months > 0
+      ? (form.cost - form.salvage_value) / form.useful_life_months
+      : 0;
+
+  return (
+    <Modal title="أصل ثابت جديد" onClose={onClose}>
+      <div className="space-y-3">
+        <Field label="اسم الأصل">
+          <input
+            className="input"
+            value={form.name_ar}
+            onChange={(e) => setForm({ ...form, name_ar: e.target.value })}
+            placeholder="مثال: كمبيوتر لاب توب Dell"
+            autoFocus
+          />
+        </Field>
+        <Field label="حساب الأصل">
+          <select
+            className="input"
+            value={form.account_id}
+            onChange={(e) => setForm({ ...form, account_id: e.target.value })}
+          >
+            <option value="">—</option>
+            {fixedAccounts.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.code} — {a.name_ar}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="حساب مجمع الإهلاك (اختياري — الافتراضي: 123)">
+          <select
+            className="input"
+            value={form.accum_dep_account_id}
+            onChange={(e) =>
+              setForm({ ...form, accum_dep_account_id: e.target.value })
+            }
+          >
+            <option value="">افتراضي (123)</option>
+            {accumAccounts.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.code} — {a.name_ar}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="التكلفة">
+            <input
+              type="number"
+              step="0.01"
+              className="input"
+              value={form.cost}
+              onChange={(e) =>
+                setForm({ ...form, cost: Number(e.target.value) })
+              }
+            />
+          </Field>
+          <Field label="قيمة الخردة">
+            <input
+              type="number"
+              step="0.01"
+              className="input"
+              value={form.salvage_value}
+              onChange={(e) =>
+                setForm({ ...form, salvage_value: Number(e.target.value) })
+              }
+            />
+          </Field>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="العمر الإنتاجي (شهر)">
+            <input
+              type="number"
+              min={1}
+              className="input"
+              value={form.useful_life_months}
+              onChange={(e) =>
+                setForm({
+                  ...form,
+                  useful_life_months: Number(e.target.value) || 1,
+                })
+              }
+            />
+          </Field>
+          <Field label="تاريخ البدء">
+            <input
+              type="date"
+              className="input"
+              value={form.start_date}
+              onChange={(e) => setForm({ ...form, start_date: e.target.value })}
+            />
+          </Field>
+        </div>
+        <div className="p-3 bg-indigo-50 border border-indigo-200 rounded text-sm">
+          القسط الشهري المحسوب:{' '}
+          <span className="font-mono font-bold text-indigo-700">
+            {EGP(monthly)}
+          </span>
+        </div>
+        <Field label="ملاحظات">
+          <textarea
+            className="input"
+            rows={2}
+            value={form.notes}
+            onChange={(e) => setForm({ ...form, notes: e.target.value })}
+          />
+        </Field>
+        <div className="flex gap-2 pt-2">
+          <button
+            className="btn-primary flex-1"
+            onClick={() => mut.mutate()}
+            disabled={
+              mut.isPending ||
+              !form.name_ar ||
+              !form.account_id ||
+              form.cost <= 0
+            }
+          >
+            حفظ
+          </button>
+          <button className="btn-secondary" onClick={onClose}>
+            إلغاء
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Year-end Closing
+// ═══════════════════════════════════════════════════════════════════════
+
+function ClosingTab() {
+  const qc = useQueryClient();
+  const hasPermission = useAuthStore((s) => s.hasPermission);
+  const canClose = hasPermission('accounts.close_year');
+  const year = new Date().getFullYear() - 1;
+  const [fye, setFye] = useState(`${year}-12-31`);
+
+  const mut = useMutation({
+    mutationFn: () => accountsApi.closeYear(fye),
+    onSuccess: (r: any) => {
+      if (r?.skipped) {
+        toast(`تم التجاهل: ${r.reason || ''}`, { icon: 'ℹ️' });
+      } else {
+        toast.success('تم إقفال السنة');
+      }
+      qc.invalidateQueries({ queryKey: ['journal'] });
+      qc.invalidateQueries({ queryKey: ['trial-balance'] });
+      qc.invalidateQueries({ queryKey: ['balance-sheet'] });
+      qc.invalidateQueries({ queryKey: ['income-statement'] });
+    },
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.message || 'فشل الإقفال'),
+  });
+
+  if (!canClose) {
+    return (
+      <div className="p-6 text-center text-slate-500">
+        صلاحية إقفال السنة غير متاحة لك
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4 max-w-xl">
+      <div className="p-4 rounded-lg bg-amber-50 border border-amber-200 text-sm text-amber-900">
+        <div className="font-bold mb-1">⚠ تنبيه مهم</div>
+        <ul className="list-disc pr-5 space-y-0.5">
+          <li>قيد الإقفال يصفّر كل حسابات الإيرادات والمصروفات.</li>
+          <li>الربح الصافي يُرحَّل إلى "الأرباح المحتجزة" (٣٢).</li>
+          <li>
+            العملية idempotent — لو شغّلتها تاني لنفس السنة مايحصلش تكرار.
+          </li>
+          <li>
+            يُنفَّذ عادة في آخر يوم من السنة المالية (٣١ ديسمبر بالمصرية).
+          </li>
+        </ul>
+      </div>
+
+      <Field label="نهاية السنة المالية">
+        <input
+          type="date"
+          className="input"
+          value={fye}
+          onChange={(e) => setFye(e.target.value)}
+        />
+      </Field>
+
+      <button
+        className="btn-primary w-full bg-rose-600 hover:bg-rose-700"
+        disabled={mut.isPending}
+        onClick={() => {
+          if (
+            confirm(
+              `تأكيد إقفال السنة المنتهية في ${fye}؟\n\nسيتم ترحيل صافي النتيجة إلى الأرباح المحتجزة.`,
+            )
+          )
+            mut.mutate();
+        }}
+      >
+        {mut.isPending ? '⏳ جاري الإقفال...' : '🔒 تأكيد إقفال السنة'}
+      </button>
     </div>
   );
 }

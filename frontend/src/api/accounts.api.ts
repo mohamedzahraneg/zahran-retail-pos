@@ -177,7 +177,117 @@ export const accountsApi = {
     unwrap<BalanceSheet>(
       api.get('/accounts/reports/balance-sheet', { params }),
     ),
+
+  aging: (params: { type: 'receivable' | 'payable'; as_of?: string }) =>
+    unwrap<AgingReport>(
+      api.get('/accounts/reports/aging', { params }),
+    ),
+
+  customerLedger: (customerId: string, params?: { from?: string; to?: string }) =>
+    unwrap<PartyLedger>(
+      api.get(`/accounts/reports/customer-ledger/${customerId}`, { params }),
+    ),
+
+  supplierLedger: (supplierId: string, params?: { from?: string; to?: string }) =>
+    unwrap<PartyLedger>(
+      api.get(`/accounts/reports/supplier-ledger/${supplierId}`, { params }),
+    ),
+
+  closeYear: (fiscal_year_end: string) =>
+    unwrap<any>(api.post('/accounts/close-year', { fiscal_year_end })),
+
+  runDepreciation: () =>
+    unwrap<{ posted_count: number; schedule_ids: string[] }>(
+      api.post('/accounts/depreciation/run', {}),
+    ),
+
+  listFixedAssets: () =>
+    unwrap<FixedAsset[]>(api.get('/accounts/fixed-assets')),
+
+  createFixedAsset: (payload: CreateFixedAssetPayload) =>
+    unwrap<FixedAsset>(api.post('/accounts/fixed-assets', payload)),
+
+  updateFixedAsset: (id: string, payload: Partial<CreateFixedAssetPayload> & { is_active?: boolean }) =>
+    unwrap<FixedAsset>(api.patch(`/accounts/fixed-assets/${id}`, payload)),
+
+  removeFixedAsset: (id: string) =>
+    unwrap<any>(api.delete(`/accounts/fixed-assets/${id}`)),
 };
+
+// ── More report types ────────────────────────────────────────────────
+
+export interface AgingParty {
+  id: string;
+  code: string;
+  name: string;
+  total: number;
+  buckets: Record<string, number>;
+}
+
+export interface AgingReport {
+  buckets: string[];
+  parties: AgingParty[];
+  totals: Record<string, number>;
+  invoice_count: number;
+}
+
+export interface PartyLedgerLine {
+  id: string;
+  debit: number;
+  credit: number;
+  description: string | null;
+  entry_no: string;
+  entry_date: string;
+  entry_description: string | null;
+  reference_type: string | null;
+  reference_id: string | null;
+  account_code: string;
+  account_name: string;
+  running_balance: number;
+}
+
+export interface PartyLedger {
+  customer?: { id: string; code: string; full_name: string; current_balance: string };
+  supplier?: { id: string; code: string; name: string; current_balance: string };
+  from: string | null;
+  to: string | null;
+  opening_balance: number;
+  closing_balance: number;
+  total_debit: number;
+  total_credit: number;
+  lines: PartyLedgerLine[];
+  note?: string;
+}
+
+export interface FixedAsset {
+  id: string;
+  name_ar: string;
+  account_id: string;
+  account_code: string | null;
+  account_name: string | null;
+  accum_dep_account_id: string | null;
+  accum_code: string | null;
+  accum_name: string | null;
+  cost: string;
+  salvage_value: string;
+  useful_life_months: number;
+  start_date: string;
+  last_posted_month: string | null;
+  is_active: boolean;
+  notes: string | null;
+  created_at: string;
+}
+
+export interface CreateFixedAssetPayload {
+  name_ar: string;
+  account_id: string;
+  accum_dep_account_id?: string;
+  cost: number;
+  salvage_value?: number;
+  useful_life_months: number;
+  start_date: string;
+  notes?: string;
+}
 
 // ── Report types ──────────────────────────────────────────────────────
 

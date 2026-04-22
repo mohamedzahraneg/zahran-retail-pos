@@ -32,6 +32,7 @@ import {
 } from './journal.service';
 import { AccountingPostingService } from './posting.service';
 import { AccountingReportsService } from './reports.service';
+import { FixedAssetsService, FixedAssetDto } from './fixed-assets.service';
 import { Permissions } from '../common/decorators/roles.decorator';
 import {
   CurrentUser,
@@ -94,6 +95,7 @@ export class ChartOfAccountsController {
     private readonly journal: JournalService,
     private readonly posting: AccountingPostingService,
     private readonly reports: AccountingReportsService,
+    private readonly fixedAssets: FixedAssetsService,
   ) {}
 
   // ── Chart of Accounts ──────────────────────────────────────────────
@@ -234,5 +236,89 @@ export class ChartOfAccountsController {
   @ApiOperation({ summary: 'الميزانية العمومية' })
   balanceSheet(@Query('as_of') as_of: string) {
     return this.reports.balanceSheet(as_of);
+  }
+
+  @Get('reports/aging')
+  @Permissions('accounts.chart.view')
+  @ApiOperation({ summary: 'تقرير أعمار الديون' })
+  aging(
+    @Query('type') type: 'receivable' | 'payable' = 'receivable',
+    @Query('as_of') as_of?: string,
+  ) {
+    return this.reports.aging(
+      type === 'payable' ? 'payable' : 'receivable',
+      as_of,
+    );
+  }
+
+  @Get('reports/customer-ledger/:id')
+  @Permissions('accounts.chart.view')
+  @ApiOperation({ summary: 'كشف حساب عميل' })
+  customerLedger(
+    @Param('id') id: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    return this.reports.customerLedger(id, from, to);
+  }
+
+  @Get('reports/supplier-ledger/:id')
+  @Permissions('accounts.chart.view')
+  @ApiOperation({ summary: 'كشف حساب مورد' })
+  supplierLedger(
+    @Param('id') id: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    return this.reports.supplierLedger(id, from, to);
+  }
+
+  @Post('close-year')
+  @Permissions('accounts.close_year')
+  @ApiOperation({ summary: 'إقفال السنة المالية' })
+  closeYear(
+    @Body() body: { fiscal_year_end: string },
+    @CurrentUser() user: JwtUser,
+  ) {
+    return this.posting.closeFiscalYear(body.fiscal_year_end, user.userId);
+  }
+
+  @Post('depreciation/run')
+  @Permissions('accounts.depreciation')
+  @ApiOperation({ summary: 'تشغيل ترحيل الإهلاك الشهري يدوياً' })
+  runDepreciation(@CurrentUser() user: JwtUser) {
+    return this.posting.postMonthlyDepreciation(user.userId);
+  }
+
+  // ── Fixed asset schedules ────────────────────────────────────────────
+
+  @Get('fixed-assets')
+  @Permissions('accounts.depreciation')
+  listFixedAssets() {
+    return this.fixedAssets.list();
+  }
+
+  @Post('fixed-assets')
+  @Permissions('accounts.depreciation')
+  createFixedAsset(
+    @Body() dto: FixedAssetDto,
+    @CurrentUser() user: JwtUser,
+  ) {
+    return this.fixedAssets.create(dto, user.userId);
+  }
+
+  @Patch('fixed-assets/:id')
+  @Permissions('accounts.depreciation')
+  updateFixedAsset(
+    @Param('id') id: string,
+    @Body() dto: Partial<FixedAssetDto & { is_active: boolean }>,
+  ) {
+    return this.fixedAssets.update(id, dto);
+  }
+
+  @Delete('fixed-assets/:id')
+  @Permissions('accounts.depreciation')
+  removeFixedAsset(@Param('id') id: string) {
+    return this.fixedAssets.remove(id);
   }
 }

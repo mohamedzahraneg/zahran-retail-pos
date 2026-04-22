@@ -2,6 +2,7 @@ import {
   Injectable,
   BadRequestException,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import {
@@ -9,10 +10,14 @@ import {
   SubmitCountDto,
   FinalizeCountDto,
 } from './dto/inventory-count.dto';
+import { AccountingPostingService } from '../chart-of-accounts/posting.service';
 
 @Injectable()
 export class InventoryCountsService {
-  constructor(private readonly ds: DataSource) {}
+  constructor(
+    private readonly ds: DataSource,
+    @Optional() private readonly posting?: AccountingPostingService,
+  ) {}
 
   /** Generate CNT-YYYY-NNNNN */
   private async nextCountNo(): Promise<string> {
@@ -123,6 +128,7 @@ export class InventoryCountsService {
         (i: any) => i.counted_qty !== null && Number(i.difference) !== 0,
       );
 
+      let netValue = 0; // + = overage, - = shortage
       if (withDiff.length > 0) {
         for (const it of withDiff) {
           await tx.query(`SELECT fn_adjust_stock($1,$2,$3,$4,$5,$6)`, [
@@ -133,6 +139,13 @@ export class InventoryCountsService {
             null,
             userId,
           ]);
+          // Value the delta at the variant's cost price for GL.
+          const [cp] = await tx.query(
+            `SELECT COALESCE(cost_price, 0)::numeric(14,2) AS cp
+               FROM product_variants WHERE id = $1`,
+            [it.variant_id],
+          );
+          netValue += Number(cp?.cp || 0) * Number(it.difference);
         }
       }
 
@@ -145,6 +158,19 @@ export class InventoryCountsService {
          WHERE id = $3`,
         [userId, dto.notes ?? null, id],
       );
+
+      // Post the net value to the GL (shortage → shrinkage, overage → revenue).
+      if (Math.abs(netValue) >= 0.01) {
+        await this.posting
+          ?.postInventoryAdjustment(
+            id,
+            netValue,
+            `جرد فعلي ${c.count_no}`,
+            userId,
+            tx,
+          )
+          .catch(() => undefined);
+      }
 
       return this.findOneTx(tx, id);
     });

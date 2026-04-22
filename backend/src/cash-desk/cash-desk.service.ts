@@ -49,6 +49,68 @@ export class CashDeskService {
     @Optional() private readonly posting?: AccountingPostingService,
   ) {}
 
+  /**
+   * Give every new cashbox its own GL sub-account under the matching
+   * parent (cash → 111, bank → 1113's parent, etc.) and link the
+   * cashbox_id column so the posting service's explicit-link lookup
+   * resolves to it. Idempotent: if an account with the same cashbox_id
+   * already exists, we skip.
+   */
+  private async linkOrCreateGLSubAccount(
+    cashbox: any,
+    userId: string,
+  ): Promise<void> {
+    try {
+      const [existing] = await this.ds.query(
+        `SELECT id FROM chart_of_accounts WHERE cashbox_id = $1 LIMIT 1`,
+        [cashbox.id],
+      );
+      if (existing) return;
+
+      // Parent code per kind
+      const parentCode: Record<string, string> = {
+        cash: '111',
+        bank: '111',
+        ewallet: '111',
+        check: '111',
+      };
+      const [parent] = await this.ds.query(
+        `SELECT id, code FROM chart_of_accounts WHERE code = $1 LIMIT 1`,
+        [parentCode[cashbox.kind] || '111'],
+      );
+      if (!parent) return; // COA not seeded yet
+
+      // Find the next available code under the parent.
+      const [{ next_seq }] = await this.ds.query(
+        `SELECT COALESCE(MAX(SUBSTRING(code FROM '[0-9]+$')::int), 0) + 1 AS next_seq
+           FROM chart_of_accounts WHERE parent_id = $1`,
+        [parent.id],
+      );
+      const newCode = `${parent.code}${String(next_seq).padStart(2, '0')}`;
+
+      await this.ds.query(
+        `
+        INSERT INTO chart_of_accounts
+          (code, name_ar, name_en, account_type, normal_balance, parent_id,
+           is_leaf, is_system, level, cashbox_id, created_by, description)
+        VALUES ($1, $2, $3, 'asset'::account_type, 'debit'::normal_balance,
+                $4, TRUE, FALSE, 4, $5, $6, 'تم الإنشاء تلقائيًا مع الخزنة')
+        ON CONFLICT (code) DO NOTHING
+        `,
+        [
+          newCode,
+          cashbox.name_ar,
+          cashbox.name_ar,
+          parent.id,
+          cashbox.id,
+          userId,
+        ],
+      );
+    } catch {
+      // Non-blocking — accounting wiring should never fail a cashbox create.
+    }
+  }
+
   /** Look up the warehouse_id for a cashbox (NOT NULL on both payment tables). */
   private async warehouseForCashbox(
     em: { query: (sql: string, params?: any[]) => Promise<any[]> },
@@ -171,6 +233,25 @@ export class CashDeskService {
     return { voided: true };
   }
 
+  async voidSupplierPayment(id: string, userId: string, reason: string) {
+    const [p] = await this.ds.query(
+      `SELECT id, is_void FROM supplier_payments WHERE id = $1`,
+      [id],
+    );
+    if (!p) throw new NotFoundException('الدفعة غير موجودة');
+    if (p.is_void) throw new BadRequestException('الدفعة ملغاة بالفعل');
+    await this.ds.query(
+      `UPDATE supplier_payments
+          SET is_void = true, void_reason = $2, voided_by = $3, voided_at = now()
+        WHERE id = $1`,
+      [id, reason, userId],
+    );
+    await this.posting
+      ?.reverseByReference('supplier_payment', id, reason, userId)
+      .catch(() => undefined);
+    return { voided: true };
+  }
+
   listCustomerPayments(customerId?: string) {
     return customerId
       ? this.ds.query(
@@ -285,6 +366,9 @@ export class CashDeskService {
         Number(dto.opening_balance || 0),
       ],
     );
+    // Auto-create a GL sub-account for this cashbox so postings don't
+    // merge across all boxes of the same kind.
+    await this.linkOrCreateGLSubAccount(row, 'system');
     return row;
   }
 
@@ -448,6 +532,100 @@ export class CashDeskService {
         to_txn_id: inTxn.id,
       };
     });
+  }
+
+  // ── Bank reconciliation ─────────────────────────────────────────────
+
+  /**
+   * List cashbox transactions in a date range with reconciliation status.
+   * UI lines them up against a bank statement so the user can tick off
+   * each match. Supports filters: cashbox_id, from, to, status.
+   */
+  async listReconciliation(params: {
+    cashbox_id: string;
+    from?: string;
+    to?: string;
+    status?: 'all' | 'reconciled' | 'open';
+  }) {
+    const conds: string[] = ['cashbox_id = $1'];
+    const args: any[] = [params.cashbox_id];
+    if (params.from) {
+      args.push(params.from);
+      conds.push(
+        `(created_at AT TIME ZONE 'Africa/Cairo')::date >= $${args.length}::date`,
+      );
+    }
+    if (params.to) {
+      args.push(params.to);
+      conds.push(
+        `(created_at AT TIME ZONE 'Africa/Cairo')::date <= $${args.length}::date`,
+      );
+    }
+    if (params.status === 'reconciled') {
+      conds.push(`is_reconciled = TRUE`);
+    } else if (params.status === 'open') {
+      conds.push(`is_reconciled = FALSE`);
+    }
+    const rows = await this.ds.query(
+      `
+      SELECT id, cashbox_id, direction, amount, category, balance_after,
+             notes, created_at, is_reconciled, reconciled_at,
+             statement_reference
+        FROM cashbox_transactions
+       WHERE ${conds.join(' AND ')}
+       ORDER BY created_at ASC
+      `,
+      args,
+    );
+
+    const summary = rows.reduce(
+      (acc: any, r: any) => {
+        const amt = Number(r.amount || 0);
+        if (r.direction === 'in') acc.system_in += amt;
+        else acc.system_out += amt;
+        if (r.is_reconciled) {
+          if (r.direction === 'in') acc.reconciled_in += amt;
+          else acc.reconciled_out += amt;
+        }
+        return acc;
+      },
+      {
+        system_in: 0,
+        system_out: 0,
+        reconciled_in: 0,
+        reconciled_out: 0,
+      },
+    );
+    summary.unreconciled_in = summary.system_in - summary.reconciled_in;
+    summary.unreconciled_out = summary.system_out - summary.reconciled_out;
+    return { rows, summary };
+  }
+
+  async markReconciled(
+    txnIds: string[],
+    reference: string | null,
+    userId: string,
+  ) {
+    if (!txnIds?.length) return { updated: 0 };
+    await this.ds.query(
+      `UPDATE cashbox_transactions
+          SET is_reconciled = TRUE, reconciled_at = NOW(),
+              reconciled_by = $2, statement_reference = COALESCE($3, statement_reference)
+        WHERE id = ANY($1::uuid[])`,
+      [txnIds, userId, reference],
+    );
+    return { updated: txnIds.length };
+  }
+
+  async unmarkReconciled(txnIds: string[]) {
+    if (!txnIds?.length) return { updated: 0 };
+    await this.ds.query(
+      `UPDATE cashbox_transactions
+          SET is_reconciled = FALSE, reconciled_at = NULL, reconciled_by = NULL
+        WHERE id = ANY($1::uuid[])`,
+      [txnIds],
+    );
+    return { updated: txnIds.length };
   }
 
   async removeCashbox(id: string) {

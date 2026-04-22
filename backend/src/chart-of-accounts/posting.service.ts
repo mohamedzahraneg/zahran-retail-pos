@@ -84,7 +84,13 @@ export class AccountingPostingService {
         lines.push({ account_id: cashAcc, debit: paid, credit: 0, description: `فاتورة ${inv.invoice_no}` });
       }
       if (unpaid > 0 && recvAcc) {
-        lines.push({ account_id: recvAcc, debit: unpaid, credit: 0, description: `آجل ${inv.invoice_no}` });
+        lines.push({
+          account_id: recvAcc,
+          debit: unpaid,
+          credit: 0,
+          description: `آجل ${inv.invoice_no}`,
+          customer_id: inv.customer_id,
+        });
       }
       // Revenue + tax split
       if (salesAcc && revenue > 0) {
@@ -226,7 +232,8 @@ export class AccountingPostingService {
     return this.safe('purchase', purchaseId, em, async (q) => {
       const [p] = await q(
         `SELECT id, purchase_no, subtotal, tax_amount, shipping_cost,
-                grand_total, paid_amount, status, received_at, invoice_date
+                grand_total, paid_amount, status, received_at, invoice_date,
+                supplier_id
            FROM purchases WHERE id = $1`,
         [purchaseId],
       );
@@ -272,6 +279,7 @@ export class AccountingPostingService {
           debit: 0,
           credit: total,
           description: `مستحق مورد ${p.purchase_no}`,
+          supplier_id: p.supplier_id,
         });
       }
       // Add shipping to other-expenses if tracked inline (optional)
@@ -285,6 +293,223 @@ export class AccountingPostingService {
         description: `قيد مشتريات ${p.purchase_no}`,
         reference_type: 'purchase',
         reference_id: purchaseId,
+        lines,
+        created_by: userId,
+      });
+    });
+  }
+
+  /**
+   * Stock adjustment from a physical count → records shrinkage or overage.
+   *   Shortage (qty_delta < 0):
+   *     DR Shrinkage (534) = |value|
+   *     CR Inventory (1131) = |value|
+   *   Overage (qty_delta > 0):
+   *     DR Inventory (1131) = value
+   *     CR Inventory Overage revenue (423) = value
+   *
+   * One GL entry per adjustment batch. `adjustmentId` is typically a
+   * stock_count id or a manual adjustment id — used for idempotency.
+   */
+  async postInventoryAdjustment(
+    adjustmentId: string,
+    netValue: number,
+    description: string,
+    userId: string,
+    em?: EntityManager,
+  ) {
+    return this.safe('inventory_adjustment', adjustmentId, em, async (q) => {
+      const abs = Math.abs(Number(netValue) || 0);
+      if (abs < 0.01) return null;
+      const today = new Date().toISOString().slice(0, 10);
+      const invAcc = await this.accountIdByCode(q, '1131');
+      const shrinkAcc = await this.accountIdByCode(q, '534');
+      const overageAcc = await this.accountIdByCode(q, '423');
+      if (!invAcc) return null;
+
+      const isShortage = netValue < 0;
+      const counterAcc = isShortage ? shrinkAcc : overageAcc;
+      if (!counterAcc) return null;
+
+      return this.createEntry(q, {
+        entry_date: today,
+        description,
+        reference_type: 'inventory_adjustment',
+        reference_id: adjustmentId,
+        lines: isShortage
+          ? [
+              { account_id: counterAcc, debit: abs, credit: 0, description },
+              { account_id: invAcc, debit: 0, credit: abs, description },
+            ]
+          : [
+              { account_id: invAcc, debit: abs, credit: 0, description },
+              { account_id: counterAcc, debit: 0, credit: abs, description },
+            ],
+        created_by: userId,
+      });
+    });
+  }
+
+  /**
+   * Monthly depreciation → one entry per active fixed-asset schedule.
+   *   DR Depreciation Expense (535)
+   *   CR Accumulated Depreciation (the schedule's accum_dep_account_id
+   *       or, if unset, 123)
+   */
+  async postMonthlyDepreciation(userId: string) {
+    const schedules = await this.ds.query(
+      `SELECT id, account_id, name_ar, cost, salvage_value,
+              useful_life_months, start_date, last_posted_month,
+              accum_dep_account_id
+         FROM fixed_asset_schedules
+        WHERE is_active = TRUE
+          AND (last_posted_month IS NULL
+               OR last_posted_month < DATE_TRUNC('month', now() AT TIME ZONE 'Africa/Cairo')::date)`,
+    );
+    const posted: string[] = [];
+    const today = new Date().toISOString().slice(0, 10);
+    const monthStart = today.slice(0, 7) + '-01';
+
+    for (const s of schedules) {
+      const months = Number(s.useful_life_months || 0);
+      const cost = Number(s.cost || 0);
+      const salvage = Number(s.salvage_value || 0);
+      if (months <= 0 || cost <= salvage) continue;
+      const monthly = Number(((cost - salvage) / months).toFixed(2));
+      if (monthly < 0.01) continue;
+
+      // Use the schedule id + month as the idempotency key.
+      const refId = `${s.id}:${monthStart}`;
+      const result = await this.safe(
+        'depreciation',
+        refId,
+        undefined,
+        async (q) => {
+          const expenseAcc = await this.accountIdByCode(q, '535');
+          const accumAcc =
+            s.accum_dep_account_id ||
+            (await this.accountIdByCode(q, '123'));
+          if (!expenseAcc || !accumAcc) return null;
+
+          const entry = await this.createEntry(q, {
+            entry_date: today,
+            description: `إهلاك شهري — ${s.name_ar}`,
+            reference_type: 'depreciation',
+            reference_id: refId,
+            lines: [
+              {
+                account_id: expenseAcc,
+                debit: monthly,
+                credit: 0,
+                description: s.name_ar,
+              },
+              {
+                account_id: accumAcc,
+                debit: 0,
+                credit: monthly,
+                description: s.name_ar,
+              },
+            ],
+            created_by: userId,
+          });
+          await q(
+            `UPDATE fixed_asset_schedules
+                SET last_posted_month = DATE_TRUNC('month', now() AT TIME ZONE 'Africa/Cairo')::date,
+                    updated_at = NOW()
+              WHERE id = $1`,
+            [s.id],
+          );
+          return entry;
+        },
+      );
+      if (result && !(result as any).skipped && !(result as any).error) {
+        posted.push(s.id);
+      }
+    }
+    return { posted_count: posted.length, schedule_ids: posted };
+  }
+
+  /**
+   * Year-end closing entry — zeros out revenue + expense accounts and
+   * transfers the net result to Retained Earnings (32). Uses each
+   * account's period-to-date balance as of `fiscalYearEnd`.
+   */
+  async closeFiscalYear(
+    fiscalYearEnd: string,
+    userId: string,
+  ): Promise<any> {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(fiscalYearEnd)) {
+      throw new Error('fiscalYearEnd must be YYYY-MM-DD');
+    }
+    const year = fiscalYearEnd.slice(0, 4);
+    const refId = `year-close:${year}`;
+    return this.safe('year_close', refId, undefined, async (q) => {
+      const fiscalYearStart = `${year}-01-01`;
+      const balances = await q(
+        `
+        SELECT a.id, a.code, a.normal_balance, a.account_type,
+               COALESCE(SUM(jl.debit),  0)::numeric(14,2) AS d,
+               COALESCE(SUM(jl.credit), 0)::numeric(14,2) AS c
+          FROM chart_of_accounts a
+          LEFT JOIN journal_lines jl ON jl.account_id = a.id
+          LEFT JOIN journal_entries je ON je.id = jl.entry_id
+           AND je.is_posted = TRUE AND je.is_void = FALSE
+           AND je.entry_date BETWEEN $1::date AND $2::date
+         WHERE a.account_type IN ('revenue', 'expense')
+           AND a.is_leaf = TRUE
+         GROUP BY a.id, a.code, a.normal_balance, a.account_type
+        HAVING COALESCE(SUM(jl.debit),  0) + COALESCE(SUM(jl.credit), 0) > 0
+        `,
+        [fiscalYearStart, fiscalYearEnd],
+      );
+      if (!balances.length) return { skipped: true, reason: 'no_balances' };
+
+      const retainedAcc = await this.accountIdByCode(q, '32');
+      if (!retainedAcc) {
+        return { error: 'retained_earnings_account_missing' };
+      }
+
+      const lines: PostingLine[] = [];
+      let netProfit = 0;
+      for (const a of balances) {
+        const d = Number(a.d);
+        const c = Number(a.c);
+        const balance = a.normal_balance === 'debit' ? d - c : c - d;
+        if (Math.abs(balance) < 0.01) continue;
+        if (a.account_type === 'revenue') {
+          // revenue has credit balance → DR to zero it
+          lines.push({ account_id: a.id, debit: balance, credit: 0 });
+          netProfit += balance;
+        } else {
+          // expense has debit balance → CR to zero it
+          lines.push({ account_id: a.id, debit: 0, credit: balance });
+          netProfit -= balance;
+        }
+      }
+      if (Math.abs(netProfit) < 0.01) return { skipped: true, reason: 'balanced' };
+
+      // Plug to retained earnings
+      if (netProfit > 0) {
+        lines.push({
+          account_id: retainedAcc,
+          debit: 0,
+          credit: netProfit,
+          description: 'صافي ربح السنة',
+        });
+      } else {
+        lines.push({
+          account_id: retainedAcc,
+          debit: Math.abs(netProfit),
+          credit: 0,
+          description: 'صافي خسارة السنة',
+        });
+      }
+
+      return this.createEntry(q, {
+        entry_date: fiscalYearEnd,
+        description: `قيد إقفال السنة ${year}`,
+        reference_type: 'year_close',
+        reference_id: refId,
         lines,
         created_by: userId,
       });
@@ -407,7 +632,7 @@ export class AccountingPostingService {
     return this.safe('customer_payment', paymentId, em, async (q) => {
       const [p] = await q(
         `SELECT cp.id, cp.payment_no, cp.amount, cp.cashbox_id,
-                cp.created_at, cp.is_void, cp.kind
+                cp.customer_id, cp.created_at, cp.is_void, cp.kind
            FROM customer_payments cp WHERE cp.id = $1`,
         [paymentId],
       );
@@ -429,7 +654,12 @@ export class AccountingPostingService {
         reference_id: paymentId,
         lines: [
           { account_id: cashAcc, debit: amt, credit: 0 },
-          { account_id: creditAcc, debit: 0, credit: amt },
+          {
+            account_id: creditAcc,
+            debit: 0,
+            credit: amt,
+            customer_id: p.customer_id,
+          },
         ],
         created_by: userId,
       });
@@ -445,7 +675,7 @@ export class AccountingPostingService {
     return this.safe('supplier_payment', paymentId, em, async (q) => {
       const [p] = await q(
         `SELECT sp.id, sp.payment_no, sp.amount, sp.cashbox_id,
-                sp.created_at, sp.is_void
+                sp.supplier_id, sp.created_at, sp.is_void
            FROM supplier_payments sp WHERE sp.id = $1`,
         [paymentId],
       );
@@ -463,7 +693,12 @@ export class AccountingPostingService {
         reference_type: 'supplier_payment',
         reference_id: paymentId,
         lines: [
-          { account_id: suppAcc, debit: amt, credit: 0 },
+          {
+            account_id: suppAcc,
+            debit: amt,
+            credit: 0,
+            supplier_id: p.supplier_id,
+          },
           { account_id: cashAcc, debit: 0, credit: amt },
         ],
         created_by: userId,
@@ -796,26 +1031,50 @@ export class AccountingPostingService {
 
     // Insert lines
     let n = 1;
+    const hasPartyCols = await this.hasPartyColumns(q);
     for (const l of args.lines) {
       if ((l.debit || 0) === 0 && (l.credit || 0) === 0) continue;
-      await q(
-        `
-        INSERT INTO journal_lines
-          (entry_id, line_no, account_id, debit, credit, description,
-           cashbox_id, warehouse_id)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-        `,
-        [
-          entry.id,
-          n++,
-          l.account_id,
-          Number(l.debit || 0),
-          Number(l.credit || 0),
-          l.description ?? args.description,
-          l.cashbox_id ?? null,
-          l.warehouse_id ?? null,
-        ],
-      );
+      if (hasPartyCols) {
+        await q(
+          `
+          INSERT INTO journal_lines
+            (entry_id, line_no, account_id, debit, credit, description,
+             cashbox_id, warehouse_id, customer_id, supplier_id)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+          `,
+          [
+            entry.id,
+            n++,
+            l.account_id,
+            Number(l.debit || 0),
+            Number(l.credit || 0),
+            l.description ?? args.description,
+            l.cashbox_id ?? null,
+            l.warehouse_id ?? null,
+            l.customer_id ?? null,
+            l.supplier_id ?? null,
+          ],
+        );
+      } else {
+        await q(
+          `
+          INSERT INTO journal_lines
+            (entry_id, line_no, account_id, debit, credit, description,
+             cashbox_id, warehouse_id)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+          `,
+          [
+            entry.id,
+            n++,
+            l.account_id,
+            Number(l.debit || 0),
+            Number(l.credit || 0),
+            l.description ?? args.description,
+            l.cashbox_id ?? null,
+            l.warehouse_id ?? null,
+          ],
+        );
+      }
     }
 
     // Post (flips is_posted → TRUE; trigger validates balance).
@@ -870,6 +1129,22 @@ export class AccountingPostingService {
     const dt = typeof d === 'string' ? new Date(d) : d;
     return dt.toISOString().slice(0, 10);
   }
+
+  private _hasPartyColsCache: boolean | null = null;
+  private async hasPartyColumns(q: QueryFn): Promise<boolean> {
+    if (this._hasPartyColsCache !== null) return this._hasPartyColsCache;
+    const [row] = await q(
+      `SELECT (
+        EXISTS (SELECT 1 FROM information_schema.columns
+                 WHERE table_name='journal_lines' AND column_name='customer_id')
+        AND
+        EXISTS (SELECT 1 FROM information_schema.columns
+                 WHERE table_name='journal_lines' AND column_name='supplier_id')
+      ) AS present`,
+    );
+    this._hasPartyColsCache = !!row?.present;
+    return this._hasPartyColsCache;
+  }
 }
 
 type QueryFn = (sql: string, params?: any[]) => Promise<any[]>;
@@ -881,4 +1156,6 @@ interface PostingLine {
   description?: string;
   cashbox_id?: string | null;
   warehouse_id?: string | null;
+  customer_id?: string | null;
+  supplier_id?: string | null;
 }

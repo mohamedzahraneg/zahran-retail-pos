@@ -80,6 +80,16 @@ export default function Accounting() {
 
   return (
     <div className="space-y-6">
+      {/* Link to the new GL-backed accounts module */}
+      <div className="card p-3 bg-indigo-50 border-indigo-200 border flex items-center justify-between flex-wrap gap-2">
+        <div className="text-sm">
+          💡 نظام محاسبي جديد متاح: <b>شجرة الحسابات / القيود / الميزانية /
+          أعمار الديون</b>
+        </div>
+        <a href="/accounts" className="btn-primary text-xs py-1.5">
+          الذهاب لشجرة الحسابات ←
+        </a>
+      </div>
       {/* Period switcher */}
       <div className="card p-3 flex items-center justify-between flex-wrap gap-3">
         <div className="text-sm font-bold text-slate-700">

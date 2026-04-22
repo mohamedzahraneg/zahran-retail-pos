@@ -30,6 +30,7 @@ import Alerts from '@/pages/Alerts';
 import Accounting from '@/pages/Accounting';
 import Accounts from '@/pages/Accounts';
 import Cashboxes from '@/pages/Cashboxes';
+import BankReconciliation from '@/pages/BankReconciliation';
 import RecurringExpenses from '@/pages/RecurringExpenses';
 import CustomerGroups from '@/pages/CustomerGroups';
 import Settings from '@/pages/Settings';
@@ -142,6 +143,14 @@ export default function App() {
           element={
             <ProtectedRoute permissions={['cashdesk.view']}>
               <Cashboxes />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="bank-reconciliation"
+          element={
+            <ProtectedRoute permissions={['accounts.reconcile']}>
+              <BankReconciliation />
             </ProtectedRoute>
           }
         />
