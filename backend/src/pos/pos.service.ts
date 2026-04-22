@@ -11,6 +11,7 @@ import { CreateInvoiceDto } from './dto/invoice.dto';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
 import { LoyaltyService } from '../loyalty/loyalty.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { AccountingPostingService } from '../chart-of-accounts/posting.service';
 
 @Injectable()
 export class PosService {
@@ -21,6 +22,7 @@ export class PosService {
     @Optional() private readonly realtime?: RealtimeGateway,
     @Optional() private readonly loyalty?: LoyaltyService,
     @Optional() private readonly notifications?: NotificationsService,
+    @Optional() private readonly posting?: AccountingPostingService,
   ) {}
 
   /**
@@ -316,6 +318,11 @@ export class PosService {
       if (dto.customer_id && this.notifications) {
         this.sendThankYouNotification(invoice.id, userId).catch(() => {});
       }
+
+      // Auto-post the sale to the general ledger. Idempotent + failure-safe.
+      this.posting
+        ?.postInvoice(invoice.id, userId, em)
+        .catch(() => undefined);
 
       return result;
     });

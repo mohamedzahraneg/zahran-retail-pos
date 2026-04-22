@@ -30,6 +30,7 @@ import {
   JournalService,
   CreateJournalEntryDto,
 } from './journal.service';
+import { AccountingPostingService } from './posting.service';
 import { Permissions } from '../common/decorators/roles.decorator';
 import {
   CurrentUser,
@@ -90,6 +91,7 @@ export class ChartOfAccountsController {
   constructor(
     private readonly coa: ChartOfAccountsService,
     private readonly journal: JournalService,
+    private readonly posting: AccountingPostingService,
   ) {}
 
   // ── Chart of Accounts ──────────────────────────────────────────────
@@ -188,5 +190,20 @@ export class ChartOfAccountsController {
     @CurrentUser() user: JwtUser,
   ) {
     return this.journal.void(id, user.userId, dto.reason);
+  }
+
+  @Post('journal/backfill')
+  @Permissions('accounts.journal.post')
+  @ApiOperation({
+    summary: 'ترحيل تلقائي لكل العمليات القديمة التي لم يتم ترحيلها',
+  })
+  backfill(
+    @Body() body: { since?: string },
+    @CurrentUser() user: JwtUser,
+  ) {
+    return this.posting.backfill({
+      since: body?.since,
+      userId: user.userId,
+    });
   }
 }

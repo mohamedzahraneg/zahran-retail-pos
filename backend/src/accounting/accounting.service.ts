@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import {
@@ -12,10 +13,14 @@ import {
   UpdateExpenseCategoryDto,
   UpdateExpenseDto,
 } from './dto/accounting.dto';
+import { AccountingPostingService } from '../chart-of-accounts/posting.service';
 
 @Injectable()
 export class AccountingService {
-  constructor(private readonly ds: DataSource) {}
+  constructor(
+    private readonly ds: DataSource,
+    @Optional() private readonly posting?: AccountingPostingService,
+  ) {}
 
   // ─── Expense Categories ──────────────────────────────────────────────
   listCategories(includeInactive = false) {
@@ -237,6 +242,11 @@ export class AccountingService {
           [newBalance, exp.cashbox_id],
         );
       }
+
+      // Auto-post the approved expense to the GL.
+      await this.posting
+        ?.postExpense(id, userId, em)
+        .catch(() => undefined);
 
       return row;
     });

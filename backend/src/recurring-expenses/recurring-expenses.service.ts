@@ -1,5 +1,11 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+  Optional,
+} from '@nestjs/common';
 import { DataSource } from 'typeorm';
+import { AccountingPostingService } from '../chart-of-accounts/posting.service';
 
 export type Frequency =
   | 'daily'
@@ -39,7 +45,10 @@ export interface UpdateRecurringExpenseDto extends Partial<CreateRecurringExpens
 
 @Injectable()
 export class RecurringExpensesService {
-  constructor(private readonly ds: DataSource) {}
+  constructor(
+    private readonly ds: DataSource,
+    @Optional() private readonly posting?: AccountingPostingService,
+  ) {}
 
   async list(opts: {
     status?: string;
@@ -338,6 +347,13 @@ export class RecurringExpensesService {
          WHERE id = $1`,
         [tpl.id, scheduledFor, next_d],
       );
+
+      // Auto-post to GL if the template was auto-approved.
+      if (expenseId && tpl.auto_post && !tpl.require_approval) {
+        await this.posting
+          ?.postExpense(expenseId, userId, em)
+          .catch(() => undefined);
+      }
 
       return { generated: true, expense_id: expenseId, next_run_date: next_d };
     });

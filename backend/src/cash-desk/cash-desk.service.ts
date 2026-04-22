@@ -2,12 +2,14 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
+  Optional,
 } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import {
   CreateCustomerPaymentDto,
   CreateSupplierPaymentDto,
 } from './dto/payment.dto';
+import { AccountingPostingService } from '../chart-of-accounts/posting.service';
 
 export type CashboxKind = 'cash' | 'bank' | 'ewallet' | 'check';
 
@@ -42,7 +44,10 @@ export interface UpdateCashboxDto extends Partial<CreateCashboxDto> {
 
 @Injectable()
 export class CashDeskService {
-  constructor(private readonly ds: DataSource) {}
+  constructor(
+    private readonly ds: DataSource,
+    @Optional() private readonly posting?: AccountingPostingService,
+  ) {}
 
   /** Look up the warehouse_id for a cashbox (NOT NULL on both payment tables). */
   private async warehouseForCashbox(
@@ -98,6 +103,10 @@ export class CashDeskService {
           );
         }
       }
+      // Auto-post the receipt to GL within the same transaction.
+      await this.posting
+        ?.postInvoicePayment(payment.id, userId, em)
+        .catch(() => undefined);
       return payment;
     });
   }
@@ -142,6 +151,9 @@ export class CashDeskService {
           );
         }
       }
+      await this.posting
+        ?.postSupplierPayment(payment.id, userId, em)
+        .catch(() => undefined);
       return payment;
     });
   }
@@ -598,6 +610,17 @@ export class CashDeskService {
         `UPDATE cashboxes SET current_balance = $2, updated_at = now() WHERE id = $1`,
         [dto.cashbox_id, newBalance],
       );
+
+      await this.posting
+        ?.postCashboxDeposit(
+          txn.id,
+          dto.direction,
+          Number(dto.amount),
+          dto.cashbox_id,
+          userId,
+          em,
+        )
+        .catch(() => undefined);
 
       return { ...txn, new_balance: newBalance };
     });

@@ -1,6 +1,12 @@
-import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  BadRequestException,
+  NotFoundException,
+  Optional,
+} from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { OpenShiftDto, CloseShiftDto } from './dto/shift.dto';
+import { AccountingPostingService } from '../chart-of-accounts/posting.service';
 
 /**
  * Cashier shift (وردية) service.
@@ -21,7 +27,10 @@ import { OpenShiftDto, CloseShiftDto } from './dto/shift.dto';
  */
 @Injectable()
 export class ShiftsService {
-  constructor(private readonly ds: DataSource) {}
+  constructor(
+    private readonly ds: DataSource,
+    @Optional() private readonly posting?: AccountingPostingService,
+  ) {}
 
   async open(dto: OpenShiftDto, userId: string) {
     const [existing] = await this.ds.query(
@@ -340,6 +349,11 @@ export class ShiftsService {
         id,
       ],
     );
+    // Auto-post shift variance to GL (surplus → 421, deficit → 531).
+    // Fire-and-forget: we already returned the shift, posting failure
+    // shouldn't block the close.
+    this.posting?.postShiftClose(id, userId).catch(() => undefined);
+
     return {
       ...updated,
       summary: {

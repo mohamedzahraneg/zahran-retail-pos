@@ -691,12 +691,15 @@ function JournalTab() {
           className="input w-40"
         />
         {canPost && (
-          <button
-            className="btn-primary mr-auto"
-            onClick={() => setShowCreate(true)}
-          >
-            <Plus size={16} /> قيد جديد
-          </button>
+          <div className="flex gap-2 mr-auto">
+            <BackfillButton />
+            <button
+              className="btn-primary"
+              onClick={() => setShowCreate(true)}
+            >
+              <Plus size={16} /> قيد جديد
+            </button>
+          </div>
         )}
       </div>
 
@@ -788,6 +791,42 @@ function JournalTab() {
         />
       )}
     </div>
+  );
+}
+
+function BackfillButton() {
+  const qc = useQueryClient();
+  const mutation = useMutation({
+    mutationFn: () => accountsApi.backfill({}),
+    onSuccess: (res: any) => {
+      const summary = Object.entries(res || {})
+        .map(([k, v]: any) => `${k}: ${v.posted}/${v.found}`)
+        .join(' · ');
+      toast.success(`تم الترحيل التلقائي — ${summary || 'لا توجد عمليات'}`);
+      qc.invalidateQueries({ queryKey: ['journal'] });
+      qc.invalidateQueries({ queryKey: ['trial-balance'] });
+      qc.invalidateQueries({ queryKey: ['coa'] });
+    },
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.message || 'فشل الترحيل التلقائي'),
+  });
+  return (
+    <button
+      className="btn-secondary"
+      onClick={() => {
+        if (
+          confirm(
+            'ترحيل تلقائي لكل العمليات القديمة (فواتير / دفعات / مصروفات / ورديات) التي لم يتم ترحيلها بعد؟',
+          )
+        ) {
+          mutation.mutate();
+        }
+      }}
+      disabled={mutation.isPending}
+      title="ترحيل تلقائي للعمليات القديمة"
+    >
+      {mutation.isPending ? '⏳ جاري الترحيل...' : '🔄 ترحيل تلقائي'}
+    </button>
   );
 }
 

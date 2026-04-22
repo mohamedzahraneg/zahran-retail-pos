@@ -153,4 +153,11 @@ export const accountsApi = {
     unwrap<JournalEntry | { deleted: boolean }>(
       api.post(`/accounts/journal/${id}/void`, { reason }),
     ),
+
+  /** One-click backfill: post GL entries for every historical event that
+   *  doesn't have one yet. Idempotent — safe to re-run. */
+  backfill: (params?: { since?: string }) =>
+    unwrap<
+      Record<string, { found: number; posted: number }>
+    >(api.post('/accounts/journal/backfill', params || {})),
 };
