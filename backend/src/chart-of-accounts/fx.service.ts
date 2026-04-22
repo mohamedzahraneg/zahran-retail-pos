@@ -6,6 +6,7 @@ import {
 import { Cron } from '@nestjs/schedule';
 import { DataSource } from 'typeorm';
 import { AccountingPostingService } from './posting.service';
+import { FinancialEngineService } from './financial-engine.service';
 
 export interface UpsertRateDto {
   currency: string; // ISO code (USD/EUR/SAR…)
@@ -40,6 +41,7 @@ export class FxService {
   constructor(
     private readonly ds: DataSource,
     private readonly posting: AccountingPostingService,
+    private readonly engine: FinancialEngineService,
   ) {}
 
   async list(currency?: string, limit = 500) {
@@ -202,9 +204,10 @@ export class FxService {
   }
 
   /**
-   * Minimal raw-SQL posting for FX revaluation. Bypasses the main
-   * AccountingPostingService because the gain/loss leg doesn't fit its
-   * existing shapes.
+   * FX revaluation posting — routes through FinancialEngineService so
+   * the idempotency guard, balance check, and event-log emission are
+   * all handled uniformly. Previously this method built its own JE
+   * with raw SQL, which bypassed those guarantees.
    */
   private async postFxEntry(
     cashboxId: string,
@@ -213,88 +216,21 @@ export class FxService {
     entryDate: string,
     name: string,
     userId: string,
-    refId: string,
+    _refId: string,
   ) {
-    try {
-      // Idempotency
-      const [existing] = await this.ds.query(
-        `SELECT id FROM journal_entries
-          WHERE reference_type = 'fx_revaluation' AND reference_id = $1
-          LIMIT 1`,
-        [refId],
-      );
-      if (existing) return false;
-
-      const gainAcc = await this.accountIdByCode('424');
-      const lossAcc = await this.accountIdByCode('536');
-      if (!gainAcc || !lossAcc) return false;
-      const abs = Math.abs(diff);
-      const isGain = diff > 0;
-
-      const [{ seq }] = await this.ds.query(
-        `SELECT nextval('seq_journal_entry_no') AS seq`,
-      );
-      const entryNo = `JE-${entryDate.slice(0, 4)}-${String(seq).padStart(6, '0')}`;
-
-      const [entry] = await this.ds.query(
-        `
-        INSERT INTO journal_entries
-          (entry_no, entry_date, description, reference_type, reference_id,
-           is_posted, posted_by, posted_at, created_by)
-        VALUES ($1, $2, $3, 'fx_revaluation', $4, FALSE, $5, NULL, $5)
-        RETURNING id
-        `,
-        [
-          entryNo,
-          entryDate,
-          `إعادة تقييم عملة: ${name}`,
-          refId,
-          userId,
-        ],
-      );
-
-      const debitLine = isGain
-        ? { account_id: assetAccountId, debit: abs, credit: 0 }
-        : { account_id: lossAcc,       debit: abs, credit: 0 };
-      const creditLine = isGain
-        ? { account_id: gainAcc,       debit: 0,   credit: abs }
-        : { account_id: assetAccountId, debit: 0,   credit: abs };
-
-      await this.ds.query(
-        `INSERT INTO journal_lines
-           (entry_id, line_no, account_id, debit, credit, description, cashbox_id)
-         VALUES ($1,1,$2,$3,$4,$5,$6)`,
-        [
-          entry.id,
-          debitLine.account_id,
-          debitLine.debit,
-          debitLine.credit,
-          `فرق صرف ${name}`,
-          cashboxId,
-        ],
-      );
-      await this.ds.query(
-        `INSERT INTO journal_lines
-           (entry_id, line_no, account_id, debit, credit, description, cashbox_id)
-         VALUES ($1,2,$2,$3,$4,$5,$6)`,
-        [
-          entry.id,
-          creditLine.account_id,
-          creditLine.debit,
-          creditLine.credit,
-          `فرق صرف ${name}`,
-          cashboxId,
-        ],
-      );
-      await this.ds.query(
-        `UPDATE journal_entries SET is_posted = TRUE, posted_at = NOW() WHERE id = $1`,
-        [entry.id],
-      );
-      return true;
-    } catch (err: any) {
-      this.logger.error(`fx post failed: ${err?.message ?? err}`);
+    const res = await this.engine.recordFxRevaluation({
+      cashbox_id: cashboxId,
+      asset_account_id: assetAccountId,
+      diff,
+      as_of: entryDate,
+      name,
+      user_id: userId,
+    });
+    if (!res.ok) {
+      this.logger.error(`fx post failed: ${res.error}`);
       return false;
     }
+    return true;
   }
 
   private async accountIdByCode(code: string): Promise<string | null> {

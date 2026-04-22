@@ -10,6 +10,7 @@ import {
   CreateSupplierPaymentDto,
 } from './dto/payment.dto';
 import { AccountingPostingService } from '../chart-of-accounts/posting.service';
+import { FinancialEngineService } from '../chart-of-accounts/financial-engine.service';
 
 export type CashboxKind = 'cash' | 'bank' | 'ewallet' | 'check';
 
@@ -47,6 +48,7 @@ export class CashDeskService {
   constructor(
     private readonly ds: DataSource,
     @Optional() private readonly posting?: AccountingPostingService,
+    @Optional() private readonly engine?: FinancialEngineService,
   ) {}
 
   /**
@@ -498,70 +500,55 @@ export class CashDeskService {
       }
 
       const note = dto.notes || `تحويل من ${from.name_ar} إلى ${to.name_ar}`;
-      const newFromBal = Number(from.current_balance) - amount;
-      const newToBal = Number(to.current_balance) + amount;
 
-      // OUT leg
-      const [outTxn] = await em.query(
-        `
-        INSERT INTO cashbox_transactions
-          (cashbox_id, direction, amount, category,
-           reference_type, balance_after, user_id, notes)
-        VALUES ($1,'out'::txn_direction,$2,'transfer',
-                'cashbox'::entity_type,$3,$4,$5)
-        RETURNING id
-        `,
-        [dto.from_cashbox_id, amount, newFromBal, userId, `خارج: ${note}`],
-      );
-      // IN leg
-      const [inTxn] = await em.query(
-        `
-        INSERT INTO cashbox_transactions
-          (cashbox_id, direction, amount, category,
-           reference_type, reference_id, balance_after, user_id, notes)
-        VALUES ($1,'in'::txn_direction,$2,'transfer',
-                'cashbox'::entity_type,$3,$4,$5,$6)
-        RETURNING id
-        `,
-        [
-          dto.to_cashbox_id,
-          amount,
-          outTxn.id, // link the in-leg back to the out-leg
-          newToBal,
-          userId,
-          `داخل: ${note}`,
-        ],
+      // Generate a transfer id up-front so the engine's idempotency
+      // key is stable (a retry of the same HTTP request won't create
+      // two transfers).
+      const [{ transfer_id }] = await em.query(
+        `SELECT gen_random_uuid() AS transfer_id`,
       );
 
-      await em.query(
-        `UPDATE cashboxes SET current_balance = $2, updated_at = NOW() WHERE id = $1`,
-        [dto.from_cashbox_id, newFromBal],
-      );
-      await em.query(
-        `UPDATE cashboxes SET current_balance = $2, updated_at = NOW() WHERE id = $1`,
-        [dto.to_cashbox_id, newToBal],
-      );
+      // ━━━ Unified engine path ━━━
+      // The engine writes BOTH cashbox_transactions legs (via
+      // fn_record_cashbox_txn — atomic balance update) AND the single
+      // GL entry (DR dest · CR src). No direct UPDATE of
+      // cashboxes.current_balance anywhere.
+      if (!this.engine) {
+        throw new Error('FinancialEngineService not wired');
+      }
+      const res = await this.engine.recordCashboxTransfer({
+        transfer_id,
+        from_cashbox_id: dto.from_cashbox_id,
+        to_cashbox_id: dto.to_cashbox_id,
+        amount,
+        user_id: userId,
+        notes: note,
+        em,
+      });
+      if (!res.ok) {
+        throw new BadRequestException(`فشل التحويل: ${res.error}`);
+      }
 
-      // Single journal entry: DR destination, CR source.
-      await this.posting
-        ?.postCashboxTransfer(
-          outTxn.id,
-          dto.from_cashbox_id,
-          dto.to_cashbox_id,
-          amount,
-          note,
-          userId,
-          em,
-        )
-        .catch(() => undefined);
+      // Read the new balances back from the source of truth (the txn
+      // log aggregated into cashboxes.current_balance by
+      // fn_record_cashbox_txn).
+      const [fromAfter] = await em.query(
+        `SELECT current_balance FROM cashboxes WHERE id = $1`,
+        [dto.from_cashbox_id],
+      );
+      const [toAfter] = await em.query(
+        `SELECT current_balance FROM cashboxes WHERE id = $1`,
+        [dto.to_cashbox_id],
+      );
+      const newFromBal = Number(fromAfter?.current_balance || 0);
+      const newToBal = Number(toAfter?.current_balance || 0);
 
       return {
         transferred: true,
         amount,
         from_balance: newFromBal,
         to_balance: newToBal,
-        from_txn_id: outTxn.id,
-        to_txn_id: inTxn.id,
+        transfer_id,
       };
     });
   }
@@ -987,56 +974,41 @@ export class CashDeskService {
         [dto.cashbox_id],
       );
       if (!box) throw new Error('cashbox not found');
-      const delta = dto.direction === 'in' ? Number(dto.amount) : -Number(dto.amount);
-      const newBalance = Number(box.current_balance || 0) + delta;
 
-      // created_at: use supplied date at 10:00 Cairo, else now().
-      const createdExpr = dto.txn_date
-        ? `(($1::date) + TIME '10:00') AT TIME ZONE 'Africa/Cairo'`
-        : `now()`;
-      const createdParams = dto.txn_date ? [dto.txn_date] : [];
-
-      const [txn] = await em.query(
-        `
-        INSERT INTO cashbox_transactions
-          (cashbox_id, direction, amount, category,
-           reference_type, balance_after, user_id, notes, created_at)
-        VALUES ($${createdParams.length + 1}, $${createdParams.length + 2}::txn_direction,
-                $${createdParams.length + 3}, $${createdParams.length + 4},
-                'cashbox'::entity_type, $${createdParams.length + 5},
-                $${createdParams.length + 6}, $${createdParams.length + 7},
-                ${createdExpr})
-        RETURNING id, amount, balance_after, created_at
-        `,
-        [
-          ...createdParams,
-          dto.cashbox_id,
-          dto.direction,
-          dto.amount,
-          dto.category || (dto.direction === 'in' ? 'manual_deposit' : 'manual_withdraw'),
-          newBalance,
-          userId,
-          dto.notes || null,
-        ],
+      if (!this.engine) {
+        throw new Error('FinancialEngineService not wired');
+      }
+      // Generate a ref id so the engine's idempotency key is stable
+      // for this specific adjustment.
+      const [{ ref_id }] = await em.query(
+        `SELECT gen_random_uuid() AS ref_id`,
       );
+      const res = await this.engine.recordManualAdjustment({
+        reference_id: ref_id,
+        cashbox_id: dto.cashbox_id,
+        direction: dto.direction,
+        amount: Number(dto.amount),
+        user_id: userId,
+        entry_date: dto.txn_date,
+        notes: dto.notes,
+        em,
+      });
+      if (!res.ok) {
+        throw new BadRequestException(`فشل الإيداع/السحب: ${res.error}`);
+      }
 
-      await em.query(
-        `UPDATE cashboxes SET current_balance = $2, updated_at = now() WHERE id = $1`,
-        [dto.cashbox_id, newBalance],
+      const [after] = await em.query(
+        `SELECT current_balance FROM cashboxes WHERE id = $1`,
+        [dto.cashbox_id],
       );
-
-      await this.posting
-        ?.postCashboxDeposit(
-          txn.id,
-          dto.direction,
-          Number(dto.amount),
-          dto.cashbox_id,
-          userId,
-          em,
-        )
-        .catch(() => undefined);
-
-      return { ...txn, new_balance: newBalance };
+      const newBalance = Number(after?.current_balance || 0);
+      return {
+        id: ref_id,
+        cashbox_id: dto.cashbox_id,
+        direction: dto.direction,
+        amount: Number(dto.amount),
+        new_balance: newBalance,
+      };
     });
   }
 }

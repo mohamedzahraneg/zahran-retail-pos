@@ -972,6 +972,13 @@ export class AccountingPostingService {
       ? (sql: string, params?: any[]) => em.query(sql, params)
       : (sql: string, params?: any[]) => this.ds.query(sql, params);
     try {
+      // Raise the engine-context GUC so migration 058's guard triggers
+      // allow this service to INSERT into journal_entries /
+      // journal_lines. This legacy path is grandfathered in because it
+      // already goes through the same safe() idempotency guard the
+      // engine uses. Session-local; reverts at end of transaction.
+      await q(`SET LOCAL app.engine_context = 'on'`).catch(() => undefined);
+
       // Idempotency guard — only count LIVE entries (posted, non-void).
       // A voided entry from a previous reset should NOT block re-posting.
       const [existing] = await q(

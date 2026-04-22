@@ -113,6 +113,13 @@ export class JournalService {
       const year = dto.entry_date.slice(0, 4);
       const entryNo = `JE-${year}-${String(seq).padStart(6, '0')}`;
 
+      // Manual-entry endpoint — raise engine-context so migration 058
+      // lets us INSERT. This is a legitimate admin-only path (POST
+      // /accounts/journal) where the user supplies a balanced entry
+      // by hand. The balance trigger fn_je_enforce_balance still
+      // validates before the entry gets marked posted.
+      await em.query(`SET LOCAL app.engine_context = 'on'`);
+
       const [entry] = await em.query(
         `
         INSERT INTO journal_entries
@@ -285,6 +292,10 @@ export class JournalService {
     );
 
     return this.ds.transaction(async (em) => {
+      // Raise engine-context so migration 058 lets us void + create
+      // the reversing entry. Same rationale as createJournal above.
+      await em.query(`SET LOCAL app.engine_context = 'on'`);
+
       // Mark original as void.
       await em.query(
         `UPDATE journal_entries

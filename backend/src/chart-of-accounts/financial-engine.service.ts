@@ -205,6 +205,13 @@ export class FinancialEngineService {
     const run = async (em: EntityManager): Promise<RecordTransactionResult> => {
       const q: QueryFn = (sql, params) => em.query(sql, params);
 
+      // ── Raise the "engine context" GUC so migration 058's write
+      //    guards let us touch journal_entries / journal_lines /
+      //    cashboxes.current_balance. LOCAL scope: reverts when the
+      //    transaction ends, so no leakage to the next connection
+      //    checked out from the pool.
+      await q(`SET LOCAL app.engine_context = 'on'`);
+
       // ── Idempotency guard. Only LIVE entries block a replay; a voided
       //    entry is explicitly allowed to be superseded.
       const [existing] = await q(
@@ -617,6 +624,21 @@ export class FinancialEngineService {
       return { ok: false, error: 'expense amount must be positive' };
     }
 
+    // ━━━ CRITICAL INVARIANT ━━━
+    // Reject `cash` payment method without a cashbox. The old silent
+    // fall-back (credit-to-210-AP) meant approving a cash expense
+    // could complete with ZERO cash movement. The caller must either
+    // supply a cashbox or explicitly mark the expense as non-cash
+    // (payment_method != 'cash') so the user understands they are
+    // recording a credit liability, not a cash spend.
+    if (args.payment_method === 'cash' && !args.cashbox_id) {
+      return {
+        ok: false,
+        error:
+          'مصروف نقدي بدون خزنة — لا يمكن الترحيل بدون تحريك الخزنة',
+      };
+    }
+
     // If category isn't linked to a COA account, fall back to 529
     // (Miscellaneous Expenses) — the seeded catch-all.
     const dr: EngineGlLine = args.category_account_id
@@ -747,5 +769,295 @@ export class FinancialEngineService {
       user_id: args.user_id,
       em: args.em,
     });
+  }
+
+  /**
+   * Cashbox transfer — moves cash from one box to another. Two physical
+   * cash movements (out of source + in to destination) plus one GL
+   * entry (DR destination · CR source). Reference id is the source txn
+   * id so a replay is safely blocked.
+   */
+  async recordCashboxTransfer(args: {
+    transfer_id: string;
+    from_cashbox_id: string;
+    to_cashbox_id: string;
+    amount: number;
+    user_id: string | null;
+    entry_date?: string;
+    notes?: string;
+    em?: EntityManager;
+  }): Promise<RecordTransactionResult> {
+    if (!(args.amount > 0)) {
+      return { ok: false, error: 'transfer amount must be positive' };
+    }
+    if (args.from_cashbox_id === args.to_cashbox_id) {
+      return {
+        ok: false,
+        error: 'source and destination cashboxes must differ',
+      };
+    }
+    const description = args.notes ?? 'تحويل بين خزائن';
+    return this.recordTransaction({
+      kind: 'cashbox_transfer',
+      reference_type: 'cashbox_transfer',
+      reference_id: args.transfer_id,
+      entry_date: args.entry_date,
+      description,
+      gl_lines: [
+        {
+          resolve_from_cashbox_id: args.to_cashbox_id,
+          debit: args.amount,
+          cashbox_id: args.to_cashbox_id,
+        },
+        {
+          resolve_from_cashbox_id: args.from_cashbox_id,
+          credit: args.amount,
+          cashbox_id: args.from_cashbox_id,
+        },
+      ],
+      cash_movements: [
+        {
+          cashbox_id: args.from_cashbox_id,
+          direction: 'out',
+          amount: args.amount,
+          category: 'transfer',
+          notes: `خارج: ${description}`,
+        },
+        {
+          cashbox_id: args.to_cashbox_id,
+          direction: 'in',
+          amount: args.amount,
+          category: 'transfer',
+          notes: `داخل: ${description}`,
+        },
+      ],
+      user_id: args.user_id,
+      em: args.em,
+    });
+  }
+
+  /**
+   * Manual deposit / withdrawal — owner top-up, cash injection, etc.
+   * Not tied to a source document, so the caller supplies the
+   * reference_id (usually the cashbox_transactions.id).
+   *
+   *   direction='in'  → DR cash · CR capital (31)
+   *   direction='out' → DR drawings (32) · CR cash
+   */
+  async recordManualAdjustment(args: {
+    reference_id: string;
+    cashbox_id: string;
+    direction: 'in' | 'out';
+    amount: number;
+    user_id: string | null;
+    entry_date?: string;
+    notes?: string;
+    em?: EntityManager;
+  }): Promise<RecordTransactionResult> {
+    if (!(args.amount > 0)) {
+      return { ok: false, error: 'amount must be positive' };
+    }
+    const description =
+      args.notes ??
+      (args.direction === 'in' ? 'إيداع يدوي' : 'سحب يدوي');
+    const isIn = args.direction === 'in';
+    return this.recordTransaction({
+      kind: 'manual_adjustment',
+      reference_type: 'manual_adjustment',
+      reference_id: args.reference_id,
+      entry_date: args.entry_date,
+      description,
+      gl_lines: isIn
+        ? [
+            {
+              resolve_from_cashbox_id: args.cashbox_id,
+              debit: args.amount,
+              cashbox_id: args.cashbox_id,
+            },
+            { account_code: '31', credit: args.amount },
+          ]
+        : [
+            { account_code: '32', debit: args.amount },
+            {
+              resolve_from_cashbox_id: args.cashbox_id,
+              credit: args.amount,
+              cashbox_id: args.cashbox_id,
+            },
+          ],
+      cash_movements: [
+        {
+          cashbox_id: args.cashbox_id,
+          direction: args.direction,
+          amount: args.amount,
+          category:
+            args.direction === 'in' ? 'manual_deposit' : 'manual_withdraw',
+          notes: description,
+        },
+      ],
+      user_id: args.user_id,
+      em: args.em,
+    });
+  }
+
+  /**
+   * FX revaluation — posts the gain/loss against the foreign-currency
+   * asset account when the book balance differs from the target
+   * (balance × rate). No cash movement; only a GL post. Idempotent per
+   * (cashbox, date).
+   *
+   *   gain → DR cash-asset · CR FX-gain (424)
+   *   loss → DR FX-loss (536) · CR cash-asset
+   */
+  async recordFxRevaluation(args: {
+    cashbox_id: string;
+    asset_account_id: string;
+    diff: number; // > 0 gain, < 0 loss
+    as_of: string; // YYYY-MM-DD
+    name: string;
+    user_id: string | null;
+    em?: EntityManager;
+  }): Promise<RecordTransactionResult> {
+    if (Math.abs(args.diff) < 0.01) {
+      return {
+        ok: true,
+        skipped: true,
+        entry_id: '',
+        reason: 'idempotent-replay',
+      };
+    }
+    const abs = Math.abs(args.diff);
+    const isGain = args.diff > 0;
+    const description = `إعادة تقييم عملة: ${args.name}`;
+    // Reference id encodes cashbox + as_of so same-day revaluations of
+    // different cashboxes don't collide under the idempotency guard.
+    const refId = `${args.cashbox_id}:${args.as_of}`;
+
+    return this.recordTransaction({
+      kind: 'manual_adjustment',
+      reference_type: 'fx_revaluation',
+      reference_id: refId,
+      entry_date: args.as_of,
+      description,
+      gl_lines: isGain
+        ? [
+            {
+              account_id: args.asset_account_id,
+              debit: abs,
+              cashbox_id: args.cashbox_id,
+            },
+            { account_code: '424', credit: abs },
+          ]
+        : [
+            { account_code: '536', debit: abs },
+            {
+              account_id: args.asset_account_id,
+              credit: abs,
+              cashbox_id: args.cashbox_id,
+            },
+          ],
+      user_id: args.user_id,
+      em: args.em,
+    });
+  }
+
+  /**
+   * Opening balance wizard — posts the founding balanced entry for a
+   * fresh deployment. Caller supplies amounts; engine builds the
+   * balanced entry with plug-to-capital and writes the cash side for
+   * the cash portion. Idempotent — the reference_id is static so a
+   * second call returns skipped.
+   */
+  async recordOpeningBalance(args: {
+    cash_in_hand: number;
+    customer_dues: number;
+    inventory_value: number;
+    fixed_assets: number;
+    supplier_dues: number;
+    capital: number | null;
+    cashbox_id: string | null;
+    entry_date: string;
+    user_id: string | null;
+    em?: EntityManager;
+  }): Promise<RecordTransactionResult & { plug_to_capital?: number }> {
+    const totalDebit =
+      args.cash_in_hand +
+      args.customer_dues +
+      args.inventory_value +
+      args.fixed_assets;
+    const plug =
+      args.capital != null
+        ? args.capital
+        : totalDebit - args.supplier_dues;
+
+    if (args.cash_in_hand > 0 && !args.cashbox_id) {
+      return {
+        ok: false,
+        error: 'رصيد افتتاحي نقدي بدون خزنة غير مسموح',
+      };
+    }
+
+    const lines: EngineGlLine[] = [];
+    if (args.cash_in_hand > 0)
+      lines.push({
+        resolve_from_cashbox_id: args.cashbox_id!,
+        debit: args.cash_in_hand,
+        cashbox_id: args.cashbox_id!,
+        description: 'نقدية افتتاحية',
+      });
+    if (args.customer_dues > 0)
+      lines.push({
+        account_code: '1121',
+        debit: args.customer_dues,
+        description: 'ذمم عملاء افتتاحية',
+      });
+    if (args.inventory_value > 0)
+      lines.push({
+        account_code: '1131',
+        debit: args.inventory_value,
+        description: 'مخزون افتتاحي',
+      });
+    if (args.fixed_assets > 0)
+      lines.push({
+        account_code: '121',
+        debit: args.fixed_assets,
+        description: 'أصول ثابتة افتتاحية',
+      });
+    if (args.supplier_dues > 0)
+      lines.push({
+        account_code: '211',
+        credit: args.supplier_dues,
+        description: 'ذمم موردين افتتاحية',
+      });
+    if (plug !== 0)
+      lines.push({
+        account_code: '31',
+        credit: plug,
+        description: 'رأس المال / الرصيد المرحَّل',
+      });
+
+    const res = await this.recordTransaction({
+      kind: 'opening_balance',
+      reference_type: 'opening_balance',
+      reference_id: args.entry_date, // one opening balance per system
+      entry_date: args.entry_date,
+      description: 'قيد افتتاحي',
+      gl_lines: lines,
+      cash_movements:
+        args.cash_in_hand > 0 && args.cashbox_id
+          ? [
+              {
+                cashbox_id: args.cashbox_id,
+                direction: 'in',
+                amount: args.cash_in_hand,
+                category: 'opening_balance',
+                notes: 'رصيد افتتاحي للخزنة',
+              },
+            ]
+          : [],
+      user_id: args.user_id,
+      em: args.em,
+    });
+
+    return { ...res, plug_to_capital: plug };
   }
 }
