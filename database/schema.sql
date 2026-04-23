@@ -205,4 +205,7 @@
 \echo '== 064 Financial control tower (event stream + anomalies + health view) =='
 \ir migrations/064_financial_control_tower.sql
 
+\echo '== 065 Cost system unification (resolver + reconciliation + unified ledger view) =='
+\ir migrations/065_cost_system_unification.sql
+
 \echo '== Schema installed successfully ✅ =='
