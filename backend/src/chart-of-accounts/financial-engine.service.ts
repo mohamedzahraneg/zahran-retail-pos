@@ -336,7 +336,11 @@ export class FinancialEngineService {
 
       // ── Phase 4 — insert header + lines, then flip is_posted. Split
       //    so the balance trigger validates against the real lines.
-      const entryDate = spec.entry_date ?? this.today();
+      // Normalize entry_date: Postgres `date` columns arrive from node-pg
+      // as Date objects, while the HTTP layer sends ISO strings. Always
+      // coerce to a YYYY-MM-DD string so .slice and the INSERT work for
+      // both paths.
+      const entryDate = this.toIsoDate(spec.entry_date) ?? this.today();
       const [{ seq }] = await q(
         `SELECT nextval('seq_journal_entry_no') AS seq`,
       );
@@ -674,6 +678,19 @@ export class FinancialEngineService {
 
   private today(): string {
     return new Date().toISOString().slice(0, 10);
+  }
+
+  /**
+   * Coerce an entry_date value (string | Date | null | undefined) into
+   * the `YYYY-MM-DD` string shape the rest of the engine expects.
+   * Callers that pass a raw expense.expense_date (Date from node-pg)
+   * would otherwise hit `.slice is not a function`.
+   */
+  private toIsoDate(v: unknown): string | null {
+    if (v == null) return null;
+    if (v instanceof Date) return v.toISOString().slice(0, 10);
+    if (typeof v === 'string') return v.slice(0, 10);
+    return null;
   }
 
   // ══════════════════════════════════════════════════════════════════
