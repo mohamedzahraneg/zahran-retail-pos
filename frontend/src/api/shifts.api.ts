@@ -109,8 +109,10 @@ export interface Shift {
   variance_employee_id?: string | null;
   variance_notes?: string | null;
   variance_journal_entry_id?: string | null;
-  variance_decided_by?: string | null;
-  variance_decided_at?: string | null;
+  variance_amount?: number | string | null;
+  variance_type?: 'shortage' | 'overage' | 'zero' | null;
+  variance_approved_by?: string | null;
+  variance_approved_at?: string | null;
   invoices?: Array<{
     id: string;
     invoice_no: string;

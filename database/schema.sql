@@ -193,4 +193,7 @@
 \echo '== 060 Shift variance treatment + employee ledger =='
 \ir migrations/060_shift_variance_treatment.sql
 
+\echo '== 061 Shift variance spec alignment (approved_*, variance_amount/type) =='
+\ir migrations/061_shift_variance_spec_alignment.sql
+
 \echo '== Schema installed successfully ✅ =='
