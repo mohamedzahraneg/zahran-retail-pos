@@ -114,6 +114,9 @@ END$$;
 -- variance, (c) have NO treatment yet, (d) actually have a matching
 -- posted shift_variance JE. The engine stays the single posting
 -- primitive — we don't create or modify any JEs.
+-- journal_entries.reference_id is UUID (migration 048) AND shifts.id is
+-- UUID — compare directly without cast. The earlier `::text` variant
+-- tripped the PG15 strict-type operator check.
 UPDATE shifts s SET
     variance_treatment        = CASE WHEN s.difference < 0 THEN 'company_loss' ELSE 'revenue' END,
     variance_journal_entry_id = je.id,
@@ -123,7 +126,7 @@ UPDATE shifts s SET
                                          'تسوية تلقائية — قيد مسبق قبل ترحيل migration 060')
   FROM journal_entries je
  WHERE je.reference_type = 'shift_variance'
-   AND je.reference_id   = s.id::text
+   AND je.reference_id   = s.id
    AND je.is_posted      = TRUE
    AND je.is_void        = FALSE
    AND s.status          = 'closed'
