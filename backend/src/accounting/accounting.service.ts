@@ -277,6 +277,8 @@ export class AccountingService {
       entry_date: expense.expense_date ?? undefined,
       em,
       description: expense.description ?? undefined,
+      is_advance: expense.is_advance === true,
+      employee_user_id: expense.employee_user_id ?? null,
     });
 
     if (!res.ok) {

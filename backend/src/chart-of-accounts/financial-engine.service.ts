@@ -97,6 +97,12 @@ export interface EngineGlLine {
   /** Party tagging — powers customer/supplier ledger reports. */
   customer_id?: string;
   supplier_id?: string;
+  /**
+   * Employee dimension (migration 071). When set, the line is written
+   * with `journal_lines.employee_user_id = <uuid>` — the payroll
+   * dashboard reads `v_employee_gl_balance` aggregating on this.
+   */
+  employee_user_id?: string;
   warehouse_id?: string;
   cashbox_id?: string;
   cost_center_id?: string;
@@ -283,6 +289,7 @@ export class FinancialEngineService {
         warehouse_id: string | null;
         customer_id: string | null;
         supplier_id: string | null;
+        employee_user_id: string | null;
         cost_center_id: string | null;
       }
       const resolvedLines: ResolvedLine[] = [];
@@ -302,6 +309,7 @@ export class FinancialEngineService {
           warehouse_id: line.warehouse_id ?? null,
           customer_id: line.customer_id ?? null,
           supplier_id: line.supplier_id ?? null,
+          employee_user_id: line.employee_user_id ?? null,
           cost_center_id: line.cost_center_id ?? null,
         });
       }
@@ -351,11 +359,35 @@ export class FinancialEngineService {
       );
 
       const hasPartyCols = await this.hasPartyColumns(q);
+      const hasEmployeeCol = await this.hasEmployeeColumn(q);
       let lineNo = 1;
       for (const l of resolvedLines) {
         if (l.debit === 0 && l.credit === 0) continue;
 
-        if (hasPartyCols) {
+        if (hasPartyCols && hasEmployeeCol) {
+          await q(
+            `INSERT INTO journal_lines
+               (entry_id, line_no, account_id, debit, credit, description,
+                cashbox_id, warehouse_id, customer_id, supplier_id, cost_center_id,
+                employee_user_id)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+            [
+              entry.id,
+              lineNo++,
+              l.account_id,
+              l.debit,
+              l.credit,
+              l.description,
+              l.cashbox_id,
+              l.warehouse_id,
+              l.customer_id,
+              l.supplier_id,
+              l.cost_center_id,
+              l.employee_user_id,
+            ],
+          );
+        } else if (hasPartyCols) {
+          // Pre-071 installs where the employee dimension hasn't been added yet.
           await q(
             `INSERT INTO journal_lines
                (entry_id, line_no, account_id, debit, credit, description,
@@ -626,6 +658,20 @@ export class FinancialEngineService {
     return this._partyColsCache;
   }
 
+  /** Cache the employee-dimension probe (migration 071). */
+  private _employeeColCache: boolean | undefined;
+  private async hasEmployeeColumn(q: QueryFn): Promise<boolean> {
+    if (this._employeeColCache !== undefined) return this._employeeColCache;
+    const [row] = await q(
+      `SELECT EXISTS (
+         SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'journal_lines' AND column_name = 'employee_user_id'
+       ) AS has_col`,
+    );
+    this._employeeColCache = !!row?.has_col;
+    return this._employeeColCache;
+  }
+
   private today(): string {
     return new Date().toISOString().slice(0, 10);
   }
@@ -653,6 +699,15 @@ export class FinancialEngineService {
     entry_date?: string;
     em?: EntityManager;
     description?: string;
+    /**
+     * Advance to an employee (expenses.is_advance=TRUE). Reroutes the
+     * debit from the expense category to 1123 Employee Receivables and
+     * tags the line with the employee UUID so v_employee_gl_balance
+     * picks it up (migration 071).
+     */
+    is_advance?: boolean;
+    /** Required when is_advance=TRUE. UUID from users.id. */
+    employee_user_id?: string | null;
   }): Promise<RecordTransactionResult> {
     if (!(args.amount > 0)) {
       return { ok: false, error: 'expense amount must be positive' };
@@ -673,11 +728,17 @@ export class FinancialEngineService {
       };
     }
 
-    // If category isn't linked to a COA account, fall back to 529
-    // (Miscellaneous Expenses) — the seeded catch-all.
-    const dr: EngineGlLine = args.category_account_id
-      ? { account_id: args.category_account_id, debit: args.amount }
-      : { account_code: '529', debit: args.amount };
+    // Advance → DR 1123 Employee Receivables tagged with the employee.
+    // Regular expense → DR category account (or 529 fallback).
+    const dr: EngineGlLine = args.is_advance && args.employee_user_id
+      ? {
+          account_code: '1123',
+          debit: args.amount,
+          employee_user_id: args.employee_user_id,
+        }
+      : args.category_account_id
+        ? { account_id: args.category_account_id, debit: args.amount }
+        : { account_code: '529', debit: args.amount };
 
     // Credit side: cash if it's a cash expense with a cashbox, else
     // accounts-payable (210) for credit purchases.
@@ -834,11 +895,10 @@ export class FinancialEngineService {
         {
           account_code: debitCode,
           debit: abs,
-          // Tag the line with the employee so account-ledger reports
-          // can slice by person. The `customer_id` column is a generic
-          // party tag (supports customer / supplier / employee) on
-          // post-051 installs; older installs silently drop it.
-          customer_id:
+          // Tag the line with the employee user UUID so the GL itself
+          // becomes the per-employee ledger (migration 071). The payroll
+          // page reads v_employee_gl_balance aggregating on this column.
+          employee_user_id:
             treatment === 'charge_employee' ? args.employee_id : undefined,
           description:
             treatment === 'charge_employee'

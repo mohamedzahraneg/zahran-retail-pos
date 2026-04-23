@@ -223,4 +223,7 @@
 \echo '== 070 HOTFIX: fn_is_engine_context accepts service/migration prefixes =='
 \ir migrations/070_hotfix_is_engine_context_service_prefix.sql
 
+\echo '== 071 Employee GL dimension (journal_lines.employee_user_id + v_employee_gl_balance) =='
+\ir migrations/071_employee_gl_dimension.sql
+
 \echo '== Schema installed successfully ✅ =='
