@@ -208,4 +208,7 @@
 \echo '== 065 Cost system unification (resolver + reconciliation + unified ledger view) =='
 \ir migrations/065_cost_system_unification.sql
 
+\echo '== 066 Control tower observability fixes (engine-preserving cashbox + non-deferrable anomaly UNIQUE) =='
+\ir migrations/066_control_tower_fixes.sql
+
 \echo '== Schema installed successfully ✅ =='
