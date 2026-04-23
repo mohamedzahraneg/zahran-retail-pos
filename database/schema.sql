@@ -199,4 +199,7 @@
 \echo '== 062 Drop orphan variance_decided_* columns =='
 \ir migrations/062_drop_orphan_variance_decided_columns.sql
 
+\echo '== 063 Bank-grade immutable ledger (audit + DELETE block + fiscal lock + bypass alerts) =='
+\ir migrations/063_bank_grade_immutable_ledger.sql
+
 \echo '== Schema installed successfully ✅ =='

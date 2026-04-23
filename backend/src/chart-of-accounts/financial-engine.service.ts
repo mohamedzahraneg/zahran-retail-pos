@@ -205,12 +205,19 @@ export class FinancialEngineService {
     const run = async (em: EntityManager): Promise<RecordTransactionResult> => {
       const q: QueryFn = (sql, params) => em.query(sql, params);
 
-      // ── Raise the "engine context" GUC so migration 058's write
+      // ── Raise the "engine context" GUC so migration 058/063's write
       //    guards let us touch journal_entries / journal_lines /
       //    cashboxes.current_balance. LOCAL scope: reverts when the
       //    transaction ends, so no leakage to the next connection
       //    checked out from the pool.
-      await q(`SET LOCAL app.engine_context = 'on'`);
+      //
+      //    Migration 063 tightened the guard: the canonical value is
+      //    `engine:<uuid>` (the engine identity signal) which never
+      //    gets logged as a bypass. Legacy services setting the plain
+      //    'on' value still pass for now but drop an
+      //    engine_bypass_alerts row for observability until they're
+      //    migrated to the engine (Phase 2).
+      await q(`SET LOCAL app.engine_context = 'engine:recordTransaction'`);
 
       // ── Idempotency guard. Only LIVE entries block a replay; a voided
       //    entry is explicitly allowed to be superseded.
