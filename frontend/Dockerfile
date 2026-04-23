@@ -22,7 +22,7 @@ RUN npx vite build
 
 
 # ---- Stage 2: serve ----
-FROM nginx:1.25-alpine AS runtime
+FROM nginx:1.29-alpine AS runtime
 
 RUN apk add --no-cache tzdata && \
     cp /usr/share/zoneinfo/Africa/Cairo /etc/localtime && \
