@@ -3,8 +3,10 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { DataSource } from 'typeorm';
+import { FinancialEngineService } from '../chart-of-accounts/financial-engine.service';
 
 /**
  * Employee / HR module.
@@ -17,7 +19,10 @@ import { DataSource } from 'typeorm';
  */
 @Injectable()
 export class EmployeesService {
-  constructor(private readonly ds: DataSource) {}
+  constructor(
+    private readonly ds: DataSource,
+    @Optional() private readonly engine?: FinancialEngineService,
+  ) {}
 
   // ── helpers ──────────────────────────────────────────────────────────
   private async getProfile(userId: string) {
@@ -751,5 +756,250 @@ export class EmployeesService {
       overtime_rate: otRate,
       days: enriched,
     };
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  //   FINANCIAL LEDGER (migration 060) — unified "Financial Ledger" tab
+  //   for the employee profile. Reads `v_employee_ledger` and folds a
+  //   running balance in service code. Never bypasses the view so the
+  //   signed-amount convention stays in exactly one place (SQL).
+  // ══════════════════════════════════════════════════════════════════════
+
+  /**
+   * Return the employee's financial ledger for a date range + the current
+   * outstanding balance (what they owe the company). Positive balance =
+   * liability; negative balance = company owes them (rare — usually means
+   * they overpaid a settlement).
+   */
+  async financialLedger(
+    userId: string,
+    from?: string,
+    to?: string,
+  ): Promise<{
+    user: any;
+    opening_balance: number;
+    closing_balance: number;
+    entries: Array<{
+      event_date: string;
+      entry_type: string;
+      description: string;
+      amount_owed_delta: number;
+      gross_amount: number;
+      reference_type: string;
+      reference_id: string;
+      shift_id: string | null;
+      journal_entry_id: string | null;
+      running_balance: number;
+      notes: string | null;
+      created_at: string;
+    }>;
+    totals: {
+      shortages: number;
+      advances: number;
+      manual_deductions: number;
+      settlements: number;
+      bonuses: number;
+    };
+  }> {
+    const [user] = await this.ds.query(
+      `SELECT id, full_name, username, employee_no, job_title
+         FROM users WHERE id = $1`,
+      [userId],
+    );
+    if (!user) throw new NotFoundException('الموظف غير موجود');
+
+    // Opening balance = sum of everything BEFORE `from`. If no `from`
+    // supplied, opening is 0 and we show full history.
+    let opening = 0;
+    if (from) {
+      const [{ bal }] = await this.ds.query(
+        `SELECT COALESCE(SUM(amount_owed_delta), 0)::numeric(14,2) AS bal
+           FROM v_employee_ledger
+          WHERE user_id = $1 AND event_date < $2::date`,
+        [userId, from],
+      );
+      opening = Number(bal);
+    }
+
+    const where: string[] = ['v.user_id = $1'];
+    const args: any[] = [userId];
+    if (from) {
+      args.push(from);
+      where.push(`v.event_date >= $${args.length}::date`);
+    }
+    if (to) {
+      args.push(to);
+      where.push(`v.event_date <= $${args.length}::date`);
+    }
+
+    const rows = await this.ds.query(
+      `
+      SELECT v.event_date, v.entry_type, v.description,
+             v.amount_owed_delta::numeric(14,2) AS amount_owed_delta,
+             v.gross_amount::numeric(14,2)       AS gross_amount,
+             v.reference_type, v.reference_id,
+             v.shift_id, v.journal_entry_id,
+             v.notes, v.created_at
+        FROM v_employee_ledger v
+       WHERE ${where.join(' AND ')}
+       ORDER BY v.event_date ASC, v.created_at ASC
+      `,
+      args,
+    );
+
+    let running = opening;
+    const entries = rows.map((r: any) => {
+      running += Number(r.amount_owed_delta);
+      return {
+        ...r,
+        amount_owed_delta: Number(r.amount_owed_delta),
+        gross_amount: Number(r.gross_amount),
+        running_balance: Math.round(running * 100) / 100,
+      };
+    });
+
+    // Category breakdown for the header tiles.
+    const totals = {
+      shortages: 0,
+      advances: 0,
+      manual_deductions: 0,
+      settlements: 0,
+      bonuses: 0,
+    };
+    for (const r of rows) {
+      const amt = Number(r.gross_amount);
+      switch (r.entry_type) {
+        case 'shift_shortage':
+          totals.shortages += amt;
+          break;
+        case 'advance':
+          totals.advances += amt;
+          break;
+        case 'deduction':
+        case 'penalty':
+          totals.manual_deductions += amt;
+          break;
+        case 'settlement':
+          totals.settlements += amt;
+          break;
+        case 'bonus':
+          totals.bonuses += amt;
+          break;
+      }
+    }
+
+    return {
+      user,
+      opening_balance: Math.round(opening * 100) / 100,
+      closing_balance: Math.round(running * 100) / 100,
+      entries,
+      totals: {
+        shortages: Math.round(totals.shortages * 100) / 100,
+        advances: Math.round(totals.advances * 100) / 100,
+        manual_deductions: Math.round(totals.manual_deductions * 100) / 100,
+        settlements: Math.round(totals.settlements * 100) / 100,
+        bonuses: Math.round(totals.bonuses * 100) / 100,
+      },
+    };
+  }
+
+  /**
+   * Record a settlement — a payment BY the employee that reduces their
+   * liability. When `method='cash'` and a cashbox is supplied, the
+   * engine posts the matching journal entry:
+   *
+   *   DR Cash Register (resolved from cashbox)
+   *   CR 1123 Employee Receivables
+   *
+   * For 'bank' / 'payroll_deduction' / 'other' we just record the
+   * settlement row; the engine post is skipped because the offsetting
+   * cash move lives outside the cash register (e.g. payroll run).
+   */
+  async recordSettlement(
+    userId: string,
+    dto: {
+      amount: number;
+      settlement_date?: string;
+      method?: 'cash' | 'bank' | 'payroll_deduction' | 'other';
+      cashbox_id?: string;
+      notes?: string;
+    },
+    createdBy: string,
+  ) {
+    if (!dto.amount || dto.amount <= 0) {
+      throw new BadRequestException('قيمة التسوية يجب أن تكون أكبر من صفر');
+    }
+    const method = dto.method ?? 'cash';
+    if (method === 'cash' && !dto.cashbox_id) {
+      throw new BadRequestException(
+        'تسوية نقدية تتطلب اختيار خزنة',
+      );
+    }
+
+    return this.ds.transaction(async (em) => {
+      // 1. Insert the settlement row (journal_entry_id filled in below).
+      const [row] = await em.query(
+        `INSERT INTO employee_settlements
+           (user_id, amount, settlement_date, method, cashbox_id, notes, created_by)
+         VALUES ($1, $2, COALESCE($3::date, CURRENT_DATE), $4, $5, $6, $7)
+         RETURNING *`,
+        [
+          userId,
+          dto.amount,
+          dto.settlement_date || null,
+          method,
+          dto.cashbox_id || null,
+          dto.notes || null,
+          createdBy,
+        ],
+      );
+
+      // 2. Post the offsetting journal entry via the engine (cash only).
+      if (method === 'cash' && this.engine && dto.cashbox_id) {
+        const description =
+          `تسوية من موظف ${row.id}`.trim();
+        const res = await this.engine.recordTransaction({
+          kind: 'manual_adjustment',
+          reference_type: 'employee_settlement',
+          reference_id: String(row.id),
+          description,
+          gl_lines: [
+            {
+              resolve_from_cashbox_id: dto.cashbox_id,
+              debit: dto.amount,
+              cashbox_id: dto.cashbox_id,
+            },
+            {
+              account_code: '1123',
+              credit: dto.amount,
+              customer_id: userId,
+            },
+          ],
+          cash_movements: [
+            {
+              cashbox_id: dto.cashbox_id,
+              direction: 'in',
+              amount: dto.amount,
+              category: 'employee_settlement',
+              notes: description,
+            },
+          ],
+          user_id: createdBy,
+          em,
+        });
+        if (!res.ok) {
+          throw new BadRequestException(`فشل ترحيل التسوية: ${res.error}`);
+        }
+        if ('entry_id' in res && res.entry_id) {
+          await em.query(
+            `UPDATE employee_settlements SET journal_entry_id = $1::uuid WHERE id = $2`,
+            [res.entry_id, row.id],
+          );
+          row.journal_entry_id = res.entry_id;
+        }
+      }
+
+      return row;
+    });
   }
 }

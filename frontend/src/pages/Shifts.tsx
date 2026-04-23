@@ -21,8 +21,11 @@ import {
   Shift,
   OpenShiftPayload,
   ShiftSummary,
+  VarianceTreatment,
+  ApproveClosePayload,
 } from '@/api/shifts.api';
 import { cashDeskApi } from '@/api/cash-desk.api';
+import { usersApi } from '@/api/users.api';
 
 const EGP = (n: number | string) =>
   `${Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ج.م`;
@@ -1308,9 +1311,15 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 function PendingCloseInbox() {
   const qc = useQueryClient();
   const hasPermission = useAuthStore((s) => s.hasPermission);
-  const canDecide = hasPermission('shifts.close_approve');
+  const canDecide =
+    hasPermission('shifts.close_approve') ||
+    hasPermission('shifts.variance.approve');
   const [rejectTarget, setRejectTarget] = useState<Shift | null>(null);
   const [rejectReason, setRejectReason] = useState('');
+  // Shift currently being approved. When a pending shift has a non-zero
+  // variance we open this dialog so the manager picks a treatment before
+  // we POST /approve-close.
+  const [approveTarget, setApproveTarget] = useState<Shift | null>(null);
 
   const { data: pending = [] } = useQuery({
     queryKey: ['shifts-pending-close'],
@@ -1320,12 +1329,14 @@ function PendingCloseInbox() {
   });
 
   const approve = useMutation({
-    mutationFn: (id: string) => shiftsApi.approveClose(id),
+    mutationFn: ({ id, payload }: { id: string; payload: ApproveClosePayload }) =>
+      shiftsApi.approveClose(id, payload),
     onSuccess: () => {
       toast.success('تم اعتماد إقفال الوردية');
       qc.invalidateQueries({ queryKey: ['shifts-pending-close'] });
       qc.invalidateQueries({ queryKey: ['shifts'] });
       qc.invalidateQueries({ queryKey: ['shift-current'] });
+      setApproveTarget(null);
     },
     onError: (e: any) =>
       toast.error(e?.response?.data?.message || 'فشل الاعتماد'),
@@ -1387,7 +1398,17 @@ function PendingCloseInbox() {
             <div className="flex gap-2">
               <button
                 className="px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[11px]"
-                onClick={() => approve.mutate(s.id)}
+                onClick={() => {
+                  const expected = Number(s.expected_closing || 0);
+                  const actual = Number(s.close_requested_amount || 0);
+                  const variance = actual - expected;
+                  if (Math.abs(variance) < 0.01) {
+                    // No variance → no treatment needed, approve straight.
+                    approve.mutate({ id: s.id, payload: {} });
+                  } else {
+                    setApproveTarget(s);
+                  }
+                }}
                 disabled={approve.isPending || reject.isPending}
               >
                 اعتماد الإقفال
@@ -1465,6 +1486,204 @@ function PendingCloseInbox() {
           </div>
         </div>
       )}
+
+      {approveTarget && (
+        <ApproveVarianceDialog
+          shift={approveTarget}
+          onCancel={() => setApproveTarget(null)}
+          onConfirm={(payload) =>
+            approve.mutate({ id: approveTarget.id, payload })
+          }
+          pending={approve.isPending}
+        />
+      )}
+    </div>
+  );
+}
+
+/* ───────── Variance treatment dialog (migration 060) ─────────
+   Shown when a shift has a non-zero variance and the manager
+   presses "Approve Close". The manager must pick a treatment
+   before the POST fires. Shortage → charge employee / company
+   loss. Overage → revenue / suspense.
+*/
+function ApproveVarianceDialog({
+  shift,
+  onCancel,
+  onConfirm,
+  pending,
+}: {
+  shift: Shift;
+  onCancel: () => void;
+  onConfirm: (payload: ApproveClosePayload) => void;
+  pending: boolean;
+}) {
+  const expected = Number(shift.expected_closing || 0);
+  const actual = Number(shift.close_requested_amount || 0);
+  const variance = actual - expected;
+  const isShortage = variance < 0;
+
+  const [treatment, setTreatment] = useState<VarianceTreatment>(
+    isShortage ? 'company_loss' : 'revenue',
+  );
+  const [employeeId, setEmployeeId] = useState<string>(
+    (shift as any).close_requested_by || '',
+  );
+  const [notes, setNotes] = useState('');
+
+  const { data: users = [] } = useQuery({
+    queryKey: ['users-pickable'],
+    queryFn: () => usersApi.pickable(),
+    enabled: isShortage, // only needed when we might charge an employee
+    staleTime: 60_000,
+  });
+
+  const submit = () => {
+    if (treatment === 'charge_employee' && !employeeId) {
+      toast.error('اختر الموظف المسؤول');
+      return;
+    }
+    onConfirm({
+      variance_treatment: treatment,
+      variance_employee_id:
+        treatment === 'charge_employee' ? employeeId : undefined,
+      variance_notes: notes.trim() || undefined,
+    });
+  };
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/40 z-[65] flex items-center justify-center p-4"
+      onClick={() => !pending && onCancel()}
+    >
+      <div
+        className="bg-white rounded-2xl max-w-md w-full p-5 space-y-3"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div>
+          <h4 className="font-black text-slate-800">
+            اعتماد الوردية — معالجة الفروقات
+          </h4>
+          <p className="text-xs text-slate-500">
+            وردية {shift.shift_no} — فرق: {EGP(variance)} (
+            {isShortage ? 'عجز' : 'زيادة'})
+          </p>
+        </div>
+
+        <div className="text-xs space-y-2">
+          <div className="font-bold text-slate-600 mb-1">طريقة المعالجة</div>
+          {isShortage ? (
+            <>
+              <label className="flex items-start gap-2 cursor-pointer p-2 rounded border border-slate-200 hover:border-brand-400">
+                <input
+                  type="radio"
+                  checked={treatment === 'charge_employee'}
+                  onChange={() => setTreatment('charge_employee')}
+                  disabled={pending}
+                />
+                <div>
+                  <div className="font-bold">تحميل على الموظف (ذمة)</div>
+                  <div className="text-slate-500">
+                    Dr ذمم الموظفين 1123 · Cr الخزينة
+                  </div>
+                </div>
+              </label>
+              <label className="flex items-start gap-2 cursor-pointer p-2 rounded border border-slate-200 hover:border-brand-400">
+                <input
+                  type="radio"
+                  checked={treatment === 'company_loss'}
+                  onChange={() => setTreatment('company_loss')}
+                  disabled={pending}
+                />
+                <div>
+                  <div className="font-bold">خسارة الشركة</div>
+                  <div className="text-slate-500">
+                    Dr عجز ورديات 531 · Cr الخزينة
+                  </div>
+                </div>
+              </label>
+            </>
+          ) : (
+            <>
+              <label className="flex items-start gap-2 cursor-pointer p-2 rounded border border-slate-200 hover:border-brand-400">
+                <input
+                  type="radio"
+                  checked={treatment === 'revenue'}
+                  onChange={() => setTreatment('revenue')}
+                  disabled={pending}
+                />
+                <div>
+                  <div className="font-bold">إيراد زيادة وردية</div>
+                  <div className="text-slate-500">
+                    Dr الخزينة · Cr زيادة ورديات 421
+                  </div>
+                </div>
+              </label>
+              <label className="flex items-start gap-2 cursor-pointer p-2 rounded border border-slate-200 hover:border-brand-400">
+                <input
+                  type="radio"
+                  checked={treatment === 'suspense'}
+                  onChange={() => setTreatment('suspense')}
+                  disabled={pending}
+                />
+                <div>
+                  <div className="font-bold">حساب تسوية مؤقت</div>
+                  <div className="text-slate-500">
+                    Dr الخزينة · Cr التسوية المؤقتة 215
+                  </div>
+                </div>
+              </label>
+            </>
+          )}
+        </div>
+
+        {isShortage && treatment === 'charge_employee' && (
+          <div className="space-y-1">
+            <label className="text-xs font-bold text-slate-600">
+              الموظف المسؤول
+            </label>
+            <select
+              className="input w-full"
+              value={employeeId}
+              onChange={(e) => setEmployeeId(e.target.value)}
+              disabled={pending}
+            >
+              <option value="">اختر الموظف…</option>
+              {users.map((u: any) => (
+                <option key={u.id} value={u.id}>
+                  {u.full_name} ({u.username})
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        <div className="space-y-1">
+          <label className="text-xs font-bold text-slate-600">
+            ملاحظات (اختياري)
+          </label>
+          <textarea
+            rows={2}
+            className="input w-full"
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            disabled={pending}
+          />
+        </div>
+
+        <div className="flex justify-end gap-2 pt-2">
+          <button className="btn-ghost" onClick={onCancel} disabled={pending}>
+            إلغاء
+          </button>
+          <button
+            className="px-4 py-2 rounded-lg bg-emerald-600 text-white font-bold text-sm disabled:opacity-60"
+            onClick={submit}
+            disabled={pending}
+          >
+            {pending ? 'جاري الاعتماد…' : 'اعتماد + ترحيل القيد'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

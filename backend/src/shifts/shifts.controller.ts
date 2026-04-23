@@ -9,7 +9,11 @@ import {
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { ShiftsService } from './shifts.service';
-import { OpenShiftDto, CloseShiftDto } from './dto/shift.dto';
+import {
+  ApproveCloseDto,
+  CloseShiftDto,
+  OpenShiftDto,
+} from './dto/shift.dto';
 import { Roles, Permissions } from '../common/decorators/roles.decorator';
 import {
   CurrentUser,
@@ -38,7 +42,11 @@ export class ShiftsController {
     @Body() dto: CloseShiftDto,
     @CurrentUser() user: JwtUser,
   ) {
-    return this.svc.close(id, dto, user.userId);
+    // Pass the caller's effective permissions to the service so it can
+    // enforce `shifts.variance.approve` when the shift has a non-zero
+    // variance (migration 060). Cashiers without the flag get a clear
+    // 403 instead of silently posting to the GL.
+    return this.svc.close(id, dto, user.userId, user.permissions ?? []);
   }
 
   @Post(':id/request-close')
@@ -64,13 +72,18 @@ export class ShiftsController {
   }
 
   @Post(':id/approve-close')
-  @Permissions('shifts.close_approve')
-  @ApiOperation({ summary: 'اعتماد طلب إقفال وردية' })
+  // PermissionsGuard requires ALL listed, so we list a single code that
+  // covers the same audience (admin + manager). Migration 060 grants
+  // `shifts.variance.approve` to both roles; admin's `*` wildcard
+  // trivially passes anyway.
+  @Permissions('shifts.variance.approve')
+  @ApiOperation({ summary: 'اعتماد طلب إقفال وردية + اختيار معالجة الفروقات' })
   approveClose(
     @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ApproveCloseDto,
     @CurrentUser() user: JwtUser,
   ) {
-    return this.svc.approveClose(id, user.userId);
+    return this.svc.approveClose(id, user.userId, dto);
   }
 
   @Post(':id/reject-close')

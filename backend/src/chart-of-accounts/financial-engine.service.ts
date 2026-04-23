@@ -686,13 +686,29 @@ export class FinancialEngineService {
 
   /**
    * Shift variance at close — moves the counted cash into alignment with
-   * expected, posts DR Cash/Deficit · CR Surplus/Cash, and writes the
-   * matching cashbox_transactions row so cashboxes.current_balance
-   * agrees with the physical count.
+   * expected, posts the correct balanced entry, and writes the matching
+   * cashbox_transactions row so cashboxes.current_balance agrees with
+   * the physical count.
    *
    *   variance = actual_closing − expected_closing
-   *   variance > 0   → surplus: DR Cash (1111) · CR Shift Surplus (421)
-   *   variance < 0   → deficit: DR Shift Deficit (531) · CR Cash (1111)
+   *
+   * The `treatment` argument selects the accounting shape. When omitted
+   * the engine falls back to the legacy default (531/421) which preserves
+   * behaviour for callers that don't know about the new variance-
+   * treatment feature (migration 060).
+   *
+   * Shortage (variance < 0):
+   *   charge_employee → DR 1123 Employee Receivables   · CR Cash
+   *   company_loss    → DR 531  Shift Deficit          · CR Cash   (default)
+   *
+   * Overage (variance > 0):
+   *   revenue         → DR Cash · CR 421 Shift Surplus     (default)
+   *   suspense        → DR Cash · CR 215 Suspense Account
+   *
+   * For 'charge_employee' the caller MUST pass employee_id. The line
+   * on the Employee Receivables account is tagged with the employee
+   * UUID via customer_id so the journal row is traceable to the
+   * person on the account ledger.
    */
   async recordShiftVariance(args: {
     shift_id: string;
@@ -702,6 +718,15 @@ export class FinancialEngineService {
     user_id: string | null;
     entry_date?: string;
     em?: EntityManager;
+    /**
+     * Manager's decision (migration 060). Omit to keep legacy behaviour
+     * (company_loss on deficit, revenue on surplus).
+     */
+    treatment?: 'charge_employee' | 'company_loss' | 'revenue' | 'suspense';
+    /** Required iff treatment='charge_employee'. Tagged on the GL line. */
+    employee_id?: string;
+    /** Extra narrative shown on the journal entry. */
+    notes?: string;
   }): Promise<RecordTransactionResult> {
     const v = Number(args.variance) || 0;
     if (Math.abs(v) < 0.01) {
@@ -709,11 +734,19 @@ export class FinancialEngineService {
       return { ok: true, skipped: true, entry_id: '', reason: 'idempotent-replay' };
     }
     const abs = Math.abs(v);
-    const description =
-      `تسوية فروقات وردية ${args.shift_no ?? ''}`.trim();
+    const baseDesc = `تسوية فروقات وردية ${args.shift_no ?? ''}`.trim();
+    const description = args.notes ? `${baseDesc} — ${args.notes}` : baseDesc;
 
     if (v > 0) {
       // Surplus — physical cash is MORE than expected.
+      const treatment = args.treatment ?? 'revenue';
+      if (treatment !== 'revenue' && treatment !== 'suspense') {
+        return {
+          ok: false,
+          error: `invalid treatment '${treatment}' for surplus`,
+        };
+      }
+      const creditCode = treatment === 'suspense' ? '215' : '421';
       return this.recordTransaction({
         kind: 'shift_variance',
         reference_type: 'shift_variance',
@@ -726,7 +759,7 @@ export class FinancialEngineService {
             debit: abs,
             cashbox_id: args.cashbox_id,
           },
-          { account_code: '421', credit: abs },
+          { account_code: creditCode, credit: abs },
         ],
         cash_movements: [
           {
@@ -743,6 +776,20 @@ export class FinancialEngineService {
     }
 
     // Deficit — physical cash is LESS than expected.
+    const treatment = args.treatment ?? 'company_loss';
+    if (treatment !== 'company_loss' && treatment !== 'charge_employee') {
+      return {
+        ok: false,
+        error: `invalid treatment '${treatment}' for shortage`,
+      };
+    }
+    if (treatment === 'charge_employee' && !args.employee_id) {
+      return {
+        ok: false,
+        error: 'employee_id required for charge_employee treatment',
+      };
+    }
+    const debitCode = treatment === 'charge_employee' ? '1123' : '531';
     return this.recordTransaction({
       kind: 'shift_variance',
       reference_type: 'shift_variance',
@@ -750,7 +797,20 @@ export class FinancialEngineService {
       entry_date: args.entry_date,
       description,
       gl_lines: [
-        { account_code: '531', debit: abs },
+        {
+          account_code: debitCode,
+          debit: abs,
+          // Tag the line with the employee so account-ledger reports
+          // can slice by person. The `customer_id` column is a generic
+          // party tag (supports customer / supplier / employee) on
+          // post-051 installs; older installs silently drop it.
+          customer_id:
+            treatment === 'charge_employee' ? args.employee_id : undefined,
+          description:
+            treatment === 'charge_employee'
+              ? `عجز وردية محمَّل على الموظف`
+              : undefined,
+        },
         {
           resolve_from_cashbox_id: args.cashbox_id,
           credit: abs,

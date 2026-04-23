@@ -18,6 +18,7 @@ import {
   CreateRuleDto,
 } from './approval.service';
 import {
+  CreateDailyExpenseDto,
   CreateExpenseCategoryDto,
   CreateExpenseDto,
   ListExpensesDto,
@@ -150,6 +151,28 @@ export class AccountingController {
   @ApiOperation({ summary: 'Create a new expense' })
   createExpense(@Body() dto: CreateExpenseDto, @Req() req: any) {
     return this.service.createExpense(dto, req.user.sub ?? req.user.id);
+  }
+
+  /**
+   * Daily Expenses screen (migration 060). Requires the slim
+   * `expenses.daily.create` permission — granted to admin + manager +
+   * accountant (and the admin wildcard). Enforces an explicit
+   * employee link on every row so the Employee Financial Ledger
+   * can surface the entry.
+   */
+  @Post('expenses/daily')
+  @Roles('admin', 'manager', 'accountant', 'cashier')
+  @Permissions('expenses.daily.create')
+  @ApiOperation({ summary: 'تسجيل مصروف يومي مرتبط بالموظف المسؤول' })
+  createDailyExpense(
+    @Body() dto: CreateDailyExpenseDto,
+    @Req() req: any,
+  ) {
+    const userId = req.user.sub ?? req.user.id ?? req.user.userId;
+    const permissions: string[] = Array.isArray(req.user?.permissions)
+      ? req.user.permissions
+      : [];
+    return this.service.createDailyExpense(dto, userId, permissions);
   }
 
   @Patch('expenses/:id')

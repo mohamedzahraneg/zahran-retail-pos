@@ -35,6 +35,7 @@ import Budgets from '@/pages/Budgets';
 import FinancialControls from '@/pages/FinancialControls';
 import OpeningBalance from '@/pages/OpeningBalance';
 import RecurringExpenses from '@/pages/RecurringExpenses';
+import DailyExpenses from '@/pages/DailyExpenses';
 import CustomerGroups from '@/pages/CustomerGroups';
 import Settings from '@/pages/Settings';
 import Users from '@/pages/Users';
@@ -211,6 +212,14 @@ export default function App() {
           element={
             <ProtectedRoute permissions={['recurring_expenses.manage']}>
               <RecurringExpenses />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="daily-expenses"
+          element={
+            <ProtectedRoute permissions={['expenses.daily.create']}>
+              <DailyExpenses />
             </ProtectedRoute>
           }
         />

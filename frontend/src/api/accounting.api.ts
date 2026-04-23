@@ -131,6 +131,24 @@ export const accountingApi = {
     ),
   createExpense: (body: Partial<Expense>) =>
     unwrap<Expense>(api.post('/accounting/expenses', body)),
+
+  /**
+   * Daily Expenses endpoint (migration 060) — requires explicit
+   * `employee_user_id`. Server enforces that non-admin callers can
+   * only book expenses against their own user id.
+   */
+  createDailyExpense: (body: {
+    warehouse_id: string;
+    cashbox_id?: string;
+    category_id: string;
+    amount: number;
+    payment_method?: 'cash' | 'card' | 'transfer' | 'wallet' | 'mixed';
+    expense_date?: string;
+    description?: string;
+    receipt_url?: string;
+    vendor_name?: string;
+    employee_user_id: string;
+  }) => unwrap<Expense>(api.post('/accounting/expenses/daily', body)),
   updateExpense: (id: string, body: Partial<Expense>) =>
     unwrap<Expense>(api.patch(`/accounting/expenses/${id}`, body)),
   approveExpense: (id: string) =>

@@ -56,6 +56,18 @@ class DeductionDto {
   @IsOptional() @IsDateString() deduction_date?: string;
 }
 
+class SettlementDto {
+  @IsNumber() @Min(0.01) amount: number;
+  @IsOptional() @IsDateString() settlement_date?: string;
+  @IsOptional() @IsIn(['cash', 'bank', 'payroll_deduction', 'other']) method?:
+    | 'cash'
+    | 'bank'
+    | 'payroll_deduction'
+    | 'other';
+  @IsOptional() @IsUUID() cashbox_id?: string;
+  @IsOptional() @IsString() notes?: string;
+}
+
 class TaskDto {
   @IsUUID() user_id: string;
   @IsString() @MinLength(1) title: string;
@@ -212,6 +224,37 @@ export class EmployeesController {
   @Permissions('employee.team.view')
   userDashboard(@Param('id', ParseUUIDPipe) id: string) {
     return this.svc.myDashboard(id);
+  }
+
+  // ── Financial Ledger (migration 060) ─────────────────────────────
+  @Get('me/ledger')
+  @Permissions('employee.dashboard.view')
+  myLedger(
+    @CurrentUser() user: JwtUser,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    return this.svc.financialLedger(user.userId, from, to);
+  }
+
+  @Get(':id/ledger')
+  @Permissions('employee.ledger.view')
+  ledger(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    return this.svc.financialLedger(id, from, to);
+  }
+
+  @Post(':id/settlements')
+  @Permissions('employee.ledger.view')
+  addSettlement(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: SettlementDto,
+    @CurrentUser() user: JwtUser,
+  ) {
+    return this.svc.recordSettlement(id, dto, user.userId);
   }
 
   @Get('me/history')
