@@ -162,7 +162,8 @@ je_totals AS (
          MAX(CASE WHEN jl.credit > 0 AND a.account_type = 'asset'   THEN jl.credit END) AS cr_cash,
          MAX(CASE WHEN jl.debit > 0  AND a.account_type = 'expense' THEN a.code    END) AS gl_account_code,
          MAX(CASE WHEN jl.debit > 0  AND a.account_type = 'expense' THEN a.name_ar END) AS gl_account_name_ar,
-         MAX(CASE WHEN jl.credit > 0                                THEN jl.cashbox_id END) AS gl_cashbox_id
+         -- PostgreSQL has no MAX(uuid); cast through text to pick one.
+         MAX(CASE WHEN jl.credit > 0                                THEN jl.cashbox_id::text END)::uuid AS gl_cashbox_id
     FROM live_je
     JOIN journal_lines jl ON jl.entry_id = live_je.entry_id
     JOIN chart_of_accounts a ON a.id = jl.account_id
