@@ -413,8 +413,8 @@ export class ShiftsService {
           variance_treatment       = COALESCE($11::varchar, variance_treatment),
           variance_employee_id     = COALESCE($12::uuid,    variance_employee_id),
           variance_notes           = COALESCE($13::text,    variance_notes),
-          variance_decided_by      = COALESCE(variance_decided_by, $14::uuid),
-          variance_decided_at      = COALESCE(variance_decided_at, CASE WHEN $11::varchar IS NOT NULL THEN NOW() END)
+          variance_approved_by     = COALESCE(variance_approved_by, $14::uuid),
+          variance_approved_at     = COALESCE(variance_approved_at, CASE WHEN $11::varchar IS NOT NULL THEN NOW() END)
         WHERE id = $15::uuid
         RETURNING *
         `,
