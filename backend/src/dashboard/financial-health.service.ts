@@ -111,7 +111,7 @@ export class FinancialHealthService {
     return this.ds.query(
       `SELECT event_id, event_type, source_service, reference_type, reference_id,
               amount, debit_total, credit_total, is_engine, is_legacy,
-              session_user, meta, created_at
+              session_user_name, meta, created_at
          FROM financial_event_stream
         ORDER BY event_id DESC
         LIMIT ${cap}`,
