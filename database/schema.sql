@@ -196,4 +196,7 @@
 \echo '== 061 Shift variance spec alignment (approved_*, variance_amount/type) =='
 \ir migrations/061_shift_variance_spec_alignment.sql
 
+\echo '== 062 Drop orphan variance_decided_* columns =='
+\ir migrations/062_drop_orphan_variance_decided_columns.sql
+
 \echo '== Schema installed successfully ✅ =='
