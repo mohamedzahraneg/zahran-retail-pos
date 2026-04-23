@@ -202,4 +202,7 @@
 \echo '== 063 Bank-grade immutable ledger (audit + DELETE block + fiscal lock + bypass alerts) =='
 \ir migrations/063_bank_grade_immutable_ledger.sql
 
+\echo '== 064 Financial control tower (event stream + anomalies + health view) =='
+\ir migrations/064_financial_control_tower.sql
+
 \echo '== Schema installed successfully ✅ =='
