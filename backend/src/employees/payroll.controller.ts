@@ -168,12 +168,26 @@ export class PayrollController {
         r.expenses,
         r.advances,
         r.payouts,
-        -- Signed balance: credits - debits
+        -- Company's obligation side (what we owe the employee)
+        (r.wages + r.bonuses + r.expenses)::numeric(14,2)          AS liabilities,
+        -- Employee's obligation side (what they owe us)
+        (r.deductions + r.advances + r.payouts)::numeric(14,2)     AS receivables,
+        -- Signed net balance (positive = company owes; negative = employee owes)
+        ((r.wages + r.bonuses + r.expenses)
+         - (r.deductions + r.advances + r.payouts))::numeric(14,2) AS net_balance,
+        -- Back-compat alias used elsewhere
         ((r.wages + r.bonuses + r.expenses)
          - (r.deductions + r.advances + r.payouts))::numeric(14,2) AS balance,
-        -- What the employee owes (AR perspective)
         GREATEST(0, ((r.deductions + r.advances + r.payouts)
                      - (r.wages + r.bonuses + r.expenses)))::numeric(14,2) AS outstanding,
+        -- Cross-source transaction count (drives the UI "X حركة" stat)
+        (
+          COALESCE((SELECT COUNT(*) FROM employee_transactions t WHERE t.employee_id = r.employee_id), 0) +
+          COALESCE((SELECT COUNT(*) FROM employee_deductions d WHERE d.user_id = r.employee_id), 0) +
+          COALESCE((SELECT COUNT(*) FROM employee_bonuses b    WHERE b.user_id = r.employee_id), 0) +
+          COALESCE((SELECT COUNT(*) FROM employee_settlements s WHERE s.user_id = r.employee_id), 0) +
+          COALESCE((SELECT COUNT(*) FROM expenses e WHERE e.employee_user_id = r.employee_id AND e.is_advance), 0)
+        )::int AS txn_count,
         r.last_txn_date,
         -- COA link — every employee balance lives under 1123
         coa.code     AS coa_account_code,
