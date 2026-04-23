@@ -205,6 +205,33 @@ export class FinancialEngineService {
     const run = async (em: EntityManager): Promise<RecordTransactionResult> => {
       const q: QueryFn = (sql, params) => em.query(sql, params);
 
+      // ── Financial lockdown gate (migration 068). When the admin
+      //    has toggled `system_controls.financial_lockdown = TRUE`, the
+      //    engine refuses to post unless the session explicitly carries
+      //    `app.bypass_lockdown = 'true'` (admin-only escape hatch).
+      //    Nothing auto-sets this flag — it's a manual circuit-breaker.
+      try {
+        const [lock] = await q(
+          `SELECT financial_lockdown, lock_reason FROM system_controls WHERE id = 1`,
+        );
+        if (lock?.financial_lockdown) {
+          const bypass = await q(
+            `SELECT current_setting('app.bypass_lockdown', TRUE) AS v`,
+          );
+          if (bypass?.[0]?.v !== 'true') {
+            return {
+              ok: false,
+              error: `SYSTEM IN FINANCIAL LOCKDOWN${
+                lock.lock_reason ? ` — ${lock.lock_reason}` : ''
+              } (migration 068)`,
+            };
+          }
+        }
+      } catch {
+        // system_controls table may not exist on pre-068 installs —
+        // fall through and proceed.
+      }
+
       // ── Raise the "engine context" GUC so migration 058/063's write
       //    guards let us touch journal_entries / journal_lines /
       //    cashboxes.current_balance. LOCAL scope: reverts when the

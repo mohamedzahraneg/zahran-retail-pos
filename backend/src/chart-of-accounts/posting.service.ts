@@ -1015,12 +1015,14 @@ export class AccountingPostingService {
       ? (sql: string, params?: any[]) => em.query(sql, params)
       : (sql: string, params?: any[]) => this.ds.query(sql, params);
     try {
-      // Raise the engine-context GUC so migration 058's guard triggers
-      // allow this service to INSERT into journal_entries /
-      // journal_lines. This legacy path is grandfathered in because it
-      // already goes through the same safe() idempotency guard the
-      // engine uses. Session-local; reverts at end of transaction.
-      await q(`SET LOCAL app.engine_context = 'on'`).catch(() => undefined);
+      // Raise the engine-context GUC so migration 058/063/068's write
+      // guards allow this service to INSERT into journal_entries /
+      // journal_lines. Uses the `service:*` identity pattern introduced
+      // in migration 068 — the strict guard rejects bare 'on' now.
+      // Every write from this legacy wrapper still drops an
+      // engine_bypass_alerts row for observability until phase 2.2-2.4
+      // migrates each post method to FinancialEngineService.
+      await q(`SET LOCAL app.engine_context = 'service:posting.service'`).catch(() => undefined);
 
       // Idempotency guard — only count LIVE entries (posted, non-void).
       // A voided entry from a previous reset should NOT block re-posting.

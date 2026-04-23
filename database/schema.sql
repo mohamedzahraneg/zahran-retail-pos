@@ -214,4 +214,7 @@
 \echo '== 067 Drop leftover DEFERRABLE anomaly unique constraint (066 name guess miss) =='
 \ir migrations/067_drop_deferrable_anomaly_unique.sql
 
+\echo '== 068 Financial integrity enforcement (strict guard + lockdown + risk flags) =='
+\ir migrations/068_financial_integrity_enforcement.sql
+
 \echo '== Schema installed successfully ✅ =='
