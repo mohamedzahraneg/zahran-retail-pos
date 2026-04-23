@@ -2,6 +2,18 @@ import { api, unwrap } from './client';
 
 export type ShiftStatus = 'open' | 'closed' | 'pending_close';
 
+export type VarianceTreatment =
+  | 'charge_employee'
+  | 'company_loss'
+  | 'revenue'
+  | 'suspense';
+
+export interface ApproveClosePayload {
+  variance_treatment?: VarianceTreatment;
+  variance_employee_id?: string;
+  variance_notes?: string;
+}
+
 export interface PaymentBreakdown {
   cash: { amount: number; count: number };
   card: { amount: number; count: number };
@@ -92,6 +104,13 @@ export interface Shift {
   close_approved_at?: string | null;
   close_approved_by?: string | null;
   close_rejection_reason?: string | null;
+  // Variance treatment metadata (migration 060)
+  variance_treatment?: VarianceTreatment | null;
+  variance_employee_id?: string | null;
+  variance_notes?: string | null;
+  variance_journal_entry_id?: string | null;
+  variance_decided_by?: string | null;
+  variance_decided_at?: string | null;
   invoices?: Array<{
     id: string;
     invoice_no: string;
@@ -150,9 +169,9 @@ export const shiftsApi = {
       api.get('/shifts/pending-close'),
     ),
 
-  approveClose: (id: string) =>
+  approveClose: (id: string, payload: ApproveClosePayload = {}) =>
     unwrap<{ approved: true; shift: Shift }>(
-      api.post(`/shifts/${id}/approve-close`, {}),
+      api.post(`/shifts/${id}/approve-close`, payload),
     ),
 
   rejectClose: (id: string, reason: string) =>

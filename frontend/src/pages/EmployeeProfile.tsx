@@ -410,8 +410,198 @@ function EmployeeDashboardBody({ data }: { data: EmployeeDashboard }) {
         <RequestsCard requests={requests} />
       </div>
 
+      {/* ─── Financial Ledger (migration 060) ─── */}
+      <FinancialLedgerCard userId={profile.id} />
+
       {/* ─── Daily history ─── */}
       <HistoryCard userId={profile.id} />
+    </div>
+  );
+}
+
+/* ───────── Financial Ledger card ─────────
+   Unified view of everything that shifts the employee's outstanding
+   balance with the company: shift shortages charged, cashbox advances,
+   manual deductions, settlements paid back, and bonuses (informational
+   only; bonuses live on the payroll side and don't affect the
+   receivable). The running balance is computed server-side so the
+   header tile matches whatever v_employee_ledger says.
+*/
+function FinancialLedgerCard({ userId }: { userId?: string }) {
+  const authUser = useAuthStore((s) => s.user);
+  const isSelf = !userId || userId === authUser?.id;
+  const { data, isLoading } = useQuery({
+    queryKey: ['employee-ledger', userId ?? 'me'],
+    queryFn: () =>
+      isSelf ? employeesApi.myLedger() : employeesApi.userLedger(userId!),
+    refetchInterval: 60_000,
+  });
+
+  if (isLoading) {
+    return (
+      <div className="card p-4 text-center text-slate-500 text-sm">
+        جارٍ تحميل الملف المالي…
+      </div>
+    );
+  }
+  if (!data) return null;
+
+  const fmt = (n: number) =>
+    Number(n || 0).toLocaleString('en-US', {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    });
+
+  const entryLabel = (t: string) =>
+    ({
+      shift_shortage: 'عجز وردية',
+      advance: 'سلفة',
+      deduction: 'خصم',
+      penalty: 'مخالفة',
+      settlement: 'سداد',
+      bonus: 'حافز',
+    } as Record<string, string>)[t] ?? t;
+
+  return (
+    <div className="card p-5 space-y-4">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <h3 className="font-black text-slate-800">
+          الملف المالي — الرصيد المستحق
+        </h3>
+        <div
+          className={`px-3 py-1.5 rounded-lg text-sm font-black tabular-nums ${
+            data.closing_balance > 0.01
+              ? 'bg-rose-100 text-rose-700 border border-rose-200'
+              : data.closing_balance < -0.01
+                ? 'bg-emerald-100 text-emerald-700 border border-emerald-200'
+                : 'bg-slate-100 text-slate-700 border border-slate-200'
+          }`}
+        >
+          {data.closing_balance > 0.01
+            ? `مديون للشركة: ${fmt(data.closing_balance)} ج.م`
+            : data.closing_balance < -0.01
+              ? `له رصيد: ${fmt(-data.closing_balance)} ج.م`
+              : 'مُسوّى بالكامل'}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs">
+        <LedgerTile label="عجز ورديات" value={data.totals.shortages} tone="rose" />
+        <LedgerTile label="سلف" value={data.totals.advances} tone="amber" />
+        <LedgerTile
+          label="خصومات يدوية"
+          value={data.totals.manual_deductions}
+          tone="slate"
+        />
+        <LedgerTile
+          label="تسويات"
+          value={data.totals.settlements}
+          tone="emerald"
+        />
+        <LedgerTile label="حوافز" value={data.totals.bonuses} tone="indigo" />
+      </div>
+
+      {data.entries.length === 0 ? (
+        <div className="text-center text-slate-500 text-xs py-6">
+          لا توجد حركات مالية في الفترة المحددة.
+        </div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="bg-slate-50 text-slate-600 text-[11px]">
+                <th className="p-2 text-right">التاريخ</th>
+                <th className="p-2 text-right">النوع</th>
+                <th className="p-2 text-right">الوصف</th>
+                <th className="p-2 text-center">المبلغ</th>
+                <th className="p-2 text-center">الرصيد</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.entries.map((e) => (
+                <tr
+                  key={`${e.reference_type}-${e.reference_id}`}
+                  className="border-t border-slate-100"
+                >
+                  <td className="p-2 tabular-nums font-mono">
+                    {e.event_date}
+                  </td>
+                  <td className="p-2">
+                    <span
+                      className={`chip text-[10px] ${
+                        e.entry_type === 'settlement'
+                          ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                          : e.entry_type === 'shift_shortage'
+                            ? 'bg-rose-50 text-rose-700 border-rose-200'
+                            : e.entry_type === 'advance'
+                              ? 'bg-amber-50 text-amber-700 border-amber-200'
+                              : e.entry_type === 'bonus'
+                                ? 'bg-indigo-50 text-indigo-700 border-indigo-200'
+                                : 'bg-slate-50 text-slate-700 border-slate-200'
+                      }`}
+                    >
+                      {entryLabel(e.entry_type)}
+                    </span>
+                  </td>
+                  <td className="p-2 text-slate-700">
+                    {e.description}
+                    {e.journal_entry_id && (
+                      <span className="text-[10px] text-slate-400 mr-2 font-mono">
+                        JE
+                      </span>
+                    )}
+                  </td>
+                  <td
+                    className={`p-2 text-center tabular-nums font-bold ${
+                      e.amount_owed_delta > 0
+                        ? 'text-rose-700'
+                        : e.amount_owed_delta < 0
+                          ? 'text-emerald-700'
+                          : 'text-slate-500'
+                    }`}
+                  >
+                    {e.amount_owed_delta > 0 ? '+' : ''}
+                    {fmt(e.amount_owed_delta)}
+                  </td>
+                  <td className="p-2 text-center tabular-nums font-bold">
+                    {fmt(e.running_balance)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LedgerTile({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: number;
+  tone: 'rose' | 'amber' | 'slate' | 'emerald' | 'indigo';
+}) {
+  const toneCls: Record<string, string> = {
+    rose: 'bg-rose-50 border-rose-200 text-rose-700',
+    amber: 'bg-amber-50 border-amber-200 text-amber-700',
+    slate: 'bg-slate-50 border-slate-200 text-slate-700',
+    emerald: 'bg-emerald-50 border-emerald-200 text-emerald-700',
+    indigo: 'bg-indigo-50 border-indigo-200 text-indigo-700',
+  };
+  return (
+    <div className={`rounded-lg p-2 border ${toneCls[tone]}`}>
+      <div className="font-bold mb-0.5">{label}</div>
+      <div className="tabular-nums font-black text-sm">
+        {Number(value || 0).toLocaleString('en-US', {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        })}{' '}
+        ج.م
+      </div>
     </div>
   );
 }

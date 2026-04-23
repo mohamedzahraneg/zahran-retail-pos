@@ -199,4 +199,71 @@ export const employeesApi = {
         params: from || to ? { from, to } : undefined,
       }),
     ),
+
+  // ── Financial ledger (migration 060) ─────────────────────────────
+  myLedger: (from?: string, to?: string) =>
+    unwrap<EmployeeLedger>(
+      api.get('/employees/me/ledger', {
+        params: from || to ? { from, to } : undefined,
+      }),
+    ),
+
+  userLedger: (id: string, from?: string, to?: string) =>
+    unwrap<EmployeeLedger>(
+      api.get(`/employees/${id}/ledger`, {
+        params: from || to ? { from, to } : undefined,
+      }),
+    ),
+
+  addSettlement: (
+    id: string,
+    body: {
+      amount: number;
+      settlement_date?: string;
+      method?: 'cash' | 'bank' | 'payroll_deduction' | 'other';
+      cashbox_id?: string;
+      notes?: string;
+    },
+  ) => unwrap<any>(api.post(`/employees/${id}/settlements`, body)),
 };
+
+export interface EmployeeLedgerEntry {
+  event_date: string;
+  entry_type:
+    | 'shift_shortage'
+    | 'advance'
+    | 'deduction'
+    | 'penalty'
+    | 'settlement'
+    | 'bonus';
+  description: string;
+  amount_owed_delta: number;
+  gross_amount: number;
+  reference_type: string;
+  reference_id: string;
+  shift_id: string | null;
+  journal_entry_id: string | null;
+  running_balance: number;
+  notes: string | null;
+  created_at: string;
+}
+
+export interface EmployeeLedger {
+  user: {
+    id: string;
+    full_name: string;
+    username: string;
+    employee_no: string;
+    job_title?: string;
+  };
+  opening_balance: number;
+  closing_balance: number;
+  entries: EmployeeLedgerEntry[];
+  totals: {
+    shortages: number;
+    advances: number;
+    manual_deductions: number;
+    settlements: number;
+    bonuses: number;
+  };
+}

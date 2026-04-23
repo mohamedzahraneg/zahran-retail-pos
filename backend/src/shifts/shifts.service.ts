@@ -1,11 +1,17 @@
 import {
   Injectable,
   BadRequestException,
+  ForbiddenException,
   NotFoundException,
   Optional,
 } from '@nestjs/common';
 import { DataSource } from 'typeorm';
-import { OpenShiftDto, CloseShiftDto } from './dto/shift.dto';
+import {
+  ApproveCloseDto,
+  CloseShiftDto,
+  OpenShiftDto,
+  VarianceTreatment,
+} from './dto/shift.dto';
 import { AccountingPostingService } from '../chart-of-accounts/posting.service';
 import { FinancialEngineService } from '../chart-of-accounts/financial-engine.service';
 
@@ -287,7 +293,12 @@ export class ShiftsService {
     };
   }
 
-  async close(id: string, dto: CloseShiftDto, userId: string) {
+  async close(
+    id: string,
+    dto: CloseShiftDto,
+    userId: string,
+    userPermissions: string[] = [],
+  ) {
     const [shift] = await this.ds.query(
       `SELECT * FROM shifts WHERE id = $1`,
       [id],
@@ -301,6 +312,68 @@ export class ShiftsService {
     }
 
     const summary = await this.computeSummary(shift);
+    const variance = Number(dto.actual_closing) - summary.expected_closing;
+    const hasVariance = Math.abs(variance) >= 0.01;
+
+    // ── Variance treatment resolution ─────────────────────────────────
+    // Priority:
+    //   1. Explicit treatment on the incoming DTO (admin/manager path)
+    //   2. Treatment already stored on the shift row (set by approveClose)
+    //   3. Legacy default (company_loss on deficit, revenue on surplus)
+    //
+    // Permission gate: `shifts.variance.approve` is required to post a
+    // variance. Cashiers close with zero variance via `request-close`
+    // → auto-close; any non-zero variance goes through pending_close and
+    // a manager decides. That keeps cashier hands off the GL.
+    const storedTreatment: VarianceTreatment | null =
+      (shift.variance_treatment as VarianceTreatment) ?? null;
+    const resolvedTreatment: VarianceTreatment | null = hasVariance
+      ? (dto.variance_treatment ?? storedTreatment ?? null)
+      : null;
+    const resolvedEmployeeId: string | null =
+      dto.variance_employee_id ?? shift.variance_employee_id ?? null;
+    const resolvedNotes: string | null =
+      dto.variance_notes ?? shift.variance_notes ?? null;
+
+    if (hasVariance) {
+      const canApproveVariance =
+        userPermissions.includes('*') ||
+        userPermissions.includes('shifts.*') ||
+        userPermissions.includes('shifts.variance.approve') ||
+        userPermissions.includes('shifts.close_approve');
+      if (!canApproveVariance) {
+        throw new ForbiddenException(
+          'لا يمكنك ترحيل فروقات الوردية — اطلب الإقفال ليعتمده المدير',
+        );
+      }
+      if (!resolvedTreatment) {
+        throw new BadRequestException(
+          'الوردية بها فروقات — يجب تحديد طريقة المعالجة (تحميل موظف / خسارة شركة / إيراد / تسوية)',
+        );
+      }
+      // Validate treatment matches the sign of the variance.
+      const isShortage = variance < 0;
+      const validShortage =
+        resolvedTreatment === 'charge_employee' ||
+        resolvedTreatment === 'company_loss';
+      const validOverage =
+        resolvedTreatment === 'revenue' || resolvedTreatment === 'suspense';
+      if (isShortage && !validShortage) {
+        throw new BadRequestException(
+          `المعالجة '${resolvedTreatment}' غير صالحة لعجز الوردية`,
+        );
+      }
+      if (!isShortage && !validOverage) {
+        throw new BadRequestException(
+          `المعالجة '${resolvedTreatment}' غير صالحة لزيادة الوردية`,
+        );
+      }
+      if (resolvedTreatment === 'charge_employee' && !resolvedEmployeeId) {
+        throw new BadRequestException(
+          'تحميل الموظف يتطلب اختيار الموظف المسؤول',
+        );
+      }
+    }
 
     // Build a notes field that preserves any user note AND appends the cash
     // denomination breakdown for the audit trail.
@@ -317,77 +390,125 @@ export class ShiftsService {
       notesOut = notesOut ? `${notesOut}\n\n${breakdown}` : breakdown;
     }
 
-    // Every parameter is explicitly cast so Postgres can parse the statement
-    // even when some values arrive as null (driver can't infer type there).
-    const [updated] = await this.ds.query(
-      `
-      UPDATE shifts SET
-        status           = 'closed',
-        closed_by        = $1::uuid,
-        closed_at        = NOW(),
-        actual_closing   = $2::numeric,
-        expected_closing = $3::numeric,
-        total_sales      = $4::numeric,
-        total_returns    = $5::numeric,
-        total_expenses   = $6::numeric,
-        total_cash_in    = $7::numeric,
-        total_cash_out   = $8::numeric,
-        invoice_count    = $9::int,
-        notes            = COALESCE($10::text, notes)
-      WHERE id = $11::uuid
-      RETURNING *
-      `,
-      [
-        userId,
-        Number(dto.actual_closing) || 0,
-        Number(summary.expected_closing) || 0,
-        Number(summary.total_sales) || 0,
-        Number(summary.total_returns) || 0,
-        Number(summary.total_expenses) || 0,
-        Number(summary.total_cash_in) || 0,
-        Number(summary.total_cash_out) || 0,
-        Number(summary.invoice_count) || 0,
-        notesOut,
-        id,
-      ],
-    );
-    // Auto-post shift variance — BOTH cashbox_transactions AND the GL
-    // entry. The old code was fire-and-forget AND only wrote the GL
-    // side; cashboxes.current_balance was never aligned with the
-    // counted cash, so every surplus/deficit drifted the two (audit
-    // finding H1). Awaiting is the correct behaviour — if the GL post
-    // fails the caller should know.
-    const variance = Number(dto.actual_closing) - summary.expected_closing;
-    if (Math.abs(variance) >= 0.01 && this.engine) {
-      const res = await this.engine.recordShiftVariance({
-        shift_id: id,
-        shift_no: updated?.shift_no,
-        cashbox_id: shift.cashbox_id,
-        variance,
-        user_id: userId,
-      });
-      if (!res.ok) {
-        // Log but don't throw — the shift is already closed in the DB
-        // and the physical variance is recorded on the shift row
-        // itself. The reconciliation layer will retry.
-        // eslint-disable-next-line no-console
-        console.error(`shift variance post failed: ${res.error}`);
-      }
-    } else {
-      // Legacy fallback (engine not wired): use the old posting service.
-      await this.posting
-        ?.postShiftClose(id, userId)
-        .catch(() => undefined);
-    }
+    // ── Everything below runs in a single DB transaction so the
+    //    closing UPDATE, the engine post, the variance metadata
+    //    write, and the optional employee_deductions insert commit
+    //    together or roll back together. No half-states. ─────────────
+    return this.ds.transaction(async (em) => {
+      const [updated] = await em.query(
+        `
+        UPDATE shifts SET
+          status           = 'closed',
+          closed_by        = $1::uuid,
+          closed_at        = NOW(),
+          actual_closing   = $2::numeric,
+          expected_closing = $3::numeric,
+          total_sales      = $4::numeric,
+          total_returns    = $5::numeric,
+          total_expenses   = $6::numeric,
+          total_cash_in    = $7::numeric,
+          total_cash_out   = $8::numeric,
+          invoice_count    = $9::int,
+          notes            = COALESCE($10::text, notes),
+          variance_treatment       = COALESCE($11::varchar, variance_treatment),
+          variance_employee_id     = COALESCE($12::uuid,    variance_employee_id),
+          variance_notes           = COALESCE($13::text,    variance_notes),
+          variance_decided_by      = COALESCE(variance_decided_by, $14::uuid),
+          variance_decided_at      = COALESCE(variance_decided_at, CASE WHEN $11::varchar IS NOT NULL THEN NOW() END)
+        WHERE id = $15::uuid
+        RETURNING *
+        `,
+        [
+          userId,
+          Number(dto.actual_closing) || 0,
+          Number(summary.expected_closing) || 0,
+          Number(summary.total_sales) || 0,
+          Number(summary.total_returns) || 0,
+          Number(summary.total_expenses) || 0,
+          Number(summary.total_cash_in) || 0,
+          Number(summary.total_cash_out) || 0,
+          Number(summary.invoice_count) || 0,
+          notesOut,
+          resolvedTreatment,
+          resolvedEmployeeId,
+          resolvedNotes,
+          hasVariance ? userId : null,
+          id,
+        ],
+      );
 
-    return {
-      ...updated,
-      summary: {
-        ...summary,
-        actual_closing: Number(dto.actual_closing),
-        variance,
-      },
-    };
+      let entryId: string | null = null;
+      if (hasVariance && this.engine) {
+        const res = await this.engine.recordShiftVariance({
+          shift_id: id,
+          shift_no: updated?.shift_no,
+          cashbox_id: shift.cashbox_id,
+          variance,
+          user_id: userId,
+          em, // ride on the same transaction
+          treatment: resolvedTreatment ?? undefined,
+          employee_id: resolvedEmployeeId ?? undefined,
+          notes: resolvedNotes ?? undefined,
+        });
+        if (!res.ok) {
+          // Rolling back — the shift mustn't be closed if the GL post
+          // fails. Better a loud failure than a silent drift.
+          throw new BadRequestException(
+            `فشل ترحيل فروقات الوردية: ${res.error}`,
+          );
+        }
+        if ('entry_id' in res && res.entry_id) {
+          entryId = res.entry_id;
+          await em.query(
+            `UPDATE shifts SET variance_journal_entry_id = $1::uuid WHERE id = $2::uuid`,
+            [entryId, id],
+          );
+          (updated as any).variance_journal_entry_id = entryId;
+        }
+
+        // Shortage charged to an employee → mirror into
+        // employee_deductions so the profile's Financial Ledger tab
+        // shows the row with a link back to the shift AND the
+        // journal entry.
+        if (
+          variance < 0 &&
+          resolvedTreatment === 'charge_employee' &&
+          resolvedEmployeeId
+        ) {
+          await em.query(
+            `INSERT INTO employee_deductions
+               (user_id, amount, reason, deduction_date, created_by,
+                source, shift_id, journal_entry_id, is_recoverable, notes)
+             VALUES ($1, $2, $3, CURRENT_DATE, $4,
+                     'shift_shortage', $5, $6, TRUE, $7)`,
+            [
+              resolvedEmployeeId,
+              Math.abs(variance),
+              `عجز وردية ${updated?.shift_no ?? ''}`.trim(),
+              userId,
+              id,
+              entryId,
+              resolvedNotes,
+            ],
+          );
+        }
+      } else if (hasVariance) {
+        // Legacy fallback: engine not wired. Keep existing behaviour
+        // for dev/test installs that stub the engine.
+        await this.posting
+          ?.postShiftClose(id, userId)
+          .catch(() => undefined);
+      }
+
+      return {
+        ...updated,
+        summary: {
+          ...summary,
+          actual_closing: Number(dto.actual_closing),
+          variance,
+        },
+      };
+    });
   }
 
   // ── Request / approve close-out flow ───────────────────────────────
@@ -420,11 +541,15 @@ export class ShiftsService {
     const variance = actual - Number(summary.expected_closing || 0);
 
     if (Math.abs(variance) < 0.01) {
-      // Matches exactly — skip review, close immediately.
+      // Matches exactly — skip review, close immediately. We pass
+      // `shifts.variance.approve` as an effective permission because
+      // zero-variance closes never hit the variance guard; the flag
+      // is only consulted when there IS a variance to post.
       const result = await this.close(
         id,
         { actual_closing: actual, notes: dto.notes || '' } as any,
         userId,
+        ['shifts.variance.approve'],
       );
       return { pending: false, auto_closed: true, shift: result };
     }
@@ -449,8 +574,17 @@ export class ShiftsService {
     };
   }
 
-  /** Admin approves → runs the real close() with the requested amount. */
-  async approveClose(id: string, userId: string) {
+  /**
+   * Admin / Shift Manager approves a pending-close request.
+   *
+   * The manager's decision on how to treat the variance (charge the
+   * cashier, book as company loss, book as revenue, park in suspense)
+   * arrives in `dto`. We write the decision onto the shift row BEFORE
+   * calling close() so the atomic transaction inside close() has all
+   * the context it needs to produce a single journal entry tagged with
+   * the right accounts + (optionally) the employee receivable line.
+   */
+  async approveClose(id: string, userId: string, dto?: ApproveCloseDto) {
     const [shift] = await this.ds.query(
       `SELECT * FROM shifts WHERE id = $1`,
       [id],
@@ -460,10 +594,42 @@ export class ShiftsService {
       throw new BadRequestException('الوردية ليست في انتظار الإقفال');
     }
     const actual = Number(shift.close_requested_amount || 0);
+
+    // Pre-flight: compute the expected variance so the manager sees a
+    // sensible error BEFORE close() starts the DB transaction.
+    const expected = Number(shift.expected_closing || 0);
+    const variance = actual - expected;
+    const hasVariance = Math.abs(variance) >= 0.01;
+    if (hasVariance) {
+      if (!dto?.variance_treatment) {
+        throw new BadRequestException(
+          'يجب تحديد طريقة معالجة الفروقات قبل الاعتماد',
+        );
+      }
+      if (
+        dto.variance_treatment === 'charge_employee' &&
+        !dto.variance_employee_id
+      ) {
+        throw new BadRequestException(
+          'تحميل الموظف يتطلب اختيار الموظف المسؤول',
+        );
+      }
+    }
+
     const result = await this.close(
       id,
-      { actual_closing: actual, notes: shift.close_requested_notes || '' } as any,
+      {
+        actual_closing: actual,
+        notes: shift.close_requested_notes || '',
+        variance_treatment: dto?.variance_treatment,
+        variance_employee_id: dto?.variance_employee_id,
+        variance_notes: dto?.variance_notes,
+      } as any,
       userId,
+      // Approver reaches this path only through the permission-guarded
+      // `shifts.variance.approve` endpoint — grant the effective flag
+      // so close() doesn't re-check at the service layer.
+      ['shifts.variance.approve'],
     );
     await this.ds.query(
       `UPDATE shifts

@@ -190,4 +190,7 @@
 \echo '== 059 Fix engine-context NULL trap =='
 \ir migrations/059_fix_engine_context_null_trap.sql
 
+\echo '== 060 Shift variance treatment + employee ledger =='
+\ir migrations/060_shift_variance_treatment.sql
+
 \echo '== Schema installed successfully ✅ =='
