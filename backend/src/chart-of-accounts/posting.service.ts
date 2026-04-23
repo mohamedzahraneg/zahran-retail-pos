@@ -44,86 +44,138 @@ export class AccountingPostingService {
    *   CR Inventory (same amount)
    * All in one balanced entry.
    */
+  /**
+   * Post a completed invoice to the GL. Phase 2.1 migration: the GL
+   * shape is identical to the legacy path — same accounts (1111/1121
+   * /411/214/51/1131), same amounts, same reference (invoice/id) —
+   * but the INSERT is now performed by FinancialEngineService
+   * instead of the legacy `createEntry`. No accounting behaviour
+   * change; the bypass alert that every call previously dropped is
+   * now gone because the engine sets the canonical
+   * `engine:recordTransaction` context.
+   *
+   * Cashbox movement is still written by `pos.service` inline with
+   * the invoice payment (via `fn_record_cashbox_txn`). We pass
+   * `cash_movements: []` so the engine does NOT double-write the
+   * cashbox — keeping behaviour identical to the legacy split where
+   * POS owns cash and posting owns GL.
+   */
   async postInvoice(invoiceId: string, userId: string, em?: EntityManager) {
-    return this.safe('invoice', invoiceId, em, async (q) => {
-      // Invoices don't carry a cashbox_id directly — resolve via the
-      // shift they were rung up on (shifts.cashbox_id).
-      const [inv] = await q(
-        `SELECT i.id, i.invoice_no, i.grand_total, i.paid_amount,
-                i.tax_amount, i.completed_at, i.created_at, i.status,
-                i.customer_id,
-                s.cashbox_id AS cashbox_id
-           FROM invoices i
-           LEFT JOIN shifts s ON s.id = i.shift_id
-          WHERE i.id = $1`,
-        [invoiceId],
+    if (!this.engine) {
+      // Engine missing in a stubbed test — return no-op.
+      return null;
+    }
+    const runner = em ?? this.ds.manager;
+    // Invoices don't carry a cashbox_id directly — resolve via the
+    // shift they were rung up on (shifts.cashbox_id).
+    const [inv] = await runner.query(
+      `SELECT i.id, i.invoice_no, i.grand_total, i.paid_amount,
+              i.tax_amount, i.completed_at, i.created_at, i.status,
+              i.customer_id,
+              s.cashbox_id AS cashbox_id
+         FROM invoices i
+         LEFT JOIN shifts s ON s.id = i.shift_id
+        WHERE i.id = $1`,
+      [invoiceId],
+    );
+    if (!inv) return null;
+    if (!['paid', 'completed', 'partially_paid'].includes(inv.status)) {
+      return null;
+    }
+    const total = Number(inv.grand_total || 0);
+    const paid = Number(inv.paid_amount || 0);
+    const unpaid = Math.max(0, total - paid);
+    const tax = Number(inv.tax_amount || 0);
+    const revenue = Math.max(0, total - tax);
+    if (total < 0.01) return null;
+
+    // Sum the cost side from invoice_items.
+    const [costRow] = await runner.query(
+      `SELECT COALESCE(SUM(quantity * unit_cost), 0)::numeric(14,2) AS cogs
+         FROM invoice_items WHERE invoice_id = $1`,
+      [invoiceId],
+    );
+    const cogs = Number(costRow?.cogs || 0);
+    const entryDate = this.dateOnly(inv.completed_at || inv.created_at);
+
+    // Build gl_lines — IDENTICAL account codes, amounts, and line
+    // ordering as the legacy createEntry path. The engine resolves
+    // account_code → id internally; we don't pre-resolve so the
+    // mapping stays declarative.
+    const lines: any[] = [];
+    // Cash side. Legacy parity: cashboxAccountId(null) defaulted to
+    // 1111, so when the shift has no cashbox_id we fall back to the
+    // 1111 account code (same as legacy postInvoice behaviour).
+    if (paid > 0) {
+      lines.push(
+        inv.cashbox_id
+          ? {
+              resolve_from_cashbox_id: inv.cashbox_id,
+              debit: paid,
+              cashbox_id: inv.cashbox_id,
+              description: `فاتورة ${inv.invoice_no}`,
+            }
+          : {
+              account_code: '1111',
+              debit: paid,
+              description: `فاتورة ${inv.invoice_no}`,
+            },
       );
-      if (!inv) return null;
-      if (
-        !['paid', 'completed', 'partially_paid'].includes(inv.status)
-      ) {
-        return null;
-      }
-      const total = Number(inv.grand_total || 0);
-      const paid = Number(inv.paid_amount || 0);
-      const unpaid = Math.max(0, total - paid);
-      const tax = Number(inv.tax_amount || 0);
-      const revenue = Math.max(0, total - tax);
-      if (total < 0.01) return null;
-
-      // Sum the cost side from invoice_items.
-      const [costRow] = await q(
-        `SELECT COALESCE(SUM(quantity * unit_cost), 0)::numeric(14,2) AS cogs
-           FROM invoice_items WHERE invoice_id = $1`,
-        [invoiceId],
-      );
-      const cogs = Number(costRow?.cogs || 0);
-
-      const entryDate = this.dateOnly(inv.completed_at || inv.created_at);
-      const cashAcc = await this.cashboxAccountId(q, inv.cashbox_id);
-      const salesAcc = await this.accountIdByCode(q, '411');
-      const recvAcc = await this.accountIdByCode(q, '1121');
-      const vatAcc = tax > 0 ? await this.accountIdByCode(q, '214') : null;
-      const cogsAcc = cogs > 0 ? await this.accountIdByCode(q, '51') : null;
-      const invAcc = cogs > 0 ? await this.accountIdByCode(q, '1131') : null;
-
-      const lines: PostingLine[] = [];
-      // Cash side
-      if (paid > 0 && cashAcc) {
-        lines.push({ account_id: cashAcc, debit: paid, credit: 0, description: `فاتورة ${inv.invoice_no}` });
-      }
-      if (unpaid > 0 && recvAcc) {
-        lines.push({
-          account_id: recvAcc,
-          debit: unpaid,
-          credit: 0,
-          description: `آجل ${inv.invoice_no}`,
-          customer_id: inv.customer_id,
-        });
-      }
-      // Revenue + tax split
-      if (salesAcc && revenue > 0) {
-        lines.push({ account_id: salesAcc, debit: 0, credit: revenue, description: `إيراد ${inv.invoice_no}` });
-      }
-      if (vatAcc && tax > 0) {
-        lines.push({ account_id: vatAcc, debit: 0, credit: tax, description: `ضريبة ${inv.invoice_no}` });
-      }
-      // Cost side — only when we have cost data
-      if (cogsAcc && invAcc && cogs > 0) {
-        lines.push({ account_id: cogsAcc, debit: cogs, credit: 0, description: `تكلفة ${inv.invoice_no}` });
-        lines.push({ account_id: invAcc, debit: 0, credit: cogs, description: `خصم مخزون ${inv.invoice_no}` });
-      }
-      if (lines.length < 2) return null;
-
-      return this.createEntry(q, {
-        entry_date: entryDate,
-        description: `قيد فاتورة مبيعات ${inv.invoice_no}`,
-        reference_type: 'invoice',
-        reference_id: invoiceId,
-        lines,
-        created_by: userId,
+    }
+    if (unpaid > 0) {
+      lines.push({
+        account_code: '1121',
+        debit: unpaid,
+        customer_id: inv.customer_id ?? undefined,
+        description: `آجل ${inv.invoice_no}`,
       });
+    }
+    // Revenue + tax split
+    if (revenue > 0) {
+      lines.push({
+        account_code: '411',
+        credit: revenue,
+        description: `إيراد ${inv.invoice_no}`,
+      });
+    }
+    if (tax > 0) {
+      lines.push({
+        account_code: '214',
+        credit: tax,
+        description: `ضريبة ${inv.invoice_no}`,
+      });
+    }
+    // Cost side — only when cost data present
+    if (cogs > 0) {
+      lines.push({
+        account_code: '51',
+        debit: cogs,
+        description: `تكلفة ${inv.invoice_no}`,
+      });
+      lines.push({
+        account_code: '1131',
+        credit: cogs,
+        description: `خصم مخزون ${inv.invoice_no}`,
+      });
+    }
+    if (lines.length < 2) return null;
+
+    const res = await this.engine.recordTransaction({
+      kind: 'sale',
+      reference_type: 'invoice',
+      reference_id: invoiceId,
+      entry_date: entryDate,
+      description: `قيد فاتورة مبيعات ${inv.invoice_no}`,
+      gl_lines: lines,
+      cash_movements: [], // pos.service already wrote the cashbox txn
+      user_id: userId,
+      em,
     });
+
+    // Normalise return shape to match the legacy contract so callers
+    // (pos.service:336 reads `.error`) continue to work unchanged.
+    if (!res.ok) return { error: res.error };
+    return { entry_id: (res as any).entry_id };
   }
 
   /**
