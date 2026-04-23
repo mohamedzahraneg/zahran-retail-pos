@@ -325,6 +325,42 @@ export class FinancialHealthService {
                WHERE (reference_type IS NULL OR reference_id IS NULL)
                  AND created_at > NOW() - INTERVAL '${h} hours'`,
       },
+      // 7. Repeated shortages per employee (migration 069 intelligence)
+      {
+        sev: 'high',
+        type: 'repeated_shortage_employee',
+        sql: `SELECT 'users' AS affected_entity,
+                     user_id::text AS reference_id,
+                     jsonb_build_object(
+                       'shortage_count_30d', shortage_count_30d,
+                       'shortage_total_30d', shortage_total_30d,
+                       'risk_score', risk_score
+                     ) AS details,
+                     'Repeated shortages: ' || full_name ||
+                       ' — ' || shortage_count_30d::text || ' in 30d (' ||
+                       shortage_total_30d::text || ' EGP)' AS description
+                FROM v_employee_risk_score
+               WHERE shortage_count_30d >= 2
+                 AND risk_score >= 40`,
+      },
+      // 8. Low-accuracy shifts (variance > 5% of expected closing)
+      {
+        sev: 'medium',
+        type: 'low_accuracy_shift',
+        sql: `SELECT 'shifts' AS affected_entity,
+                     shift_id::text AS reference_id,
+                     jsonb_build_object(
+                       'shift_no', shift_no,
+                       'accuracy_pct', accuracy_pct,
+                       'variance_amount', variance_amount,
+                       'expected_closing', expected_closing
+                     ) AS details,
+                     'Low accuracy shift ' || shift_no ||
+                       ' — accuracy ' || accuracy_pct::text || '%' AS description
+                FROM v_shift_accuracy_score
+               WHERE accuracy_level = 'low'
+                 AND closed_at > NOW() - INTERVAL '${h} hours'`,
+      },
     ];
 
     let inserted = 0;
@@ -481,6 +517,59 @@ export class FinancialHealthService {
          ${clause}
          ORDER BY f.flagged_at DESC
          LIMIT ${cap}`,
+    );
+  }
+
+  // ═════════════════════════════════════════════════════════════════════
+  //   Intelligence layer (migration 069) — read-only dashboard feeds.
+  //   Each reads a materialized view; zero side effects.
+  // ═════════════════════════════════════════════════════════════════════
+
+  /** Live cash position per cashbox (stored vs computed + drift). */
+  cashPosition() {
+    return this.ds.query(
+      `SELECT * FROM v_cash_position ORDER BY name_ar`,
+    );
+  }
+
+  /** Last 30 days revenue vs expense rollup for the P&L sparkline. */
+  dailyPnl(days = 30) {
+    const d = Math.min(Math.max(Number(days) || 30, 1), 90);
+    return this.ds.query(
+      `SELECT * FROM v_daily_pnl WHERE day >= CURRENT_DATE - ($1::int || ' days')::interval ORDER BY day DESC`,
+      [d],
+    );
+  }
+
+  /** Per-employee risk rollup — shortage count, outstanding, risk_score. */
+  employeeRiskScores(params: { min_score?: number; limit?: number } = {}) {
+    const cap = Math.min(Math.max(Number(params.limit) || 50, 1), 500);
+    const min = Math.max(0, Number(params.min_score) || 0);
+    return this.ds.query(
+      `SELECT * FROM v_employee_risk_score
+        WHERE risk_score >= $1
+          AND (shortage_count_30d > 0 OR outstanding_balance > 0)
+        ORDER BY risk_score DESC, outstanding_balance DESC
+        LIMIT ${cap}`,
+      [min],
+    );
+  }
+
+  /** Shifts with accuracy ratings (post-close). */
+  shiftAccuracy(params: { limit?: number; level?: 'high' | 'medium' | 'low' } = {}) {
+    const cap = Math.min(Math.max(Number(params.limit) || 50, 1), 500);
+    const conds: string[] = [];
+    const args: any[] = [];
+    if (params.level) {
+      args.push(params.level);
+      conds.push(`accuracy_level = $${args.length}`);
+    }
+    const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+    return this.ds.query(
+      `SELECT * FROM v_shift_accuracy_score ${where}
+        ORDER BY closed_at DESC
+        LIMIT ${cap}`,
+      args,
     );
   }
 

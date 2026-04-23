@@ -122,4 +122,47 @@ export class FinancialDashboardController {
   ) {
     return this.svc.resolveRiskFlag(parseInt(id, 10), user.userId, body?.resolution);
   }
+
+  // ─── Intelligence layer (migration 069) — read-only analytics ────────
+
+  @Get('cash-position')
+  @ApiOperation({ summary: 'الوضع النقدي الحي لكل خزنة' })
+  cashPosition() {
+    return this.svc.cashPosition();
+  }
+
+  @Get('daily-pnl')
+  @ApiQuery({ name: 'days', required: false, type: Number })
+  @ApiOperation({ summary: 'الربح والخسارة اليومي (30 يوم)' })
+  dailyPnl(@Query('days') days?: string) {
+    return this.svc.dailyPnl(days ? parseInt(days, 10) : 30);
+  }
+
+  @Get('employee-risk')
+  @ApiQuery({ name: 'min_score', required: false, type: Number })
+  @ApiQuery({ name: 'limit', required: false, type: Number })
+  @ApiOperation({ summary: 'تقييم مخاطر الموظفين' })
+  employeeRisk(
+    @Query('min_score') minScore?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.svc.employeeRiskScores({
+      min_score: minScore ? parseInt(minScore, 10) : 0,
+      limit: limit ? parseInt(limit, 10) : 50,
+    });
+  }
+
+  @Get('shift-accuracy')
+  @ApiQuery({ name: 'level', required: false })
+  @ApiQuery({ name: 'limit', required: false, type: Number })
+  @ApiOperation({ summary: 'دقة إقفال الورديات' })
+  shiftAccuracy(
+    @Query('level') level?: 'high' | 'medium' | 'low',
+    @Query('limit') limit?: string,
+  ) {
+    return this.svc.shiftAccuracy({
+      level,
+      limit: limit ? parseInt(limit, 10) : 50,
+    });
+  }
 }
