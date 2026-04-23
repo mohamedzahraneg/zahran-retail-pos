@@ -104,8 +104,12 @@ export class UpdateExpenseDto extends PartialType(CreateExpenseDto) {}
  * to a responsible employee).
  */
 export class CreateDailyExpenseDto {
+  // Optional: daily expenses aren't tied to a specific warehouse. If the
+  // frontend bundle wasn't built with VITE_DEFAULT_WAREHOUSE_ID the server
+  // falls back to the first active warehouse (see createDailyExpense).
+  @IsOptional()
   @IsUUID()
-  warehouse_id!: string;
+  warehouse_id?: string;
 
   @IsOptional()
   @IsUUID()
