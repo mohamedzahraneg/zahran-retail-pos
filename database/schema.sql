@@ -211,4 +211,7 @@
 \echo '== 066 Control tower observability fixes (engine-preserving cashbox + non-deferrable anomaly UNIQUE) =='
 \ir migrations/066_control_tower_fixes.sql
 
+\echo '== 067 Drop leftover DEFERRABLE anomaly unique constraint (066 name guess miss) =='
+\ir migrations/067_drop_deferrable_anomaly_unique.sql
+
 \echo '== Schema installed successfully ✅ =='
