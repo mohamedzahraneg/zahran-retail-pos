@@ -94,6 +94,7 @@ export class PayrollController {
         SELECT
           u.id                                              AS employee_id,
           u.username,
+          u.full_name,
           COALESCE(u.full_name, u.username)                 AS employee_name,
           u.employee_no,
           u.job_title,
@@ -107,35 +108,35 @@ export class PayrollController {
           (
             COALESCE((SELECT SUM(amount) FROM employee_transactions t
                        WHERE t.employee_id = u.id AND t.type='wage'), 0)
-          )::numeric(14,2) AS wages_total,
+          )::numeric(14,2) AS wages,
           (
             COALESCE((SELECT SUM(amount) FROM employee_transactions t
                        WHERE t.employee_id = u.id AND t.type='bonus'), 0)
             + COALESCE((SELECT SUM(amount) FROM employee_bonuses b
                          WHERE b.user_id = u.id), 0)
-          )::numeric(14,2) AS bonuses_total,
+          )::numeric(14,2) AS bonuses,
           (
             COALESCE((SELECT SUM(amount) FROM employee_transactions t
                        WHERE t.employee_id = u.id AND t.type='deduction'), 0)
             + COALESCE((SELECT SUM(amount) FROM employee_deductions d
                          WHERE d.user_id = u.id), 0)
-          )::numeric(14,2) AS deductions_total,
+          )::numeric(14,2) AS deductions,
           (
             COALESCE((SELECT SUM(amount) FROM employee_transactions t
                        WHERE t.employee_id = u.id AND t.type='expense'), 0)
-          )::numeric(14,2) AS expenses_total,
+          )::numeric(14,2) AS expenses,
           (
             COALESCE((SELECT SUM(amount) FROM employee_transactions t
                        WHERE t.employee_id = u.id AND t.type='advance'), 0)
             + COALESCE((SELECT SUM(amount) FROM expenses e
                          WHERE e.employee_user_id = u.id AND e.is_advance = TRUE), 0)
-          )::numeric(14,2) AS advances_total,
+          )::numeric(14,2) AS advances,
           (
             COALESCE((SELECT SUM(amount) FROM employee_transactions t
                        WHERE t.employee_id = u.id AND t.type='payout'), 0)
             + COALESCE((SELECT SUM(amount) FROM employee_settlements s
                          WHERE s.user_id = u.id), 0)
-          )::numeric(14,2) AS payouts_total,
+          )::numeric(14,2) AS payouts,
           GREATEST(
             (SELECT MAX(txn_date) FROM employee_transactions WHERE employee_id = u.id),
             (SELECT MAX(deduction_date) FROM employee_deductions WHERE user_id = u.id),
@@ -155,23 +156,24 @@ export class PayrollController {
       SELECT
         r.employee_id,
         r.employee_name,
+        r.full_name,
         r.username,
         r.employee_no,
         r.job_title,
         r.salary_amount::numeric(14,2),
         r.salary_frequency,
-        r.wages_total,
-        r.bonuses_total,
-        r.deductions_total,
-        r.expenses_total,
-        r.advances_total,
-        r.payouts_total,
+        r.wages,
+        r.bonuses,
+        r.deductions,
+        r.expenses,
+        r.advances,
+        r.payouts,
         -- Signed balance: credits - debits
-        ((r.wages_total + r.bonuses_total + r.expenses_total)
-         - (r.deductions_total + r.advances_total + r.payouts_total))::numeric(14,2) AS balance,
+        ((r.wages + r.bonuses + r.expenses)
+         - (r.deductions + r.advances + r.payouts))::numeric(14,2) AS balance,
         -- What the employee owes (AR perspective)
-        GREATEST(0, ((r.deductions_total + r.advances_total + r.payouts_total)
-                     - (r.wages_total + r.bonuses_total + r.expenses_total)))::numeric(14,2) AS outstanding,
+        GREATEST(0, ((r.deductions + r.advances + r.payouts)
+                     - (r.wages + r.bonuses + r.expenses)))::numeric(14,2) AS outstanding,
         r.last_txn_date,
         -- COA link — every employee balance lives under 1123
         coa.code     AS coa_account_code,
