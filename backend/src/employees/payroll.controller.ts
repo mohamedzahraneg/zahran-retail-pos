@@ -99,19 +99,52 @@ export class PayrollController {
           u.job_title,
           u.salary_amount,
           u.salary_frequency,
-          COALESCE(SUM(t.amount) FILTER (WHERE t.type='wage'),      0)::numeric(14,2) AS wages_total,
-          COALESCE(SUM(t.amount) FILTER (WHERE t.type='bonus'),     0)::numeric(14,2) AS bonuses_total,
-          COALESCE(SUM(t.amount) FILTER (WHERE t.type='deduction'), 0)::numeric(14,2) AS deductions_total,
-          COALESCE(SUM(t.amount) FILTER (WHERE t.type='expense'),   0)::numeric(14,2) AS expenses_total,
-          COALESCE(SUM(t.amount) FILTER (WHERE t.type='advance'),   0)::numeric(14,2) AS advances_total,
-          COALESCE(SUM(t.amount) FILTER (WHERE t.type='payout'),    0)::numeric(14,2) AS payouts_total,
-          -- Last transaction date for recency signal
-          MAX(t.txn_date) AS last_txn_date
+          -- UNION two sources: the new employee_transactions table AND
+          -- the pre-existing employee_deductions / _settlements /
+          -- _bonuses / advance-expenses (all surfaced by
+          -- v_employee_ledger). Employees without employee_transactions
+          -- rows still show their real balances from the ledger tables.
+          (
+            COALESCE((SELECT SUM(amount) FROM employee_transactions t
+                       WHERE t.employee_id = u.id AND t.type='wage'), 0)
+          )::numeric(14,2) AS wages_total,
+          (
+            COALESCE((SELECT SUM(amount) FROM employee_transactions t
+                       WHERE t.employee_id = u.id AND t.type='bonus'), 0)
+            + COALESCE((SELECT SUM(amount) FROM employee_bonuses b
+                         WHERE b.user_id = u.id), 0)
+          )::numeric(14,2) AS bonuses_total,
+          (
+            COALESCE((SELECT SUM(amount) FROM employee_transactions t
+                       WHERE t.employee_id = u.id AND t.type='deduction'), 0)
+            + COALESCE((SELECT SUM(amount) FROM employee_deductions d
+                         WHERE d.user_id = u.id), 0)
+          )::numeric(14,2) AS deductions_total,
+          (
+            COALESCE((SELECT SUM(amount) FROM employee_transactions t
+                       WHERE t.employee_id = u.id AND t.type='expense'), 0)
+          )::numeric(14,2) AS expenses_total,
+          (
+            COALESCE((SELECT SUM(amount) FROM employee_transactions t
+                       WHERE t.employee_id = u.id AND t.type='advance'), 0)
+            + COALESCE((SELECT SUM(amount) FROM expenses e
+                         WHERE e.employee_user_id = u.id AND e.is_advance = TRUE), 0)
+          )::numeric(14,2) AS advances_total,
+          (
+            COALESCE((SELECT SUM(amount) FROM employee_transactions t
+                       WHERE t.employee_id = u.id AND t.type='payout'), 0)
+            + COALESCE((SELECT SUM(amount) FROM employee_settlements s
+                         WHERE s.user_id = u.id), 0)
+          )::numeric(14,2) AS payouts_total,
+          GREATEST(
+            (SELECT MAX(txn_date) FROM employee_transactions WHERE employee_id = u.id),
+            (SELECT MAX(deduction_date) FROM employee_deductions WHERE user_id = u.id),
+            (SELECT MAX(bonus_date) FROM employee_bonuses WHERE user_id = u.id),
+            (SELECT MAX(settlement_date) FROM employee_settlements WHERE user_id = u.id),
+            (SELECT MAX(expense_date) FROM expenses WHERE employee_user_id = u.id AND is_advance)
+          ) AS last_txn_date
         FROM users u
-        LEFT JOIN employee_transactions t ON t.employee_id = u.id
         WHERE u.is_active = TRUE
-        GROUP BY u.id, u.username, u.full_name, u.employee_no,
-                 u.job_title, u.salary_amount, u.salary_frequency
       ),
       coa AS (
         SELECT id AS account_id, code, name_ar, name_en
@@ -180,27 +213,58 @@ export class PayrollController {
       conds.push(`t.txn_date <= $${args.length}::date`);
     }
     const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
-    return this.ds.query(
-      `
-      SELECT
-        t.id, t.employee_id,
-        COALESCE(u.full_name, u.username) AS employee_name,
-        t.txn_date, t.type, t.amount, t.description,
-        t.reference_type, t.reference_id,
-        t.cashbox_id, t.shift_id,
-        cb.name_ar  AS cashbox_name,
-        s.shift_no,
-        t.created_by, t.created_at
-      FROM employee_transactions t
-      LEFT JOIN users u     ON u.id  = t.employee_id
-      LEFT JOIN cashboxes cb ON cb.id = t.cashbox_id
-      LEFT JOIN shifts s    ON s.id  = t.shift_id
+    // Union view over BOTH the new employee_transactions table AND
+    // the pre-existing ledger tables (employee_deductions/_bonuses/
+    // _settlements + advance expenses). Unified shape so the
+    // frontend payroll grid shows everything regardless of origin.
+    const unionSql = `
+      WITH all_txns AS (
+        SELECT t.id::text AS id, t.employee_id, t.txn_date, t.type,
+               t.amount, t.description, t.reference_type, t.reference_id::text AS reference_id,
+               t.cashbox_id, t.shift_id, t.created_by, t.created_at
+          FROM employee_transactions t
+        UNION ALL
+        SELECT 'ded:' || d.id::text, d.user_id, d.deduction_date, 'deduction',
+               d.amount, d.reason,
+               COALESCE(d.source, 'deduction'), d.shift_id::text,
+               NULL::uuid, d.shift_id, d.created_by, d.created_at
+          FROM employee_deductions d WHERE NOT d.is_void
+        UNION ALL
+        SELECT 'bon:' || b.id::text, b.user_id, b.bonus_date, 'bonus',
+               b.amount, COALESCE(b.note, b.kind),
+               b.kind, NULL::text, NULL::uuid, NULL::uuid,
+               b.created_by, b.created_at
+          FROM employee_bonuses b WHERE NOT b.is_void
+        UNION ALL
+        SELECT 'set:' || s.id::text, s.user_id, s.settlement_date, 'payout',
+               s.amount, COALESCE(s.notes, s.method),
+               'settlement', s.journal_entry_id::text,
+               s.cashbox_id, NULL::uuid, s.created_by, s.created_at
+          FROM employee_settlements s WHERE NOT s.is_void
+        UNION ALL
+        SELECT 'adv:' || e.id::text, e.employee_user_id, e.expense_date, 'advance',
+               e.amount, e.description,
+               'expense', e.id::text,
+               e.cashbox_id, NULL::uuid, e.created_by, e.created_at
+          FROM expenses e WHERE e.is_advance = TRUE AND e.employee_user_id IS NOT NULL
+      )
+      SELECT t.id, t.employee_id,
+             COALESCE(u.full_name, u.username) AS employee_name,
+             t.txn_date, t.type, t.amount, t.description,
+             t.reference_type, t.reference_id,
+             t.cashbox_id, t.shift_id,
+             cb.name_ar  AS cashbox_name,
+             s.shift_no,
+             t.created_by, t.created_at
+        FROM all_txns t
+        LEFT JOIN users u     ON u.id  = t.employee_id
+        LEFT JOIN cashboxes cb ON cb.id = t.cashbox_id
+        LEFT JOIN shifts s    ON s.id  = t.shift_id
       ${where}
       ORDER BY t.txn_date DESC, t.created_at DESC
       LIMIT ${limit}
-      `,
-      args,
-    );
+    `;
+    return this.ds.query(unionSql, args);
   }
 
   /** Single-employee detail: profile + balance + recent transactions. */
