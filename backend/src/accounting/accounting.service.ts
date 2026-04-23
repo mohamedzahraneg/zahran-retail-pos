@@ -327,9 +327,28 @@ export class AccountingService {
       );
     }
 
+    // Daily expenses aren't branch-scoped. When the bundle hasn't been
+    // built with VITE_DEFAULT_WAREHOUSE_ID (the common case on prod)
+    // the request arrives with warehouse_id undefined — resolve the
+    // first active warehouse here so the expense still posts.
+    let warehouseId = dto.warehouse_id ?? null;
+    if (!warehouseId) {
+      const [wh] = await this.ds.query(
+        `SELECT id FROM warehouses WHERE is_active = TRUE
+          ORDER BY created_at ASC LIMIT 1`,
+      );
+      if (!wh) {
+        throw new BadRequestException(
+          'لا يوجد مخزن فعّال — أضف مخزن قبل تسجيل المصروفات اليومية',
+        );
+      }
+      warehouseId = wh.id;
+    }
+
     return this.createExpense(
       {
         ...dto,
+        warehouse_id: warehouseId,
         employee_user_id: effectiveEmployee,
       } as any,
       userId,
