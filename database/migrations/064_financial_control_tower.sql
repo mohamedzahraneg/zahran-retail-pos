@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS financial_event_stream (
   credit_total     NUMERIC(14,2),
   is_engine        BOOLEAN      NOT NULL DEFAULT FALSE,
   is_legacy        BOOLEAN      NOT NULL DEFAULT FALSE,
-  session_user     TEXT,
+  session_user_name TEXT,  -- named this way because `session_user` is a reserved SQL keyword
   client_addr      INET,
   meta             JSONB        DEFAULT '{}'::jsonb,
   created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
@@ -135,7 +135,7 @@ BEGIN
   INSERT INTO financial_event_stream
     (event_type, source_service, reference_type, reference_id,
      amount, debit_total, credit_total, is_engine, is_legacy,
-     session_user, client_addr, meta)
+     session_user_name, client_addr, meta)
   VALUES
     ('journal_entry', v_src, NEW.reference_type, NEW.reference_id::text,
      GREATEST(v_debit, v_credit), v_debit, v_credit, v_eng, v_leg,
@@ -159,7 +159,7 @@ BEGIN
   INSERT INTO financial_event_stream
     (event_type, source_service, reference_type, reference_id,
      amount, debit_total, credit_total, is_engine, is_legacy,
-     session_user, client_addr, meta)
+     session_user_name, client_addr, meta)
   VALUES
     ('cashbox_txn', v_src, NEW.reference_type::text, NEW.reference_id::text,
      NEW.amount,
@@ -196,7 +196,7 @@ BEGIN
   INSERT INTO financial_event_stream
     (event_type, source_service, reference_type, reference_id,
      amount, debit_total, credit_total, is_engine, is_legacy,
-     session_user, client_addr, meta)
+     session_user_name, client_addr, meta)
   VALUES
     ('shift_close', v_src, 'shift', NEW.id::text,
      ABS(COALESCE(NEW.actual_closing,0) - COALESCE(NEW.expected_closing,0)),
@@ -227,7 +227,7 @@ BEGIN
   INSERT INTO financial_event_stream
     (event_type, source_service, reference_type, reference_id,
      amount, debit_total, credit_total, is_engine, is_legacy,
-     session_user, meta)
+     session_user_name, meta)
   VALUES
     ('deduction', v_src, 'employee_deduction', NEW.id::text,
      NEW.amount, NEW.amount, 0, v_eng, v_leg,
@@ -251,7 +251,7 @@ BEGIN
   INSERT INTO financial_event_stream
     (event_type, source_service, reference_type, reference_id,
      amount, debit_total, credit_total, is_engine, is_legacy,
-     session_user, meta)
+     session_user_name, meta)
   VALUES
     ('settlement', v_src, 'employee_settlement', NEW.id::text,
      NEW.amount, 0, NEW.amount, v_eng, v_leg,
