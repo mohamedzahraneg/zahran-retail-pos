@@ -17,6 +17,12 @@ import {
   ExpenseApprovalService,
   CreateRuleDto,
 } from './approval.service';
+import { CostAccountResolver } from './cost-account-resolver.service';
+import { CostReconciliationService } from './cost-reconciliation.service';
+import {
+  CurrentUser,
+  JwtUser,
+} from '../common/decorators/current-user.decorator';
 import {
   CreateDailyExpenseDto,
   CreateExpenseCategoryDto,
@@ -39,7 +45,63 @@ export class AccountingController {
   constructor(
     private readonly service: AccountingService,
     private readonly approvals: ExpenseApprovalService,
+    private readonly resolver: CostAccountResolver,
+    private readonly reconciliation: CostReconciliationService,
   ) {}
+
+  // ─── Cost reconciliation endpoints (migration 065) ─────────────
+  /** Current resolver mapping — proof that every active category has a COA link. */
+  @Get('cost/mappings')
+  @Permissions('accounting.cost.reconcile')
+  @ApiOperation({ summary: 'خريطة تصنيف المصروفات → شجرة الحسابات' })
+  costMappings() {
+    return this.resolver.listMappings();
+  }
+
+  /** Run a reconciliation pass. Idempotent per (report_date, adhoc). */
+  @Post('cost/reconcile')
+  @Permissions('accounting.cost.reconcile')
+  @ApiOperation({ summary: 'تشغيل تسوية المصروفات لتاريخ معين' })
+  runReconciliation(
+    @Body() body: { report_date?: string; run_type?: 'daily' | 'adhoc' | 'hourly' | 'backfill' },
+    @CurrentUser() user: JwtUser,
+  ) {
+    return this.reconciliation.run({
+      reportDate: body?.report_date,
+      runType: body?.run_type,
+      generatedBy: user?.userId,
+    });
+  }
+
+  @Get('cost/reconcile/history')
+  @Permissions('accounting.cost.reconcile')
+  @ApiOperation({ summary: 'تاريخ تقارير التسوية' })
+  reconciliationHistory(@Query('limit') limit?: string) {
+    return this.reconciliation.listHistory(limit ? parseInt(limit, 10) : 30);
+  }
+
+  @Get('cost/reconcile/:id')
+  @Permissions('accounting.cost.reconcile')
+  @ApiOperation({ summary: 'تفاصيل تقرير تسوية واحد' })
+  reconciliationDetail(@Param('id') id: string) {
+    return this.reconciliation.get(parseInt(id, 10));
+  }
+
+  /** Single reporting surface — NEVER read raw legacy/engine tables for expense analysis. */
+  @Get('cost/unified-ledger')
+  @Permissions('accounting.cost.reconcile')
+  @ApiOperation({ summary: 'الدفتر الموحَّد للتكاليف (خالي من التكرار)' })
+  unifiedLedger(
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.reconciliation.unifiedLedger({
+      from,
+      to,
+      limit: limit ? parseInt(limit, 10) : 200,
+    });
+  }
 
   // ─── Expense approvals ───────────────────────────────────────────────
 

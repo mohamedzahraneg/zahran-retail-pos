@@ -18,6 +18,7 @@ import { ForbiddenException } from '@nestjs/common';
 import { AccountingPostingService } from '../chart-of-accounts/posting.service';
 import { FinancialEngineService } from '../chart-of-accounts/financial-engine.service';
 import { ExpenseApprovalService } from './approval.service';
+import { CostAccountResolver } from './cost-account-resolver.service';
 
 @Injectable()
 export class AccountingService {
@@ -26,6 +27,7 @@ export class AccountingService {
     @Optional() private readonly posting?: AccountingPostingService,
     @Optional() private readonly engine?: FinancialEngineService,
     @Optional() private readonly approvals?: ExpenseApprovalService,
+    @Optional() private readonly resolver?: CostAccountResolver,
   ) {}
 
   // ─── Expense Categories ──────────────────────────────────────────────
@@ -237,10 +239,26 @@ export class AccountingService {
       return;
     }
 
-    // Resolve the category's linked GL account once so we can fall back
-    // to 529 (Miscellaneous) if the category isn't mapped.
+    // Resolve the GL account via the centralized CostAccountResolver
+    // (migration 065). Falls back to 529 if the category is unmapped.
+    // No inline lookups here — all paths go through the resolver so
+    // reporting + reconciliation see a single mapping table.
     let categoryAccountId: string | null = null;
-    if (expense.category_id) {
+    if (this.resolver) {
+      const hint =
+        (expense.category_code as string | undefined) ??
+        (expense.description as string | undefined) ??
+        undefined;
+      const res = await this.resolver.resolve({
+        category_id: expense.category_id,
+        hint,
+        em,
+      });
+      categoryAccountId = res.account_id;
+    } else if (expense.category_id) {
+      // Defensive legacy path — only hit when resolver isn't wired
+      // (e.g., a stubbed unit test). Production always has the
+      // resolver via DI.
       const [row] = await em.query(
         `SELECT account_id FROM expense_categories WHERE id = $1`,
         [expense.category_id],
