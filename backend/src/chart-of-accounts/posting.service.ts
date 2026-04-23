@@ -1,5 +1,6 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { DataSource, EntityManager } from 'typeorm';
+import { FinancialEngineService } from './financial-engine.service';
 
 /**
  * Centralized journal posting for every financial event in the system.
@@ -25,7 +26,10 @@ import { DataSource, EntityManager } from 'typeorm';
 export class AccountingPostingService {
   private readonly logger = new Logger('Posting');
 
-  constructor(private readonly ds: DataSource) {}
+  constructor(
+    private readonly ds: DataSource,
+    @Optional() private readonly engine?: FinancialEngineService,
+  ) {}
 
   // ═══════════════════════════════════════════════════════════════════
   // Public API — one method per event type
@@ -712,94 +716,81 @@ export class AccountingPostingService {
     });
   }
 
-  /** Approved expense → DR Expense (by category)  CR Cash/Bank */
+  /**
+   * Approved expense → delegates to FinancialEngineService.recordExpense.
+   *
+   * Migration 063 tightened the write guards. Rather than compose the
+   * INSERT statements here (which would leave engine_bypass_alerts
+   * breadcrumbs), we hand the spec to the engine. Idempotency,
+   * cashbox movement, and financial_event_log bookkeeping all stay in
+   * one place — the engine.
+   */
   async postExpense(expenseId: string, userId: string, em?: EntityManager) {
-    return this.safe('expense', expenseId, em, async (q) => {
-      const [e] = await q(
-        `SELECT e.id, e.expense_no, e.amount, e.cashbox_id, e.category_id,
-                e.expense_date, e.is_approved,
-                ec.account_id AS category_account_id
-           FROM expenses e
-           LEFT JOIN expense_categories ec ON ec.id = e.category_id
-          WHERE e.id = $1`,
-        [expenseId],
-      );
-      if (!e || !e.is_approved) return null;
-      const amt = Number(e.amount || 0);
-      if (amt < 0.01) return null;
-
-      const cashAcc = await this.cashboxAccountId(q, e.cashbox_id);
-      const expenseAcc =
-        e.category_account_id || (await this.accountIdByCode(q, '529'));
-      if (!cashAcc || !expenseAcc) return null;
-
-      return this.createEntry(q, {
-        entry_date: this.dateOnly(e.expense_date),
-        description: `مصروف ${e.expense_no}`,
-        reference_type: 'expense',
-        reference_id: expenseId,
-        lines: [
-          { account_id: expenseAcc, debit: amt, credit: 0 },
-          { account_id: cashAcc, debit: 0, credit: amt },
-        ],
-        created_by: userId,
-      });
+    if (!this.engine) {
+      // Engine missing in a stubbed test — return no-op rather than
+      // fall through to direct SQL (the guard would reject anyway).
+      return null;
+    }
+    const runner = em ?? this.ds.manager;
+    const [e] = await runner.query(
+      `SELECT e.id, e.expense_no, e.amount, e.cashbox_id, e.category_id,
+              e.expense_date, e.is_approved, e.payment_method,
+              e.description,
+              ec.account_id AS category_account_id
+         FROM expenses e
+         LEFT JOIN expense_categories ec ON ec.id = e.category_id
+        WHERE e.id = $1`,
+      [expenseId],
+    );
+    if (!e || !e.is_approved) return null;
+    const amt = Number(e.amount || 0);
+    if (amt < 0.01) return null;
+    const res = await this.engine.recordExpense({
+      expense_id: e.id,
+      expense_no: e.expense_no,
+      amount: amt,
+      category_account_id: e.category_account_id ?? null,
+      cashbox_id: e.cashbox_id ?? null,
+      payment_method: e.payment_method ?? 'cash',
+      user_id: userId,
+      entry_date: this.dateOnly(e.expense_date),
+      description: e.description ?? undefined,
+      em,
     });
+    return res.ok ? { entry_id: (res as any).entry_id } : null;
   }
 
-  /** Shift close with variance →
-   *    Surplus: DR Cash  CR Shift Surplus (421)
-   *    Deficit: DR Shift Deficit (531)  CR Cash
+  /**
+   * Shift close with variance → delegates to
+   * FinancialEngineService.recordShiftVariance (migration 063).
+   *
+   * The legacy shape (431/521, direct INSERTs) is retired. The engine
+   * already encodes the same accounting — surplus to 421, deficit to
+   * 531 — plus the variance-treatment options added in migration 060.
    */
   async postShiftClose(shiftId: string, userId: string, em?: EntityManager) {
-    return this.safe('shift_variance', shiftId, em, async (q) => {
-      const [s] = await q(
-        `SELECT id, shift_no, cashbox_id, actual_closing, expected_closing,
-                closed_at, status
-           FROM shifts WHERE id = $1`,
-        [shiftId],
-      );
-      if (!s || s.status !== 'closed' || !s.closed_at) return null;
-      const variance =
-        Number(s.actual_closing || 0) - Number(s.expected_closing || 0);
-      if (Math.abs(variance) < 0.01) return null; // perfect match → nothing to post
-
-      const cashAcc = await this.cashboxAccountId(q, s.cashbox_id);
-      if (!cashAcc) return null;
-      const entryDate = this.dateOnly(s.closed_at);
-
-      if (variance > 0) {
-        // Surplus — extra cash found
-        const surplusAcc = await this.accountIdByCode(q, '421');
-        if (!surplusAcc) return null;
-        return this.createEntry(q, {
-          entry_date: entryDate,
-          description: `زيادة وردية ${s.shift_no}`,
-          reference_type: 'shift_variance',
-          reference_id: shiftId,
-          lines: [
-            { account_id: cashAcc, debit: variance, credit: 0 },
-            { account_id: surplusAcc, debit: 0, credit: variance },
-          ],
-          created_by: userId,
-        });
-      }
-      // Deficit — cash short
-      const absV = Math.abs(variance);
-      const deficitAcc = await this.accountIdByCode(q, '531');
-      if (!deficitAcc) return null;
-      return this.createEntry(q, {
-        entry_date: entryDate,
-        description: `عجز وردية ${s.shift_no}`,
-        reference_type: 'shift_variance',
-        reference_id: shiftId,
-        lines: [
-          { account_id: deficitAcc, debit: absV, credit: 0 },
-          { account_id: cashAcc, debit: 0, credit: absV },
-        ],
-        created_by: userId,
-      });
+    if (!this.engine) return null;
+    const runner = em ?? this.ds.manager;
+    const [s] = await runner.query(
+      `SELECT id, shift_no, cashbox_id, actual_closing, expected_closing,
+              closed_at, status
+         FROM shifts WHERE id = $1`,
+      [shiftId],
+    );
+    if (!s || s.status !== 'closed' || !s.closed_at) return null;
+    const variance =
+      Number(s.actual_closing || 0) - Number(s.expected_closing || 0);
+    if (Math.abs(variance) < 0.01) return null;
+    const res = await this.engine.recordShiftVariance({
+      shift_id: s.id,
+      shift_no: s.shift_no,
+      cashbox_id: s.cashbox_id,
+      variance,
+      user_id: userId,
+      entry_date: this.dateOnly(s.closed_at),
+      em,
     });
+    return res.ok ? { entry_id: (res as any).entry_id } : null;
   }
 
   /** Cashbox-to-cashbox transfer → DR destination-cash, CR source-cash. */
