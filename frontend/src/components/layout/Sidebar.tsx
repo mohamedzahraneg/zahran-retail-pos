@@ -37,6 +37,7 @@ import {
   Shield,
   Repeat,
   Receipt,
+  Activity,
   Users2,
   Settings,
   UserCog,
@@ -98,6 +99,7 @@ const groups: NavGroup[] = [
       { to: '/cashboxes', label: 'الخزائن والبنوك', icon: Wallet, roles: ['admin', 'manager', 'accountant'], permission: 'cashdesk.manage_accounts' },
       { to: '/recurring-expenses', label: 'المصاريف الدورية', icon: Repeat, roles: ['admin', 'manager', 'accountant'], permission: 'recurring_expenses.manage' },
       { to: '/daily-expenses', label: 'المصروفات اليومية', icon: Receipt, roles: ['admin', 'manager', 'accountant', 'cashier'], permission: 'expenses.daily.create' },
+      { to: '/dashboard/financial', label: 'برج المراقبة المالية', icon: Activity, roles: ['admin', 'manager', 'accountant'], permission: 'dashboard.financial.view' },
       // /accounting (legacy), /budgets, /financial-controls,
       // /bank-reconciliation, /accounts-audit — all routes still work
       // but removed from sidebar to reduce cognitive load. Power users
