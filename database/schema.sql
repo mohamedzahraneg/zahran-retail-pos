@@ -220,4 +220,7 @@
 \echo '== 069 Financial intelligence layer (risk score + accuracy + cash position + daily P&L views) =='
 \ir migrations/069_financial_intelligence_layer.sql
 
+\echo '== 070 HOTFIX: fn_is_engine_context accepts service/migration prefixes =='
+\ir migrations/070_hotfix_is_engine_context_service_prefix.sql
+
 \echo '== Schema installed successfully ✅ =='
