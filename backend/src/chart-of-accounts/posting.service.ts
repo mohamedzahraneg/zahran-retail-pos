@@ -846,6 +846,13 @@ export class AccountingPostingService {
   }
 
   /** Cashbox-to-cashbox transfer → DR destination-cash, CR source-cash. */
+  /**
+   * Cashbox → Cashbox transfer — delegates to the engine recipe
+   * (migration 069 partial migration). The engine already encodes the
+   * same Dr dest / Cr source shape plus matching IN/OUT cashbox
+   * movements; we hand the spec over instead of writing to
+   * journal_entries directly.
+   */
   async postCashboxTransfer(
     txnId: string,
     fromCashboxId: string,
@@ -855,27 +862,26 @@ export class AccountingPostingService {
     userId: string,
     em?: EntityManager,
   ) {
-    return this.safe('cashbox_transfer', txnId, em, async (q) => {
-      if (!(amount > 0)) return null;
-      const fromAcc = await this.cashboxAccountId(q, fromCashboxId);
-      const toAcc = await this.cashboxAccountId(q, toCashboxId);
-      if (!fromAcc || !toAcc) return null;
-      const today = new Date().toISOString().slice(0, 10);
-      return this.createEntry(q, {
-        entry_date: today,
-        description,
-        reference_type: 'cashbox_transfer',
-        reference_id: txnId,
-        lines: [
-          { account_id: toAcc, debit: amount, credit: 0, cashbox_id: toCashboxId },
-          { account_id: fromAcc, debit: 0, credit: amount, cashbox_id: fromCashboxId },
-        ],
-        created_by: userId,
-      });
+    if (!this.engine) return null;
+    if (!(amount > 0)) return null;
+    const res = await this.engine.recordCashboxTransfer({
+      transfer_id: txnId,
+      from_cashbox_id: fromCashboxId,
+      to_cashbox_id: toCashboxId,
+      amount,
+      notes: description,
+      user_id: userId,
+      em,
     });
+    return res.ok ? { entry_id: (res as any).entry_id } : null;
   }
 
-  /** Manual cashbox deposit/withdrawal — posts capital adjustments. */
+  /**
+   * Manual cashbox deposit / withdrawal — delegates to
+   * engine.recordManualAdjustment. Capital (31) / drawings (32)
+   * counter-accounts are encoded by the engine; identical shape to
+   * the legacy path.
+   */
   async postCashboxDeposit(
     txnId: string,
     direction: 'in' | 'out',
@@ -884,34 +890,18 @@ export class AccountingPostingService {
     userId: string,
     em?: EntityManager,
   ) {
-    return this.safe('cashbox_manual', txnId, em, async (q) => {
-      if (!(amount > 0)) return null;
-      const cashAcc = await this.cashboxAccountId(q, cashboxId);
-      // Counter-account: treat as owner top-up / capital adjustment by default.
-      const capitalAcc = await this.accountIdByCode(q, '31');
-      if (!cashAcc || !capitalAcc) return null;
-
-      const today = new Date().toISOString().slice(0, 10);
-      const lines: PostingLine[] =
-        direction === 'in'
-          ? [
-              { account_id: cashAcc, debit: amount, credit: 0 },
-              { account_id: capitalAcc, debit: 0, credit: amount },
-            ]
-          : [
-              { account_id: capitalAcc, debit: amount, credit: 0 },
-              { account_id: cashAcc, debit: 0, credit: amount },
-            ];
-      return this.createEntry(q, {
-        entry_date: today,
-        description:
-          direction === 'in' ? 'إيداع نقدي يدوي' : 'سحب نقدي يدوي',
-        reference_type: 'cashbox_manual',
-        reference_id: txnId,
-        lines,
-        created_by: userId,
-      });
+    if (!this.engine) return null;
+    if (!(amount > 0)) return null;
+    const res = await this.engine.recordManualAdjustment({
+      reference_id: txnId,
+      cashbox_id: cashboxId,
+      direction,
+      amount,
+      user_id: userId,
+      notes: direction === 'in' ? 'إيداع نقدي يدوي' : 'سحب نقدي يدوي',
+      em,
     });
+    return res.ok ? { entry_id: (res as any).entry_id } : null;
   }
 
   /**

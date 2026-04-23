@@ -217,4 +217,7 @@
 \echo '== 068 Financial integrity enforcement (strict guard + lockdown + risk flags) =='
 \ir migrations/068_financial_integrity_enforcement.sql
 
+\echo '== 069 Financial intelligence layer (risk score + accuracy + cash position + daily P&L views) =='
+\ir migrations/069_financial_intelligence_layer.sql
+
 \echo '== Schema installed successfully ✅ =='
