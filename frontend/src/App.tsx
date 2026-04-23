@@ -36,6 +36,7 @@ import FinancialControls from '@/pages/FinancialControls';
 import OpeningBalance from '@/pages/OpeningBalance';
 import RecurringExpenses from '@/pages/RecurringExpenses';
 import DailyExpenses from '@/pages/DailyExpenses';
+import FinancialControlTower from '@/pages/FinancialControlTower';
 import CustomerGroups from '@/pages/CustomerGroups';
 import Settings from '@/pages/Settings';
 import Users from '@/pages/Users';
@@ -220,6 +221,14 @@ export default function App() {
           element={
             <ProtectedRoute permissions={['expenses.daily.create']}>
               <DailyExpenses />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="dashboard/financial"
+          element={
+            <ProtectedRoute permissions={['dashboard.financial.view']}>
+              <FinancialControlTower />
             </ProtectedRoute>
           }
         />
