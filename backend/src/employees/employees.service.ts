@@ -972,7 +972,7 @@ export class EmployeesService {
             {
               account_code: '1123',
               credit: dto.amount,
-              customer_id: userId,
+              employee_user_id: userId,
             },
           ],
           cash_movements: [

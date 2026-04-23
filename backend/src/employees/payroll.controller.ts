@@ -88,6 +88,13 @@ export class PayrollController {
   @Permissions('employee.team.view')
   @ApiOperation({ summary: 'أرصدة الموظفين الحية مرتبطة بحساب 1123' })
   async balances() {
+    // Primary source of truth: v_employee_gl_balance (migration 071),
+    // which aggregates journal_lines tagged with employee_user_id on
+    // account 1123. Legacy source tables are joined as a fallback so
+    // employees whose historical activity isn't GL-tagged still show
+    // a balance. The going-forward goal: every row here matches
+    // `gl_balance` — divergence (`gl_vs_source_diff`) flags drift
+    // that the engine hasn't caught up with.
     return this.ds.query(
       `
       WITH rollup AS (
@@ -152,6 +159,15 @@ export class PayrollController {
           FROM chart_of_accounts
          WHERE code = '1123'   -- ذمم الموظفين — the canonical GL home
          LIMIT 1
+      ),
+      -- GL-based balance: post-migration-071 rows are tagged with
+      -- employee_user_id on account 1123. This is the canonical
+      -- single source of truth. Employees with no tagged lines
+      -- show NULL here and the UI falls back on the rollup.
+      gl AS (
+        SELECT employee_user_id, balance, debit_total, credit_total,
+               entry_count, last_entry_date
+          FROM v_employee_gl_balance
       )
       SELECT
         r.employee_id,
@@ -191,8 +207,24 @@ export class PayrollController {
         r.last_txn_date,
         -- COA link — every employee balance lives under 1123
         coa.code     AS coa_account_code,
-        coa.name_ar  AS coa_account_name_ar
-      FROM rollup r, coa
+        coa.name_ar  AS coa_account_name_ar,
+        -- GL-first fields (migration 071). Single source of truth for
+        -- post-migration activity. NULL-safe for historic employees.
+        COALESCE(gl.balance, 0)::numeric(14,2)        AS gl_balance,
+        COALESCE(gl.debit_total, 0)::numeric(14,2)    AS gl_debit_total,
+        COALESCE(gl.credit_total, 0)::numeric(14,2)   AS gl_credit_total,
+        COALESCE(gl.entry_count, 0)::int              AS gl_entry_count,
+        gl.last_entry_date                            AS gl_last_entry_date,
+        -- Drift indicator: diff between GL-derived and source-table balance.
+        -- Non-zero means some source activity hasn't posted through the
+        -- engine yet (or pre-071 untagged rows). Reconcile jobs consume this.
+        (COALESCE(gl.balance, 0)
+          - ((r.deductions + r.advances + r.payouts)
+             - (r.wages + r.bonuses + r.expenses)))::numeric(14,2)
+                                                      AS gl_vs_source_diff
+      FROM rollup r
+      CROSS JOIN coa
+      LEFT JOIN gl ON gl.employee_user_id = r.employee_id
       ORDER BY r.employee_name
       `,
     );
