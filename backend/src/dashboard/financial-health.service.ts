@@ -329,6 +329,8 @@ export class FinancialHealthService {
 
     let inserted = 0;
     let skipped = 0;
+    let riskFlagsCreated = 0;
+    let lockdownRecommended = false;
     for (const rule of rules) {
       let candidates: any[] = [];
       try {
@@ -346,14 +348,154 @@ export class FinancialHealthService {
              RETURNING anomaly_id`,
             [rule.sev, rule.type, c.description, c.affected_entity, c.reference_id, JSON.stringify(c.details ?? {})],
           );
-          if (res.length > 0) inserted++;
-          else skipped++;
+          if (res.length > 0) {
+            inserted++;
+            // PHASE 3 hook — if this anomaly is a legacy-bypass and
+            // the bypass alert row names a session_user that matches
+            // an active employee, insert a HIGH-risk flag. No auto-
+            // deduction from payroll (dangerous); the admin reviews
+            // the flag on the employee profile and decides manually.
+            if (rule.type === 'legacy_bypass_journal_entry') {
+              try {
+                const sessionUser =
+                  (c.details?.session_user as string | undefined) ?? null;
+                if (sessionUser) {
+                  const [u] = await this.ds.query(
+                    `SELECT id FROM users
+                      WHERE username = $1 AND is_active = TRUE
+                      LIMIT 1`,
+                    [sessionUser],
+                  );
+                  if (u?.id) {
+                    await this.ds.query(
+                      `INSERT INTO employee_risk_flags
+                         (user_id, risk_level, reason, anomaly_id, details)
+                       VALUES ($1, 'high', $2, $3, $4::jsonb)`,
+                      [
+                        u.id,
+                        `تجاوز FinancialEngine — كتابة مباشرة خارج المحرك (${c.affected_entity})`,
+                        res[0].anomaly_id,
+                        JSON.stringify({ source_anomaly: c }),
+                      ],
+                    );
+                    riskFlagsCreated++;
+                  }
+                }
+              } catch {
+                // best-effort — a failure here does not negate the
+                // underlying anomaly insertion
+              }
+            }
+          } else {
+            skipped++;
+          }
         } catch {
           skipped++;
         }
       }
     }
-    return { scanned_hours: h, inserted, skipped_existing: skipped };
+
+    // PHASE 4 — if the unresolved CRITICAL anomaly count exceeds the
+    // threshold, emit a `system_lockdown_recommended` anomaly. DOES NOT
+    // auto-activate lockdown — the admin must explicitly toggle via
+    // /dashboard/financial/lockdown.
+    try {
+      const [{ n: critCount }] = await this.ds.query(
+        `SELECT COUNT(*)::int AS n FROM financial_anomalies
+          WHERE NOT resolved AND severity = 'critical'`,
+      );
+      const THRESHOLD = 3;
+      if (Number(critCount) >= THRESHOLD) {
+        await this.ds.query(
+          `INSERT INTO financial_anomalies
+             (severity, anomaly_type, description, affected_entity, reference_id, details)
+           VALUES ('critical', 'system_lockdown_recommended',
+                   'شذوذات حرجة متعددة — يُنصح بتفعيل قفل النظام يدوياً',
+                   'system_controls', 'threshold-breach',
+                   $1::jsonb)
+           ON CONFLICT (anomaly_type, affected_entity, reference_id, resolved) DO NOTHING`,
+          [JSON.stringify({ critical_count: critCount, threshold: THRESHOLD })],
+        );
+        lockdownRecommended = true;
+      }
+    } catch {}
+
+    return {
+      scanned_hours: h,
+      inserted,
+      skipped_existing: skipped,
+      risk_flags_created: riskFlagsCreated,
+      lockdown_recommended: lockdownRecommended,
+    };
+  }
+
+  // ═════════════════════════════════════════════════════════════════════
+  //   Lockdown + risk flag operator surface
+  // ═════════════════════════════════════════════════════════════════════
+
+  async lockdownStatus() {
+    const [row] = await this.ds.query(
+      `SELECT financial_lockdown, locked_by, locked_at, lock_reason,
+              last_changed_at
+         FROM system_controls WHERE id = 1`,
+    );
+    return row ?? {
+      financial_lockdown: false,
+      locked_by: null,
+      locked_at: null,
+      lock_reason: null,
+    };
+  }
+
+  async toggleLockdown(
+    on: boolean,
+    userId: string,
+    reason?: string,
+  ) {
+    const [row] = await this.ds.query(
+      `UPDATE system_controls SET
+         financial_lockdown = $1::boolean,
+         locked_by          = CASE WHEN $1 THEN $2::uuid ELSE NULL END,
+         locked_at          = CASE WHEN $1 THEN NOW()    ELSE NULL END,
+         lock_reason        = CASE WHEN $1 THEN $3       ELSE NULL END,
+         last_changed_at    = NOW()
+       WHERE id = 1
+       RETURNING *`,
+      [on, userId, reason ?? null],
+    );
+    return row;
+  }
+
+  async riskFlags(params: { resolved?: boolean; limit?: number } = {}) {
+    const cap = Math.min(Math.max(Number(params.limit) || 100, 1), 500);
+    const where: string[] = [];
+    if (params.resolved === true) where.push('resolved = TRUE');
+    if (params.resolved === false) where.push('NOT resolved');
+    const clause = where.length ? 'WHERE ' + where.join(' AND ') : '';
+    return this.ds.query(
+      `SELECT f.id, f.user_id, u.username, u.full_name,
+              f.risk_level, f.reason, f.anomaly_id, f.details,
+              f.flagged_at, f.resolved, f.resolved_at, f.resolution
+         FROM employee_risk_flags f
+         LEFT JOIN users u ON u.id = f.user_id
+         ${clause}
+         ORDER BY f.flagged_at DESC
+         LIMIT ${cap}`,
+    );
+  }
+
+  async resolveRiskFlag(id: number, userId: string, resolution?: string) {
+    if (!id) throw new BadRequestException('id required');
+    const [row] = await this.ds.query(
+      `UPDATE employee_risk_flags
+          SET resolved = TRUE, resolved_by = $2, resolved_at = NOW(),
+              resolution = $3
+        WHERE id = $1 AND NOT resolved
+        RETURNING *`,
+      [id, userId, resolution ?? null],
+    );
+    if (!row) throw new BadRequestException('risk flag not found or already resolved');
+    return row;
   }
 
   /** Operator-only: mark an anomaly resolved. */

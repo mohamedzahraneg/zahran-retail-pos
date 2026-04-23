@@ -118,7 +118,13 @@ export class JournalService {
       // /accounts/journal) where the user supplies a balanced entry
       // by hand. The balance trigger fn_je_enforce_balance still
       // validates before the entry gets marked posted.
-      await em.query(`SET LOCAL app.engine_context = 'on'`);
+      // Migration 068 strict guard: bare 'on' no longer passes.
+      // Use the `service:*` identity pattern — still drops a bypass
+      // alert for observability until this path is migrated to
+      // FinancialEngineService (phase 2.4).
+      await em.query(
+        `SET LOCAL app.engine_context = 'service:journal.service.create'`,
+      );
 
       const [entry] = await em.query(
         `
@@ -292,9 +298,12 @@ export class JournalService {
     );
 
     return this.ds.transaction(async (em) => {
-      // Raise engine-context so migration 058 lets us void + create
+      // Raise engine-context so the write guards let us void + create
       // the reversing entry. Same rationale as createJournal above.
-      await em.query(`SET LOCAL app.engine_context = 'on'`);
+      // Migration 068 strict guard: uses service:* pattern.
+      await em.query(
+        `SET LOCAL app.engine_context = 'service:journal.service.void'`,
+      );
 
       // Mark original as void.
       await em.query(

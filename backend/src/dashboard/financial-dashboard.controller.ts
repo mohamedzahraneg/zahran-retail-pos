@@ -81,4 +81,45 @@ export class FinancialDashboardController {
   ) {
     return this.svc.resolve(parseInt(id, 10), user.userId, body?.note);
   }
+
+  // ─── Financial lockdown (migration 068, admin only) ──────────────────
+  @Get('lockdown')
+  @ApiOperation({ summary: 'حالة القفل المالي' })
+  lockdownStatus() {
+    return this.svc.lockdownStatus();
+  }
+
+  @Patch('lockdown')
+  @Permissions('system.lockdown.manage')
+  @ApiOperation({ summary: 'تفعيل/إيقاف القفل المالي للنظام' })
+  toggleLockdown(
+    @Body() body: { on: boolean; reason?: string },
+    @CurrentUser() user: JwtUser,
+  ) {
+    return this.svc.toggleLockdown(!!body?.on, user.userId, body?.reason);
+  }
+
+  // ─── Employee risk flags (migration 068) ──────────────────────────────
+  @Get('risk-flags')
+  @ApiOperation({ summary: 'قائمة التنبيهات على الموظفين' })
+  riskFlags(
+    @Query('resolved') resolved?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.svc.riskFlags({
+      resolved:
+        resolved === 'true' ? true : resolved === 'false' ? false : undefined,
+      limit: limit ? parseInt(limit, 10) : 100,
+    });
+  }
+
+  @Patch('risk-flags/:id/resolve')
+  @ApiOperation({ summary: 'حل تنبيه موظف (قرار الإدارة)' })
+  resolveRiskFlag(
+    @Param('id') id: string,
+    @Body() body: { resolution?: string },
+    @CurrentUser() user: JwtUser,
+  ) {
+    return this.svc.resolveRiskFlag(parseInt(id, 10), user.userId, body?.resolution);
+  }
 }

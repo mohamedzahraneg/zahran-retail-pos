@@ -296,7 +296,10 @@ export class ReconciliationService {
     // Raise the session flag so migration 058's trigger allows the
     // write — this is a sanctioned rebuild, not a stray mutation.
     await this.ds.transaction(async (em) => {
-      await em.query(`SET LOCAL app.engine_context = 'on'`);
+      // Migration 068 strict guard: service:* identity pattern.
+      await em.query(
+        `SET LOCAL app.engine_context = 'service:reconciliation.service'`,
+      );
       await em.query(
         `UPDATE cashboxes SET current_balance = $2, updated_at = NOW()
           WHERE id = $1`,
