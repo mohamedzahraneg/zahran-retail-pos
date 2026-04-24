@@ -65,18 +65,56 @@ export interface EmployeeDashboard {
     month: { minutes: number; days: number };
   };
   warnings: Array<{ kind: string; message: string }>;
+  /**
+   * Selected-month window (defaults to current Cairo month) + a live
+   * week slice. Added by PR #88. `is_current` tells the UI whether
+   * "today" attendance data is meaningful.
+   */
+  period: {
+    month: { from: string; to: string; label: string; is_current: boolean };
+    week: { from: string; to: string };
+  };
+  /**
+   * Per-user ledger reset marker (migration 081). `date` is the cutoff
+   * after which the post-reset main cards apply. NULL for employees
+   * who never had a reset posted — UI falls back to legacy display.
+   */
+  ledger_reset: { date: string | null; has_reset: boolean };
+  /**
+   * Canonical monthly wage workflow (migrations 082–083). These are
+   * the numbers the post-reset main cards read from.
+   */
+  wage: {
+    daily_amount: number;
+    target_minutes_day: number;
+    accrual_in_month: number;
+    accrual_count: number;
+    paid_in_month: number;
+    paid_count: number;
+    remaining_from_month_accrual: number;
+  };
+  /**
+   * GL balance headlines (migration 084). `opening_balance` = as-of
+   * (month start − 1 day); `closing_balance` = as-of month end;
+   * `live_snapshot` = v_employee_gl_balance right now.
+   */
+  gl: {
+    opening_balance: number;
+    closing_balance: number;
+    live_snapshot: number;
+  };
   salary: {
     amount: number;
     frequency: 'daily' | 'weekly' | 'monthly';
     expected: number;
+    /**
+     * Legacy source-derived numbers — after the ledger reset these are
+     * shown only inside the collapsed "السجل القديم قبل التصفير"
+     * archive section and must NOT drive the main cards. `gl_balance`
+     * is kept as the live snapshot for backward compatibility.
+     */
     accrued: number;
     bonuses: number;
-    /**
-     * Canonical GL balance from v_employee_gl_balance (COA 1123 + 213,
-     * migration 075). Positive = employee owes company; negative =
-     * company owes employee. The UI uses this as the headline — the
-     * source-derived `net` below is shown as a breakdown only.
-     */
     gl_balance: number;
     deductions: number;
     advances_month: number;
@@ -111,8 +149,12 @@ export interface TeamRow {
 }
 
 export const employeesApi = {
-  dashboard: () =>
-    unwrap<EmployeeDashboard>(api.get('/employees/me/dashboard')),
+  dashboard: (month?: string) =>
+    unwrap<EmployeeDashboard>(
+      api.get('/employees/me/dashboard', {
+        params: month ? { month } : undefined,
+      }),
+    ),
 
   myTasks: () => unwrap<EmployeeTask[]>(api.get('/employees/me/tasks')),
   ackTask: (id: string | number) =>
@@ -139,8 +181,12 @@ export const employeesApi = {
     body: { decision: 'approved' | 'rejected'; reason?: string },
   ) => unwrap<EmployeeRequest>(api.post(`/employees/requests/${id}/decide`, body)),
 
-  userDashboard: (id: string) =>
-    unwrap<EmployeeDashboard>(api.get(`/employees/${id}/dashboard`)),
+  userDashboard: (id: string, month?: string) =>
+    unwrap<EmployeeDashboard>(
+      api.get(`/employees/${id}/dashboard`, {
+        params: month ? { month } : undefined,
+      }),
+    ),
 
   updateProfile: (
     id: string,
@@ -296,6 +342,13 @@ export interface EmployeeLedger {
    * when opening-balance or reclassification JEs exist.
    */
   closing_balance: number;
+  /**
+   * GL-based opening/closing truncated at (from − 1 day) / to. Both
+   * are NULL when `from`/`to` aren't supplied. Use these for the
+   * main post-reset monthly ledger header.
+   */
+  gl_opening_balance: number | null;
+  gl_closing_balance: number | null;
   /**
    * Canonical headline. From v_employee_gl_balance (COA 1123 + 213,
    * migration 075). Positive = employee owes company; negative =

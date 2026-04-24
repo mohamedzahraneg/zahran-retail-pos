@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import {
@@ -12,6 +13,9 @@ import {
   Plus,
   X,
   Lightbulb,
+  Archive,
+  Info,
+  ShieldCheck,
 } from 'lucide-react';
 import {
   employeesApi,
@@ -21,6 +25,123 @@ import {
 } from '@/api/employees.api';
 import { attendanceApi } from '@/api/attendance.api';
 import { useAuthStore } from '@/stores/auth.store';
+
+// ═══ Month picker helpers ═════════════════════════════════════════════
+// Single place for YYYY-MM parsing / default / bounds so the page and
+// all child cards stay consistent.
+
+function currentMonthCairo(): string {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Africa/Cairo',
+    year: 'numeric',
+    month: '2-digit',
+  }).formatToParts(new Date());
+  const y = parts.find((p) => p.type === 'year')!.value;
+  const m = parts.find((p) => p.type === 'month')!.value;
+  return `${y}-${m}`;
+}
+
+function monthBounds(month: string): { from: string; to: string } {
+  const match = /^(\d{4})-(\d{2})$/.exec(month);
+  const y = match ? Number(match[1]) : new Date().getUTCFullYear();
+  const m = match ? Number(match[2]) : new Date().getUTCMonth() + 1;
+  const first = `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-01`;
+  const lastDate = new Date(Date.UTC(y, m, 1));
+  lastDate.setUTCDate(lastDate.getUTCDate() - 1);
+  const last =
+    lastDate.getUTCFullYear() +
+    '-' +
+    String(lastDate.getUTCMonth() + 1).padStart(2, '0') +
+    '-' +
+    String(lastDate.getUTCDate()).padStart(2, '0');
+  return { from: first, to: last };
+}
+
+function addMonths(month: string, delta: number): string {
+  const match = /^(\d{4})-(\d{2})$/.exec(month) || ['', '2026', '01'];
+  let y = Number(match[1]);
+  let m = Number(match[2]) + delta;
+  while (m <= 0) {
+    y -= 1;
+    m += 12;
+  }
+  while (m > 12) {
+    y += 1;
+    m -= 12;
+  }
+  return `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}`;
+}
+
+function monthLabelArabic(month: string): string {
+  const { from } = monthBounds(month);
+  const d = new Date(from + 'T00:00:00');
+  return d.toLocaleDateString('ar-EG-u-ca-gregory', {
+    timeZone: 'Africa/Cairo',
+    year: 'numeric',
+    month: 'long',
+  });
+}
+
+/**
+ * Month picker + URL sync. Drives the whole Employee Profile month
+ * scope. Default = current Cairo month. Persists selection in the
+ * `?m=YYYY-MM` query param so refresh / deep-link survives.
+ */
+function useMonthSelector(): {
+  month: string;
+  setMonth: (m: string) => void;
+  isCurrent: boolean;
+  label: string;
+  from: string;
+  to: string;
+} {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const cur = currentMonthCairo();
+  const raw = searchParams.get('m') || '';
+  const month = /^\d{4}-\d{2}$/.test(raw) ? raw : cur;
+
+  const setMonth = (next: string) => {
+    const clean = /^\d{4}-\d{2}$/.test(next) ? next : cur;
+    const copy = new URLSearchParams(searchParams);
+    if (clean === cur) {
+      copy.delete('m');
+    } else {
+      copy.set('m', clean);
+    }
+    setSearchParams(copy, { replace: false });
+  };
+
+  const { from, to } = monthBounds(month);
+  return {
+    month,
+    setMonth,
+    isCurrent: month === cur,
+    label: monthLabelArabic(month),
+    from,
+    to,
+  };
+}
+
+/** React Query keys that depend on the selected month. Centralised so
+ *  mutations can invalidate every monthly slice in one call. */
+function monthScopedKeys() {
+  return [
+    ['employee-dashboard'],
+    ['employee-ledger'],
+    ['employee-payable-days'],
+    ['employee-history-mine'],
+    ['payroll-balances'],
+    ['payroll-list'],
+    ['employees-team'],
+    ['attendance'],
+  ] as const;
+}
+
+function invalidateMonthly(qc: ReturnType<typeof useQueryClient>) {
+  for (const key of monthScopedKeys()) {
+    qc.invalidateQueries({ queryKey: key });
+  }
+}
 
 const EGP = (n: number | string) =>
   `${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ج.م`;
@@ -155,12 +276,11 @@ function LiveDateTime() {
 }
 
 export default function EmployeeProfile() {
-  const qc = useQueryClient();
-  const authUser = useAuthStore((s) => s.user);
+  const monthSel = useMonthSelector();
 
   const { data, isLoading } = useQuery({
-    queryKey: ['employee-dashboard'],
-    queryFn: () => employeesApi.dashboard(),
+    queryKey: ['employee-dashboard', 'me', monthSel.month],
+    queryFn: () => employeesApi.dashboard(monthSel.month),
     refetchInterval: 30_000,
   });
 
@@ -171,18 +291,32 @@ export default function EmployeeProfile() {
       </div>
     );
   }
-  return <EmployeeDashboardBody data={data} />;
+  return <EmployeeDashboardBody data={data} monthSel={monthSel} />;
 }
 
-function EmployeeDashboardBody({ data }: { data: EmployeeDashboard }) {
+type MonthSelector = ReturnType<typeof useMonthSelector>;
+
+function EmployeeDashboardBody({
+  data,
+  monthSel,
+}: {
+  data: EmployeeDashboard;
+  monthSel: MonthSelector;
+}) {
   const qc = useQueryClient();
   const { profile, attendance, salary, tasks, requests, recommendations } = data;
+  const hasPermission = useAuthStore((s) => s.hasPermission);
+  const canManageAttendance = hasPermission('employee.attendance.manage');
+  const wage = data.wage;
+  const gl = data.gl;
+  const ledgerReset = data.ledger_reset;
+  const showArchive = !!ledgerReset?.has_reset;
 
   const clockIn = useMutation({
     mutationFn: () => attendanceApi.clockIn(),
     onSuccess: () => {
       toast.success('تم تسجيل حضورك');
-      qc.invalidateQueries({ queryKey: ['employee-dashboard'] });
+      invalidateMonthly(qc);
     },
     onError: (e: any) =>
       toast.error(e?.response?.data?.message || 'فشل تسجيل الحضور'),
@@ -191,7 +325,7 @@ function EmployeeDashboardBody({ data }: { data: EmployeeDashboard }) {
     mutationFn: () => attendanceApi.clockOut(),
     onSuccess: () => {
       toast.success('تم تسجيل انصرافك');
-      qc.invalidateQueries({ queryKey: ['employee-dashboard'] });
+      invalidateMonthly(qc);
     },
     onError: (e: any) =>
       toast.error(e?.response?.data?.message || 'فشل تسجيل الانصراف'),
@@ -335,91 +469,196 @@ function EmployeeDashboardBody({ data }: { data: EmployeeDashboard }) {
         </div>
       )}
 
-      {/* ─── Metric strip ─── */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+      {/* ─── Month selector + admin attendance controls ─── */}
+      <MonthSelectorBar monthSel={monthSel} />
+
+      {canManageAttendance && (
+        <AdminAttendancePanel
+          userId={profile.id}
+          fullName={profile.full_name}
+          dailyAmount={Number(wage?.daily_amount ?? 0)}
+        />
+      )}
+
+      {/* ─── Attendance cards (monthly) ─── */}
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
         <MetricCard
           label="ساعات اليوم"
           value={
-            attendance.today?.duration_min
-              ? fmtMinutes(Number(attendance.today.duration_min))
-              : isClockedIn
-                ? 'مستمر'
-                : '—'
+            !monthSel.isCurrent
+              ? '—'
+              : attendance.today?.duration_min
+                ? fmtMinutes(Number(attendance.today.duration_min))
+                : isClockedIn
+                  ? 'مستمر'
+                  : '—'
           }
-          hint={`هدف ${(targetDayMin / 60).toFixed(1)}س`}
+          hint={
+            monthSel.isCurrent
+              ? `هدف ${(targetDayMin / 60).toFixed(1)}س`
+              : 'الشهر الحالي فقط'
+          }
           tone="indigo"
           icon={<Clock size={18} />}
         />
         <MetricCard
           label="ساعات الشهر"
           value={`${monthHours.toFixed(1)}س`}
-          hint={`${attendance.month.days} يوم`}
+          hint={monthSel.label}
           tone="emerald"
           icon={<Clock size={18} />}
         />
-        {/* Canonical GL balance headline — positive = employee owes
-            company; negative = company owes employee. The source-
-            derived `salary.net` is shown as a secondary breakdown in
-            "تفاصيل الدخل" below. */}
         <MetricCard
-          label="الرصيد النهائي من القيود"
-          value={
-            salary.gl_balance > 0.01
-              ? `مدين ${EGP(salary.gl_balance)}`
-              : salary.gl_balance < -0.01
-                ? `مستحق له ${EGP(-salary.gl_balance)}`
-                : 'متوازن'
-          }
-          hint={`الصافي من الرواتب ${EGP(salary.net)}`}
-          tone={
-            salary.gl_balance > 0.01
-              ? 'rose'
-              : salary.gl_balance < -0.01
-                ? 'emerald'
-                : 'indigo'
-          }
-          icon={<DollarSign size={18} />}
+          label="أيام العمل"
+          value={`${attendance.month.days} يوم`}
+          hint={monthSel.label}
+          tone="slate"
+          icon={<Clock size={18} />}
         />
         <MetricCard
-          label="السلف هذا الشهر"
-          value={EGP(salary.advances_month)}
-          hint={`مجموعها ${EGP(salary.advances_lifetime)}`}
-          tone="amber"
-          icon={<DollarSign size={18} />}
+          label="آخر حضور"
+          value={attendance.today?.clock_in ? fmtClockAr(attendance.today.clock_in) : '—'}
+          hint={monthSel.isCurrent ? 'اليوم' : '—'}
+          tone="emerald"
+          icon={<Clock size={18} />}
+        />
+        <MetricCard
+          label="آخر انصراف"
+          value={attendance.today?.clock_out ? fmtClockAr(attendance.today.clock_out) : '—'}
+          hint={monthSel.isCurrent ? 'اليوم' : '—'}
+          tone="rose"
+          icon={<Clock size={18} />}
         />
       </div>
 
-      {/* ─── Salary breakdown ─── */}
-      <div className="card p-5">
-        <div className="flex items-center gap-2 mb-2">
-          <DollarSign className="text-brand-600" size={18} />
-          <h3 className="font-black text-slate-800">تفاصيل الدخل</h3>
-          <span className="text-[11px] text-slate-500 mr-auto">
-            {profile.salary_frequency === 'daily'
-              ? 'يومي'
-              : profile.salary_frequency === 'weekly'
-                ? 'أسبوعي'
-                : 'شهري'}{' '}
-            · {EGP(profile.salary_amount)}
-          </span>
+      {/* ─── Main canonical post-reset cards ─── */}
+      <div className="card p-4 border-2 border-indigo-100 bg-indigo-50/40">
+        <div className="flex items-start gap-2 mb-3">
+          <Info className="text-indigo-600 shrink-0 mt-0.5" size={16} />
+          <div className="text-[11px] text-indigo-900 leading-relaxed">
+            استحقاق اليومية لا يعني صرف نقدي. الصرف من الخزنة يتم فقط عند
+            تسجيل صرف. الأرقام الرئيسية تعتمد على القيود المحاسبية
+            والحركات الجديدة فقط.
+          </div>
         </div>
-        <div className="text-[11px] text-slate-500 mb-4">
-          تفاصيل العمليات غير الملغاة فقط · الرصيد النهائي من القيود المحاسبية
-          في البطاقة العلوية
-        </div>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
-          <BreakdownRow label="مستحق حتى الآن" value={EGP(salary.accrued)} tone="emerald" />
-          <BreakdownRow label="حوافز ومكافآت" value={EGP(salary.bonuses)} tone="indigo" />
-          <BreakdownRow label="خصومات" value={EGP(salary.deductions)} tone="rose" />
-          <BreakdownRow label="سلف" value={EGP(salary.advances_month)} tone="amber" />
-          <BreakdownRow
-            label="الصافي من الرواتب (غير الرصيد النهائي)"
-            value={EGP(salary.net)}
-            tone={salary.debt_warning ? 'rose' : 'emerald'}
-            big
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+          <MetricCard
+            label="الرصيد النهائي من القيود"
+            value={
+              gl.live_snapshot > 0.01
+                ? `مدين ${EGP(gl.live_snapshot)}`
+                : gl.live_snapshot < -0.01
+                  ? `مستحق له ${EGP(-gl.live_snapshot)}`
+                  : 'متوازن'
+            }
+            hint={`افتتاحي ${EGP(gl.opening_balance)} · ختامي ${EGP(gl.closing_balance)}`}
+            tone={
+              gl.live_snapshot > 0.01
+                ? 'rose'
+                : gl.live_snapshot < -0.01
+                  ? 'emerald'
+                  : 'indigo'
+            }
+            icon={<DollarSign size={18} />}
+          />
+          <MetricCard
+            label="استحقاق اليومية لهذا الشهر"
+            value={EGP(wage.accrual_in_month)}
+            hint={`${wage.accrual_count} يوم · يومية ${EGP(wage.daily_amount)}`}
+            tone="indigo"
+            icon={<DollarSign size={18} />}
+          />
+          <MetricCard
+            label="المدفوع فعليًا خلال الشهر"
+            value={EGP(wage.paid_in_month)}
+            hint={`${wage.paid_count} تسوية`}
+            tone="emerald"
+            icon={<DollarSign size={18} />}
+          />
+          <MetricCard
+            label="المتبقي مستحق"
+            value={EGP(wage.remaining_from_month_accrual)}
+            hint="استحقاق − مدفوع"
+            tone={wage.remaining_from_month_accrual > 0.01 ? 'amber' : 'emerald'}
+            icon={<DollarSign size={18} />}
+          />
+          <MetricCard
+            label="السلف الجديدة خارج اليومية"
+            value={EGP(salary.advances_month)}
+            hint={monthSel.label}
+            tone="amber"
+            icon={<DollarSign size={18} />}
+          />
+          <MetricCard
+            label="مكافآت / خصومات / جزاءات"
+            value={`+${EGP(salary.bonuses)} / −${EGP(salary.deductions)}`}
+            hint="ضمن الشهر المختار"
+            tone="slate"
+            icon={<DollarSign size={18} />}
           />
         </div>
       </div>
+
+      {/* ─── Archived old-history section (collapsed by default) ───
+          Kept so admins can audit pre-reset numbers, but nothing here
+          drives the main cards above.  */}
+      {showArchive && (
+        <details className="card p-0 group">
+          <summary className="cursor-pointer list-none p-4 flex items-center gap-2 select-none">
+            <Archive className="text-slate-500 shrink-0" size={16} />
+            <div className="min-w-0 flex-1">
+              <div className="font-black text-slate-700 text-sm">
+                السجل القديم قبل التصفير
+              </div>
+              <div className="text-[10px] text-slate-500 mt-0.5 break-words">
+                تاريخ التصفير: {ledgerReset.date} · هذه الأرقام مصدرها
+                الجداول الأصلية وليست هي الرصيد النهائي.
+              </div>
+            </div>
+            <span className="text-[10px] text-slate-400 group-open:hidden">عرض ▾</span>
+            <span className="text-[10px] text-slate-400 hidden group-open:inline">إخفاء ▴</span>
+          </summary>
+          <div className="px-4 pb-4 border-t border-slate-100 pt-4">
+            <div className="text-[11px] text-slate-500 mb-3">
+              الأرقام الرئيسية بعد التصفير تعتمد على القيود المحاسبية والحركات
+              الجديدة فقط. السجل القديم متاح للأرشفة والمراجعة.
+            </div>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+              <BreakdownRow
+                label="مستحق حتى الآن (قديم)"
+                value={EGP(salary.accrued)}
+                tone="emerald"
+              />
+              <BreakdownRow
+                label="حوافز ومكافآت (قديم)"
+                value={EGP(salary.bonuses)}
+                tone="indigo"
+              />
+              <BreakdownRow
+                label="خصومات (قديم)"
+                value={EGP(salary.deductions)}
+                tone="rose"
+              />
+              <BreakdownRow
+                label="سلف (قديم)"
+                value={EGP(salary.advances_month)}
+                tone="amber"
+              />
+              <BreakdownRow
+                label="الصافي من الرواتب (قديم — ليس الرصيد النهائي)"
+                value={EGP(salary.net)}
+                tone={salary.debt_warning ? 'rose' : 'emerald'}
+                big
+              />
+              <BreakdownRow
+                label="إجمالي السلف عبر التاريخ"
+                value={EGP(salary.advances_lifetime)}
+                tone="amber"
+              />
+            </div>
+          </div>
+        </details>
+      )}
 
       {/* ─── Tasks + Requests ─── */}
       <div className="grid lg:grid-cols-2 gap-5">
@@ -427,11 +666,193 @@ function EmployeeDashboardBody({ data }: { data: EmployeeDashboard }) {
         <RequestsCard requests={requests} />
       </div>
 
-      {/* ─── Financial Ledger (migration 060) ─── */}
-      <FinancialLedgerCard userId={profile.id} />
+      {/* ─── Financial Ledger — monthly GL view ─── */}
+      <FinancialLedgerCard userId={profile.id} monthSel={monthSel} />
 
       {/* ─── Daily history ─── */}
       <HistoryCard userId={profile.id} />
+    </div>
+  );
+}
+
+/* ───────── Month selector bar ───────── */
+
+function MonthSelectorBar({ monthSel }: { monthSel: MonthSelector }) {
+  const prev = addMonths(monthSel.month, -1);
+  const next = addMonths(monthSel.month, +1);
+  const cur = currentMonthCairo();
+  return (
+    <div className="card p-3 flex items-center gap-2 flex-wrap">
+      <button
+        className="btn-ghost px-2 py-1 text-xs"
+        onClick={() => monthSel.setMonth(prev)}
+        title={prev}
+      >
+        ← الشهر السابق
+      </button>
+      <div className="flex items-center gap-2 min-w-0">
+        <span className="text-[11px] text-slate-500">الشهر المعروض:</span>
+        <input
+          type="month"
+          className="input input-sm tabular-nums"
+          value={monthSel.month}
+          onChange={(e) => monthSel.setMonth(e.target.value || cur)}
+        />
+        <span className="text-xs font-bold text-slate-800 truncate">
+          {monthSel.label}
+        </span>
+        {monthSel.isCurrent && (
+          <span className="chip bg-emerald-50 text-emerald-700 border-emerald-200 text-[10px]">
+            الحالي
+          </span>
+        )}
+      </div>
+      <button
+        className="btn-ghost px-2 py-1 text-xs"
+        onClick={() => monthSel.setMonth(next)}
+        title={next}
+      >
+        الشهر التالي →
+      </button>
+      {!monthSel.isCurrent && (
+        <button
+          className="btn-ghost px-2 py-1 text-xs mr-auto"
+          onClick={() => monthSel.setMonth(cur)}
+        >
+          العودة للشهر الحالي
+        </button>
+      )}
+    </div>
+  );
+}
+
+/* ───────── Admin attendance controls (employee.attendance.manage) ─────────
+   Visible only when the logged-in user can manage employee attendance.
+   All three actions run against the server — no fake frontend-only updates.
+   Wage accrual via "تثبيت يومية" posts DR 521 / CR 213 with NO cashbox
+   movement. Payout / settlement still lives in the existing employee
+   settlement flow (Team drawer).  */
+
+function AdminAttendancePanel({
+  userId,
+  fullName,
+  dailyAmount,
+}: {
+  userId: string;
+  fullName: string;
+  dailyAmount: number;
+}) {
+  const qc = useQueryClient();
+  const today = new Date().toISOString().slice(0, 10);
+  const [markDate, setMarkDate] = useState<string>(today);
+  const [markReason, setMarkReason] = useState<string>('');
+
+  const adminClockIn = useMutation({
+    mutationFn: () => attendanceApi.adminClockIn({ user_id: userId }),
+    onSuccess: () => {
+      toast.success('تم تسجيل الحضور نيابةً');
+      invalidateMonthly(qc);
+    },
+    onError: (e: any) => toast.error(e?.response?.data?.message || 'فشل'),
+  });
+  const adminClockOut = useMutation({
+    mutationFn: () => attendanceApi.adminClockOut({ user_id: userId }),
+    onSuccess: () => {
+      toast.success('تم تسجيل الانصراف نيابةً');
+      invalidateMonthly(qc);
+    },
+    onError: (e: any) => toast.error(e?.response?.data?.message || 'فشل'),
+  });
+  const markPayable = useMutation({
+    mutationFn: (body: { work_date: string; reason: string }) =>
+      attendanceApi.adminMarkPayableDay({ user_id: userId, ...body }),
+    onSuccess: () => {
+      toast.success('تم تثبيت يومية — DR 521 / CR 213 فقط، بدون خزنة');
+      setMarkReason('');
+      invalidateMonthly(qc);
+    },
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.message || 'فشل تثبيت اليومية'),
+  });
+
+  return (
+    <div className="card p-4 border-2 border-violet-200 bg-violet-50/40 space-y-3">
+      <div className="flex items-center gap-2">
+        <ShieldCheck className="text-violet-700 shrink-0" size={16} />
+        <div className="font-black text-violet-900 text-sm break-words min-w-0">
+          أدوات المسؤول للحضور واليومية — {fullName}
+        </div>
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          className="btn-primary text-xs"
+          onClick={() => adminClockIn.mutate()}
+          disabled={adminClockIn.isPending}
+        >
+          تسجيل حضور
+        </button>
+        <button
+          className="btn-primary text-xs"
+          onClick={() => adminClockOut.mutate()}
+          disabled={adminClockOut.isPending}
+        >
+          تسجيل انصراف
+        </button>
+      </div>
+      <div className="pt-2 border-t border-violet-200/70">
+        <div className="text-[11px] font-bold text-violet-900 mb-2">
+          تثبيت يومية يدويًا — {EGP(dailyAmount)} / يوم
+        </div>
+        <div className="flex flex-wrap items-end gap-2">
+          <label className="block text-[11px] text-slate-600">
+            تاريخ اليوم
+            <input
+              type="date"
+              className="input input-sm block mt-0.5"
+              value={markDate}
+              onChange={(e) => setMarkDate(e.target.value)}
+              disabled={markPayable.isPending}
+            />
+          </label>
+          <label className="block text-[11px] text-slate-600 flex-1 min-w-[180px]">
+            السبب (مطلوب)
+            <input
+              type="text"
+              className="input input-sm block mt-0.5 w-full"
+              placeholder="مثلاً: يوم عمل بدون بصمة"
+              value={markReason}
+              onChange={(e) => setMarkReason(e.target.value)}
+              disabled={markPayable.isPending}
+            />
+          </label>
+          <button
+            className="btn-primary text-xs"
+            disabled={
+              markPayable.isPending || !markDate || !markReason.trim()
+            }
+            onClick={() => {
+              if (!markReason.trim()) {
+                toast.error('السبب مطلوب');
+                return;
+              }
+              if (dailyAmount <= 0) {
+                toast.error('لم يُحدَّد راتب يومي للموظف');
+                return;
+              }
+              markPayable.mutate({
+                work_date: markDate,
+                reason: markReason.trim(),
+              });
+            }}
+          >
+            تثبيت يومية
+          </button>
+        </div>
+        <div className="text-[10px] text-violet-900/70 mt-2 leading-relaxed">
+          تثبيت اليومية يُنشئ قيدًا محاسبيًا فقط: DR 521 / CR 213. لا
+          يتحرك أي شيء في الخزنة حتى تسجيل الصرف.
+        </div>
+      </div>
     </div>
   );
 }
@@ -444,13 +865,22 @@ function EmployeeDashboardBody({ data }: { data: EmployeeDashboard }) {
    receivable). The running balance is computed server-side so the
    header tile matches whatever v_employee_ledger says.
 */
-function FinancialLedgerCard({ userId }: { userId?: string }) {
+function FinancialLedgerCard({
+  userId,
+  monthSel,
+}: {
+  userId?: string;
+  monthSel: MonthSelector;
+}) {
   const authUser = useAuthStore((s) => s.user);
   const isSelf = !userId || userId === authUser?.id;
+  const { from, to } = monthSel;
   const { data, isLoading } = useQuery({
-    queryKey: ['employee-ledger', userId ?? 'me'],
+    queryKey: ['employee-ledger', userId ?? 'me', monthSel.month],
     queryFn: () =>
-      isSelf ? employeesApi.myLedger() : employeesApi.userLedger(userId!),
+      isSelf
+        ? employeesApi.myLedger(from, to)
+        : employeesApi.userLedger(userId!, from, to),
     refetchInterval: 60_000,
   });
 
@@ -479,19 +909,32 @@ function FinancialLedgerCard({ userId }: { userId?: string }) {
       bonus: 'حافز',
     } as Record<string, string>)[t] ?? t;
 
-  // Canonical headline sourced from v_employee_gl_balance via the
-  // /employees/:id/ledger endpoint (added in the audit-#4-follow-up
-  // PR). Falls back to closing_balance for older backends that
-  // pre-date the field.
+  // Canonical headline sourced from v_employee_gl_balance.
   const headlineBal =
     typeof data.gl_balance === 'number' ? data.gl_balance : data.closing_balance;
+  const glOpening = typeof data.gl_opening_balance === 'number' ? data.gl_opening_balance : null;
+  const glClosing = typeof data.gl_closing_balance === 'number' ? data.gl_closing_balance : null;
+  // gl_entries come full-history from the API. Restrict the visible
+  // timeline to the selected month so the "movements" table matches
+  // the opening/closing headline.
+  const inMonth = (d: string) => d >= monthSel.from && d <= monthSel.to;
+  const monthEntries = (data.gl_entries || []).filter((g) => inMonth(g.entry_date));
+  const monthMovement = monthEntries.reduce(
+    (acc, g) => acc + Number(g.signed_effect || 0),
+    0,
+  );
 
   return (
     <div className="card p-5 space-y-4">
       <div className="flex items-center justify-between flex-wrap gap-2">
-        <h3 className="font-black text-slate-800">
-          الملف المالي — الرصيد المستحق
-        </h3>
+        <div className="min-w-0">
+          <h3 className="font-black text-slate-800 break-words">
+            الملف المالي — الرصيد النهائي من القيود المحاسبية
+          </h3>
+          <div className="text-[11px] text-slate-500 mt-0.5">
+            {monthSel.label}
+          </div>
+        </div>
         <div
           className={`px-3 py-1.5 rounded-lg text-sm font-black tabular-nums ${
             headlineBal > 0.01
@@ -507,6 +950,25 @@ function FinancialLedgerCard({ userId }: { userId?: string }) {
               ? `له رصيد: ${fmt(-headlineBal)} ج.م`
               : 'مُسوّى بالكامل'}
         </div>
+      </div>
+
+      {/* Monthly opening + movement + closing strip. */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
+        <LedgerTile
+          label={`افتتاحي — قبل ${monthSel.from}`}
+          value={glOpening ?? 0}
+          tone="slate"
+        />
+        <LedgerTile
+          label="حركات الشهر"
+          value={monthMovement}
+          tone={monthMovement > 0 ? 'rose' : monthMovement < 0 ? 'emerald' : 'slate'}
+        />
+        <LedgerTile
+          label={`ختامي — حتى ${monthSel.to}`}
+          value={glClosing ?? 0}
+          tone="indigo"
+        />
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs">
@@ -525,59 +987,23 @@ function FinancialLedgerCard({ userId }: { userId?: string }) {
         <LedgerTile label="حوافز" value={data.totals.bonuses} tone="indigo" />
       </div>
 
-      {/* Source-table equation — shows how the entries list rolls up.
-          This is NOT the final balance when opening-balance or
-          reclassification JEs exist (e.g. PR #73's ledger reset).
-          The headline badge above uses the canonical gl_balance. */}
-      <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 text-xs text-slate-700">
-        <div className="font-bold mb-1">تفاصيل الحركات — لا تمثل الرصيد النهائي إذا توجد تسويات افتتاحية/قيود تصحيح</div>
-        <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1 font-mono tabular-nums leading-relaxed">
-          <span className="font-bold">مجموع الحركات</span>
-          <span>=</span>
-          {data.opening_balance !== 0 && (
-            <>
-              <span>رصيد افتتاحي {fmt(data.opening_balance)}</span>
-              <span>+</span>
-            </>
-          )}
-          <span className="text-rose-700">عجز {fmt(data.totals.shortages)}</span>
-          <span>+</span>
-          <span className="text-amber-700">سلف {fmt(data.totals.advances)}</span>
-          <span>−</span>
-          <span className="text-slate-700">خصومات {fmt(data.totals.manual_deductions)}</span>
-          <span>−</span>
-          <span className="text-emerald-700">تسويات {fmt(data.totals.settlements)}</span>
-          <span>−</span>
-          <span className="text-indigo-700">حوافز {fmt(data.totals.bonuses)}</span>
-          <span>=</span>
-          <span className="font-black">{fmt(data.closing_balance)}</span>
-        </div>
-        <div className="mt-2 pt-2 border-t border-slate-200 font-mono tabular-nums text-slate-800">
-          <span className="font-bold">الرصيد النهائي من القيود: </span>
-          <span className="font-black">{fmt(headlineBal)}</span>
-          <span className="text-[10px] text-slate-500 mr-2">
-            (من قيود اليومية — v_employee_gl_balance)
-          </span>
-        </div>
-      </div>
-
       {/* ─── Canonical GL ledger — explains gl_balance ───────────────
            Every posted non-void journal_line on 1123 / 213 tagged
            with this employee, chronologically. Reset + reclassification
            JEs appear here as first-class rows. SUM(signed_effect) ==
            gl_balance. This is the audit trail behind the headline. */}
       <div className="space-y-2">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between flex-wrap gap-2">
           <h4 className="text-sm font-black text-slate-800">
-            قيود اليومية — الرصيد النهائي من القيود المحاسبية
+            حركات الشهر — قيود اليومية على حسابات الموظف
           </h4>
           <span className="text-[10px] text-slate-500">
-            حسابات 1123 ذمم / 213 مستحقات · مجموع = {fmt(headlineBal)}
+            حسابات 1123 ذمم / 213 مستحقات · صافي الحركة = {fmt(monthMovement)}
           </span>
         </div>
-        {(!data.gl_entries || data.gl_entries.length === 0) ? (
+        {monthEntries.length === 0 ? (
           <div className="text-center text-slate-500 text-xs py-4">
-            لا توجد قيود محاسبية مرتبطة بالموظف.
+            لا توجد قيود محاسبية خلال {monthSel.label}.
           </div>
         ) : (
           <div className="overflow-x-auto border border-slate-200 rounded-lg">
@@ -595,7 +1021,7 @@ function FinancialLedgerCard({ userId }: { userId?: string }) {
                 </tr>
               </thead>
               <tbody>
-                {data.gl_entries.map((g, i) => (
+                {monthEntries.map((g, i) => (
                   <tr key={`${g.entry_no}-${i}`} className="border-t border-slate-100">
                     <td className="p-2 tabular-nums font-mono">{g.entry_date}</td>
                     <td className="p-2 font-mono text-[11px] text-slate-600">
@@ -647,11 +1073,43 @@ function FinancialLedgerCard({ userId }: { userId?: string }) {
         )}
       </div>
 
-      {/* ─── Legacy source-table log (kept as secondary history) ─── */}
-      <div className="pt-3 border-t border-slate-200 space-y-2">
-        <h4 className="text-sm font-bold text-slate-700">
-          سجل العمليات الأصلي — مصدري (لا يمثل الرصيد النهائي)
-        </h4>
+      {/* ─── Legacy source-table log — archived / collapsed ─── */}
+      <details className="group pt-3 border-t border-slate-200">
+        <summary className="cursor-pointer list-none flex items-center gap-2 select-none py-1">
+          <Archive className="text-slate-500 shrink-0" size={14} />
+          <h4 className="text-sm font-bold text-slate-700 min-w-0 break-words">
+            سجل العمليات الأصلي — أرشيف للمراجعة (لا يمثل الرصيد النهائي)
+          </h4>
+          <span className="text-[10px] text-slate-400 mr-auto group-open:hidden">عرض ▾</span>
+          <span className="text-[10px] text-slate-400 mr-auto hidden group-open:inline">إخفاء ▴</span>
+        </summary>
+        <div className="pt-3 space-y-2">
+          <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 text-xs text-slate-700">
+            <div className="font-bold mb-1">
+              معادلة الحركات من الجداول الأصلية — مرجعية فقط
+            </div>
+            <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1 font-mono tabular-nums leading-relaxed">
+              <span className="font-bold">مجموع الحركات</span>
+              <span>=</span>
+              {data.opening_balance !== 0 && (
+                <>
+                  <span>رصيد افتتاحي {fmt(data.opening_balance)}</span>
+                  <span>+</span>
+                </>
+              )}
+              <span className="text-rose-700">عجز {fmt(data.totals.shortages)}</span>
+              <span>+</span>
+              <span className="text-amber-700">سلف {fmt(data.totals.advances)}</span>
+              <span>−</span>
+              <span className="text-slate-700">خصومات {fmt(data.totals.manual_deductions)}</span>
+              <span>−</span>
+              <span className="text-emerald-700">تسويات {fmt(data.totals.settlements)}</span>
+              <span>−</span>
+              <span className="text-indigo-700">حوافز {fmt(data.totals.bonuses)}</span>
+              <span>=</span>
+              <span className="font-black">{fmt(data.closing_balance)}</span>
+            </div>
+          </div>
       {data.entries.length === 0 ? (
         <div className="text-center text-slate-500 text-xs py-6">
           لا توجد حركات مالية في الفترة المحددة.
@@ -723,7 +1181,8 @@ function FinancialLedgerCard({ userId }: { userId?: string }) {
           </table>
         </div>
       )}
-      </div>
+        </div>
+      </details>
     </div>
   );
 }
@@ -1004,7 +1463,7 @@ function MetricCard({
   label: string;
   value: string;
   hint?: string;
-  tone: 'indigo' | 'emerald' | 'amber' | 'rose';
+  tone: 'indigo' | 'emerald' | 'amber' | 'rose' | 'slate';
   icon?: React.ReactNode;
 }) {
   const bg = {
@@ -1012,6 +1471,7 @@ function MetricCard({
     emerald: 'bg-emerald-50 border-emerald-200 text-emerald-700',
     amber: 'bg-amber-50 border-amber-200 text-amber-700',
     rose: 'bg-rose-50 border-rose-200 text-rose-700',
+    slate: 'bg-slate-50 border-slate-200 text-slate-700',
   }[tone];
   return (
     // min-w-0 on the card so long Arabic values can wrap in a grid
