@@ -25,6 +25,7 @@ import {
 } from '@/api/employees.api';
 import { attendanceApi } from '@/api/attendance.api';
 import { useAuthStore } from '@/stores/auth.store';
+import { invalidateMonthly } from '@/utils/employee-cache';
 
 // ═══ Month picker helpers ═════════════════════════════════════════════
 // Single place for YYYY-MM parsing / default / bounds so the page and
@@ -122,26 +123,9 @@ function useMonthSelector(): {
   };
 }
 
-/** React Query keys that depend on the selected month. Centralised so
- *  mutations can invalidate every monthly slice in one call. */
-function monthScopedKeys() {
-  return [
-    ['employee-dashboard'],
-    ['employee-ledger'],
-    ['employee-payable-days'],
-    ['employee-history-mine'],
-    ['payroll-balances'],
-    ['payroll-list'],
-    ['employees-team'],
-    ['attendance'],
-  ] as const;
-}
-
-function invalidateMonthly(qc: ReturnType<typeof useQueryClient>) {
-  for (const key of monthScopedKeys()) {
-    qc.invalidateQueries({ queryKey: key });
-  }
-}
+// `invalidateMonthly` and the canonical query-key list moved to
+// `frontend/src/utils/employee-cache.ts` in PR-1 so Attendance.tsx
+// can use the same broad invalidation. Imported above.
 
 const EGP = (n: number | string) =>
   `${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ج.م`;

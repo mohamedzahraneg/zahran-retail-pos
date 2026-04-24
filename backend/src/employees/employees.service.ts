@@ -773,9 +773,21 @@ export class EmployeesService {
     // uses this as the headline — positive = employee owes company,
     // negative = company owes employee. The `_this_month` fields stay
     // as month-only operational details.
+    //
+    // PR-1 wiring: also expose target_hours_day + monthly aggregates
+    // for overtime / lateness / early-leave so the Team list can
+    // surface them without the admin opening each drawer. The math
+    // here matches the per-day formulas used in myDashboard
+    // (lines 323-386 for late/early, generated `duration_min` for
+    // overtime). All time-of-day comparisons are done in Cairo TZ to
+    // align with the rest of the codebase.
     return this.ds.query(
       `SELECT u.id, u.employee_no, u.full_name, u.username, u.job_title,
               u.salary_amount, u.salary_frequency,
+              u.target_hours_day,
+              u.shift_start_time,
+              u.shift_end_time,
+              u.late_grace_min,
               r.name_ar AS role_name,
               COALESCE((
                 SELECT SUM(duration_min) FROM attendance_records a
@@ -783,6 +795,54 @@ export class EmployeesService {
                    AND a.work_date >= date_trunc('month', (now() AT TIME ZONE 'Africa/Cairo'))::date
                    AND a.clock_out IS NOT NULL
               ), 0)::int AS minutes_this_month,
+              -- Overtime minutes this month: sum of (duration − target)
+              -- on each closed day where the worker exceeded target.
+              COALESCE((
+                SELECT SUM(GREATEST(0,
+                         a.duration_min - COALESCE(u.target_hours_day,8) * 60))
+                  FROM attendance_records a
+                 WHERE a.user_id = u.id
+                   AND a.work_date >= date_trunc('month', (now() AT TIME ZONE 'Africa/Cairo'))::date
+                   AND a.clock_out IS NOT NULL
+              ), 0)::int AS overtime_minutes_this_month,
+              -- Shortage minutes this month: sum of (target − duration)
+              -- on closed days where the worker fell short of target.
+              COALESCE((
+                SELECT SUM(GREATEST(0,
+                         COALESCE(u.target_hours_day,8) * 60 - a.duration_min))
+                  FROM attendance_records a
+                 WHERE a.user_id = u.id
+                   AND a.work_date >= date_trunc('month', (now() AT TIME ZONE 'Africa/Cairo'))::date
+                   AND a.clock_out IS NOT NULL
+              ), 0)::int AS shortage_minutes_this_month,
+              -- Late minutes this month: minutes past shift_start_time
+              -- (after grace) at clock-in. Cairo TZ; NULL shift_start
+              -- → 0. Same shape as the per-day calc in myDashboard.
+              COALESCE((
+                SELECT SUM(GREATEST(0,
+                         EXTRACT(EPOCH FROM (
+                           ((a.clock_in AT TIME ZONE 'Africa/Cairo')::time - u.shift_start_time)
+                         )) / 60
+                         - COALESCE(u.late_grace_min, 10)))
+                  FROM attendance_records a
+                 WHERE a.user_id = u.id
+                   AND u.shift_start_time IS NOT NULL
+                   AND a.clock_in IS NOT NULL
+                   AND a.work_date >= date_trunc('month', (now() AT TIME ZONE 'Africa/Cairo'))::date
+              ), 0)::int AS late_minutes_this_month,
+              -- Early-leave minutes this month: minutes before
+              -- shift_end_time at clock-out.
+              COALESCE((
+                SELECT SUM(GREATEST(0,
+                         EXTRACT(EPOCH FROM (
+                           u.shift_end_time - (a.clock_out AT TIME ZONE 'Africa/Cairo')::time
+                         )) / 60))
+                  FROM attendance_records a
+                 WHERE a.user_id = u.id
+                   AND u.shift_end_time IS NOT NULL
+                   AND a.clock_out IS NOT NULL
+                   AND a.work_date >= date_trunc('month', (now() AT TIME ZONE 'Africa/Cairo'))::date
+              ), 0)::int AS early_leave_minutes_this_month,
               COALESCE((
                 SELECT SUM(amount) FROM expenses e
                  WHERE e.employee_user_id = u.id AND e.is_advance = true

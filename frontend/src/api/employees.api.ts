@@ -136,7 +136,24 @@ export interface TeamRow {
   salary_amount: string;
   salary_frequency: 'daily' | 'weekly' | 'monthly';
   role_name?: string;
+  /**
+   * Target hours per working day (from `users.target_hours_day`).
+   * Used for the Team list shortage / overtime columns. Server falls
+   * back to 8 when the column is NULL.
+   */
+  target_hours_day: number | string | null;
+  shift_start_time: string | null;
+  shift_end_time: string | null;
+  late_grace_min: number | null;
   minutes_this_month: number;
+  /** Sum of (duration_min − target_minutes_day) on closed days when positive. */
+  overtime_minutes_this_month: number;
+  /** Sum of (target_minutes_day − duration_min) on closed days when positive. */
+  shortage_minutes_this_month: number;
+  /** Sum of clock-in lateness past shift_start_time + grace, Cairo TZ. */
+  late_minutes_this_month: number;
+  /** Sum of clock-out earliness before shift_end_time, Cairo TZ. */
+  early_leave_minutes_this_month: number;
   advances_this_month: string;
   bonuses_this_month: string;
   open_tasks: number;

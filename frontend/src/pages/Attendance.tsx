@@ -14,6 +14,7 @@ import {
   type AttendanceRecord,
 } from '@/api/attendance.api';
 import { useAuthStore } from '@/stores/auth.store';
+import { invalidateMonthly } from '@/utils/employee-cache';
 
 const fmtTime = (iso: string | null) => {
   if (!iso) return '—';
@@ -78,13 +79,16 @@ export default function Attendance() {
     enabled: isAdmin,
   });
 
+  // PR-1: broaden invalidation to match EmployeeProfile.tsx so the
+  // Team list, Payroll tab, and Employee Profile cards all refresh
+  // when clock-in/out happens from this page. Previously only the
+  // attendance-* keys refreshed and downstream balances stayed stale
+  // until the user navigated.
   const clockIn = useMutation({
     mutationFn: (note?: string) => attendanceApi.clockIn(note),
     onSuccess: () => {
       toast.success('تم تسجيل الحضور');
-      qc.invalidateQueries({ queryKey: ['attendance-my-today'] });
-      qc.invalidateQueries({ queryKey: ['attendance-list'] });
-      qc.invalidateQueries({ queryKey: ['attendance-summary'] });
+      invalidateMonthly(qc);
     },
     onError: (e: any) =>
       toast.error(e?.response?.data?.message || 'تعذر تسجيل الحضور'),
@@ -94,9 +98,7 @@ export default function Attendance() {
     mutationFn: (note?: string) => attendanceApi.clockOut(note),
     onSuccess: () => {
       toast.success('تم تسجيل الانصراف');
-      qc.invalidateQueries({ queryKey: ['attendance-my-today'] });
-      qc.invalidateQueries({ queryKey: ['attendance-list'] });
-      qc.invalidateQueries({ queryKey: ['attendance-summary'] });
+      invalidateMonthly(qc);
     },
     onError: (e: any) =>
       toast.error(e?.response?.data?.message || 'تعذر تسجيل الانصراف'),
