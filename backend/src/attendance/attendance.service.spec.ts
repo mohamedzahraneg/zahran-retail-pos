@@ -1,22 +1,31 @@
 import { Test } from '@nestjs/testing';
 import { DataSource } from 'typeorm';
 import { AttendanceService } from './attendance.service';
+import { EmployeesService } from '../employees/employees.service';
+import { AccountingService } from '../accounting/accounting.service';
 
 /**
- * Unit tests for the admin-on-behalf + wage-accrual surface added in
- * migrations 081–084. DataSource is mocked — we assert the SQL shape
- * and the validation behaviour, not the database itself.
+ * Unit tests for the admin-on-behalf + wage-accrual + pay-wage surface
+ * added in migrations 081–084 and the PR-1 payroll cleanup.
+ * DataSource + downstream services are mocked — we assert the SQL
+ * shape and the validation behaviour, not the database itself.
  */
-describe('AttendanceService — admin + wage accrual', () => {
+describe('AttendanceService — admin + wage accrual + pay-wage', () => {
   let service: AttendanceService;
   let ds: { query: jest.Mock };
+  let empSvc: { recordSettlement: jest.Mock; addBonus: jest.Mock };
+  let accountingSvc: { createDailyExpense: jest.Mock };
 
   beforeEach(async () => {
     ds = { query: jest.fn() };
+    empSvc = { recordSettlement: jest.fn(), addBonus: jest.fn() };
+    accountingSvc = { createDailyExpense: jest.fn() };
     const moduleRef = await Test.createTestingModule({
       providers: [
         AttendanceService,
         { provide: DataSource, useValue: ds },
+        { provide: EmployeesService, useValue: empSvc },
+        { provide: AccountingService, useValue: accountingSvc },
       ],
     }).compile();
     service = moduleRef.get(AttendanceService);
@@ -169,6 +178,217 @@ describe('AttendanceService — admin + wage accrual', () => {
       expect(params[5]).toBe(270);             // daily_wage_snapshot
       expect(params[6]).toBe(720);             // target minutes
       expect(params[7]).toBe('admin');         // created_by
+    });
+  });
+
+  // ── PR-1: pay-wage with overpayment classifier ─────────────────────
+  describe('payWage', () => {
+    const ADMIN = 'admin-uuid';
+    const TARGET = 'target-uuid';
+    const CASHBOX = 'cashbox-uuid';
+
+    function mockGl(balance: number) {
+      // Order of ds.query calls inside payWage:
+      //   1. SELECT users WHERE id = $1 ... (active check)
+      //   2. SELECT balance FROM v_employee_gl_balance ... (payable check)
+      //   3. (advance branch only) SELECT id FROM expense_categories ...
+      ds.query.mockImplementation((sql: string) => {
+        if (typeof sql === 'string') {
+          if (sql.includes('FROM users')) return [{ id: TARGET }];
+          if (sql.includes('v_employee_gl_balance')) {
+            return [{ balance }];
+          }
+          if (sql.includes('expense_categories')) {
+            return [{ id: 'advance-cat-uuid' }];
+          }
+        }
+        return [];
+      });
+    }
+
+    it('rejects amount <= 0', async () => {
+      await expect(
+        service.payWage(TARGET, { amount: 0, cashbox_id: CASHBOX }, ADMIN),
+      ).rejects.toThrow('المبلغ يجب أن يكون أكبر من صفر');
+    });
+
+    it('requires cashbox_id', async () => {
+      await expect(
+        service.payWage(TARGET, { amount: 100, cashbox_id: '' }, ADMIN),
+      ).rejects.toThrow('cashbox_id مطلوب');
+    });
+
+    it('refuses to pay when employee not found / inactive', async () => {
+      ds.query.mockResolvedValueOnce([]); // SELECT users → empty
+      await expect(
+        service.payWage(TARGET, { amount: 100, cashbox_id: CASHBOX }, ADMIN),
+      ).rejects.toThrow('الموظف غير موجود');
+    });
+
+    it('amount <= payable: single settlement only — no excess flow', async () => {
+      // payable = 270 (gl = -270 means company owes 270 to employee)
+      mockGl(-270);
+      empSvc.recordSettlement.mockResolvedValueOnce({ id: 'settle-1' });
+
+      const r = await service.payWage(
+        TARGET,
+        { amount: 100, cashbox_id: CASHBOX },
+        ADMIN,
+      );
+
+      expect(empSvc.recordSettlement).toHaveBeenCalledTimes(1);
+      expect(empSvc.recordSettlement.mock.calls[0][1]).toMatchObject({
+        amount: 100,
+        method: 'cash',
+        cashbox_id: CASHBOX,
+      });
+      expect(empSvc.addBonus).not.toHaveBeenCalled();
+      expect(accountingSvc.createDailyExpense).not.toHaveBeenCalled();
+      expect(r.payable_amount_settled).toBe(100);
+      expect(r.excess_amount).toBe(0);
+      expect(r.excess_handling).toBeNull();
+      expect(r.settlement_ids).toEqual(['settle-1']);
+    });
+
+    it('amount = payable exactly: still one settlement, no excess flow', async () => {
+      mockGl(-270);
+      empSvc.recordSettlement.mockResolvedValueOnce({ id: 'settle-1' });
+
+      const r = await service.payWage(
+        TARGET,
+        { amount: 270, cashbox_id: CASHBOX },
+        ADMIN,
+      );
+
+      expect(empSvc.recordSettlement).toHaveBeenCalledTimes(1);
+      expect(r.payable_amount_settled).toBe(270);
+      expect(r.excess_amount).toBe(0);
+    });
+
+    it('amount > payable + no excess_handling: rejects with helpful message', async () => {
+      mockGl(-100); // payable = 100
+      await expect(
+        service.payWage(
+          TARGET,
+          { amount: 150, cashbox_id: CASHBOX },
+          ADMIN,
+        ),
+      ).rejects.toThrow(/تصنيف الزيادة/);
+      expect(empSvc.recordSettlement).not.toHaveBeenCalled();
+    });
+
+    it('excess_handling supplied but no excess: rejects', async () => {
+      mockGl(-200); // payable = 200
+      await expect(
+        service.payWage(
+          TARGET,
+          { amount: 100, cashbox_id: CASHBOX, excess_handling: 'advance' },
+          ADMIN,
+        ),
+      ).rejects.toThrow('لا توجد زيادة');
+    });
+
+    it('excess as advance: settles payable + posts is_advance=TRUE expense', async () => {
+      mockGl(-100); // payable = 100, amount = 270, excess = 170
+      empSvc.recordSettlement.mockResolvedValueOnce({ id: 'settle-1' });
+      accountingSvc.createDailyExpense.mockResolvedValueOnce({ id: 'exp-1' });
+
+      const r = await service.payWage(
+        TARGET,
+        { amount: 270, cashbox_id: CASHBOX, excess_handling: 'advance' },
+        ADMIN,
+        ['*'],
+      );
+
+      // 1 settlement for payable
+      expect(empSvc.recordSettlement).toHaveBeenCalledTimes(1);
+      expect(empSvc.recordSettlement.mock.calls[0][1].amount).toBe(100);
+      // 1 advance expense for the excess
+      expect(accountingSvc.createDailyExpense).toHaveBeenCalledTimes(1);
+      const expenseDto = accountingSvc.createDailyExpense.mock.calls[0][0];
+      expect(expenseDto.amount).toBe(170);
+      expect(expenseDto.is_advance).toBe(true);
+      expect(expenseDto.employee_user_id).toBe(TARGET);
+      expect(expenseDto.cashbox_id).toBe(CASHBOX);
+      expect(expenseDto.category_id).toBe('advance-cat-uuid');
+      expect(empSvc.addBonus).not.toHaveBeenCalled();
+
+      expect(r.payable_amount_settled).toBe(100);
+      expect(r.excess_amount).toBe(170);
+      expect(r.excess_handling).toBe('advance');
+      expect(r.advance_expense_id).toBe('exp-1');
+      expect(r.bonus_id).toBeNull();
+    });
+
+    it('excess as bonus: settles payable + accrues bonus + settles bonus', async () => {
+      mockGl(-100);
+      empSvc.recordSettlement.mockResolvedValueOnce({ id: 'settle-payable' });
+      empSvc.addBonus.mockResolvedValueOnce({ id: 99 });
+      empSvc.recordSettlement.mockResolvedValueOnce({ id: 'settle-bonus' });
+
+      const r = await service.payWage(
+        TARGET,
+        { amount: 270, cashbox_id: CASHBOX, excess_handling: 'bonus' },
+        ADMIN,
+      );
+
+      // 1 settlement for payable + 1 bonus accrual + 1 settlement for bonus
+      expect(empSvc.recordSettlement).toHaveBeenCalledTimes(2);
+      expect(empSvc.addBonus).toHaveBeenCalledTimes(1);
+      expect(empSvc.addBonus.mock.calls[0][1]).toMatchObject({
+        amount: 170,
+        kind: 'bonus',
+      });
+      expect(accountingSvc.createDailyExpense).not.toHaveBeenCalled();
+
+      // The two settlements should sum to 270 (the cashbox total).
+      const sum =
+        empSvc.recordSettlement.mock.calls[0][1].amount +
+        empSvc.recordSettlement.mock.calls[1][1].amount;
+      expect(sum).toBe(270);
+
+      expect(r.payable_amount_settled).toBe(100);
+      expect(r.excess_amount).toBe(170);
+      expect(r.excess_handling).toBe('bonus');
+      expect(r.bonus_id).toBe(99);
+      expect(r.settlement_ids).toEqual(['settle-payable', 'settle-bonus']);
+    });
+
+    it('payable=0, amount>0, advance: skips payable settlement, posts advance only', async () => {
+      mockGl(0); // payable = 0
+      accountingSvc.createDailyExpense.mockResolvedValueOnce({ id: 'exp-1' });
+
+      const r = await service.payWage(
+        TARGET,
+        { amount: 100, cashbox_id: CASHBOX, excess_handling: 'advance' },
+        ADMIN,
+        ['*'],
+      );
+
+      expect(empSvc.recordSettlement).not.toHaveBeenCalled();
+      expect(accountingSvc.createDailyExpense).toHaveBeenCalledTimes(1);
+      expect(r.payable_amount_settled).toBe(0);
+      expect(r.excess_amount).toBe(100);
+    });
+
+    it('advance branch errors when shared category is missing', async () => {
+      // override: empty expense_categories result
+      ds.query.mockImplementation((sql: string) => {
+        if (typeof sql === 'string') {
+          if (sql.includes('FROM users')) return [{ id: TARGET }];
+          if (sql.includes('v_employee_gl_balance')) return [{ balance: 0 }];
+          if (sql.includes('expense_categories')) return [];
+        }
+        return [];
+      });
+
+      await expect(
+        service.payWage(
+          TARGET,
+          { amount: 100, cashbox_id: CASHBOX, excess_handling: 'advance' },
+          ADMIN,
+        ),
+      ).rejects.toThrow(/employee_advance|الترحيل 086/);
     });
   });
 

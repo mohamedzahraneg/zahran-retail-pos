@@ -67,6 +67,11 @@ class CreatePayrollDto {
   // independently posting DR 1123 / CR 1111. Historical reads
   // continue to work — the payroll union query synthesises
   // type='advance' rows from expenses.is_advance=TRUE for display.
+  // `wage` is accepted at the DTO boundary so existing callers get a
+  // 400 with a clear redirect message (below in `create()`). Daily
+  // wage is now driven by the attendance / payable-day workflow
+  // (migration 082–083, PR #88): POST /attendance/admin/mark-payable-day.
+  // Payout of a wage uses POST /employees/:id/pay-wage (PR-1).
   @IsIn(['wage', 'bonus', 'deduction', 'payout'])
   type!: 'wage' | 'bonus' | 'deduction' | 'payout';
   @IsNumber() @IsPositive() amount!: number;
@@ -498,45 +503,19 @@ export class PayrollController {
           userId,
         );
       case 'wage':
-        // No canonical source table for wages today. employee_
-        // transactions IS the wage system of record. Kept as a
-        // direct insert here — the trg_employee_txn_post trigger
-        // posts DR 521 / CR 213 via fn_post_employee_txn.
-        return this.legacyWageInsert(dto, userId);
+        // Daily wage now flows exclusively through the attendance /
+        // payable-day workflow (migration 082–083, PR #88). A manual
+        // wage row from this modal would be a parallel, unlinked
+        // source that the monthly Employee Profile (PR-B) can't
+        // reconcile against GL — and which was silently racing with
+        // the payable_days insert to produce the duplicate-entry
+        // error users kept hitting. Reject with a clear redirect.
+        throw new BadRequestException(
+          'اليومية تُسجَّل من مسار الحضور / تثبيت يومية، وليست كحركة يدوية هنا. ' +
+            'استخدم POST /attendance/admin/mark-payable-day لتسجيل يومية، ' +
+            'ثم POST /employees/:id/pay-wage لصرف المبلغ من الخزنة.',
+        );
     }
-  }
-
-  /**
-   * Direct employee_transactions insert for type='wage' only.
-   * Bonus/deduction/payout must NOT route through here — use the
-   * canonical services above. Kept private + named explicitly so
-   * future readers don't accidentally resurrect the direct-insert
-   * pattern for other types.
-   */
-  private async legacyWageInsert(
-    dto: CreatePayrollDto,
-    userId: string,
-  ) {
-    const [row] = await this.ds.query(
-      `
-      INSERT INTO employee_transactions
-        (employee_id, txn_date, type, amount, description,
-         cashbox_id, shift_id, created_by)
-      VALUES ($1, COALESCE($2::date, CURRENT_DATE), $3, $4, $5, $6, $7, $8)
-      RETURNING *
-      `,
-      [
-        dto.employee_id,
-        dto.txn_date ?? null,
-        dto.type,
-        dto.amount,
-        dto.description ?? null,
-        dto.cashbox_id ?? null,
-        dto.shift_id ?? null,
-        userId,
-      ],
-    );
-    return row;
   }
 
   /**

@@ -4,6 +4,8 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { DataSource } from 'typeorm';
+import { EmployeesService } from '../employees/employees.service';
+import { AccountingService } from '../accounting/accounting.service';
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const UAParser = require('ua-parser-js');
 
@@ -34,7 +36,11 @@ function deviceFromUA(ua: string | null | undefined) {
 
 @Injectable()
 export class AttendanceService {
-  constructor(private readonly ds: DataSource) {}
+  constructor(
+    private readonly ds: DataSource,
+    private readonly empSvc: EmployeesService,
+    private readonly accountingSvc: AccountingService,
+  ) {}
 
   async clockIn(userId: string, ctx: ClockCtx = {}, note?: string) {
     const today = new Date().toISOString().slice(0, 10);
@@ -365,6 +371,193 @@ export class AttendanceService {
       [payableDayId, reason.trim(), adminId],
     );
     return { payable_day_id: row.id };
+  }
+
+  /**
+   * Compute the employee's live payable balance (what the company
+   * currently owes them on 213 / 1123). Positive = company owes
+   * employee; 0 = no payable or employee owes company.
+   */
+  private async payableBalance(userId: string): Promise<number> {
+    const [row] = await this.ds.query(
+      `SELECT balance::numeric(14,2) AS balance
+         FROM v_employee_gl_balance
+        WHERE employee_user_id = $1`,
+      [userId],
+    );
+    const gl = Number(row?.balance || 0);
+    // v_employee_gl_balance: positive = employee owes; negative = company owes.
+    // Payable to employee = max(0, -gl).
+    return Math.max(0, -gl);
+  }
+
+  /**
+   * Daily-wage payout. Single canonical entry point for all cash that
+   * leaves the cashbox toward an employee.
+   *
+   * Splits:
+   *   amount <= payable  → single settlement (DR 213 / CR cashbox)
+   *   amount >  payable  → settlement for the payable portion, then
+   *                        the excess classified explicitly:
+   *                          'advance' → DR 1123 / CR cashbox (via the
+   *                                      canonical daily-expense path
+   *                                      with is_advance=TRUE)
+   *                          'bonus'   → DR 521 / CR 213 (accrual),
+   *                                      then DR 213 / CR cashbox
+   *                                      (settlement of the bonus)
+   *
+   * No silent fallback: if amount > payable and excess_handling is
+   * missing, the whole call rejects with 400.
+   *
+   * Cashbox moves exactly `amount` across the call (sum of all cashbox
+   * transactions). Trial balance stays 0 (every leg is balanced).
+   */
+  async payWage(
+    targetUserId: string,
+    body: {
+      amount: number;
+      cashbox_id: string;
+      excess_handling?: 'advance' | 'bonus';
+      notes?: string;
+    },
+    adminId: string,
+    adminPermissions: string[] = [],
+  ) {
+    const amount = Number(body?.amount || 0);
+    if (!(amount > 0)) {
+      throw new BadRequestException('المبلغ يجب أن يكون أكبر من صفر');
+    }
+    if (!body?.cashbox_id) {
+      throw new BadRequestException('cashbox_id مطلوب لصرف اليومية نقدًا');
+    }
+    const [target] = await this.ds.query(
+      `SELECT id FROM users WHERE id = $1 AND is_active = TRUE`,
+      [targetUserId],
+    );
+    if (!target) throw new NotFoundException('الموظف غير موجود');
+
+    const payable = await this.payableBalance(targetUserId);
+    const payablePart = Math.min(amount, payable);
+    const excess = Math.max(0, amount - payable);
+    // Round to 2dp so comparisons don't get bitten by fp drift.
+    const r2 = (n: number) => Math.round(n * 100) / 100;
+
+    if (r2(excess) > 0 && !body.excess_handling) {
+      throw new BadRequestException(
+        `المبلغ يتجاوز المتبقي المستحق بـ ${r2(excess).toFixed(2)} ج.م — ` +
+          `يجب اختيار تصنيف الزيادة: advance أو bonus.`,
+      );
+    }
+    if (body.excess_handling && r2(excess) <= 0) {
+      throw new BadRequestException(
+        'لا توجد زيادة لتصنيفها — المبلغ لا يتجاوز المتبقي المستحق.',
+      );
+    }
+
+    const today = new Date().toISOString().slice(0, 10);
+    const baseNote = (body.notes || '').trim();
+    const result: {
+      payable_before: number;
+      payable_amount_settled: number;
+      excess_amount: number;
+      excess_handling: 'advance' | 'bonus' | null;
+      settlement_ids: string[];
+      bonus_id: number | null;
+      advance_expense_id: string | null;
+    } = {
+      payable_before: r2(payable),
+      payable_amount_settled: 0,
+      excess_amount: r2(excess),
+      excess_handling: body.excess_handling || null,
+      settlement_ids: [],
+      bonus_id: null,
+      advance_expense_id: null,
+    };
+
+    // 1. Settle the payable portion (if any).
+    if (r2(payablePart) > 0) {
+      const settlement = await this.empSvc.recordSettlement(
+        targetUserId,
+        {
+          amount: r2(payablePart),
+          settlement_date: today,
+          method: 'cash',
+          cashbox_id: body.cashbox_id,
+          notes: baseNote || 'صرف يومية — الجزء المستحق',
+        },
+        adminId,
+      );
+      result.payable_amount_settled = r2(payablePart);
+      if ((settlement as any)?.id != null) {
+        result.settlement_ids.push(String((settlement as any).id));
+      }
+    }
+
+    // 2. Handle excess.
+    if (r2(excess) > 0) {
+      if (body.excess_handling === 'advance') {
+        // Resolve the shared employee_advance category (migration 086).
+        const [cat] = await this.ds.query(
+          `SELECT id FROM expense_categories
+            WHERE code = 'employee_advance' AND is_active = TRUE
+            LIMIT 1`,
+        );
+        if (!cat?.id) {
+          throw new BadRequestException(
+            'فئة سلف الموظفين غير مُفعّلة — أعد تشغيل الترحيل 086 أو فعّل فئة employee_advance يدوياً.',
+          );
+        }
+        // is_advance lives on CreateExpenseDto; CreateDailyExpenseDto
+        // doesn't declare it but the service reads it through `(dto as any)`
+        // (accounting.service.ts:152-154). Inject via spread + cast.
+        const expense = await this.accountingSvc.createDailyExpense(
+          {
+            amount: r2(excess),
+            category_id: cat.id,
+            payment_method: 'cash',
+            cashbox_id: body.cashbox_id,
+            expense_date: today,
+            description: baseNote || 'زيادة عن اليومية — سلفة للموظف',
+            employee_user_id: targetUserId,
+            is_advance: true,
+          } as any,
+          adminId,
+          adminPermissions,
+        );
+        result.advance_expense_id = (expense as any)?.id ?? null;
+      } else if (body.excess_handling === 'bonus') {
+        // Accrue bonus → DR 521 / CR 213 (no cashbox).
+        const bonus = await this.empSvc.addBonus(
+          targetUserId,
+          {
+            amount: r2(excess),
+            kind: 'bonus',
+            note: baseNote || 'زيادة عن اليومية — مكافأة',
+            bonus_date: today,
+          },
+          adminId,
+        );
+        result.bonus_id = (bonus as any)?.id ?? null;
+
+        // Pay the bonus → DR 213 / CR cashbox.
+        const bonusSettlement = await this.empSvc.recordSettlement(
+          targetUserId,
+          {
+            amount: r2(excess),
+            settlement_date: today,
+            method: 'cash',
+            cashbox_id: body.cashbox_id,
+            notes: baseNote || 'صرف المكافأة الزائدة',
+          },
+          adminId,
+        );
+        if ((bonusSettlement as any)?.id != null) {
+          result.settlement_ids.push(String((bonusSettlement as any).id));
+        }
+      }
+    }
+
+    return result;
   }
 
   /** List payable-day rows for an employee in a date range. */

@@ -106,4 +106,26 @@ export const attendanceApi = {
 
   payableDays: (params: { user_id: string; from?: string; to?: string }) =>
     unwrap<PayableDayRow[]>(api.get('/attendance/payable-days', { params })),
+
+  /**
+   * Daily-wage payout. Settles the payable portion (DR 213 / CR cashbox);
+   * any excess must be classified explicitly as 'advance' (DR 1123 /
+   * CR cashbox) or 'bonus' (DR 521 / CR 213 then DR 213 / CR cashbox).
+   */
+  adminPayWage: (body: {
+    user_id: string;
+    amount: number;
+    cashbox_id: string;
+    excess_handling?: 'advance' | 'bonus';
+    notes?: string;
+  }) =>
+    unwrap<{
+      payable_before: number;
+      payable_amount_settled: number;
+      excess_amount: number;
+      excess_handling: 'advance' | 'bonus' | null;
+      settlement_ids: string[];
+      bonus_id: number | null;
+      advance_expense_id: string | null;
+    }>(api.post('/attendance/admin/pay-wage', body)),
 };

@@ -493,6 +493,7 @@ export class SettingsService {
         { code: 'employee.bonuses.manage',  label: 'إضافة حوافز/مكافآت/ساعات إضافية' },
         { code: 'employee.deductions.view', label: 'عرض الاستقطاعات' },
         { code: 'employee.deductions.manage', label: 'إضافة/تعديل استقطاعات' },
+        { code: 'employee.ledger.view',     label: 'عرض الملف المالي للموظف وصرف المستحقات' },
         { code: 'employee.tasks.assign',    label: 'إسناد مهام للموظفين' },
         { code: 'employee.tasks.view_team', label: 'عرض مهام كل الموظفين' },
       ],

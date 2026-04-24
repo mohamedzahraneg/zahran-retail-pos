@@ -477,6 +477,7 @@ function EmployeeDashboardBody({
           userId={profile.id}
           fullName={profile.full_name}
           dailyAmount={Number(wage?.daily_amount ?? 0)}
+          liveGlBalance={Number(gl?.live_snapshot ?? 0)}
         />
       )}
 
@@ -737,15 +738,21 @@ function AdminAttendancePanel({
   userId,
   fullName,
   dailyAmount,
+  liveGlBalance,
 }: {
   userId: string;
   fullName: string;
   dailyAmount: number;
+  /** v_employee_gl_balance.balance — positive = employee owes,
+   *  negative = company owes employee. Drives the "متبقي مستحق" hint
+   *  in the pay-wage modal. */
+  liveGlBalance: number;
 }) {
   const qc = useQueryClient();
   const today = new Date().toISOString().slice(0, 10);
   const [markDate, setMarkDate] = useState<string>(today);
   const [markReason, setMarkReason] = useState<string>('');
+  const [showPayModal, setShowPayModal] = useState(false);
 
   const adminClockIn = useMutation({
     mutationFn: () => attendanceApi.adminClockIn({ user_id: userId }),
@@ -797,6 +804,12 @@ function AdminAttendancePanel({
           disabled={adminClockOut.isPending}
         >
           تسجيل انصراف
+        </button>
+        <button
+          className="btn-primary text-xs"
+          onClick={() => setShowPayModal(true)}
+        >
+          صرف يومية
         </button>
       </div>
       <div className="pt-2 border-t border-violet-200/70">
@@ -851,6 +864,258 @@ function AdminAttendancePanel({
         <div className="text-[10px] text-violet-900/70 mt-2 leading-relaxed">
           تثبيت اليومية يُنشئ قيدًا محاسبيًا فقط: DR 521 / CR 213. لا
           يتحرك أي شيء في الخزنة حتى تسجيل الصرف.
+        </div>
+      </div>
+      {showPayModal && (
+        <PayWageModal
+          userId={userId}
+          fullName={fullName}
+          liveGlBalance={liveGlBalance}
+          onClose={() => setShowPayModal(false)}
+          onSuccess={() => {
+            setShowPayModal(false);
+            invalidateMonthly(qc);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/* ───────── Pay Wage modal ─────────
+   Splits the payout into:
+     • payable portion (≤ 213 balance)  → DR 213 / CR cashbox
+     • excess (if any)  → admin must classify:
+         'advance' → DR 1123 / CR cashbox (via canonical expense path)
+         'bonus'   → DR 521 / CR 213, then DR 213 / CR cashbox
+   Backend: POST /attendance/admin/pay-wage. Server enforces the same
+   rules — no silent fallback.
+*/
+function PayWageModal({
+  userId,
+  fullName,
+  liveGlBalance,
+  onClose,
+  onSuccess,
+}: {
+  userId: string;
+  fullName: string;
+  liveGlBalance: number;
+  onClose: () => void;
+  onSuccess: () => void;
+}) {
+  // Reading the cashbox list inline to avoid an extra prop drill — same
+  // 60s cache the rest of the app uses.
+  const { data: cashboxes } = useQuery({
+    queryKey: ['cashboxes', 'active'],
+    queryFn: async () => {
+      const m = await import('@/api/cash-desk.api');
+      return m.cashDeskApi.cashboxes(false);
+    },
+    staleTime: 60_000,
+  });
+
+  const payableBalance = Math.max(0, -Number(liveGlBalance || 0));
+  const [amount, setAmount] = useState<string>('');
+  const [cashboxId, setCashboxId] = useState<string>('');
+  const [excessHandling, setExcessHandling] = useState<'advance' | 'bonus' | ''>('');
+  const [notes, setNotes] = useState<string>('');
+
+  useEffect(() => {
+    if (!cashboxId && cashboxes && cashboxes.length > 0) {
+      setCashboxId((cashboxes[0] as any).id);
+    }
+  }, [cashboxes, cashboxId]);
+
+  const amtNum = Number(amount || 0);
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  const payablePart = r2(Math.min(amtNum, payableBalance));
+  const excess = r2(Math.max(0, amtNum - payableBalance));
+  const needsClassifier = excess > 0;
+  const validClassifier = !needsClassifier || excessHandling !== '';
+
+  const pay = useMutation({
+    mutationFn: () =>
+      attendanceApi.adminPayWage({
+        user_id: userId,
+        amount: amtNum,
+        cashbox_id: cashboxId,
+        excess_handling: excessHandling || undefined,
+        notes: notes.trim() || undefined,
+      }),
+    onSuccess: (r) => {
+      const parts: string[] = [];
+      if (r.payable_amount_settled > 0)
+        parts.push(`صرف مستحق ${EGP(r.payable_amount_settled)}`);
+      if (r.excess_amount > 0) {
+        parts.push(
+          r.excess_handling === 'advance'
+            ? `سلفة ${EGP(r.excess_amount)}`
+            : `مكافأة ${EGP(r.excess_amount)}`,
+        );
+      }
+      toast.success(`تم: ${parts.join(' · ')}`);
+      onSuccess();
+    },
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.message || 'فشل صرف اليومية'),
+  });
+
+  const canSubmit =
+    amtNum > 0 &&
+    !!cashboxId &&
+    validClassifier &&
+    !pay.isPending;
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div
+        className="modal-panel w-full max-w-md space-y-4"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between">
+          <h3 className="text-lg font-bold">صرف يومية — {fullName}</h3>
+          <button onClick={onClose} className="icon-btn">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-[11px] text-emerald-900 leading-relaxed">
+          المتبقي مستحق على 213:{' '}
+          <span className="font-black tabular-nums">
+            {EGP(payableBalance)}
+          </span>
+          {payableBalance === 0 && (
+            <span className="block mt-0.5 text-emerald-800/80">
+              لا يوجد مستحق متبقٍّ — أي مبلغ يُصرف الآن سيُعامَل كزيادة
+              ويجب تصنيفها.
+            </span>
+          )}
+        </div>
+
+        <div>
+          <label className="label">المبلغ المراد صرفه نقدًا *</label>
+          <input
+            type="number"
+            step="0.01"
+            min="0"
+            className="input"
+            value={amount}
+            placeholder="0.00"
+            onChange={(e) => {
+              setAmount(e.target.value);
+              if (Number(e.target.value || 0) - payableBalance <= 0.001) {
+                setExcessHandling('');
+              }
+            }}
+            disabled={pay.isPending}
+          />
+        </div>
+
+        <div>
+          <label className="label">الخزنة *</label>
+          <select
+            className="input"
+            value={cashboxId}
+            onChange={(e) => setCashboxId(e.target.value)}
+            disabled={pay.isPending}
+          >
+            <option value="">— اختر خزنة —</option>
+            {(cashboxes || []).map((c: any) => (
+              <option key={c.id} value={c.id}>
+                {c.name_ar || c.name}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {/* Live split preview. */}
+        {amtNum > 0 && (
+          <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-[11px] text-slate-700 space-y-1">
+            <div className="flex justify-between">
+              <span>الجزء المستحق (DR 213 / CR خزنة)</span>
+              <span className="tabular-nums font-bold">
+                {EGP(payablePart)}
+              </span>
+            </div>
+            {excess > 0 && (
+              <div className="flex justify-between text-amber-700">
+                <span>الزيادة عن المستحق</span>
+                <span className="tabular-nums font-bold">{EGP(excess)}</span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Excess classifier — required when there's overpayment. */}
+        {needsClassifier && (
+          <div className="rounded-lg border-2 border-amber-200 bg-amber-50/50 px-3 py-2 space-y-2">
+            <div className="text-[11px] font-bold text-amber-900">
+              المبلغ يتجاوز المتبقي بـ {EGP(excess)} — اختر تصنيف الزيادة:
+            </div>
+            <label className="flex items-start gap-2 text-xs text-slate-800">
+              <input
+                type="radio"
+                name="excess"
+                checked={excessHandling === 'advance'}
+                onChange={() => setExcessHandling('advance')}
+                disabled={pay.isPending}
+              />
+              <span>
+                <span className="font-bold">سلفة خارج اليومية</span>
+                <span className="text-[10px] text-slate-500 block">
+                  DR 1123 ذمم الموظفين / CR الخزنة. تزيد ما يدين به الموظف
+                  للشركة.
+                </span>
+              </span>
+            </label>
+            <label className="flex items-start gap-2 text-xs text-slate-800">
+              <input
+                type="radio"
+                name="excess"
+                checked={excessHandling === 'bonus'}
+                onChange={() => setExcessHandling('bonus')}
+                disabled={pay.isPending}
+              />
+              <span>
+                <span className="font-bold">مكافأة / حافز</span>
+                <span className="text-[10px] text-slate-500 block">
+                  DR 521 رواتب / CR 213 ثم DR 213 / CR الخزنة. تزيد دخل
+                  الموظف وتُصرف فورًا.
+                </span>
+              </span>
+            </label>
+          </div>
+        )}
+
+        <div>
+          <label className="label">ملاحظات</label>
+          <input
+            type="text"
+            className="input"
+            placeholder="اختياري"
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            disabled={pay.isPending}
+          />
+        </div>
+
+        <div className="text-[10px] text-slate-500 leading-relaxed">
+          الخزنة تتحرك مرة واحدة فقط بالمبلغ الكامل. ميزان المراجعة يبقى
+          صفرًا.
+        </div>
+
+        <div className="flex justify-end gap-2 pt-2">
+          <button onClick={onClose} className="btn-ghost" disabled={pay.isPending}>
+            إلغاء
+          </button>
+          <button
+            className="btn-primary"
+            disabled={!canSubmit}
+            onClick={() => pay.mutate()}
+          >
+            {pay.isPending ? 'جارٍ الصرف…' : 'صرف الآن'}
+          </button>
         </div>
       </div>
     </div>
