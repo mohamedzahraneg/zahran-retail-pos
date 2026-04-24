@@ -44,6 +44,7 @@ import Loyalty from '@/pages/Loyalty';
 import Attendance from '@/pages/Attendance';
 import EmployeeProfile from '@/pages/EmployeeProfile';
 import Team from '@/pages/Team';
+import Payroll from '@/pages/Payroll';
 import SetupWizard from '@/pages/SetupWizard';
 import NotFound from '@/pages/NotFound';
 
@@ -254,6 +255,14 @@ export default function App() {
           element={
             <ProtectedRoute permissions={['employee.team.view']}>
               <Team />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="payroll"
+          element={
+            <ProtectedRoute permissions={['employee.team.view']}>
+              <Payroll />
             </ProtectedRoute>
           }
         />
