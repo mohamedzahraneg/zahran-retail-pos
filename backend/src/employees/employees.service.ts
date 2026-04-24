@@ -885,7 +885,8 @@ export class EmployeesService {
   async daysHistory(userId: string, fromISO: string, toISO: string) {
     const [profile] = await this.ds.query(
       `SELECT target_hours_day, target_hours_week, salary_amount,
-              salary_frequency, overtime_rate
+              salary_frequency, overtime_rate,
+              shift_start_time, shift_end_time, late_grace_min
          FROM users WHERE id = $1`,
       [userId],
     );
@@ -917,13 +918,29 @@ export class EmployeesService {
         SELECT generate_series($2::date, $3::date, INTERVAL '1 day')::date AS day
       ),
       att AS (
-        SELECT work_date AS day,
-               MIN(clock_in)  AS first_in,
-               MAX(clock_out) AS last_out,
-               COALESCE(SUM(duration_min),0)::int AS minutes
-          FROM attendance_records
-         WHERE user_id = $1 AND work_date BETWEEN $2::date AND $3::date
-         GROUP BY work_date
+        -- Per-day attendance + Cairo-TZ-aware late / early-leave
+        -- minutes. Same formulas as teamOverview() (PR-1) and the
+        -- per-row block in myDashboard. NULL shift_start/end →
+        -- 0 (no rule to compare against).
+        SELECT a.work_date AS day,
+               MIN(a.clock_in)  AS first_in,
+               MAX(a.clock_out) AS last_out,
+               COALESCE(SUM(a.duration_min),0)::int AS minutes,
+               COALESCE(SUM(GREATEST(0,
+                 EXTRACT(EPOCH FROM (
+                   ((a.clock_in AT TIME ZONE 'Africa/Cairo')::time - $5::time)
+                 )) / 60
+                 - $7::int)
+               )::int, 0) AS late_min,
+               COALESCE(SUM(GREATEST(0,
+                 EXTRACT(EPOCH FROM (
+                   $6::time - (a.clock_out AT TIME ZONE 'Africa/Cairo')::time
+                 )) / 60)
+               )::int, 0) AS early_leave_min
+          FROM attendance_records a
+         WHERE a.user_id = $1
+           AND a.work_date BETWEEN $2::date AND $3::date
+         GROUP BY a.work_date
       ),
       bns AS (
         SELECT bonus_date AS day, COALESCE(SUM(amount),0)::numeric(14,2) AS amt
@@ -950,6 +967,9 @@ export class EmployeesService {
              COALESCE(att.minutes, 0)                AS minutes,
              GREATEST(COALESCE(att.minutes,0) - $4, 0)::int AS overtime_min,
              GREATEST($4 - COALESCE(att.minutes,0), 0)::int AS undertime_min,
+             $4::int                                 AS target_min,
+             COALESCE(att.late_min, 0)::int          AS late_min,
+             COALESCE(att.early_leave_min, 0)::int   AS early_leave_min,
              att.first_in,
              att.last_out,
              COALESCE(bns.amt, 0)  AS bonuses,
@@ -961,7 +981,15 @@ export class EmployeesService {
         LEFT JOIN dds  ON dds.day  = d.day
         LEFT JOIN advs ON advs.day = d.day
        ORDER BY d.day DESC`,
-      [userId, fromISO, toISO, targetDayMin],
+      [
+        userId,
+        fromISO,
+        toISO,
+        targetDayMin,
+        profile?.shift_start_time ?? null,
+        profile?.shift_end_time ?? null,
+        Number(profile?.late_grace_min ?? 10),
+      ],
     );
     // Enrich each row with computed wage figures so the client can
     // show "المستحق" / "الأجر الكامل" without doing the math again.

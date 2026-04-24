@@ -35,6 +35,10 @@ import Payroll from './Payroll';
 // Attendance — same story (PR-2). Embedded as the "الحضور" tab.
 // The standalone /attendance route is kept as a permanent redirect.
 import { AttendanceBody } from './Attendance';
+// AdminAttendancePanel is now rendered inside the team drawer (this PR)
+// instead of on /me. Same component, same backend endpoints, same
+// permission gate. The /me page no longer shows admin-on-behalf tools.
+import { AdminAttendancePanel } from './EmployeeProfile';
 
 const EGP = (n: number | string) =>
   `${Number(n || 0).toLocaleString('en-US', {
@@ -530,7 +534,13 @@ function PendingInbox({ requests }: { requests: EmployeeRequest[] }) {
 
 /* ───────── Detail drawer ───────── */
 
-type DetailTab = 'overview' | 'profile' | 'bonus' | 'deduction' | 'task';
+type DetailTab =
+  | 'overview'
+  | 'profile'
+  | 'bonus'
+  | 'deduction'
+  | 'task'
+  | 'attendance';
 
 function EmployeeDetailDrawer({
   row,
@@ -549,6 +559,14 @@ function EmployeeDetailDrawer({
 
   const tabs: Array<{ key: DetailTab; label: string; show: boolean }> = [
     { key: 'overview', label: 'نظرة عامة', show: true },
+    {
+      // Admin attendance + wage tools (clock-in / clock-out on behalf,
+      // تثبيت يومية, صرف يومية). Moved here from /me in this PR so
+      // self-service profiles never expose admin-on-behalf controls.
+      key: 'attendance',
+      label: 'حضور / يومية',
+      show: hasPermission('employee.attendance.manage'),
+    },
     {
       key: 'profile',
       label: 'تعديل الملف',
@@ -618,6 +636,14 @@ function EmployeeDetailDrawer({
 
         <div className="p-4 space-y-4">
           {tab === 'overview' && <OverviewTab dash={dash} />}
+          {tab === 'attendance' && (
+            <AdminAttendancePanel
+              userId={row.id}
+              fullName={row.full_name || row.username}
+              dailyAmount={Number(row.salary_amount || 0)}
+              liveGlBalance={Number(row.gl_balance || 0)}
+            />
+          )}
           {tab === 'profile' && <ProfileForm userId={row.id} dash={dash} />}
           {tab === 'bonus' && <BonusForm userId={row.id} />}
           {tab === 'deduction' && <DeductionForm userId={row.id} />}
