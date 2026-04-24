@@ -501,6 +501,40 @@ function FinancialLedgerCard({ userId }: { userId?: string }) {
         <LedgerTile label="حوافز" value={data.totals.bonuses} tone="indigo" />
       </div>
 
+      {/* Explainability — show the equation that produced the headline
+          balance above. Values come straight from data.totals (already
+          returned by /employees/:id/ledger); no new backend call.
+          The opening-balance piece is included so the math always
+          closes even when the filter window excludes earlier entries. */}
+      <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 text-xs text-slate-700">
+        <div className="font-bold mb-1">كيف حُسب الرصيد</div>
+        <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1 font-mono tabular-nums leading-relaxed">
+          <span className="font-bold">الرصيد</span>
+          <span>=</span>
+          {data.opening_balance !== 0 && (
+            <>
+              <span>رصيد افتتاحي {fmt(data.opening_balance)}</span>
+              <span>+</span>
+            </>
+          )}
+          <span className="text-rose-700">عجز {fmt(data.totals.shortages)}</span>
+          <span>+</span>
+          <span className="text-amber-700">سلف {fmt(data.totals.advances)}</span>
+          <span>−</span>
+          <span className="text-slate-700">خصومات {fmt(data.totals.manual_deductions)}</span>
+          <span>−</span>
+          <span className="text-emerald-700">تسويات {fmt(data.totals.settlements)}</span>
+          <span>−</span>
+          <span className="text-indigo-700">حوافز {fmt(data.totals.bonuses)}</span>
+          <span>=</span>
+          <span className="font-black">{fmt(data.closing_balance)}</span>
+        </div>
+        <div className="mt-1 text-[10px] text-slate-500 leading-relaxed">
+          الأرقام الموجبة تزيد ما يدينه الموظف للشركة؛ الأرقام السالبة
+          تقلّله. تفاصيل كل عملية موجودة في جدول الحركات أدناه.
+        </div>
+      </div>
+
       {data.entries.length === 0 ? (
         <div className="text-center text-slate-500 text-xs py-6">
           لا توجد حركات مالية في الفترة المحددة.

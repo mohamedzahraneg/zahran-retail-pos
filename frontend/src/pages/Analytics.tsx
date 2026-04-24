@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { Line, Bar, Doughnut } from 'react-chartjs-2';
 import {
@@ -70,8 +71,13 @@ const shortEGP = (n: number | string) => {
 const DOW_AR = ['أحد', 'اثنين', 'ثلاثاء', 'أربعاء', 'خميس', 'جمعة', 'سبت'];
 
 export default function Analytics() {
+  // Default period is `day` (today). Previous default was `month`, which
+  // was confusing on a business with only a few days of real activity:
+  // headline "net profit" appeared trivially small next to cumulative
+  // tiles (cash / inventory / receivables) that ignore the date window.
+  // The scope badge on each card now makes that distinction explicit.
   const [period, setPeriod] = useState<PeriodRange>(() =>
-    resolvePeriod('month'),
+    resolvePeriod('day'),
   );
 
   const { data: indicators } = useQuery({
@@ -381,7 +387,11 @@ export default function Analytics() {
         </div>
       </div>
 
-      {/* Smart indicators — top grid */}
+      {/* Smart indicators — top grid.
+          Scope tags: 'period' = windowed by the selector above;
+                       'current' / 'cumulative' = ignore it.
+          Drill-down `to` opens the source screen so the user can see
+          the underlying documents. */}
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
         <IndicatorTile
           icon={<DollarSign size={16} />}
@@ -389,6 +399,8 @@ export default function Analytics() {
           value={EGP(indValue(indicators?.revenue))}
           sub={`${indValue(indicators?.invoice_count)} فاتورة`}
           color="emerald"
+          scope="period"
+          to="/invoices"
         />
         <IndicatorTile
           icon={<Percent size={16} />}
@@ -402,6 +414,7 @@ export default function Analytics() {
                 ? 'amber'
                 : 'rose'
           }
+          scope="period"
         />
         <IndicatorTile
           icon={<TrendingUp size={16} />}
@@ -411,6 +424,8 @@ export default function Analytics() {
           color={
             indValue(indicators?.net_profit) >= 0 ? 'indigo' : 'rose'
           }
+          scope="period"
+          to="/accounts"
         />
         <IndicatorTile
           icon={<Package size={16} />}
@@ -418,6 +433,8 @@ export default function Analytics() {
           value={EGP(indValue(indicators?.inventory_value))}
           sub={`دوران ${indValue(indicators?.inventory_turns).toFixed(1)}×/سنة`}
           color="slate"
+          scope="current"
+          to="/products"
         />
         <IndicatorTile
           icon={<Activity size={16} />}
@@ -431,6 +448,8 @@ export default function Analytics() {
                 ? 'amber'
                 : 'rose'
           }
+          scope="period"
+          to="/returns"
         />
         <IndicatorTile
           icon={<Wallet size={16} />}
@@ -444,6 +463,8 @@ export default function Analytics() {
                 ? 'amber'
                 : 'rose'
           }
+          scope="current"
+          to="/cashboxes"
         />
       </div>
 
@@ -452,20 +473,27 @@ export default function Analytics() {
         <MiniStat
           label="متوسط الفاتورة"
           value={EGP(indValue(indicators?.avg_ticket))}
+          scope="period"
         />
         <MiniStat
           label="مستحقات العملاء"
           value={EGP(indValue(indicators?.receivables))}
           color="amber"
+          scope="cumulative"
+          to="/customers"
         />
         <MiniStat
           label="مستحقات للموردين"
           value={EGP(indValue(indicators?.payables))}
           color="rose"
+          scope="cumulative"
+          to="/suppliers"
         />
         <MiniStat
           label="المصروف اليومي"
           value={EGP(indValue(indicators?.daily_burn))}
+          scope="period"
+          to="/daily-expenses"
         />
       </div>
 
@@ -578,18 +606,56 @@ export default function Analytics() {
 // Sub-components
 // ════════════════════════════════════════════════════════════════════
 
+// Scope tag — makes it obvious which KPIs respect the date filter and
+// which are always cumulative / current-state. Without this, users
+// change the period, see some numbers move and others stay, and
+// conclude the screen is broken.
+type KpiScope = 'period' | 'current' | 'cumulative';
+const SCOPE_LABEL: Record<KpiScope, string> = {
+  period: 'ضمن الفترة',
+  current: 'رصيد حالي',
+  cumulative: 'تراكمي',
+};
+const SCOPE_CLS: Record<KpiScope, string> = {
+  period: 'bg-white/70 text-slate-600 border-slate-300',
+  current: 'bg-white/70 text-sky-700 border-sky-300',
+  cumulative: 'bg-white/70 text-violet-700 border-violet-300',
+};
+
+function ScopeBadge({ scope }: { scope: KpiScope }) {
+  return (
+    <span
+      className={`text-[9px] px-1.5 py-0.5 rounded border font-medium ${SCOPE_CLS[scope]}`}
+      title={
+        scope === 'period'
+          ? 'يتغيّر حسب الفترة المختارة بالأعلى'
+          : scope === 'current'
+            ? 'قيمة حالية — لا تتأثر بالفترة'
+            : 'مجموع تراكمي — لا يتأثر بالفترة'
+      }
+    >
+      {SCOPE_LABEL[scope]}
+    </span>
+  );
+}
+
 function IndicatorTile({
   icon,
   label,
   value,
   sub,
   color,
+  scope,
+  to,
 }: {
   icon: React.ReactNode;
   label: string;
   value: string;
   sub?: string;
   color: 'emerald' | 'rose' | 'indigo' | 'amber' | 'slate';
+  scope: KpiScope;
+  /** Optional drill-down target. When set, tile shows "تفاصيل ←". */
+  to?: string;
 }) {
   const cls: Record<string, string> = {
     emerald: 'bg-emerald-50 border-emerald-200 text-emerald-800',
@@ -600,15 +666,31 @@ function IndicatorTile({
   };
   return (
     <div className={`card p-3 border-2 ${cls[color]}`}>
-      <div className="text-xs font-bold flex items-center gap-1 opacity-80">
-        {icon} {label}
+      <div className="flex items-center justify-between gap-1">
+        <div className="text-xs font-bold flex items-center gap-1 opacity-80 truncate">
+          {icon} {label}
+        </div>
+        <ScopeBadge scope={scope} />
       </div>
       <div className="font-black text-lg font-mono mt-1 truncate">
         {value}
       </div>
-      {sub && (
-        <div className="text-[10px] opacity-70 truncate mt-0.5">{sub}</div>
-      )}
+      <div className="flex items-center justify-between gap-1 mt-0.5">
+        {sub ? (
+          <div className="text-[10px] opacity-70 truncate">{sub}</div>
+        ) : (
+          <span />
+        )}
+        {to && (
+          <Link
+            to={to}
+            className="text-[10px] font-bold opacity-70 hover:opacity-100 whitespace-nowrap"
+            title="عرض مصدر الرقم"
+          >
+            تفاصيل ←
+          </Link>
+        )}
+      </div>
     </div>
   );
 }
@@ -617,10 +699,14 @@ function MiniStat({
   label,
   value,
   color = 'slate',
+  scope,
+  to,
 }: {
   label: string;
   value: string;
   color?: 'slate' | 'amber' | 'rose';
+  scope: KpiScope;
+  to?: string;
 }) {
   const cls: Record<string, string> = {
     slate: 'text-slate-700 border-slate-200',
@@ -629,8 +715,22 @@ function MiniStat({
   };
   return (
     <div className={`card p-3 border ${cls[color]}`}>
-      <div className="text-xs text-slate-500">{label}</div>
+      <div className="flex items-center justify-between gap-1">
+        <div className="text-xs text-slate-500 truncate">{label}</div>
+        <ScopeBadge scope={scope} />
+      </div>
       <div className="font-black text-lg font-mono mt-1">{value}</div>
+      {to && (
+        <div className="mt-0.5 text-end">
+          <Link
+            to={to}
+            className="text-[10px] font-bold text-slate-500 hover:text-slate-900"
+            title="عرض مصدر الرقم"
+          >
+            تفاصيل ←
+          </Link>
+        </div>
+      )}
     </div>
   );
 }

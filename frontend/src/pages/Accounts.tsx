@@ -1372,6 +1372,9 @@ function IncomeStatementTab() {
 
   return (
     <div className="space-y-3">
+      <div className="bg-sky-50 border border-sky-200 rounded-lg px-3 py-2 text-xs text-sky-800">
+        اضغط على أي حساب فرعي لعرض القيود التي كوّنت هذا الرقم.
+      </div>
       <div className="flex items-center gap-3 flex-wrap">
         <label className="text-sm">من</label>
         <input
@@ -1460,6 +1463,9 @@ function BalanceSheetTab() {
 
   return (
     <div className="space-y-3">
+      <div className="bg-sky-50 border border-sky-200 rounded-lg px-3 py-2 text-xs text-sky-800">
+        اضغط على أي حساب فرعي لعرض القيود التي كوّنت هذا الرقم.
+      </div>
       <div className="flex items-center gap-3 flex-wrap">
         <label className="text-sm">بتاريخ</label>
         <input
