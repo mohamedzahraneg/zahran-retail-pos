@@ -27,6 +27,7 @@ import {
   CurrentUser,
   JwtUser,
 } from '../common/decorators/current-user.decorator';
+import { EmployeesService } from './employees.service';
 
 /**
  * Payroll / Employee Accounts surface.
@@ -81,7 +82,16 @@ class UpdatePayrollDto {
 @ApiTags('payroll')
 @Controller('payroll')
 export class PayrollController {
-  constructor(private readonly ds: DataSource) {}
+  constructor(
+    private readonly ds: DataSource,
+    // Delegate writes to the canonical business-event services. The
+    // user-facing Payroll modal posts here, but the actual row lands
+    // in the correct source table (employee_bonuses / _deductions /
+    // _settlements) via these methods — no direct insert into
+    // employee_transactions for events that already have a canonical
+    // table. See `create()` below for the full dispatch table.
+    private readonly empSvc: EmployeesService,
+  ) {}
 
   /**
    * Per-employee balances. Frontend expects at minimum:
@@ -402,9 +412,37 @@ export class PayrollController {
   }
 
   /**
-   * Create a new payroll transaction. The `trg_employee_txn_post`
-   * database trigger automatically posts the matching GL entry and
-   * cashbox movement (if applicable) inside the same transaction.
+   * Create a new payroll transaction.
+   *
+   * The Payroll modal is one of several UI surfaces that can record
+   * these business events. The other surfaces (Bonus form in Team
+   * drawer, Deduction form in Team drawer, Settlement modal) POST
+   * directly to their canonical endpoints. To prevent parallel
+   * write paths from producing divergent ledger rows, this endpoint
+   * now DELEGATES by type:
+   *
+   *   type      →  canonical service                  source table
+   *   ─────────    ────────────────────────────────    ─────────────────────
+   *   bonus     →  EmployeesService.addBonus          employee_bonuses
+   *   deduction →  EmployeesService.addDeduction      employee_deductions
+   *   payout    →  EmployeesService.recordSettlement  employee_settlements
+   *   wage      →  direct employee_transactions INSERT (no canonical
+   *                table exists yet for wages — documented as legacy
+   *                on this one path until a future canonicalization)
+   *
+   * For bonus/deduction: the source row is inserted by the canonical
+   * service, and migration 040's mirror triggers propagate it into
+   * employee_transactions with `source_ref_type` set, so the Payroll
+   * page's UNION query surfaces it identically to before.
+   *
+   * For payout: recordSettlement writes a balanced JE directly via
+   * FinancialEngineService (see PR #68). `cashbox_id` is required so
+   * we can forward method='cash'. If a caller wants bank / payroll
+   * deduction / other, they must use POST /employees/:id/settlements
+   * directly with the method parameter.
+   *
+   * `advance` and `expense` are disabled at the DTO boundary — see
+   * the @IsIn comment on CreatePayrollDto.
    */
   @Post()
   @Permissions('employee.deductions.manage')
@@ -413,6 +451,71 @@ export class PayrollController {
     if (!(Number(dto.amount) > 0)) {
       throw new BadRequestException('المبلغ يجب أن يكون أكبر من صفر');
     }
+    const userId = user.userId;
+
+    switch (dto.type) {
+      case 'bonus':
+        return this.empSvc.addBonus(
+          dto.employee_id,
+          {
+            amount: dto.amount,
+            kind: 'bonus',
+            note: dto.description,
+            bonus_date: dto.txn_date,
+          },
+          userId,
+        );
+      case 'deduction':
+        return this.empSvc.addDeduction(
+          dto.employee_id,
+          {
+            amount: dto.amount,
+            // addDeduction requires a reason string. The Payroll
+            // modal makes `description` optional, so fall back to a
+            // generic label rather than 400-ing.
+            reason: dto.description?.trim() || 'خصم',
+            deduction_date: dto.txn_date,
+          },
+          userId,
+        );
+      case 'payout':
+        if (!dto.cashbox_id) {
+          throw new BadRequestException(
+            'payout from /payroll يتطلب cashbox_id — أو استخدم ' +
+              'POST /employees/:id/settlements لاختيار method آخر',
+          );
+        }
+        return this.empSvc.recordSettlement(
+          dto.employee_id,
+          {
+            amount: dto.amount,
+            settlement_date: dto.txn_date,
+            method: 'cash',
+            cashbox_id: dto.cashbox_id,
+            notes: dto.description,
+          },
+          userId,
+        );
+      case 'wage':
+        // No canonical source table for wages today. employee_
+        // transactions IS the wage system of record. Kept as a
+        // direct insert here — the trg_employee_txn_post trigger
+        // posts DR 521 / CR 213 via fn_post_employee_txn.
+        return this.legacyWageInsert(dto, userId);
+    }
+  }
+
+  /**
+   * Direct employee_transactions insert for type='wage' only.
+   * Bonus/deduction/payout must NOT route through here — use the
+   * canonical services above. Kept private + named explicitly so
+   * future readers don't accidentally resurrect the direct-insert
+   * pattern for other types.
+   */
+  private async legacyWageInsert(
+    dto: CreatePayrollDto,
+    userId: string,
+  ) {
     const [row] = await this.ds.query(
       `
       INSERT INTO employee_transactions
@@ -429,7 +532,7 @@ export class PayrollController {
         dto.description ?? null,
         dto.cashbox_id ?? null,
         dto.shift_id ?? null,
-        user.userId,
+        userId,
       ],
     );
     return row;

@@ -1,0 +1,72 @@
+-- Migration 076 — Drop the settlement → employee_transactions mirror trigger.
+-- ═══════════════════════════════════════════════════════════════════════════
+--
+-- Context
+--
+--   migration 040 introduced `trg_mirror_settlement_to_txn` to mirror
+--   every `employee_settlements` row into `employee_transactions`
+--   (type='payout'). At the time the mirror was the *only* way a
+--   settlement reached the GL — fn_post_employee_txn on the mirrored
+--   row posted DR 213 / CR 1111.
+--
+--   PR #68 later made `EmployeesService.recordSettlement` post the GL
+--   directly via `FinancialEngineService.recordTransaction` with the
+--   correct per-method debit (cashbox for cash/bank, 213 for
+--   payroll_deduction, caller-supplied for other). This created a
+--   redundant second writer, latent because `employee_settlements`
+--   has 0 rows on live.
+--
+--   PR #77 delegates `POST /payroll type=payout` to recordSettlement,
+--   which would exercise both writers for the first time. The result
+--   would be:
+--     1. Two journal_entries per settlement — one from the engine
+--        (reference_type='employee_settlement') and one from
+--        fn_post_employee_txn via the mirrored employee_transactions
+--        row (reference_type='employee_txn').
+--     2. Two rows in the Payroll page's UNION ledger display (the
+--        payroll controller reads BOTH employee_settlements directly
+--        AND employee_transactions, so a mirrored settlement appears
+--        twice).
+--
+-- Decision — Option A: drop the mirror trigger.
+--
+--   Without the mirror:
+--     * Settlements get exactly ONE JE (the engine's).
+--     * Settlements get exactly ONE cashbox_transactions row (the
+--       engine's) — or zero for non-cash methods.
+--     * Settlements still appear in the Payroll UNION list, because
+--       the controller reads employee_settlements directly and
+--       synthesises type='payout' rows from it.
+--     * Historical audit trail preserved — no row deleted, no JE
+--       voided.
+--
+-- Rollback
+--
+--   The function `fn_mirror_settlement_to_txn` is intentionally
+--   KEPT (only the trigger is dropped). Restore by re-creating the
+--   trigger: `CREATE TRIGGER trg_mirror_settlement_to_txn AFTER
+--   INSERT OR UPDATE ON employee_settlements FOR EACH ROW EXECUTE
+--   FUNCTION fn_mirror_settlement_to_txn();`
+--
+-- Pre-flight verified on live (2026-04-24)
+--   * employee_settlements row count: 0
+--   * employee_transactions with source_ref_type='employee_settlement': 0
+--   → zero historical data affected; this migration is forward-only.
+--
+-- What this migration does NOT touch
+--   * FinancialEngine — unchanged.
+--   * recordSettlement — unchanged.
+--   * Other mirror triggers (bonus, deduction, advance) — unchanged.
+--   * employee_settlements table shape — unchanged.
+--   * Any historical row — no UPDATE, no DELETE.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+BEGIN;
+
+DROP TRIGGER IF EXISTS trg_mirror_settlement_to_txn ON employee_settlements;
+
+-- Function kept for rollback safety. If the need ever arises, the
+-- trigger can be restored in one DDL without code changes.
+-- (fn_mirror_settlement_to_txn remains in place.)
+
+COMMIT;
