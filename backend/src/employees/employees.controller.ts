@@ -65,6 +65,12 @@ class SettlementDto {
     | 'payroll_deduction'
     | 'other';
   @IsOptional() @IsUUID() cashbox_id?: string;
+  // Offset account for method='other'. Required when method='other',
+  // ignored otherwise. The settlement JE debits this account and
+  // credits 1123 — so this is the non-cash DR side (e.g. '1114'
+  // ewallet, a specific bank sub-account, or a write-off expense
+  // account). Must not be 1123 itself.
+  @IsOptional() @IsString() offset_account_code?: string;
   @IsOptional() @IsString() notes?: string;
 }
 
