@@ -55,15 +55,15 @@ const TYPE_STYLES: Record<EmpTxnType, string> = {
 
 export default function Payroll() {
   const hasPermission = useAuthStore((s) => s.hasPermission);
-  const user = useAuthStore((s) => s.user);
   // Write-side gate for CREATE/UPDATE (bonus, deduction, payout,
   // wage) — backend enforces @Permissions('employee.deductions.manage').
   const canManage = hasPermission('employee.deductions.manage');
-  // Void gate — admin-only. Backend enforces @Roles('admin') on
-  // DELETE /payroll/:id (now void, not hard delete). Managers can
-  // create but cannot void — voids are a destructive accounting
-  // action reserved for admins.
-  const canVoid = user?.role === 'admin';
+  // Void gate — `payroll.void` permission, granted to admin only by
+  // migration 087. Backend enforces @Permissions('payroll.void') on
+  // DELETE /payroll/:id. Switched from a literal role check in PR-1
+  // so the gate is consistent with the rest of the codebase. Manager
+  // can create but cannot void.
+  const canVoid = hasPermission('payroll.void');
 
   const qc = useQueryClient();
   const [addOpen, setAddOpen] = useState(false);

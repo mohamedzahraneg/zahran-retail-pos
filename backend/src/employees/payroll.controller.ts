@@ -22,7 +22,7 @@ import {
   IsString,
   IsUUID,
 } from 'class-validator';
-import { Permissions, Roles } from '../common/decorators/roles.decorator';
+import { Permissions } from '../common/decorators/roles.decorator';
 import { ForbiddenException } from '@nestjs/common';
 import {
   CurrentUser,
@@ -569,14 +569,17 @@ export class PayrollController {
    *   * employee_ledger_reset_2026_04 (opening-balance adjustments)
    *   * expense_reclass_to_1123       (expense reclassifications)
    *
-   * Role gate: admin only. Managers/accountants can create via the
-   * regular flows but cannot void.
+   * Permission gate: `payroll.void` — granted to admin only by
+   * migration 087. Managers/accountants can create via the regular
+   * flows (employee.deductions.manage / employee.bonuses.manage) but
+   * cannot void. Switched from @Roles('admin') in PR-1 so the gate
+   * is consistent with the rest of the codebase.
    */
   @Delete(':id')
-  @Roles('admin')
+  @Permissions('payroll.void')
   @ApiOperation({
     summary:
-      'إلغاء أثر حركة (void — ليس حذف نهائي). Admin-only.',
+      'إلغاء أثر حركة (void — ليس حذف نهائي). يتطلب permission payroll.void (admin فقط).',
   })
   async voidTxn(
     @Param('id') id: string,

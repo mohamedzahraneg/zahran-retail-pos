@@ -2,7 +2,6 @@ import { useState, useMemo, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
-import { attendanceApi } from '@/api/attendance.api';
 import { useAuthStore } from '@/stores/auth.store';
 import {
   Clock,
@@ -40,23 +39,12 @@ export default function Shifts() {
   const qc = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
 
-  // Auto-clock-in on entering this page — no-op if already checked in
-  // today (the backend throws a friendly error we swallow silently).
-  useEffect(() => {
-    let done = false;
-    attendanceApi.myToday().then((row) => {
-      if (done) return;
-      if (!row || !row.clock_in || row.clock_out) {
-        attendanceApi
-          .clockIn()
-          .then(() => toast.success('تم تسجيل حضورك'))
-          .catch(() => {});
-      }
-    });
-    return () => {
-      done = true;
-    };
-  }, []);
+  // PR-1: removed the silent auto-clock-in side-effect that used to
+  // fire on every visit to /shifts. It bypassed the Cairo grace-window
+  // logic and could double-tag a record when the page was reopened
+  // mid-shift. Clock-in is now an explicit action only — handled by
+  // the Employee Profile + Attendance pages, both of which broadcast
+  // to all month-scoped query keys via invalidateMonthly().
 
   // /shifts?open=1 — auto-pop the "open shift" modal (used by the
   // session-start redirect from useShiftGate).

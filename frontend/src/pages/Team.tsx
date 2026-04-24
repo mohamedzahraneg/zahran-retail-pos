@@ -202,7 +202,22 @@ function TeamTab({ pending }: { pending: EmployeeRequest[] }) {
                 <th className="p-3 text-right">الموظف</th>
                 <th className="p-3 text-center">الدور</th>
                 <th className="p-3 text-center">الراتب</th>
+                <th className="p-3 text-center" title="الهدف اليومي بالساعات من إعدادات الموظف">
+                  الهدف اليومي
+                </th>
                 <th className="p-3 text-center">ساعات الشهر</th>
+                <th className="p-3 text-center" title="مجموع الإضافي على الأيام المغلقة (فعلي − هدف)">
+                  إضافي الشهر
+                </th>
+                <th className="p-3 text-center" title="مجموع النقص عن الهدف على الأيام المغلقة">
+                  نقص الشهر
+                </th>
+                <th className="p-3 text-center" title="مجموع التأخير عن بداية الوردية بعد فترة السماح">
+                  تأخير
+                </th>
+                <th className="p-3 text-center" title="مجموع الانصراف المبكر قبل نهاية الوردية">
+                  انصراف مبكر
+                </th>
                 <th className="p-3 text-center">سلف الشهر</th>
                 <th className="p-3 text-center">حوافز الشهر</th>
                 <th className="p-3 text-center">مهام / طلبات</th>
@@ -232,8 +247,33 @@ function TeamTab({ pending }: { pending: EmployeeRequest[] }) {
                       {FREQ_LABEL[t.salary_frequency]}
                     </div>
                   </td>
+                  <td className="p-3 text-center tabular-nums text-slate-700">
+                    {t.target_hours_day != null
+                      ? `${Number(t.target_hours_day)}س`
+                      : '—'}
+                  </td>
                   <td className="p-3 text-center tabular-nums">
                     {fmtHours(Number(t.minutes_this_month || 0))}
+                  </td>
+                  <td className="p-3 text-center tabular-nums text-emerald-700 font-bold">
+                    {Number(t.overtime_minutes_this_month) > 0
+                      ? `+${fmtHours(Number(t.overtime_minutes_this_month))}`
+                      : '—'}
+                  </td>
+                  <td className="p-3 text-center tabular-nums text-rose-700 font-bold">
+                    {Number(t.shortage_minutes_this_month) > 0
+                      ? `−${fmtHours(Number(t.shortage_minutes_this_month))}`
+                      : '—'}
+                  </td>
+                  <td className="p-3 text-center tabular-nums text-amber-700">
+                    {Number(t.late_minutes_this_month) > 0
+                      ? `${Number(t.late_minutes_this_month)}د`
+                      : '—'}
+                  </td>
+                  <td className="p-3 text-center tabular-nums text-amber-700">
+                    {Number(t.early_leave_minutes_this_month) > 0
+                      ? `${Number(t.early_leave_minutes_this_month)}د`
+                      : '—'}
                   </td>
                   <td className="p-3 text-center tabular-nums font-mono text-amber-700">
                     {EGP(t.advances_this_month)}
@@ -266,7 +306,7 @@ function TeamTab({ pending }: { pending: EmployeeRequest[] }) {
               ))}
               {!filtered.length && (
                 <tr>
-                  <td colSpan={8} className="p-10 text-center text-slate-400">
+                  <td colSpan={13} className="p-10 text-center text-slate-400">
                     لا نتائج
                   </td>
                 </tr>
