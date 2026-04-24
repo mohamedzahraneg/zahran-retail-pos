@@ -32,6 +32,9 @@ import { useAuthStore } from '@/stores/auth.store';
 // elsewhere in Team (BonusForm, DeductionForm) continue to live-
 // refresh both tabs.
 import Payroll from './Payroll';
+// Attendance — same story (PR-2). Embedded as the "الحضور" tab.
+// The standalone /attendance route is kept as a permanent redirect.
+import { AttendanceBody } from './Attendance';
 
 const EGP = (n: number | string) =>
   `${Number(n || 0).toLocaleString('en-US', {
@@ -84,10 +87,16 @@ export default function Team() {
   });
 
   const [searchParams, setSearchParams] = useSearchParams();
-  const activeTab: 'team' | 'accounts' =
-    searchParams.get('tab') === 'accounts' ? 'accounts' : 'team';
+  type TabName = 'team' | 'attendance' | 'accounts';
+  const rawTab = searchParams.get('tab');
+  const activeTab: TabName =
+    rawTab === 'accounts'
+      ? 'accounts'
+      : rawTab === 'attendance'
+        ? 'attendance'
+        : 'team';
 
-  const setTab = (next: 'team' | 'accounts') => {
+  const setTab = (next: TabName) => {
     const sp = new URLSearchParams(searchParams);
     if (next === 'team') sp.delete('tab');
     else sp.set('tab', next);
@@ -108,12 +117,16 @@ export default function Team() {
         </div>
       </div>
 
-      {/* Tab bar — two sections of one consolidated screen:
+      {/* Tab bar — three sections of one consolidated screen:
             1. الفريق        — existing team table + pending + drawer
-            2. الحسابات      — verbatim Payroll page (balance cards +
+            2. الحضور        — embedded AttendanceBody (PR-2). Inherits
+                               its own internal gating: self-clock card
+                               for everyone, admin filters/log only for
+                               admin/manager/accountant.
+            3. الحسابات      — verbatim Payroll page (balance cards +
                                filters + transactions + add modal)
-          Permission gate for both is `employee.team.view` (same as
-          legacy /team and /payroll routes). */}
+          Outer permission gate for the route is `employee.team.view`
+          (same as legacy /team and /payroll routes). */}
       <div className="flex items-center gap-1 border-b border-slate-200">
         <button
           type="button"
@@ -126,6 +139,18 @@ export default function Team() {
         >
           <Users2 size={15} />
           الفريق
+        </button>
+        <button
+          type="button"
+          onClick={() => setTab('attendance')}
+          className={`px-4 py-2 -mb-px border-b-2 text-sm font-bold transition flex items-center gap-2 ${
+            activeTab === 'attendance'
+              ? 'border-indigo-600 text-indigo-700'
+              : 'border-transparent text-slate-500 hover:text-slate-700'
+          }`}
+        >
+          <Clock size={15} />
+          الحضور
         </button>
         <button
           type="button"
@@ -146,6 +171,12 @@ export default function Team() {
         // cache with the rest of Team, so mutations from either tab
         // invalidate + refetch the other automatically.
         <Payroll />
+      ) : activeTab === 'attendance' ? (
+        // Embedded body of the legacy /attendance page — same self
+        // clock-in widget + admin summary + per-row log. The shared
+        // invalidateMonthly() (PR-1) keeps Team list / Payroll cards
+        // in sync when clock-in/out fires from this tab.
+        <AttendanceBody embedded />
       ) : (
         <TeamTab pending={pending} />
       )}
