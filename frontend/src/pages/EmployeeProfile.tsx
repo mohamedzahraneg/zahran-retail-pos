@@ -745,9 +745,9 @@ function LedgerTile({
     indigo: 'bg-indigo-50 border-indigo-200 text-indigo-700',
   };
   return (
-    <div className={`rounded-lg p-2 border ${toneCls[tone]}`}>
-      <div className="font-bold mb-0.5">{label}</div>
-      <div className="tabular-nums font-black text-sm">
+    <div className={`rounded-lg p-2 border min-w-0 h-full ${toneCls[tone]}`}>
+      <div className="font-bold mb-0.5 break-words">{label}</div>
+      <div className="tabular-nums font-black text-sm break-words leading-tight">
         {Number(value || 0).toLocaleString('en-US', {
           minimumFractionDigits: 2,
           maximumFractionDigits: 2,
@@ -1014,13 +1014,31 @@ function MetricCard({
     rose: 'bg-rose-50 border-rose-200 text-rose-700',
   }[tone];
   return (
-    <div className={`rounded-xl border p-4 ${bg}`}>
-      <div className="flex items-center justify-between mb-2">
-        <span className="text-[11px] font-bold opacity-80">{label}</span>
-        <span className="opacity-80">{icon}</span>
+    // min-w-0 on the card so long Arabic values can wrap in a grid
+    // cell without pushing the card wider than its track. h-full
+    // keeps sibling cards in the same row aligned. overflow-hidden
+    // is a safety net for extreme values.
+    <div className={`rounded-xl border p-4 min-w-0 h-full overflow-hidden ${bg}`}>
+      <div className="flex items-center justify-between gap-2 mb-2">
+        <span className="text-[11px] font-bold opacity-80 min-w-0 break-words">
+          {label}
+        </span>
+        <span className="opacity-80 shrink-0">{icon}</span>
       </div>
-      <div className="text-2xl font-black truncate">{value}</div>
-      {hint && <div className="text-[10px] opacity-70 mt-0.5">{hint}</div>}
+      {/* Responsive type — smaller on mobile so long labels like
+          "مستحق له 885.00 ج.م" don't truncate or overflow. Breaking
+          is allowed as a last resort via break-words. `title` lets
+          the user see the full value on hover if a line-clamp
+          kicks in on very narrow screens. */}
+      <div
+        className="text-lg sm:text-xl md:text-2xl font-black break-words tabular-nums leading-tight"
+        title={value}
+      >
+        {value}
+      </div>
+      {hint && (
+        <div className="text-[10px] opacity-70 mt-1 break-words">{hint}</div>
+      )}
     </div>
   );
 }
@@ -1043,12 +1061,13 @@ function BreakdownRow({
     rose: 'text-rose-700',
   }[tone];
   return (
-    <div className="bg-slate-50 rounded-lg p-3 border border-slate-100">
-      <div className="text-[11px] text-slate-500 font-bold mb-1">{label}</div>
+    <div className="bg-slate-50 rounded-lg p-3 border border-slate-100 min-w-0 h-full">
+      <div className="text-[11px] text-slate-500 font-bold mb-1 break-words">{label}</div>
       <div
-        className={`font-black ${textTone} tabular-nums ${
-          big ? 'text-xl' : 'text-base'
+        className={`font-black ${textTone} tabular-nums break-words leading-tight ${
+          big ? 'text-lg sm:text-xl' : 'text-sm sm:text-base'
         }`}
+        title={value}
       >
         {value}
       </div>
