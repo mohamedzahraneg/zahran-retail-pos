@@ -768,6 +768,28 @@ export class CashDeskService {
    * on legacy DBs. Exposes both new and legacy column names.
    */
   cashflowToday() {
+    // "خارج اليوم" / outflows_total must show ONLY real operational cash
+    // that actually left the business (expenses, supplier payments,
+    // payroll payout, real withdrawals, refunds). The following
+    // categories are NOT operational and were inflating the KPI:
+    //   • edit_reversal   — accounting reversal of a prior cash-in; no
+    //                       money physically left (a customer sale was
+    //                       corrected, nothing was paid out).
+    //   • reversal_*      — mirror pattern produced by
+    //                       posting.reverseByReference (Phase 2.5);
+    //                       undoes a previous movement, not a new one.
+    //   • transfer_out    — internal movement between own cashboxes;
+    //                       net-zero across the treasury.
+    //   • shift_variance  — already surfaced in the "فوارق الورديات"
+    //                       tile and represents a physical shortage
+    //                       that left the drawer *before* this row
+    //                       was posted; counting it here would double-
+    //                       report the same event.
+    //
+    // The IN side is NOT touched in this change. cash_in_today / inflows_total
+    // continue to include every direction='in' row today; refining them
+    // symmetrically (to drop edit_replay, reversal_*_in, transfer_in,
+    // shift_variance surplus) is a separate decision.
     return this.ds.query(`
       SELECT
         cb.id                                  AS cashbox_id,
@@ -780,6 +802,10 @@ export class CashDeskService {
         COALESCE(SUM(ct.amount) FILTER (
           WHERE ct.direction = 'out'
             AND DATE(ct.created_at AT TIME ZONE 'Africa/Cairo') = CURRENT_DATE
+            AND ct.category <> 'edit_reversal'
+            AND ct.category NOT LIKE E'reversal\\_%' ESCAPE '\\'
+            AND ct.category <> 'transfer_out'
+            AND ct.category <> 'shift_variance'
         ), 0)::numeric(14,2)                   AS cash_out_today,
         COALESCE(SUM(ct.amount) FILTER (
           WHERE ct.direction = 'in'
@@ -788,6 +814,10 @@ export class CashDeskService {
         COALESCE(SUM(ct.amount) FILTER (
           WHERE ct.direction = 'out'
             AND DATE(ct.created_at AT TIME ZONE 'Africa/Cairo') = CURRENT_DATE
+            AND ct.category <> 'edit_reversal'
+            AND ct.category NOT LIKE E'reversal\\_%' ESCAPE '\\'
+            AND ct.category <> 'transfer_out'
+            AND ct.category <> 'shift_variance'
         ), 0)::numeric(14,2)                   AS outflows_total,
         COUNT(*) FILTER (
           WHERE DATE(ct.created_at AT TIME ZONE 'Africa/Cairo') = CURRENT_DATE
