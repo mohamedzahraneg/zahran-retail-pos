@@ -1,10 +1,15 @@
 import { api, unwrap } from './client';
 
+// 'expense' removed (2026‑04). Its backend recipe posted
+// DR 529 مصروفات متفرقة / CR 213, hiding a real reimbursement
+// inside misc. Until a proper reimbursement flow with
+// expense_account_code is designed, the type is refused at the
+// backend DTO boundary — removed here so the UI doesn't render a
+// broken button.
 export type EmpTxnType =
   | 'wage'
   | 'bonus'
   | 'deduction'
-  | 'expense'
   | 'advance'
   | 'payout';
 
@@ -12,7 +17,6 @@ export const TXN_TYPE_LABELS: Record<EmpTxnType, string> = {
   wage: 'يومية',
   bonus: 'مكافأة',
   deduction: 'خصم',
-  expense: 'مصروف (نيابة)',
   advance: 'سلفة',
   payout: 'صرف',
 };
@@ -21,7 +25,6 @@ export const TXN_TYPE_LABELS: Record<EmpTxnType, string> = {
 export const TXN_DIRECTION: Record<EmpTxnType, 1 | -1> = {
   wage: 1,
   bonus: 1,
-  expense: 1,
   deduction: -1,
   advance: -1,
   payout: -1,
