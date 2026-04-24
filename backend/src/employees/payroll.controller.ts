@@ -52,16 +52,21 @@ import {
 class CreatePayrollDto {
   @IsUUID() employee_id!: string;
   @IsDateString() @IsOptional() txn_date?: string;
-  // 'expense' was intentionally removed (2026‑04). Its GL recipe was
-  // DR 529 مصروفات متفرقة / CR 213, hiding a real reimbursable
-  // expense inside "miscellaneous" — the same anti‑pattern PR #64/#65
-  // closed on the main expenses flow. The DTO had no category picker,
-  // so every reimbursement landed on 529. Until a proper
-  // "expense_account_code"-aware DTO + UI is designed, we refuse the
-  // type at the boundary. 0 historical rows on live — no
-  // reclassification needed.
-  @IsIn(['wage', 'bonus', 'deduction', 'advance', 'payout'])
-  type!: 'wage' | 'bonus' | 'deduction' | 'advance' | 'payout';
+  // 'expense' removed (PR #69) and 'advance' removed in this PR.
+  // Canonical advance path is expenses.is_advance=TRUE via POST
+  // /accounting/expenses{,/daily} — it's the only path that routes
+  // through FinancialEngine and writes both journal_lines AND
+  // cashbox_transactions. fn_post_employee_txn's advance branch
+  // writes journal_lines only, so repeat use would drift
+  // cashboxes.current_balance from SUM(cashbox_transactions).
+  // Disabling this write-surface also closes the triple-path
+  // dual-write risk (audit #4): same advance could have been
+  // recorded via expenses + employee_requests + payroll, each
+  // independently posting DR 1123 / CR 1111. Historical reads
+  // continue to work — the payroll union query synthesises
+  // type='advance' rows from expenses.is_advance=TRUE for display.
+  @IsIn(['wage', 'bonus', 'deduction', 'payout'])
+  type!: 'wage' | 'bonus' | 'deduction' | 'payout';
   @IsNumber() @IsPositive() amount!: number;
   @IsOptional() @IsString() description?: string;
   @IsOptional() @IsUUID() cashbox_id?: string;
