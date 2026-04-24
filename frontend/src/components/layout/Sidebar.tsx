@@ -149,8 +149,13 @@ const groups: NavGroup[] = [
       // attendance.view_team.
       { to: '/me', label: 'ملفي الشخصي', icon: BadgeCheck, roles: ['admin', 'manager', 'cashier', 'accountant', 'salesperson', 'inventory'], permission: 'employee.dashboard.view' },
       { to: '/attendance', label: 'حضور الفريق', icon: UserCheck, roles: ['admin', 'manager', 'accountant'], permission: 'attendance.view_team' },
-      { to: '/payroll', label: 'حسابات الموظفين', icon: Wallet, roles: ['admin', 'manager', 'accountant'], permission: 'employee.team.view' },
-      { to: '/team', label: 'إدارة الفريق', icon: Users2, roles: ['admin', 'manager'], permission: 'employee.team.view' },
+      // حسابات الموظفين is now a tab inside /team (consolidation).
+      // /payroll still redirects to /team?tab=accounts for backward-
+      // compat (bookmarks, legacy links), but the sidebar shows a
+      // single entry. Permission stays the same — `employee.team.view`
+      // — and now spans both the admin role set of /team and the
+      // accountant set that previously had its own /payroll entry.
+      { to: '/team', label: 'إدارة الفريق', icon: Users2, roles: ['admin', 'manager', 'accountant'], permission: 'employee.team.view' },
       { to: '/settings', label: 'الإعدادات', icon: Settings, roles: ['admin'], permission: 'settings.view' },
       { to: '/import', label: 'استيراد Excel', icon: FileUp, roles: ['admin', 'manager'], permission: 'import.run' },
       { to: '/notifications', label: 'الإشعارات (واتساب)', icon: MessageCircle, roles: ['admin', 'manager'], permission: 'notifications.manage' },

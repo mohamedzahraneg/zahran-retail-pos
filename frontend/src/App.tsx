@@ -258,13 +258,14 @@ export default function App() {
             </ProtectedRoute>
           }
         />
+        {/* /payroll — legacy route kept as a permanent redirect so
+            external links (emails, bookmarks) don't 404. The Payroll
+            UI now lives as the "الحسابات" tab inside /team — same
+            permission gate (employee.team.view), same component, same
+            design. */}
         <Route
           path="payroll"
-          element={
-            <ProtectedRoute permissions={['employee.team.view']}>
-              <Payroll />
-            </ProtectedRoute>
-          }
+          element={<Navigate to="/team?tab=accounts" replace />}
         />
         <Route path="settings" element={<Settings />} />
         <Route
