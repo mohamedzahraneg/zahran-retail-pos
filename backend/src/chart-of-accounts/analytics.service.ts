@@ -294,14 +294,28 @@ export class AccountingAnalyticsService {
       Number(rev?.invoice_count || 0) > 0
         ? (Number(ret?.return_count || 0) / Number(rev.invoice_count)) * 100
         : 0;
-    // Average daily burn = (expenses + cogs) / days-in-range
+    // Average daily burn = GL expense total / days-in-range.
+    //
+    // We intentionally do NOT add `invoices.cogs_total` here.
+    // Chart-of-accounts account `51 تكلفة البضاعة المباعة` is defined
+    // with `account_type = 'expense'`, so the `expenses` query above
+    // (SUM debit−credit over every journal_line on an expense-type
+    // account) already contains the COGS amount. Adding `cogs`
+    // separately was the old behaviour and silently double-counted
+    // COGS — daily_burn appeared ~2× too high and, because
+    // cash_runway_days = cash_on_hand / daily_burn, runway appeared
+    // ~2× too short.
+    //
+    // The fix is scoped to this one expression. No other KPI
+    // (net_profit, gross_margin, cogs, expenses) is touched; those
+    // are left exactly as they were.
     const fromD = new Date(params.from);
     const toD = new Date(params.to);
     const days = Math.max(
       1,
       Math.round((toD.getTime() - fromD.getTime()) / 86400000) + 1,
     );
-    const dailyBurn = (expenses + cogs) / days;
+    const dailyBurn = expenses / days;
     const cashRunwayDays =
       dailyBurn > 0 ? Number(cash?.cash_on_hand || 0) / dailyBurn : 9999;
     const inventoryTurns =
