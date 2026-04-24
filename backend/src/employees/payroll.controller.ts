@@ -619,7 +619,7 @@ export class PayrollController {
         // UPDATEs journal_entries.is_void=true. Without the context,
         // migration 068's strict guard blocks that UPDATE.
         await em.query(
-          `SELECT set_config('app.engine_context', 'admin_void:payroll', true)`,
+          `SELECT set_config('app.engine_context', 'engine:admin_void_payroll', true)`,
         );
         const [row] = await em.query(
           `UPDATE employee_bonuses
@@ -640,7 +640,7 @@ export class PayrollController {
       const rawId = id.slice(4);
       return this.ds.transaction(async (em) => {
         await em.query(
-          `SELECT set_config('app.engine_context', 'admin_void:payroll', true)`,
+          `SELECT set_config('app.engine_context', 'engine:admin_void_payroll', true)`,
         );
         const [row] = await em.query(
           `UPDATE employee_deductions
@@ -661,7 +661,7 @@ export class PayrollController {
       const rawId = id.slice(4);
       return this.ds.transaction(async (em) => {
         await em.query(
-          `SELECT set_config('app.engine_context', 'admin_void:payroll', true)`,
+          `SELECT set_config('app.engine_context', 'engine:admin_void_payroll', true)`,
         );
         const [s] = await em.query(
           `SELECT id, user_id, amount, method, cashbox_id,
@@ -750,7 +750,7 @@ export class PayrollController {
     // journal_entries.is_void=true. Same engine-context requirement.
     return this.ds.transaction(async (em) => {
       await em.query(
-        `SELECT set_config('app.engine_context', 'admin_void:payroll', true)`,
+        `SELECT set_config('app.engine_context', 'engine:admin_void_payroll', true)`,
       );
       const res = await em.query(
         `DELETE FROM employee_transactions WHERE id = $1::uuid RETURNING id`,
