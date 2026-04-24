@@ -9,10 +9,14 @@ name: zahran
 services:
 
   # ---------------------------------------------------------------------------
-  #  PostgreSQL — القاعدة الرئيسية (يتم تحميل schema.sql تلقائياً عند أول تشغيل)
+  #  PostgreSQL — LOCAL DEVELOPMENT ONLY.
+  #  Production uses Supabase; see docs/DEPLOYMENT.md. This service is gated
+  #  behind the `dev` profile so it NEVER starts with `--profile full` (prod)
+  #  and cannot be accidentally written to by the production API container.
   # ---------------------------------------------------------------------------
   db:
     image: postgres:15-alpine
+    profiles: ["dev"]
     restart: unless-stopped
     environment:
       POSTGRES_DB:       ${DB_NAME:-zahran_retail}
@@ -88,7 +92,10 @@ services:
     environment:
       NODE_ENV: production
       PORT: 3000
-      DATABASE_URL: ${DATABASE_URL:-postgres://${DB_USER:-zahran}:${DB_PASS:-change_me_strong}@db:5432/${DB_NAME:-zahran_retail}}
+      # REQUIRED. No fallback. Production points at the Supabase pooler DSN
+      # (see .env.production.example). If this variable is unset, docker
+      # compose refuses to start — we never silently use a local Postgres.
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required — production points at Supabase pooler, never Docker Postgres. See docs/DEPLOYMENT.md.}
       REDIS_URL:   redis://redis:6379
       S3_ENDPOINT: http://minio:9000
       S3_KEY:      ${MINIO_USER:-zahran}
@@ -99,8 +106,12 @@ services:
       REFRESH_TOKEN_DAYS: ${REFRESH_TOKEN_DAYS:-14}
       CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:8080,http://localhost:5173}
       TZ: Africa/Cairo
+    # NOTE: `db` is intentionally absent from depends_on. Production reads
+    # DATABASE_URL → Supabase pooler, so waiting on a local docker Postgres
+    # would just block startup for no reason. Local-dev users who want the
+    # full stack against docker Postgres should run with both the `dev` and
+    # `full` profiles and set DATABASE_URL to the db:5432 DSN themselves.
     depends_on:
-      db:    { condition: service_healthy }
       redis: { condition: service_started }
       minio: { condition: service_started }
     volumes:

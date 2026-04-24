@@ -1443,6 +1443,16 @@ export class ReconciliationService {
     const wiped: Record<string, number> = {};
 
     return this.ds.transaction(async (em) => {
+      // Sanctioned admin-only destructive reset. Raise the engine
+      // context ONCE for the whole transaction so every guarded UPDATE
+      // below (journal_entries void trigger, cashboxes balance guard,
+      // etc.) recognises it as a legitimate admin wipe. Bare DELETE
+      // statements aren't gated by fn_engine_write_allowed, but the
+      // UPDATE cashboxes.current_balance at the end is.
+      await em.query(
+        `SET LOCAL app.engine_context = 'service:reconciliation.factoryReset'`,
+      );
+
       const safeDelete = async (label: string, sql: string) => {
         try {
           const r = await em.query(sql);

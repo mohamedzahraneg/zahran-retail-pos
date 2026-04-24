@@ -197,6 +197,62 @@ jobs:
           psql -h localhost -U zahran -d zahran_ci -c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public';" || true
 
   # ---------------------------------------------------------------------------
+  # Compose guard — production must NOT silently fall back to a local Docker
+  # Postgres. docker-compose.yml uses `${DATABASE_URL:?...}` which should
+  # fail when the variable is unset. This job catches any regression that
+  # reintroduces a default value.
+  # ---------------------------------------------------------------------------
+  compose-guard:
+    name: Compose Guard (no silent DB fallback)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: compose config must fail without DATABASE_URL
+        run: |
+          set +e
+          # Deliberately unset DATABASE_URL. If compose renders anyway the
+          # production fallback has been reintroduced and we must fail CI.
+          unset DATABASE_URL
+          err=$(docker compose --profile full config 2>&1 >/dev/null)
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "::error::docker compose --profile full rendered successfully without DATABASE_URL."
+            echo "::error::A default value for DATABASE_URL has been reintroduced. Production must require DATABASE_URL."
+            exit 1
+          fi
+          echo "$err" | grep -qi 'DATABASE_URL' || {
+            echo "::error::compose failed without DATABASE_URL, but not for the expected reason."
+            echo "--- compose stderr ---"
+            echo "$err"
+            exit 1
+          }
+          echo "OK: docker compose refuses to render the full profile without DATABASE_URL."
+
+      - name: compose config must succeed with DATABASE_URL set
+        env:
+          DATABASE_URL: postgres://ci:ci@ci-host:6543/postgres
+          JWT_SECRET: ci-secret-placeholder
+        run: |
+          docker compose --profile full config >/dev/null
+          echo "OK: docker compose renders cleanly when DATABASE_URL is provided."
+
+      - name: dev profile must NOT start db alongside full
+        run: |
+          # With only the full profile, the `db` service must be absent
+          # (it lives in the `dev` profile). If it shows up, prod will
+          # wastefully spin up a local Postgres again.
+          rendered=$(DATABASE_URL=postgres://ci:ci@ci-host:6543/postgres JWT_SECRET=x \
+            docker compose --profile full config)
+          if echo "$rendered" | grep -qE '^[[:space:]]+db:' ; then
+            echo "::error::The `db` service is enabled in the full profile. It must only run under the dev profile."
+            exit 1
+          fi
+          echo "OK: full profile does not include the local db service."
+
+  # ---------------------------------------------------------------------------
   # Docker images — only build on main / tags; don't push (no registry yet)
   # ---------------------------------------------------------------------------
   docker:

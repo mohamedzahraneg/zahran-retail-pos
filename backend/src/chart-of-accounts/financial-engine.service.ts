@@ -66,10 +66,16 @@ export type TransactionKind =
   | 'expense'
   | 'customer_payment'
   | 'supplier_payment'
+  | 'purchase'
+  | 'purchase_return'
   | 'shift_variance'
   | 'opening_balance'
   | 'cashbox_transfer'
-  | 'manual_adjustment';
+  | 'manual_adjustment'
+  | 'depreciation'
+  | 'inventory_adjustment'
+  | 'year_close'
+  | 'reversal';
 
 /**
  * A single GL line. Exactly ONE of {debit, credit} must be > 0, the
@@ -158,6 +164,24 @@ export interface RecordTransactionSpec {
    * engine wraps its own transaction.
    */
   em?: EntityManager;
+
+  /**
+   * Reversal audit link. When set, this entry is recorded as a
+   * reversing entry of `reversal_of` (journal_entries.id):
+   *   - the new JE is written with reference_type='reversal' and
+   *     reversal_of = <original entry_id>
+   *   - the original entry is flipped to is_void = TRUE with
+   *     voided_at/voided_by populated
+   * Preserves the same audit chain the legacy `reverseByReference`
+   * built; callers build the reversed gl_lines + cash_movements.
+   */
+  reversal_of?: string;
+
+  /**
+   * Free-form reason attached to the original entry's void_reason
+   * column. Ignored when reversal_of is not supplied.
+   */
+  reversal_reason?: string;
 }
 
 export type RecordTransactionResult =
@@ -346,21 +370,45 @@ export class FinancialEngineService {
       );
       const entryNo = `JE-${entryDate.slice(0, 4)}-${String(seq).padStart(6, '0')}`;
 
-      const [entry] = await q(
-        `INSERT INTO journal_entries
-           (entry_no, entry_date, description, reference_type, reference_id,
-            is_posted, posted_by, posted_at, created_by)
-         VALUES ($1, $2, $3, $4, $5, FALSE, $6, NOW(), $6)
-         RETURNING id`,
-        [
-          entryNo,
-          entryDate,
-          spec.description,
-          spec.reference_type,
-          spec.reference_id,
-          spec.user_id,
-        ],
-      );
+      // Persist the reversal audit link when present. The column exists
+      // on every migration ≥ 010; older installs would fail the INSERT,
+      // so we probe the schema once per process.
+      const hasReversalOfCol = spec.reversal_of
+        ? await this.hasReversalOfColumn(q)
+        : false;
+      const entryRows = hasReversalOfCol
+        ? await q(
+            `INSERT INTO journal_entries
+               (entry_no, entry_date, description, reference_type, reference_id,
+                reversal_of, is_posted, posted_by, posted_at, created_by)
+             VALUES ($1, $2, $3, $4, $5, $6, FALSE, $7, NOW(), $7)
+             RETURNING id`,
+            [
+              entryNo,
+              entryDate,
+              spec.description,
+              spec.reference_type,
+              spec.reference_id,
+              spec.reversal_of ?? null,
+              spec.user_id,
+            ],
+          )
+        : await q(
+            `INSERT INTO journal_entries
+               (entry_no, entry_date, description, reference_type, reference_id,
+                is_posted, posted_by, posted_at, created_by)
+             VALUES ($1, $2, $3, $4, $5, FALSE, $6, NOW(), $6)
+             RETURNING id`,
+            [
+              entryNo,
+              entryDate,
+              spec.description,
+              spec.reference_type,
+              spec.reference_id,
+              spec.user_id,
+            ],
+          );
+      const entry = entryRows[0];
 
       const hasPartyCols = await this.hasPartyColumns(q);
       const hasEmployeeCol = await this.hasEmployeeColumn(q);
@@ -438,6 +486,27 @@ export class FinancialEngineService {
           WHERE id = $1`,
         [entry.id],
       );
+
+      // ── Reversal audit closure — when reversal_of is supplied the
+      //    original entry must be flipped to is_void so it drops out of
+      //    the trial balance. Caller's engine_context is still engine:*
+      //    so the write passes fn_engine_write_allowed.
+      if (spec.reversal_of && hasReversalOfCol) {
+        await q(
+          `UPDATE journal_entries
+              SET is_void    = TRUE,
+                  void_reason = COALESCE(void_reason, $2),
+                  voided_by  = $3,
+                  voided_at  = NOW()
+            WHERE id = $1
+              AND is_void = FALSE`,
+          [
+            spec.reversal_of,
+            spec.reversal_reason ?? `مصدر القيد العكسي: ${entryNo}`,
+            spec.user_id,
+          ],
+        );
+      }
 
       // ── Phase 5 — audit log (lightweight, append-only). Missing on
       //    pre-057 installs; the outer try catches and ignores the
@@ -583,6 +652,12 @@ export class FinancialEngineService {
       cashbox_transfer: 'cashbox',
       opening_balance: 'cashbox',
       manual_adjustment: 'cashbox',
+      inventory_adjustment: 'stock',
+      depreciation: 'other',
+      year_close: 'other',
+      reversal: 'other',
+      fx_revaluation: 'cashbox',
+      purchase_return: 'purchase',
     };
     const mapped = aliases[refType] ?? refType;
     return allowed.has(mapped) ? mapped : 'other';
@@ -660,6 +735,20 @@ export class FinancialEngineService {
     );
     this._partyColsCache = !!row?.has_col;
     return this._partyColsCache;
+  }
+
+  /** Cache the reversal-of column probe — it has existed since migration 010. */
+  private _reversalColCache: boolean | undefined;
+  private async hasReversalOfColumn(q: QueryFn): Promise<boolean> {
+    if (this._reversalColCache !== undefined) return this._reversalColCache;
+    const [row] = await q(
+      `SELECT EXISTS (
+         SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'journal_entries' AND column_name = 'reversal_of'
+       ) AS has_col`,
+    );
+    this._reversalColCache = !!row?.has_col;
+    return this._reversalColCache;
   }
 
   /** Cache the employee-dimension probe (migration 071). */
@@ -1015,6 +1104,110 @@ export class FinancialEngineService {
    *   direction='in'  → DR cash · CR capital (31)
    *   direction='out' → DR drawings (32) · CR cash
    */
+  /**
+   * Sanctioned **cash-only** movement — use ONLY for paths where a
+   * balanced GL entry already exists elsewhere and the only remaining
+   * step is to record the physical cash leg.
+   *
+   * Current legitimate callers:
+   *   * `pos.editInvoice` — the invoice's GL was posted at original
+   *     creation; edit-time cash reversal/replay mirrors that.
+   *   * `returns.refund` — the return GL (including the Cash credit)
+   *     was posted at approval time; the physical cash-out happens
+   *     only when refund_method='cash'.
+   *
+   * What it does:
+   *   • Sets `app.engine_context = 'engine:cashOnlyMovement'` so the
+   *     write passes `fn_engine_write_allowed` silently (no bypass
+   *     alert — this IS an engine-owned path).
+   *   • Delegates to the same `fn_record_cashbox_txn` the rest of the
+   *     engine uses → atomic cashbox_transactions INSERT + balance
+   *     UPDATE under a FOR UPDATE row lock.
+   *   • Records a `cash_only` row in `financial_event_log` for audit.
+   *
+   * What it does NOT do:
+   *   • Write any `journal_entries` / `journal_lines` row. That is the
+   *     caller's responsibility (typically done via
+   *     `recordTransaction` at the originating document's posting
+   *     time).
+   *   • Enforce idempotency on (reference_type, reference_id). Multiple
+   *     cashbox rows may legitimately share a reference (e.g. two cash
+   *     payments on the same invoice). Callers that need retry-safety
+   *     must key on their own dimension.
+   */
+  async recordCashOnlyMovement(args: {
+    cashbox_id: string;
+    direction: 'in' | 'out';
+    amount: number;
+    /** Free-form category (e.g. 'refund', 'sale', 'edit_reversal'). */
+    category: string;
+    /** Must be one of the entity_type enum aliases (engine maps). */
+    reference_type: string;
+    reference_id: string;
+    user_id: string | null;
+    notes?: string;
+    em?: EntityManager;
+  }): Promise<{ ok: true; cash_txn_id: number } | { ok: false; error: string }> {
+    if (!(args.amount > 0)) {
+      return { ok: false, error: 'amount must be positive' };
+    }
+    if (args.direction !== 'in' && args.direction !== 'out') {
+      return { ok: false, error: 'direction must be in/out' };
+    }
+
+    const run = async (em: EntityManager) => {
+      const q: QueryFn = (sql, params) => em.query(sql, params);
+
+      // Engine-identity context — silent under fn_engine_write_allowed.
+      await q(`SET LOCAL app.engine_context = 'engine:cashOnlyMovement'`);
+
+      const [row] = await q(
+        `SELECT fn_record_cashbox_txn(
+           $1::uuid, $2::text, $3::numeric, $4::text,
+           $5::text, $6::uuid, $7::uuid, $8::text
+         ) AS id`,
+        [
+          args.cashbox_id,
+          args.direction,
+          Number(args.amount),
+          args.category,
+          this.mapToEntityType(args.reference_type),
+          args.reference_id,
+          args.user_id,
+          args.notes ?? null,
+        ],
+      );
+      const cashTxnId = Number(row?.id);
+
+      // Audit trail — best-effort, mirrors recordTransaction's pattern.
+      try {
+        await q(
+          `INSERT INTO financial_event_log
+             (event_kind, reference_type, reference_id, entry_id,
+              amount, user_id, created_at)
+           VALUES ('cash_only_movement', $1, $2, NULL, $3, $4, NOW())`,
+          [args.reference_type, args.reference_id, args.amount, args.user_id],
+        );
+      } catch {
+        /* append-only table may not exist on very old installs */
+      }
+
+      return cashTxnId;
+    };
+
+    try {
+      const txnId = args.em
+        ? await run(args.em)
+        : await this.ds.transaction((em) => run(em));
+      return { ok: true, cash_txn_id: txnId };
+    } catch (err: any) {
+      this.logger.error(
+        `recordCashOnlyMovement ${args.reference_type}/${args.reference_id} failed: ${err?.message ?? err}`,
+      );
+      return { ok: false, error: err?.message ?? String(err) };
+    }
+  }
+
   async recordManualAdjustment(args: {
     reference_id: string;
     cashbox_id: string;

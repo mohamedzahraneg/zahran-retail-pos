@@ -2,8 +2,11 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
+  Optional,
 } from '@nestjs/common';
 import { DataSource } from 'typeorm';
+import { FinancialEngineService } from './financial-engine.service';
+import { AccountingPostingService } from './posting.service';
 
 export interface JournalLineInput {
   account_id: string;
@@ -38,7 +41,11 @@ export interface CreateJournalEntryDto {
  */
 @Injectable()
 export class JournalService {
-  constructor(private readonly ds: DataSource) {}
+  constructor(
+    private readonly ds: DataSource,
+    @Optional() private readonly engine?: FinancialEngineService,
+    @Optional() private readonly posting?: AccountingPostingService,
+  ) {}
 
   async create(dto: CreateJournalEntryDto, userId: string) {
     if (!dto.entry_date || !/^\d{4}-\d{2}-\d{2}$/.test(dto.entry_date)) {
@@ -84,6 +91,30 @@ export class JournalService {
       );
     }
 
+    // Phase 2.5: manual-entry posting now flows through the engine.
+    // Pre-flight validation (leaf / active / exists) stays here — it
+    // produces user-friendly Arabic error messages and guards against
+    // the class of mistakes unique to this endpoint (posting to a
+    // parent account, etc.). The actual INSERT happens in
+    // FinancialEngineService.recordTransaction under the canonical
+    // engine:* context, which is silent under fn_engine_write_allowed.
+    if (!this.engine) {
+      throw new BadRequestException(
+        'FinancialEngineService غير متاح — لا يمكن إنشاء قيد يدوي بدون المحرك المحاسبي',
+      );
+    }
+
+    // post_immediately=false is a legacy draft-only path; the engine
+    // always posts (it's atomic — an unposted row is an intermediate
+    // state, not a caller-visible return). We refuse the draft mode
+    // explicitly rather than silently up-converting it, so any caller
+    // relying on drafts hears about the change.
+    if (dto.post_immediately === false) {
+      throw new BadRequestException(
+        'الترحيل المؤجَّل لم يعد مدعوماً — القيد يُرحَّل تلقائياً عند الإنشاء',
+      );
+    }
+
     return this.ds.transaction(async (em) => {
       // Validate every referenced account — must exist, be active, be a leaf.
       const ids = Array.from(new Set(cleaned.map((l) => l.account_id)));
@@ -107,76 +138,41 @@ export class JournalService {
         }
       }
 
-      const [{ seq }] = await em.query(
-        `SELECT nextval('seq_journal_entry_no') AS seq`,
-      );
-      const year = dto.entry_date.slice(0, 4);
-      const entryNo = `JE-${year}-${String(seq).padStart(6, '0')}`;
+      // Derive the engine reference. Manual entries accept a caller-
+      // supplied reference_type/reference_id; otherwise we mint a
+      // deterministic one so the engine's idempotency key stays stable.
+      const referenceType = dto.reference_type ?? 'manual';
+      const referenceId =
+        dto.reference_id ??
+        (await em.query(`SELECT gen_random_uuid() AS id`))[0].id;
 
-      // Manual-entry endpoint — raise engine-context so migration 058
-      // lets us INSERT. This is a legitimate admin-only path (POST
-      // /accounts/journal) where the user supplies a balanced entry
-      // by hand. The balance trigger fn_je_enforce_balance still
-      // validates before the entry gets marked posted.
-      // Migration 068 strict guard: bare 'on' no longer passes.
-      // Use the `service:*` identity pattern — still drops a bypass
-      // alert for observability until this path is migrated to
-      // FinancialEngineService (phase 2.4).
-      await em.query(
-        `SET LOCAL app.engine_context = 'service:journal.service.create'`,
-      );
+      const res = await this.engine!.recordTransaction({
+        kind: 'manual_adjustment',
+        reference_type: referenceType,
+        reference_id: referenceId,
+        entry_date: dto.entry_date,
+        description: dto.description ?? 'قيد يدوي',
+        gl_lines: cleaned.map((l) => ({
+          account_id: l.account_id,
+          debit: l.debit,
+          credit: l.credit,
+          description: l.description ?? dto.description ?? undefined,
+          cashbox_id: l.cashbox_id ?? undefined,
+          warehouse_id: l.warehouse_id ?? undefined,
+        })),
+        // Manual entries do not move physical cash — cashbox dimensions
+        // on the lines are for GL reporting only, not for fn_record_cashbox_txn.
+        cash_movements: [],
+        user_id: userId,
+        em,
+      });
 
-      const [entry] = await em.query(
-        `
-        INSERT INTO journal_entries
-          (entry_no, entry_date, description, reference_type, reference_id, created_by)
-        VALUES ($1,$2,$3,$4,$5,$6)
-        RETURNING *
-        `,
-        [
-          entryNo,
-          dto.entry_date,
-          dto.description ?? null,
-          dto.reference_type ?? 'manual',
-          dto.reference_id ?? null,
-          userId,
-        ],
-      );
-
-      // Lines
-      let n = 1;
-      for (const l of cleaned) {
-        await em.query(
-          `
-          INSERT INTO journal_lines
-            (entry_id, line_no, account_id, debit, credit, description,
-             cashbox_id, warehouse_id)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-          `,
-          [
-            entry.id,
-            n++,
-            l.account_id,
-            l.debit,
-            l.credit,
-            l.description,
-            l.cashbox_id,
-            l.warehouse_id,
-          ],
+      if (!res.ok) {
+        throw new BadRequestException(
+          `فشل ترحيل القيد اليدوي: ${res.error}`,
         );
       }
-
-      // Post immediately unless explicitly deferred.
-      const shouldPost = dto.post_immediately !== false;
-      if (shouldPost) {
-        await em.query(
-          `UPDATE journal_entries SET is_posted = TRUE, posted_by = $2, posted_at = NOW()
-             WHERE id = $1`,
-          [entry.id, userId],
-        );
-      }
-
-      return this.fetchFull(em, entry.id);
+      return this.fetchFull(em, (res as any).entry_id);
     });
   }
 
@@ -274,13 +270,22 @@ export class JournalService {
     return { ...entry, lines };
   }
 
-  /** Reverse a posted entry with a new offsetting entry. */
+  /**
+   * Reverse a posted entry — Phase 2.5: delegates to
+   * AccountingPostingService.reverseByReference, which now routes the
+   * whole operation through the engine (reversing JE with
+   * `reversal_of` link + reversed cashbox rows + void of the original).
+   *
+   * A non-posted draft is still just deleted — no ledger effect to
+   * reverse.
+   */
   async void(id: string, userId: string, reason: string) {
     if (!reason?.trim()) {
       throw new BadRequestException('سبب الإلغاء مطلوب');
     }
     const [je] = await this.ds.query(
-      `SELECT * FROM journal_entries WHERE id = $1`,
+      `SELECT id, entry_no, reference_type, reference_id, is_void, is_posted
+         FROM journal_entries WHERE id = $1`,
       [id],
     );
     if (!je) throw new NotFoundException('القيد غير موجود');
@@ -288,71 +293,39 @@ export class JournalService {
       throw new BadRequestException('القيد ملغى بالفعل');
     }
     if (!je.is_posted) {
-      // Non-posted entries can just be deleted.
+      // Non-posted entries have no ledger effect yet — just delete.
+      // The manual-create path no longer allows drafts so in practice
+      // this branch only fires for legacy rows created before Phase 2.5.
       await this.ds.query(`DELETE FROM journal_entries WHERE id = $1`, [id]);
       return { deleted: true };
     }
-    const lines = await this.ds.query(
-      `SELECT * FROM journal_lines WHERE entry_id = $1 ORDER BY line_no`,
-      [id],
-    );
 
+    if (!this.posting) {
+      throw new BadRequestException(
+        'AccountingPostingService غير متاح — لا يمكن عكس القيد',
+      );
+    }
+
+    // Reverse via the engine-backed posting service. It re-reads the
+    // original entry's lines + paired cashbox rows, swaps them, and
+    // hands them to the engine with reversal_of = <this entry's id>.
     return this.ds.transaction(async (em) => {
-      // Raise engine-context so the write guards let us void + create
-      // the reversing entry. Same rationale as createJournal above.
-      // Migration 068 strict guard: uses service:* pattern.
-      await em.query(
-        `SET LOCAL app.engine_context = 'service:journal.service.void'`,
+      const result = await this.posting!.reverseByReference(
+        je.reference_type,
+        je.reference_id,
+        reason,
+        userId,
+        em,
       );
-
-      // Mark original as void.
-      await em.query(
-        `UPDATE journal_entries
-            SET is_void = TRUE, void_reason = $2,
-                voided_by = $3, voided_at = NOW()
-          WHERE id = $1`,
-        [id, reason, userId],
-      );
-
-      // Create the reversing entry with dr/cr swapped.
-      const [{ seq }] = await em.query(
-        `SELECT nextval('seq_journal_entry_no') AS seq`,
-      );
-      const year = new Date().toISOString().slice(0, 4);
-      const revNo = `JE-${year}-${String(seq).padStart(6, '0')}`;
-      const [rev] = await em.query(
-        `
-        INSERT INTO journal_entries
-          (entry_no, entry_date, description, reference_type, reference_id,
-           reversal_of, is_posted, posted_by, posted_at, created_by)
-        VALUES ($1,(now() AT TIME ZONE 'Africa/Cairo')::date,
-                $2, 'reversal', $3, $3, TRUE, $4, NOW(), $4)
-        RETURNING *
-        `,
-        [revNo, `عكس قيد ${je.entry_no}: ${reason}`, id, userId],
-      );
-      let n = 1;
-      for (const l of lines) {
-        await em.query(
-          `
-          INSERT INTO journal_lines
-            (entry_id, line_no, account_id, debit, credit, description,
-             cashbox_id, warehouse_id)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-          `,
-          [
-            rev.id,
-            n++,
-            l.account_id,
-            Number(l.credit) || 0, // swap
-            Number(l.debit) || 0, // swap
-            l.description,
-            l.cashbox_id,
-            l.warehouse_id,
-          ],
+      if (result && (result as any).error) {
+        throw new BadRequestException(
+          `فشل عكس القيد: ${(result as any).error}`,
         );
       }
-      return this.fetchFull(em, rev.id);
+      if (!result || !(result as any).entry_id) {
+        throw new NotFoundException('القيد الأصلي غير موجود للعكس');
+      }
+      return this.fetchFull(em, (result as any).entry_id);
     });
   }
 }
