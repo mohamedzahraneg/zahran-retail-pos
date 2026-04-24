@@ -4,8 +4,12 @@ import { AccountingService } from './accounting.service';
 import { ExpenseApprovalService } from './approval.service';
 import { CostAccountResolver } from './cost-account-resolver.service';
 import { CostReconciliationService } from './cost-reconciliation.service';
-import { ReclassifyTo1123Service } from './reclassify-to-1123.service';
-import { EmployeeLedgerReset202604Service } from './employee-ledger-reset-2026-04.service';
+
+// One-shot bootstrap services removed after completion:
+//   * ReclassifyTo1123Service (PR #66/#67) — posted JE-2026-000171..174
+//   * EmployeeLedgerReset202604Service (PR #73) — posted JE-000176..177
+// Engine idempotency on (reference_type, reference_id) made both
+// permanent no-ops on subsequent boots. Historical JEs preserved.
 
 @Module({
   controllers: [AccountingController],
@@ -14,8 +18,6 @@ import { EmployeeLedgerReset202604Service } from './employee-ledger-reset-2026-0
     ExpenseApprovalService,
     CostAccountResolver,
     CostReconciliationService,
-    ReclassifyTo1123Service,
-    EmployeeLedgerReset202604Service,
   ],
   exports: [
     AccountingService,
