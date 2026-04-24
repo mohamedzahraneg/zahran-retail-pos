@@ -41,7 +41,6 @@ import CustomerGroups from '@/pages/CustomerGroups';
 import Settings from '@/pages/Settings';
 import Users from '@/pages/Users';
 import Loyalty from '@/pages/Loyalty';
-import Attendance from '@/pages/Attendance';
 import EmployeeProfile from '@/pages/EmployeeProfile';
 import Team from '@/pages/Team';
 import Payroll from '@/pages/Payroll';
@@ -241,7 +240,15 @@ export default function App() {
             </ProtectedRoute>
           }
         />
-        <Route path="attendance" element={<Attendance />} />
+        {/* /attendance — legacy route kept as a permanent redirect so
+            external links (sidebar bookmarks, deep-links) don't 404.
+            The Attendance UI now lives as the "الحضور" tab inside
+            /team — same permission gates, same component (AttendanceBody),
+            same design. */}
+        <Route
+          path="attendance"
+          element={<Navigate to="/team?tab=attendance" replace />}
+        />
         <Route
           path="me"
           element={

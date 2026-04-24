@@ -43,7 +43,26 @@ const fmtMinutes = (mins: number | null) => {
   return `${h}س ${m.toString().padStart(2, '0')}د`;
 };
 
-export default function Attendance() {
+/**
+ * Embeddable body of the Attendance screen — same self clock-in widget
+ * + admin summary + per-row log that used to live at /attendance.
+ *
+ * PR-2 promotes this to a named export so Team.tsx can render it
+ * inside the new "الحضور" tab without forking the implementation.
+ * The standalone /attendance route is kept as a permanent redirect to
+ * /team?tab=attendance for backward compatibility.
+ *
+ * Permission gates are unchanged from the legacy page:
+ *   • Self clock-in card: any authenticated user.
+ *   • Admin filters / summary / detailed log: only when the role check
+ *     below passes (admin / manager / accountant).
+ *
+ * `embedded` controls layout chrome:
+ *   • false (default) → keeps the original page header + outer padding.
+ *   • true             → drops both so the parent (Team tab) supplies
+ *                       the header and the surrounding card layout.
+ */
+export function AttendanceBody({ embedded = false }: { embedded?: boolean } = {}) {
   const user = useAuthStore((s) => s.user);
   const qc = useQueryClient();
   const isAdmin = !!user && ['admin', 'manager', 'accountant'].includes(user.role);
@@ -113,16 +132,21 @@ export default function Attendance() {
   })();
 
   return (
-    <div className="p-6 space-y-6" dir="rtl">
-      <header>
-        <h1 className="text-2xl font-black flex items-center gap-2 text-slate-800">
-          <Clock className="w-7 h-7 text-brand-500" />
-          الحضور والانصراف
-        </h1>
-        <p className="text-sm text-slate-500 mt-1">
-          سجّل حضورك وانصرافك، وتابع حضور فريق العمل.
-        </p>
-      </header>
+    <div
+      className={embedded ? 'space-y-6' : 'p-6 space-y-6'}
+      dir="rtl"
+    >
+      {!embedded && (
+        <header>
+          <h1 className="text-2xl font-black flex items-center gap-2 text-slate-800">
+            <Clock className="w-7 h-7 text-brand-500" />
+            الحضور والانصراف
+          </h1>
+          <p className="text-sm text-slate-500 mt-1">
+            سجّل حضورك وانصرافك، وتابع حضور فريق العمل.
+          </p>
+        </header>
+      )}
 
       {/* Clock-in widget */}
       <section className="card p-6 bg-gradient-to-l from-brand-50 to-white border border-brand-100">
@@ -341,4 +365,14 @@ export default function Attendance() {
       )}
     </div>
   );
+}
+
+/**
+ * Default export — kept so `<Route path="attendance" element={<Attendance />}` /
+ * imports of `Attendance` keep compiling. Today the route at `/attendance`
+ * permanently redirects to `/team?tab=attendance` (PR-2), but bookmarks /
+ * external links to the legacy URL still resolve.
+ */
+export default function Attendance() {
+  return <AttendanceBody />;
 }

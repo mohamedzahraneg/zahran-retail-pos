@@ -143,12 +143,13 @@ const groups: NavGroup[] = [
     items: [
       { to: '/users', label: 'المستخدمون', icon: UserCog, roles: ['admin', 'manager'], permission: 'users.view' },
       // Personal attendance + everything-about-you lives on /me. The
-      // admin-only team attendance board is still reachable at
-      // /attendance (route still registered) but no longer needs its
-      // own sidebar entry — it shows up only for users with
-      // attendance.view_team.
+      // admin-only team attendance board is now the "الحضور" tab on
+      // /team (PR-2 consolidation) — the legacy /attendance route is
+      // a permanent redirect for bookmarks. Sidebar entry points
+      // directly at the tab so the URL is honest about where the
+      // user lands.
       { to: '/me', label: 'ملفي الشخصي', icon: BadgeCheck, roles: ['admin', 'manager', 'cashier', 'accountant', 'salesperson', 'inventory'], permission: 'employee.dashboard.view' },
-      { to: '/attendance', label: 'حضور الفريق', icon: UserCheck, roles: ['admin', 'manager', 'accountant'], permission: 'attendance.view_team' },
+      { to: '/team?tab=attendance', label: 'حضور الفريق', icon: UserCheck, roles: ['admin', 'manager', 'accountant'], permission: 'attendance.view_team' },
       // حسابات الموظفين is now a tab inside /team (consolidation).
       // /payroll still redirects to /team?tab=accounts for backward-
       // compat (bookmarks, legacy links), but the sidebar shows a
