@@ -425,7 +425,11 @@ export default function Analytics() {
             indValue(indicators?.net_profit) >= 0 ? 'indigo' : 'rose'
           }
           scope="period"
-          to="/accounts"
+          // Deep-link to the Income Statement tab with the SAME window the
+          // indicator was computed over. The tab presents revenue / COGS
+          // (under expenses) / other expenses / returns (under revenue
+          // contra) and arrives at exactly the same net_profit number.
+          to={`/accounts?tab=income&from=${period.from}&to=${period.to}`}
         />
         <IndicatorTile
           icon={<Package size={16} />}
@@ -494,7 +498,11 @@ export default function Analytics() {
           value={EGP(indValue(indicators?.daily_burn))}
           sub="من قائمة الدخل ÷ أيام الفترة"
           scope="period"
-          to="/accounts"
+          // Same Income Statement tab + window, but with focus=expenses
+          // so the expense breakdown section auto-scrolls into view.
+          // Each leaf row in the expense tree is clickable and opens
+          // the per-account journal-line drawer (AccountLedgerDrawer).
+          to={`/accounts?tab=income&from=${period.from}&to=${period.to}&focus=expenses`}
         />
       </div>
 

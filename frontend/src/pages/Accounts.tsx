@@ -1,4 +1,5 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import {
@@ -66,8 +67,34 @@ type Tab =
   | 'assets'
   | 'closing';
 
+// Valid Tab values, exported so the URL parser can whitelist them.
+const VALID_TABS: readonly Tab[] = [
+  'tree',
+  'journal',
+  'trial',
+  'income',
+  'balance',
+  'aging',
+  'vat',
+  'assets',
+  'closing',
+];
+
 export default function Accounts() {
-  const [tab, setTab] = useState<Tab>('tree');
+  // Respect URL query params so external pages (Analytics KPI cards)
+  // can deep-link into a specific tab with a specific date window:
+  //   /accounts?tab=income&from=2026-04-01&to=2026-04-24
+  //   /accounts?tab=income&from=2026-04-01&to=2026-04-24&focus=expenses
+  //   /accounts?tab=balance&as_of=2026-04-24
+  // Only parameters that are understood and valid are honoured; the
+  // rest are silently ignored so bad links can never crash the page.
+  const [searchParams] = useSearchParams();
+  const urlTab = searchParams.get('tab') as Tab | null;
+  const initialTab: Tab =
+    urlTab && (VALID_TABS as readonly string[]).includes(urlTab)
+      ? (urlTab as Tab)
+      : 'tree';
+  const [tab, setTab] = useState<Tab>(initialTab);
 
   return (
     <div className="space-y-4">
@@ -143,8 +170,20 @@ export default function Accounts() {
           {tab === 'tree' && <ChartTree />}
           {tab === 'journal' && <JournalTab />}
           {tab === 'trial' && <TrialBalanceTab />}
-          {tab === 'income' && <IncomeStatementTab />}
-          {tab === 'balance' && <BalanceSheetTab />}
+          {tab === 'income' && (
+            <IncomeStatementTab
+              initialFrom={searchParams.get('from') ?? undefined}
+              initialTo={searchParams.get('to') ?? undefined}
+              focus={
+                searchParams.get('focus') === 'expenses' ? 'expenses' : undefined
+              }
+            />
+          )}
+          {tab === 'balance' && (
+            <BalanceSheetTab
+              initialAsOf={searchParams.get('as_of') ?? undefined}
+            />
+          )}
           {tab === 'aging' && <AgingTab />}
           {tab === 'vat' && <VatReturnTab />}
           {tab === 'assets' && <FixedAssetsTab />}
@@ -1346,11 +1385,44 @@ function TrialBalanceTab() {
 //  Income Statement
 // ═══════════════════════════════════════════════════════════════════════
 
-function IncomeStatementTab() {
+// Simple YYYY-MM-DD guard — falsy/invalid input falls back to the caller's default.
+function safeISODate(v: string | undefined): string | null {
+  if (!v) return null;
+  return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null;
+}
+
+function IncomeStatementTab({
+  initialFrom,
+  initialTo,
+  focus,
+}: {
+  initialFrom?: string;
+  initialTo?: string;
+  /** 'expenses' → scroll expense section into view on mount (used by
+   *  the Analytics "Daily Burn" drill-down). */
+  focus?: 'expenses';
+} = {}) {
   const todayISO = new Date().toISOString().slice(0, 10);
   const monthStart = todayISO.slice(0, 7) + '-01';
-  const [from, setFrom] = useState(monthStart);
-  const [to, setTo] = useState(todayISO);
+  const [from, setFrom] = useState(safeISODate(initialFrom) ?? monthStart);
+  const [to, setTo] = useState(safeISODate(initialTo) ?? todayISO);
+
+  // Auto-scroll the "المصروفات" section into view when the page was
+  // opened from the Analytics Daily-Burn "تفاصيل" link. The ref attaches
+  // in the JSX below. Runs once on mount.
+  const expensesRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (focus === 'expenses' && expensesRef.current) {
+      // Small timeout so the report data has time to render.
+      const t = setTimeout(() => {
+        expensesRef.current?.scrollIntoView({
+          behavior: 'smooth',
+          block: 'start',
+        });
+      }, 350);
+      return () => clearTimeout(t);
+    }
+  }, [focus]);
 
   const { data, isLoading } = useQuery({
     queryKey: ['income-statement', from, to],
@@ -1424,11 +1496,20 @@ function IncomeStatementTab() {
               heading="الإيرادات"
               color="text-emerald-700"
             />
-            <ReportTree
-              nodes={data.accounts.filter((a) => a.account_type === 'expense')}
-              heading="المصروفات"
-              color="text-rose-700"
-            />
+            <div
+              ref={expensesRef}
+              className={
+                focus === 'expenses'
+                  ? 'ring-2 ring-rose-300 ring-offset-2 ring-offset-white scroll-mt-4'
+                  : ''
+              }
+            >
+              <ReportTree
+                nodes={data.accounts.filter((a) => a.account_type === 'expense')}
+                heading="المصروفات"
+                color="text-rose-700"
+              />
+            </div>
             <div className="p-3 bg-slate-50 border-t-2 border-slate-300 flex items-center justify-between font-black">
               <span>صافي الربح / (الخسارة)</span>
               <span
@@ -1452,9 +1533,13 @@ function IncomeStatementTab() {
 //  Balance Sheet
 // ═══════════════════════════════════════════════════════════════════════
 
-function BalanceSheetTab() {
+function BalanceSheetTab({
+  initialAsOf,
+}: {
+  initialAsOf?: string;
+} = {}) {
   const todayISO = new Date().toISOString().slice(0, 10);
-  const [asOf, setAsOf] = useState(todayISO);
+  const [asOf, setAsOf] = useState(safeISODate(initialAsOf) ?? todayISO);
 
   const { data, isLoading } = useQuery({
     queryKey: ['balance-sheet', asOf],
