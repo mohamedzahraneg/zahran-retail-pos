@@ -674,26 +674,32 @@ function IndicatorTile({
     slate: 'bg-slate-50 border-slate-200 text-slate-800',
   };
   return (
-    <div className={`card p-3 border-2 ${cls[color]}`}>
+    <div className={`card p-3 border-2 min-w-0 h-full ${cls[color]}`}>
       <div className="flex items-center justify-between gap-1">
-        <div className="text-xs font-bold flex items-center gap-1 opacity-80 truncate">
-          {icon} {label}
+        <div className="text-xs font-bold flex items-center gap-1 opacity-80 min-w-0 break-words">
+          <span className="shrink-0">{icon}</span>
+          <span className="break-words">{label}</span>
         </div>
-        <ScopeBadge scope={scope} />
+        <div className="shrink-0">
+          <ScopeBadge scope={scope} />
+        </div>
       </div>
-      <div className="font-black text-lg font-mono mt-1 truncate">
+      <div
+        className="font-black text-base sm:text-lg font-mono mt-1 break-words tabular-nums leading-tight"
+        title={value}
+      >
         {value}
       </div>
       <div className="flex items-center justify-between gap-1 mt-0.5">
         {sub ? (
-          <div className="text-[10px] opacity-70 truncate">{sub}</div>
+          <div className="text-[10px] opacity-70 break-words min-w-0">{sub}</div>
         ) : (
           <span />
         )}
         {to && (
           <Link
             to={to}
-            className="text-[10px] font-bold opacity-70 hover:opacity-100 whitespace-nowrap"
+            className="text-[10px] font-bold opacity-70 hover:opacity-100 whitespace-nowrap shrink-0"
             title="عرض مصدر الرقم"
           >
             تفاصيل ←
@@ -726,22 +732,29 @@ function MiniStat({
     rose: 'text-rose-700 border-rose-200',
   };
   return (
-    <div className={`card p-3 border ${cls[color]}`}>
+    <div className={`card p-3 border min-w-0 h-full ${cls[color]}`}>
       <div className="flex items-center justify-between gap-1">
-        <div className="text-xs text-slate-500 truncate">{label}</div>
-        <ScopeBadge scope={scope} />
+        <div className="text-xs text-slate-500 break-words min-w-0">{label}</div>
+        <div className="shrink-0">
+          <ScopeBadge scope={scope} />
+        </div>
       </div>
-      <div className="font-black text-lg font-mono mt-1">{value}</div>
+      <div
+        className="font-black text-base sm:text-lg font-mono mt-1 break-words tabular-nums leading-tight"
+        title={value}
+      >
+        {value}
+      </div>
       <div className="flex items-center justify-between gap-1 mt-0.5">
         {sub ? (
-          <div className="text-[10px] text-slate-400 truncate">{sub}</div>
+          <div className="text-[10px] text-slate-400 break-words min-w-0">{sub}</div>
         ) : (
           <span />
         )}
         {to && (
           <Link
             to={to}
-            className="text-[10px] font-bold text-slate-500 hover:text-slate-900 whitespace-nowrap"
+            className="text-[10px] font-bold text-slate-500 hover:text-slate-900 whitespace-nowrap shrink-0"
             title="عرض مصدر الرقم"
           >
             تفاصيل ←

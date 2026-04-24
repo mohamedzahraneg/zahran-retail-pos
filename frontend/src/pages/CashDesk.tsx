@@ -408,15 +408,22 @@ function KpiCard({
   hint?: string;
 }) {
   return (
-    <div className="card p-5 flex items-center gap-4">
-      <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${color}`}>
+    <div className="card p-5 flex items-center gap-4 h-full min-w-0">
+      <div
+        className={`w-12 h-12 rounded-xl flex items-center justify-center shrink-0 ${color}`}
+      >
         {icon}
       </div>
       <div className="flex-1 min-w-0">
-        <div className="text-xs text-slate-500 mb-1">{title}</div>
-        <div className="font-black text-2xl text-slate-800 truncate">{value}</div>
+        <div className="text-xs text-slate-500 mb-1 break-words">{title}</div>
+        <div
+          className="font-black text-lg sm:text-xl md:text-2xl text-slate-800 break-words tabular-nums leading-tight"
+          title={value}
+        >
+          {value}
+        </div>
         {hint && (
-          <div className="text-[11px] text-slate-400 mt-0.5 truncate">{hint}</div>
+          <div className="text-[11px] text-slate-400 mt-0.5 break-words">{hint}</div>
         )}
       </div>
     </div>
@@ -448,25 +455,44 @@ function VarianceCard({
     : isPositive
       ? 'text-emerald-700'
       : 'text-slate-700';
-  const label = isNegative
-    ? `عجز صافي ${EGP(Math.abs(net))}`
+  // Status + amount are now rendered as separate lines so neither
+  // part ever truncates. The amount stays tabular-nums + no-wrap.
+  const statusLabel = isNegative
+    ? 'عجز صافي'
     : isPositive
-      ? `زيادة صافية ${EGP(net)}`
+      ? 'زيادة صافية'
       : 'لا فوارق';
+  const statusAmount = isNegative
+    ? EGP(Math.abs(net))
+    : isPositive
+      ? EGP(net)
+      : null;
 
   return (
-    <div className="card p-5 flex items-center gap-4">
+    // h-full + min-w-0 keep grid siblings aligned; shrink-0 icon
+    // prevents the title from pushing outside the card on narrow
+    // screens.
+    <div className="card p-5 flex items-center gap-4 h-full min-w-0">
       <div
-        className={`w-12 h-12 rounded-xl flex items-center justify-center ${color}`}
+        className={`w-12 h-12 rounded-xl flex items-center justify-center shrink-0 ${color}`}
       >
         <AlertCircle className={textColor} />
       </div>
       <div className="flex-1 min-w-0">
         <div className="text-xs text-slate-500 mb-1">فوارق الورديات</div>
-        <div className={`font-black text-2xl truncate ${textColor}`}>
-          {label}
+        {/* Responsive type — text-lg on mobile, text-2xl on desktop.
+            break-words as a safety net; tabular-nums keeps the amount
+            width predictable. No truncate — label + amount already
+            fit because they're on separate lines/whitespace. */}
+        <div
+          className={`font-black text-lg sm:text-xl md:text-2xl break-words leading-tight ${textColor}`}
+        >
+          <span>{statusLabel}</span>
+          {statusAmount && (
+            <span className="tabular-nums whitespace-nowrap"> {statusAmount}</span>
+          )}
         </div>
-        <div className="text-[11px] text-slate-400 mt-0.5 truncate">
+        <div className="text-[11px] text-slate-400 mt-1 break-words">
           <span className="text-emerald-600">+{EGP(surplus)}</span>
           {' · '}
           <span className="text-rose-600">−{EGP(deficit)}</span>

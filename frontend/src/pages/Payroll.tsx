@@ -410,9 +410,14 @@ function MiniStat({
     purple: 'bg-purple-50 border-purple-200 text-purple-800',
   };
   return (
-    <div className={`border rounded-lg p-2 ${cls[tone]}`}>
-      <div className="text-[10px] font-bold">{label}</div>
-      <div className="font-mono font-black text-sm mt-0.5">{value}</div>
+    <div className={`border rounded-lg p-2 min-w-0 h-full ${cls[tone]}`}>
+      <div className="text-[10px] font-bold break-words">{label}</div>
+      <div
+        className="font-mono font-black text-sm mt-0.5 break-words tabular-nums leading-tight"
+        title={value}
+      >
+        {value}
+      </div>
     </div>
   );
 }
