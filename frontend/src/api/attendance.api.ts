@@ -27,6 +27,29 @@ export interface AttendanceSummaryRow {
   last_out: string | null;
 }
 
+export interface PayableDayRow {
+  id: string;
+  user_id: string;
+  work_date: string;
+  kind: 'wage_accrual';
+  source: 'attendance' | 'admin_manual';
+  attendance_record_id: string | null;
+  worked_minutes: number | null;
+  daily_wage_snapshot: string | number;
+  target_minutes_snapshot: number | null;
+  amount_accrued: string | number;
+  journal_entry_id: string | null;
+  reason: string | null;
+  is_void: boolean;
+  void_reason: string | null;
+  voided_at: string | null;
+  voided_by: string | null;
+  created_by: string;
+  created_at: string;
+  entry_no?: string;
+  je_is_void?: boolean;
+}
+
 export const attendanceApi = {
   myToday: () =>
     unwrap<AttendanceRecord | null>(api.get('/attendance/me/today')),
@@ -54,4 +77,33 @@ export const attendanceApi = {
     id: string,
     body: { clock_in?: string; clock_out?: string; note?: string },
   ) => unwrap<AttendanceRecord>(api.patch(`/attendance/${id}`, body)),
+
+  // ── Admin-on-behalf + wage accrual (employee.attendance.manage) ──────
+  adminClockIn: (body: { user_id: string; note?: string }) =>
+    unwrap<AttendanceRecord>(api.post('/attendance/admin/clock-in', body)),
+
+  adminClockOut: (body: { user_id: string; note?: string }) =>
+    unwrap<AttendanceRecord>(api.post('/attendance/admin/clock-out', body)),
+
+  adminMarkPayableDay: (body: {
+    user_id: string;
+    work_date: string;
+    reason: string;
+  }) =>
+    unwrap<{ payable_day_id: string }>(
+      api.post('/attendance/admin/mark-payable-day', body),
+    ),
+
+  adminApproveWage: (attendanceId: string) =>
+    unwrap<{ payable_day_id: string }>(
+      api.post(`/attendance/admin/approve-wage/${attendanceId}`, {}),
+    ),
+
+  adminVoidAccrual: (payableDayId: string, body: { reason: string }) =>
+    unwrap<{ payable_day_id: string }>(
+      api.post(`/attendance/admin/void-accrual/${payableDayId}`, body),
+    ),
+
+  payableDays: (params: { user_id: string; from?: string; to?: string }) =>
+    unwrap<PayableDayRow[]>(api.get('/attendance/payable-days', { params })),
 };
