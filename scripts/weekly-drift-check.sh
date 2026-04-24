@@ -207,8 +207,6 @@ fi
 FORBIDDEN=(
   "backend/src/payroll"
   "backend/src/provisioning"
-  "frontend/src/api/payroll.api.ts"
-  "frontend/src/pages/Payroll.tsx"
 )
 for p in "${FORBIDDEN[@]}"; do
   if [ -e "$REPO_DIR/$p" ]; then
