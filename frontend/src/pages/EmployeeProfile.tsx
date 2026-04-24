@@ -357,15 +357,27 @@ function EmployeeDashboardBody({ data }: { data: EmployeeDashboard }) {
           tone="emerald"
           icon={<Clock size={18} />}
         />
+        {/* Canonical GL balance headline — positive = employee owes
+            company; negative = company owes employee. The source-
+            derived `salary.net` is shown as a secondary breakdown in
+            "تفاصيل الدخل" below. */}
         <MetricCard
-          label="الصافي المتوقع"
-          value={EGP(salary.net)}
-          hint={
-            salary.debt_warning
-              ? 'تجاوزت رصيدك!'
-              : `من ${EGP(salary.accrued)} مستحق`
+          label="الرصيد النهائي من القيود"
+          value={
+            salary.gl_balance > 0.01
+              ? `مدين ${EGP(salary.gl_balance)}`
+              : salary.gl_balance < -0.01
+                ? `مستحق له ${EGP(-salary.gl_balance)}`
+                : 'متوازن'
           }
-          tone={salary.debt_warning ? 'rose' : 'emerald'}
+          hint={`الصافي من الرواتب ${EGP(salary.net)}`}
+          tone={
+            salary.gl_balance > 0.01
+              ? 'rose'
+              : salary.gl_balance < -0.01
+                ? 'emerald'
+                : 'indigo'
+          }
           icon={<DollarSign size={18} />}
         />
         <MetricCard
@@ -397,7 +409,7 @@ function EmployeeDashboardBody({ data }: { data: EmployeeDashboard }) {
           <BreakdownRow label="خصومات" value={EGP(salary.deductions)} tone="rose" />
           <BreakdownRow label="سلف" value={EGP(salary.advances_month)} tone="amber" />
           <BreakdownRow
-            label="الصافي"
+            label="الصافي من الرواتب (غير الرصيد النهائي)"
             value={EGP(salary.net)}
             tone={salary.debt_warning ? 'rose' : 'emerald'}
             big
@@ -463,6 +475,13 @@ function FinancialLedgerCard({ userId }: { userId?: string }) {
       bonus: 'حافز',
     } as Record<string, string>)[t] ?? t;
 
+  // Canonical headline sourced from v_employee_gl_balance via the
+  // /employees/:id/ledger endpoint (added in the audit-#4-follow-up
+  // PR). Falls back to closing_balance for older backends that
+  // pre-date the field.
+  const headlineBal =
+    typeof data.gl_balance === 'number' ? data.gl_balance : data.closing_balance;
+
   return (
     <div className="card p-5 space-y-4">
       <div className="flex items-center justify-between flex-wrap gap-2">
@@ -471,17 +490,17 @@ function FinancialLedgerCard({ userId }: { userId?: string }) {
         </h3>
         <div
           className={`px-3 py-1.5 rounded-lg text-sm font-black tabular-nums ${
-            data.closing_balance > 0.01
+            headlineBal > 0.01
               ? 'bg-rose-100 text-rose-700 border border-rose-200'
-              : data.closing_balance < -0.01
+              : headlineBal < -0.01
                 ? 'bg-emerald-100 text-emerald-700 border border-emerald-200'
                 : 'bg-slate-100 text-slate-700 border border-slate-200'
           }`}
         >
-          {data.closing_balance > 0.01
-            ? `مديون للشركة: ${fmt(data.closing_balance)} ج.م`
-            : data.closing_balance < -0.01
-              ? `له رصيد: ${fmt(-data.closing_balance)} ج.م`
+          {headlineBal > 0.01
+            ? `مديون للشركة: ${fmt(headlineBal)} ج.م`
+            : headlineBal < -0.01
+              ? `له رصيد: ${fmt(-headlineBal)} ج.م`
               : 'مُسوّى بالكامل'}
         </div>
       </div>
@@ -502,15 +521,14 @@ function FinancialLedgerCard({ userId }: { userId?: string }) {
         <LedgerTile label="حوافز" value={data.totals.bonuses} tone="indigo" />
       </div>
 
-      {/* Explainability — show the equation that produced the headline
-          balance above. Values come straight from data.totals (already
-          returned by /employees/:id/ledger); no new backend call.
-          The opening-balance piece is included so the math always
-          closes even when the filter window excludes earlier entries. */}
+      {/* Source-table equation — shows how the entries list rolls up.
+          This is NOT the final balance when opening-balance or
+          reclassification JEs exist (e.g. PR #73's ledger reset).
+          The headline badge above uses the canonical gl_balance. */}
       <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 text-xs text-slate-700">
-        <div className="font-bold mb-1">كيف حُسب الرصيد</div>
+        <div className="font-bold mb-1">تفاصيل الحركات — لا تمثل الرصيد النهائي إذا توجد تسويات افتتاحية/قيود تصحيح</div>
         <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1 font-mono tabular-nums leading-relaxed">
-          <span className="font-bold">الرصيد</span>
+          <span className="font-bold">مجموع الحركات</span>
           <span>=</span>
           {data.opening_balance !== 0 && (
             <>
@@ -530,9 +548,12 @@ function FinancialLedgerCard({ userId }: { userId?: string }) {
           <span>=</span>
           <span className="font-black">{fmt(data.closing_balance)}</span>
         </div>
-        <div className="mt-1 text-[10px] text-slate-500 leading-relaxed">
-          الأرقام الموجبة تزيد ما يدينه الموظف للشركة؛ الأرقام السالبة
-          تقلّله. تفاصيل كل عملية موجودة في جدول الحركات أدناه.
+        <div className="mt-2 pt-2 border-t border-slate-200 font-mono tabular-nums text-slate-800">
+          <span className="font-bold">الرصيد النهائي من القيود: </span>
+          <span className="font-black">{fmt(headlineBal)}</span>
+          <span className="text-[10px] text-slate-500 mr-2">
+            (من قيود اليومية — v_employee_gl_balance)
+          </span>
         </div>
       </div>
 

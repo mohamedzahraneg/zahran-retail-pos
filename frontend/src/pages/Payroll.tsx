@@ -170,9 +170,14 @@ export default function Payroll() {
             </div>
           )}
           {balances.map((b) => {
-            // Sourced from v_employee_balances_gl — positive means company
-            // owes employee, negative means employee owes company.
-            const net = Number(b.net_balance);
+            // Canonical headline — from v_employee_gl_balance (COA 1123
+            // + 213, migration 075). Sign convention:
+            //   glb > 0  →  employee owes company (rose)
+            //   glb < 0  →  company owes employee (emerald)
+            // Was reading source-derived `net_balance` with opposite
+            // sign — switched for consistency with opening-balance
+            // reset entries (PR #73).
+            const glb = Number(b.gl_balance ?? 0);
             const liab = Number(b.liabilities);
             const recv = Number(b.receivables);
             return (
@@ -191,20 +196,20 @@ export default function Payroll() {
                 <div className="flex items-baseline justify-between mt-2">
                   <div
                     className={`text-xl font-black font-mono ${
-                      net > 0
-                        ? 'text-emerald-700'
-                        : net < 0
-                          ? 'text-rose-700'
+                      glb > 0.01
+                        ? 'text-rose-700'
+                        : glb < -0.01
+                          ? 'text-emerald-700'
                           : 'text-slate-600'
                     }`}
                   >
-                    {EGP(Math.abs(net))}
+                    {EGP(Math.abs(glb))}
                   </div>
                   <div className="text-[11px] text-slate-500">
-                    {net > 0
-                      ? 'مستحق للموظف'
-                      : net < 0
-                        ? 'مستحق على الموظف'
+                    {glb > 0.01
+                      ? 'مدين للشركة'
+                      : glb < -0.01
+                        ? 'مستحق للموظف'
                         : 'متوازن'}
                   </div>
                 </div>

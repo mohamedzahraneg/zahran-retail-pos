@@ -190,6 +190,17 @@ export class EmployeesService {
     const debtWarning = net < 0;
     const outstandingDebt = debtWarning ? Math.abs(net) : 0;
 
+    // Canonical GL balance — read-only from v_employee_gl_balance.
+    // This is the headline balance on the UI since PR #73 opened
+    // account 32 for legacy opening-balance resets. Source-table
+    // computation above (`net`) is kept as a breakdown.
+    const [glRow] = await this.ds.query(
+      `SELECT balance::numeric(14,2) AS balance
+         FROM v_employee_gl_balance WHERE employee_user_id = $1`,
+      [userId],
+    );
+    const glBalance = Number(glRow?.balance || 0);
+
     // ─── Timing warnings (late / early leave) ─────────────────────
     const warnings: Array<{ kind: string; message: string }> = [];
     const shiftStart = profile.shift_start_time as string | null;
@@ -321,9 +332,16 @@ export class EmployeesService {
         deductions: Number(deduct.amount || 0),
         advances_month: Number(adv.amount || 0),
         advances_lifetime: Number(advLifetime.amount || 0),
+        // Source-derived net (accrued + bonuses − deductions − advances).
+        // UI treats this as an operational breakdown, not the headline —
+        // `gl_balance` below is the canonical employee GL balance.
         net: Math.round(net * 100) / 100,
         outstanding_debt: Math.round(outstandingDebt * 100) / 100,
         debt_warning: debtWarning,
+        // Canonical from v_employee_gl_balance (COA 1123 + 213).
+        // Positive = employee owes company; negative = company owes
+        // employee. This is the headline the UI must display.
+        gl_balance: Math.round(Number(glBalance) * 100) / 100,
       },
       tasks,
       requests,
@@ -605,6 +623,11 @@ export class EmployeesService {
 
   /** Admin team overview — one row per active user with summary metrics. */
   async teamOverview() {
+    // `gl_balance` is the canonical employee GL balance from
+    // v_employee_gl_balance (COA 1123 + 213, migration 075). The UI
+    // uses this as the headline — positive = employee owes company,
+    // negative = company owes employee. The `_this_month` fields stay
+    // as month-only operational details.
     return this.ds.query(
       `SELECT u.id, u.employee_no, u.full_name, u.username, u.job_title,
               u.salary_amount, u.salary_frequency,
@@ -628,9 +651,11 @@ export class EmployeesService {
               (SELECT COUNT(*) FROM employee_tasks t
                 WHERE t.user_id = u.id AND t.status IN ('pending','acknowledged'))::int AS open_tasks,
               (SELECT COUNT(*) FROM employee_requests q
-                WHERE q.user_id = u.id AND q.status = 'pending')::int AS pending_requests
+                WHERE q.user_id = u.id AND q.status = 'pending')::int AS pending_requests,
+              COALESCE(gl.balance, 0)::numeric(14,2) AS gl_balance
          FROM users u
          LEFT JOIN roles r ON r.id = u.role_id
+         LEFT JOIN v_employee_gl_balance gl ON gl.employee_user_id = u.id
         WHERE u.is_active = true
         ORDER BY u.full_name`,
     );
@@ -779,6 +804,14 @@ export class EmployeesService {
     user: any;
     opening_balance: number;
     closing_balance: number;
+    /**
+     * Canonical GL balance from v_employee_gl_balance (COA 1123 + 213,
+     * migration 075). Use this for the headline. `closing_balance` is
+     * the source-table running balance — kept for the breakdown
+     * equation but may differ from gl_balance when opening-balance
+     * or reclassification JEs exist (e.g. PR #73's ledger reset).
+     */
+    gl_balance: number;
     entries: Array<{
       event_date: string;
       entry_type: string;
@@ -888,10 +921,20 @@ export class EmployeesService {
       }
     }
 
+    // Canonical GL balance — headline source. v_employee_gl_balance
+    // is the authoritative per-employee number (COA 1123 + 213 since
+    // migration 075). Read-only; no writes.
+    const [glRow] = await this.ds.query(
+      `SELECT balance::numeric(14,2) AS balance
+         FROM v_employee_gl_balance WHERE employee_user_id = $1`,
+      [userId],
+    );
+
     return {
       user,
       opening_balance: Math.round(opening * 100) / 100,
       closing_balance: Math.round(running * 100) / 100,
+      gl_balance: Math.round(Number(glRow?.balance || 0) * 100) / 100,
       entries,
       totals: {
         shortages: Math.round(totals.shortages * 100) / 100,

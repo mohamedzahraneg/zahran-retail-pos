@@ -73,6 +73,13 @@ export interface EmployeeTxn {
  */
 export interface EmployeeBalance {
   employee_id: string;
+  /**
+   * Canonical GL balance from v_employee_gl_balance (COA 1123 + 213,
+   * migration 075). This is the headline. Positive = employee owes
+   * company; negative = company owes employee. Prefer this over
+   * `net_balance` (source-derived) for all user-facing display.
+   */
+  gl_balance: number | string;
   full_name: string;
   username: string;
   liabilities: number | string; // account 213 (credit − debit)
