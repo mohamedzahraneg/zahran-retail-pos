@@ -128,19 +128,27 @@ export class EmployeesService {
       [userId],
     );
 
-    // Bonuses + deductions this month
+    // Bonuses + deductions this month. `AND NOT is_void` hides admin-
+    // voided rows (PR #82+) so the "تفاصيل الدخل" breakdown on the
+    // Employee Profile only shows live transactions. Canonical balance
+    // still comes from v_employee_gl_balance which was fixed in
+    // migration 079.
     const [bonus] = await this.ds.query(
       `SELECT COALESCE(SUM(amount),0)::numeric(14,2) AS amount,
               COUNT(*)::int AS count
          FROM employee_bonuses
-        WHERE user_id = $1 AND bonus_date BETWEEN $2::date AND $3::date`,
+        WHERE user_id = $1
+          AND bonus_date BETWEEN $2::date AND $3::date
+          AND NOT is_void`,
       [userId, mFrom, mTo],
     );
     const [deduct] = await this.ds.query(
       `SELECT COALESCE(SUM(amount),0)::numeric(14,2) AS amount,
               COUNT(*)::int AS count
          FROM employee_deductions
-        WHERE user_id = $1 AND deduction_date BETWEEN $2::date AND $3::date`,
+        WHERE user_id = $1
+          AND deduction_date BETWEEN $2::date AND $3::date
+          AND NOT is_void`,
       [userId, mFrom, mTo],
     );
 
@@ -508,6 +516,7 @@ export class EmployeesService {
          FROM employee_bonuses b
          LEFT JOIN users u ON u.id = b.created_by
         WHERE ${where.join(' AND ')}
+          AND NOT b.is_void
         ORDER BY b.bonus_date DESC`,
       args,
     );
@@ -540,7 +549,8 @@ export class EmployeesService {
 
   listDeductions(userId: string) {
     return this.ds.query(
-      `SELECT * FROM employee_deductions WHERE user_id = $1
+      `SELECT * FROM employee_deductions
+        WHERE user_id = $1 AND NOT is_void
         ORDER BY deduction_date DESC`,
       [userId],
     );
@@ -647,6 +657,7 @@ export class EmployeesService {
                 SELECT SUM(amount) FROM employee_bonuses b
                  WHERE b.user_id = u.id
                    AND b.bonus_date >= date_trunc('month', (now() AT TIME ZONE 'Africa/Cairo'))::date
+                   AND NOT b.is_void
               ), 0)::numeric(14,2) AS bonuses_this_month,
               (SELECT COUNT(*) FROM employee_tasks t
                 WHERE t.user_id = u.id AND t.status IN ('pending','acknowledged'))::int AS open_tasks,
@@ -723,12 +734,14 @@ export class EmployeesService {
         SELECT bonus_date AS day, COALESCE(SUM(amount),0)::numeric(14,2) AS amt
           FROM employee_bonuses
          WHERE user_id = $1 AND bonus_date BETWEEN $2::date AND $3::date
+           AND NOT is_void
          GROUP BY bonus_date
       ),
       dds AS (
         SELECT deduction_date AS day, COALESCE(SUM(amount),0)::numeric(14,2) AS amt
           FROM employee_deductions
          WHERE user_id = $1 AND deduction_date BETWEEN $2::date AND $3::date
+           AND NOT is_void
          GROUP BY deduction_date
       ),
       advs AS (

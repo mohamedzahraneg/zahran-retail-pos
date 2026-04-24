@@ -391,7 +391,7 @@ function EmployeeDashboardBody({ data }: { data: EmployeeDashboard }) {
 
       {/* ─── Salary breakdown ─── */}
       <div className="card p-5">
-        <div className="flex items-center gap-2 mb-4">
+        <div className="flex items-center gap-2 mb-2">
           <DollarSign className="text-brand-600" size={18} />
           <h3 className="font-black text-slate-800">تفاصيل الدخل</h3>
           <span className="text-[11px] text-slate-500 mr-auto">
@@ -402,6 +402,10 @@ function EmployeeDashboardBody({ data }: { data: EmployeeDashboard }) {
                 : 'شهري'}{' '}
             · {EGP(profile.salary_amount)}
           </span>
+        </div>
+        <div className="text-[11px] text-slate-500 mb-4">
+          تفاصيل العمليات غير الملغاة فقط · الرصيد النهائي من القيود المحاسبية
+          في البطاقة العلوية
         </div>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
           <BreakdownRow label="مستحق حتى الآن" value={EGP(salary.accrued)} tone="emerald" />
