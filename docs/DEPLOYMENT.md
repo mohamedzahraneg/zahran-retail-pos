@@ -24,6 +24,96 @@
 
 ---
 
+## 0) PRODUCTION DATABASE TRUTH (READ FIRST)
+
+> **This section is load-bearing. Read it before doing anything else.**
+
+### 0.1 The one source of truth
+
+| Fact | Value |
+|---|---|
+| Production database | **Supabase PostgreSQL** (single-tenant) |
+| Supabase project ref | `teyjynfijgwdxusbdzgz` (`zahran-pos`) |
+| Region | `eu-central-2` |
+| Server version | PostgreSQL **17.6** |
+| Public URL | `https://pos.turathmasr.com` |
+| Production VPS | `/opt/zahran` on `root@72.60.184.79` |
+| Connection path | NestJS container → Supavisor pooler → Supabase Postgres |
+| Migration runner | NestJS boot-time `MigrationsService` (see `backend/src/database/migrations.service.ts`) |
+| Migration registry of record | `public.schema_migrations` (populated by the runner) |
+
+### 0.2 What is NOT production
+
+- The `db:` service in `docker-compose.yml` (Postgres 15 on an internal network) is **development only**. It is now gated behind the `dev` profile and will never start with `--profile full`.
+- Supabase's native migration registry (`supabase_migrations.schema_migrations`) currently shows only the 5 bootstrap migrations. It is **not** the source of truth unless explicitly reconciled with `public.schema_migrations` (82 rows). Do not use `supabase db diff` / `supabase db reset` / Supabase branches against this project without reconciling first — you will destroy schema.
+
+### 0.3 Invariants the stack now enforces
+
+1. `docker-compose.yml` declares `DATABASE_URL: ${DATABASE_URL:?...}` — **docker compose refuses to start** if `DATABASE_URL` is not set. There is no longer a silent docker-Postgres fallback.
+2. The `db:` service has `profiles: ["dev"]` and is absent from the API service's `depends_on`. `docker compose --profile full up -d` in production never starts it.
+3. `MigrationsService.verifyProductionDatabase()` runs before any migration. In `NODE_ENV=production` it aborts boot unless **all** of the following hold:
+   - `current_database() = 'postgres'` (Supabase's fixed DB name)
+   - `server_version_num >= 170000` (PG 17+)
+   - `schema_migrations` table exists
+   - Row `filename = '071_employee_gl_dimension.sql'` is present in `schema_migrations`
+4. A CI job (`compose-guard` in `.github/workflows/ci.yml`) fails if anyone reintroduces a default value for `DATABASE_URL` that allows `docker compose config` to succeed without it.
+
+### 0.4 Verifying production safely (read-only)
+
+On the VPS:
+
+```bash
+# 1. Containers are up
+docker compose ps
+
+# 2. DATABASE_URL is set (password masked in the output)
+docker compose exec api printenv \
+  | grep -E '^(DATABASE_URL|NODE_ENV|PORT)=' \
+  | sed -E 's#(:)[^:@]+(@)#\1***\2#'
+
+# 3. No local docker Postgres is running
+docker compose ps | grep -i ' db ' && echo 'UNEXPECTED: local db is running' || echo 'OK: no local db'
+
+# 4. API logs confirm the boot-time sanity check passed
+docker compose logs api --since 10m \
+  | grep -E 'production DB sanity verified|Wrong database|\\[Migrations\\]'
+```
+
+From any workstation with Supabase MCP / `psql` (read-only queries, mask the password):
+
+```sql
+-- Current database must be 'postgres', PG 17+
+SELECT current_database(),
+       current_setting('server_version_num')::int AS pg_version;
+
+-- Migration count must be ≥ 82
+SELECT count(*) FROM public.schema_migrations;
+
+-- Sentinel migration must be present
+SELECT filename, applied_at
+  FROM public.schema_migrations
+ WHERE filename = '071_employee_gl_dimension.sql';
+```
+
+Expected answer set:
+
+```
+current_database = postgres
+pg_version       = 170006  (or higher)
+count            = 82
+sentinel row     = 071_employee_gl_dimension.sql | 2026-04-23 22:38:13 UTC
+```
+
+If any of these fail, **do not write** to the DB from that process — it is pointed at the wrong database.
+
+### 0.5 Secrets handling
+
+- `/opt/zahran/.env` is the **only** place the real `DATABASE_URL` (with password) exists. It is gitignored (`.gitignore` lines 16–22) and excluded from rsync (`scripts/deploy.sh:77`).
+- `.env.production.example` at repo root documents the **shape** of the DSN (placeholders only, no password). Never commit secrets; never paste password values into commits, tickets, or docs.
+- If `/opt/zahran/.env` is lost, retrieve `DATABASE_URL` from Supabase Studio → Project Settings → Database → Connection string (Transaction mode, port 6543), and restore to the file with `chmod 600`.
+
+---
+
 ## 1) المعمارية العامة
 
 ```

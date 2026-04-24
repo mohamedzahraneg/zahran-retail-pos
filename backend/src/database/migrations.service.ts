@@ -20,6 +20,12 @@ import * as crypto from 'node:crypto';
  * schema_combined.sql and shouldn't try to re-install them. Anything after
  * 045 is new and must run.
  */
+/** Marker used to distinguish a wrong-database error from a migration error. */
+const FATAL_DB_ERROR = 'FatalDatabaseSanityError';
+
+/** Sentinel migration that MUST already be applied on a production DB. */
+const PRODUCTION_SENTINEL_MIGRATION = '071_employee_gl_dimension.sql';
+
 @Injectable()
 export class MigrationsService implements OnModuleInit {
   private readonly logger = new Logger('Migrations');
@@ -27,6 +33,10 @@ export class MigrationsService implements OnModuleInit {
   constructor(private readonly ds: DataSource) {}
 
   async onModuleInit() {
+    // Sanity check runs FIRST and is deliberately NOT inside the try/catch
+    // below — a wrong-database error must crash the boot, not be swallowed.
+    await this.verifyProductionDatabase();
+
     try {
       await this.ensureBookkeeping();
       await this.seedLegacyBaseline();
@@ -35,9 +45,97 @@ export class MigrationsService implements OnModuleInit {
       this.logger.error(
         `startup migration runner failed: ${err?.message ?? err}`,
       );
-      // Never block the app from starting — prefer a degraded API to a
-      // hard crash loop. Operators see the error in logs and can fix it.
+      // Never block the app from starting on a per-migration error — prefer
+      // a degraded API to a hard crash loop. Operators see the error in
+      // logs and can fix it.
     }
+  }
+
+  /**
+   * Confirm we are connected to the expected production Postgres BEFORE we
+   * run any migrations. In production (NODE_ENV=production) we refuse to
+   * boot if any of these are false:
+   *   1. current_database() = 'postgres'            (Supabase default)
+   *   2. server_version_num >= 170000               (Supabase runs PG 17+)
+   *   3. schema_migrations table exists             (bookkeeping seeded)
+   *   4. sentinel migration row is present         (we are on the right DB)
+   *
+   * Outside production this is a no-op — local docker Postgres has a
+   * different database name and lower PG version, and we do not want to
+   * block dev startup.
+   */
+  private async verifyProductionDatabase(): Promise<void> {
+    const env = (process.env.NODE_ENV || 'development').toLowerCase();
+    if (env !== 'production') {
+      this.logger.log(`DB sanity check skipped (NODE_ENV=${env})`);
+      return;
+    }
+
+    let meta: { db_name: string; pg_version: number; has_bookkeeping: boolean };
+    try {
+      const rows = await this.ds.query(`
+        SELECT current_database()                      AS db_name,
+               current_setting('server_version_num')::int AS pg_version,
+               EXISTS (
+                 SELECT 1 FROM information_schema.tables
+                  WHERE table_schema = 'public'
+                    AND table_name = 'schema_migrations'
+               )                                       AS has_bookkeeping
+      `);
+      meta = rows[0];
+    } catch (err: any) {
+      this.fatalDb(
+        `could not query sanity metadata from the database: ${err?.message ?? err}`,
+      );
+    }
+
+    if (meta.db_name !== 'postgres') {
+      this.fatalDb(
+        `connected to database "${meta.db_name}" but production expects "postgres" (the Supabase default). ` +
+          `This usually means DATABASE_URL points at a docker Postgres by mistake. ` +
+          `Set DATABASE_URL to the Supabase pooler DSN (see .env.production.example).`,
+      );
+    }
+
+    if (meta.pg_version < 170000) {
+      this.fatalDb(
+        `connected to PostgreSQL server_version_num=${meta.pg_version} but production requires 17+ (Supabase). ` +
+          `Refusing to boot against what looks like a local Postgres 15 container.`,
+      );
+    }
+
+    if (!meta.has_bookkeeping) {
+      this.fatalDb(
+        `schema_migrations table does not exist on this database. ` +
+          `A production Supabase DB is bootstrapped with this table; its absence means we are on an empty/wrong DB.`,
+      );
+    }
+
+    const sentinel: Array<{ filename: string }> = await this.ds.query(
+      `SELECT filename FROM public.schema_migrations WHERE filename = $1`,
+      [PRODUCTION_SENTINEL_MIGRATION],
+    );
+    if (sentinel.length === 0) {
+      this.fatalDb(
+        `sentinel migration "${PRODUCTION_SENTINEL_MIGRATION}" is not recorded in schema_migrations. ` +
+          `This means the DB has not been brought to the production baseline — probably a wrong DATABASE_URL.`,
+      );
+    }
+
+    this.logger.log(
+      `✓ production DB sanity verified (db=${meta.db_name}, pg=${meta.pg_version}, sentinel present)`,
+    );
+  }
+
+  /** Throw a fatal, non-retriable error that propagates out of onModuleInit. */
+  private fatalDb(detail: string): never {
+    const banner =
+      '[FATAL] Wrong database. Refusing to start the API in production. ' +
+      detail;
+    this.logger.error(banner);
+    const err: any = new Error(banner);
+    err.name = FATAL_DB_ERROR;
+    throw err;
   }
 
   /** Create the schema_migrations table if it doesn't exist yet. */
