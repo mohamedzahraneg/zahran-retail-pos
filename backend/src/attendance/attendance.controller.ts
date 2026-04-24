@@ -86,4 +86,67 @@ export class AttendanceController {
   ) {
     return this.svc.adjust(id, body);
   }
+
+  // ── Admin-on-behalf + wage accrual (employee.attendance.manage) ──────
+
+  @Post('admin/clock-in')
+  @Permissions('employee.attendance.manage')
+  adminClockIn(
+    @CurrentUser() user: JwtUser,
+    @Body() body: { user_id: string; note?: string },
+  ) {
+    return this.svc.adminClockIn(body.user_id, user.userId, body?.note);
+  }
+
+  @Post('admin/clock-out')
+  @Permissions('employee.attendance.manage')
+  adminClockOut(
+    @CurrentUser() user: JwtUser,
+    @Body() body: { user_id: string; note?: string },
+  ) {
+    return this.svc.adminClockOut(body.user_id, user.userId, body?.note);
+  }
+
+  @Post('admin/mark-payable-day')
+  @Permissions('employee.attendance.manage')
+  adminMarkPayableDay(
+    @CurrentUser() user: JwtUser,
+    @Body() body: { user_id: string; work_date: string; reason: string },
+  ) {
+    return this.svc.adminMarkPayableDay(
+      body.user_id,
+      body.work_date,
+      body.reason,
+      user.userId,
+    );
+  }
+
+  @Post('admin/approve-wage/:attendance_id')
+  @Permissions('employee.attendance.manage')
+  adminApproveWage(
+    @Param('attendance_id', ParseUUIDPipe) attendanceId: string,
+    @CurrentUser() user: JwtUser,
+  ) {
+    return this.svc.adminApproveWageFromAttendance(attendanceId, user.userId);
+  }
+
+  @Post('admin/void-accrual/:payable_day_id')
+  @Permissions('employee.attendance.manage')
+  adminVoidAccrual(
+    @Param('payable_day_id', ParseUUIDPipe) payableDayId: string,
+    @CurrentUser() user: JwtUser,
+    @Body() body: { reason: string },
+  ) {
+    return this.svc.adminVoidWageAccrual(payableDayId, body.reason, user.userId);
+  }
+
+  @Get('payable-days')
+  @Permissions('employee.attendance.manage')
+  payableDays(
+    @Query('user_id', ParseUUIDPipe) userId: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    return this.svc.listPayableDays({ user_id: userId, from, to });
+  }
 }
