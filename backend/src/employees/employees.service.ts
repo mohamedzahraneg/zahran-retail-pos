@@ -909,11 +909,26 @@ export class EmployeesService {
    * engine posts the matching journal entry:
    *
    *   DR Cash Register (resolved from cashbox)
-   *   CR 1123 Employee Receivables
+   *   CR 1123 Employee Receivables       (tagged employee_user_id)
    *
-   * For 'bank' / 'payroll_deduction' / 'other' we just record the
-   * settlement row; the engine post is skipped because the offsetting
-   * cash move lives outside the cash register (e.g. payroll run).
+   * All four methods now post a balanced JE:
+   *   * cash              — DR cashbox (resolved from cashbox.kind →
+   *                         1111) / CR 1123 — with cash movement IN
+   *   * bank              — DR cashbox (resolved from cashbox.kind →
+   *                         1113 bank or 1114 ewallet) / CR 1123 —
+   *                         with cash movement IN
+   *   * payroll_deduction — DR 213 Employee Payables / CR 1123 — no
+   *                         cash movement; clears the receivable
+   *                         against the accrued-payable, so next
+   *                         payroll run pays out net
+   *   * other             — DR <offset_account_code> / CR 1123 — no
+   *                         cash movement; caller must supply the
+   *                         explicit offset account (write-off,
+   *                         inter-company receivable, etc.)
+   *
+   * Before this change only 'cash' posted a JE and the other three
+   * methods created a silent settlement row that never reduced 1123
+   * — the payroll page showed a payout, but the GL did not.
    */
   async recordSettlement(
     userId: string,
@@ -922,6 +937,7 @@ export class EmployeesService {
       settlement_date?: string;
       method?: 'cash' | 'bank' | 'payroll_deduction' | 'other';
       cashbox_id?: string;
+      offset_account_code?: string;
       notes?: string;
     },
     createdBy: string,
@@ -930,10 +946,31 @@ export class EmployeesService {
       throw new BadRequestException('قيمة التسوية يجب أن تكون أكبر من صفر');
     }
     const method = dto.method ?? 'cash';
-    if (method === 'cash' && !dto.cashbox_id) {
+
+    // Per-method pre-conditions — fail early so we never create a
+    // settlement row without the inputs needed to post its JE.
+    if ((method === 'cash' || method === 'bank') && !dto.cashbox_id) {
       throw new BadRequestException(
-        'تسوية نقدية تتطلب اختيار خزنة',
+        method === 'cash'
+          ? 'تسوية نقدية تتطلب اختيار خزنة'
+          : 'تسوية بنكية تتطلب اختيار حساب بنك/محفظة',
       );
+    }
+    if (method === 'other') {
+      if (!dto.offset_account_code) {
+        throw new BadRequestException(
+          "تسوية بطريقة 'أخرى' تتطلب تحديد الحساب المقابل",
+        );
+      }
+      if (dto.offset_account_code === '1123') {
+        throw new BadRequestException(
+          'لا يمكن استخدام 1123 كحساب مقابل — هو طرف التسوية نفسه',
+        );
+      }
+    }
+    const engine = this.engine;
+    if (!engine) {
+      throw new BadRequestException('محرك القيود غير متاح');
     }
 
     return this.ds.transaction(async (em) => {
@@ -954,49 +991,65 @@ export class EmployeesService {
         ],
       );
 
-      // 2. Post the offsetting journal entry via the engine (cash only).
-      if (method === 'cash' && this.engine && dto.cashbox_id) {
-        const description =
-          `تسوية من موظف ${row.id}`.trim();
-        const res = await this.engine.recordTransaction({
-          kind: 'manual_adjustment',
-          reference_type: 'employee_settlement',
-          reference_id: String(row.id),
-          description,
-          gl_lines: [
-            {
-              resolve_from_cashbox_id: dto.cashbox_id,
+      // 2. Build the per-method GL spec. CR side is always 1123
+      // tagged with employee_user_id (039c guard requires
+      // employee_id, which the engine mirrors from employee_user_id
+      // post-PR #67).
+      const description = `تسوية من موظف ${row.id} (${method})`.trim();
+      const dr =
+        method === 'cash' || method === 'bank'
+          ? {
+              resolve_from_cashbox_id: dto.cashbox_id!,
               debit: dto.amount,
-              cashbox_id: dto.cashbox_id,
-            },
-            {
-              account_code: '1123',
-              credit: dto.amount,
-              employee_user_id: userId,
-            },
-          ],
-          cash_movements: [
-            {
-              cashbox_id: dto.cashbox_id,
-              direction: 'in',
-              amount: dto.amount,
-              category: 'employee_settlement',
-              notes: description,
-            },
-          ],
-          user_id: createdBy,
-          em,
-        });
-        if (!res.ok) {
-          throw new BadRequestException(`فشل ترحيل التسوية: ${res.error}`);
-        }
-        if ('entry_id' in res && res.entry_id) {
-          await em.query(
-            `UPDATE employee_settlements SET journal_entry_id = $1::uuid WHERE id = $2`,
-            [res.entry_id, row.id],
-          );
-          row.journal_entry_id = res.entry_id;
-        }
+              cashbox_id: dto.cashbox_id!,
+            }
+          : method === 'payroll_deduction'
+            ? {
+                account_code: '213',
+                debit: dto.amount,
+                employee_user_id: userId,
+              }
+            : {
+                account_code: dto.offset_account_code!,
+                debit: dto.amount,
+              };
+      const cr = {
+        account_code: '1123',
+        credit: dto.amount,
+        employee_user_id: userId,
+      };
+      const cashMovements =
+        method === 'cash' || method === 'bank'
+          ? [
+              {
+                cashbox_id: dto.cashbox_id!,
+                direction: 'in' as const,
+                amount: dto.amount,
+                category: 'employee_settlement',
+                notes: description,
+              },
+            ]
+          : [];
+
+      const res = await engine.recordTransaction({
+        kind: 'manual_adjustment',
+        reference_type: 'employee_settlement',
+        reference_id: String(row.id),
+        description,
+        gl_lines: [dr, cr],
+        cash_movements: cashMovements,
+        user_id: createdBy,
+        em,
+      });
+      if (!res.ok) {
+        throw new BadRequestException(`فشل ترحيل التسوية: ${res.error}`);
+      }
+      if ('entry_id' in res && res.entry_id) {
+        await em.query(
+          `UPDATE employee_settlements SET journal_entry_id = $1::uuid WHERE id = $2`,
+          [res.entry_id, row.id],
+        );
+        row.journal_entry_id = res.entry_id;
       }
 
       return row;
