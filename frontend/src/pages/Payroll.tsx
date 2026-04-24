@@ -31,6 +31,8 @@ import {
   payrollApi,
   type EmpTxnType,
   type CreateEmpTxn,
+  type CreatePayrollType,
+  CREATE_TXN_TYPES,
   TXN_TYPE_LABELS,
   TXN_DIRECTION,
 } from '@/api/payroll.api';
@@ -457,8 +459,8 @@ function AddTxnModal({
         </div>
         <div>
           <label className="label">النوع *</label>
-          <div className="grid grid-cols-3 gap-1">
-            {(Object.keys(TXN_TYPE_LABELS) as EmpTxnType[]).map((t) => (
+          <div className="grid grid-cols-2 gap-1">
+            {CREATE_TXN_TYPES.map((t) => (
               <button
                 key={t}
                 type="button"

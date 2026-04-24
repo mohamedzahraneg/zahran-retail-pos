@@ -27,8 +27,16 @@ import {
 } from '../common/decorators/current-user.decorator';
 
 class RequestDto {
-  @IsIn(['advance', 'leave', 'overtime_extension', 'other']) kind:
-    | 'advance'
+  // 'advance' removed (audit #4 — triple-path dual-write risk).
+  // Approved advance requests used to chain through a DB mirror
+  // trigger → employee_transactions → fn_post_employee_txn, which
+  // writes journal_lines only (no cashbox_transactions) and can
+  // duplicate an expenses.is_advance=TRUE entry for the same money.
+  // Canonical advance path is POST /accounting/expenses{,/daily}
+  // with is_advance=TRUE, which routes through FinancialEngine and
+  // correctly writes both GL + cashbox. Historical advance requests
+  // still read correctly; only new submissions are refused here.
+  @IsIn(['leave', 'overtime_extension', 'other']) kind:
     | 'leave'
     | 'overtime_extension'
     | 'other';

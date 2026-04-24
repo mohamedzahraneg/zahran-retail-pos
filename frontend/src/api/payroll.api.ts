@@ -1,17 +1,35 @@
 import { api, unwrap } from './client';
 
-// 'expense' removed (2026‑04). Its backend recipe posted
-// DR 529 مصروفات متفرقة / CR 213, hiding a real reimbursement
-// inside misc. Until a proper reimbursement flow with
-// expense_account_code is designed, the type is refused at the
-// backend DTO boundary — removed here so the UI doesn't render a
-// broken button.
+// EmpTxnType is the DISPLAY union — it keeps 'advance' so historical
+// rows (synthesised from expenses.is_advance=TRUE in the /payroll
+// union query) still render with their label and styling.
+//
+// 'expense' removed (PR #69) and write-side 'advance' removed in the
+// audit-#4 PR — see CreatePayrollType below. Direct creation of an
+// advance via POST /payroll is refused at the backend DTO boundary;
+// the canonical write path is POST /accounting/expenses with
+// is_advance=TRUE.
 export type EmpTxnType =
   | 'wage'
   | 'bonus'
   | 'deduction'
   | 'advance'
   | 'payout';
+
+/**
+ * Narrower union for write-side surfaces (CreateEmpTxn below, and the
+ * type-picker button grid in the Payroll modal). Excludes 'advance'
+ * and 'expense' — the display EmpTxnType still includes them so
+ * historical rows render correctly.
+ */
+export type CreatePayrollType = Exclude<EmpTxnType, 'advance'>;
+
+export const CREATE_TXN_TYPES: readonly CreatePayrollType[] = [
+  'wage',
+  'bonus',
+  'deduction',
+  'payout',
+] as const;
 
 export const TXN_TYPE_LABELS: Record<EmpTxnType, string> = {
   wage: 'يومية',
@@ -71,7 +89,7 @@ export interface EmployeeSummary extends EmployeeBalance {
 
 export interface CreateEmpTxn {
   employee_id: string;
-  type: EmpTxnType;
+  type: CreatePayrollType;
   amount: number;
   txn_date?: string;
   description?: string;

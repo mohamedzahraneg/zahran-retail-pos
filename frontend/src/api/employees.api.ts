@@ -13,6 +13,12 @@ export interface EmployeeTask {
   status: 'pending' | 'acknowledged' | 'completed' | 'cancelled';
 }
 
+// Display union for historical rows — keeps 'advance' so pre-existing
+// approved/pending advance requests still render. Write-side uses the
+// narrower SubmitRequestKind below (audit #4 — direct advance creation
+// disabled; canonical path is expenses.is_advance=TRUE).
+export type SubmitRequestKind = 'leave' | 'overtime_extension' | 'other';
+
 export interface EmployeeRequest {
   id: string;
   user_id: string;
@@ -105,7 +111,7 @@ export const employeesApi = {
   myRequests: () =>
     unwrap<EmployeeRequest[]>(api.get('/employees/me/requests')),
   submitRequest: (body: {
-    kind: EmployeeRequest['kind'];
+    kind: SubmitRequestKind;
     amount?: number;
     starts_at?: string;
     ends_at?: string;

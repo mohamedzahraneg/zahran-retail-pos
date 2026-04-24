@@ -17,6 +17,7 @@ import {
   employeesApi,
   EmployeeDashboard,
   EmployeeTask,
+  type SubmitRequestKind,
 } from '@/api/employees.api';
 import { attendanceApi } from '@/api/attendance.api';
 import { useAuthStore } from '@/stores/auth.store';
@@ -1156,10 +1157,11 @@ function RequestModal({
   onClose: () => void;
   onSuccess: () => void;
 }) {
-  const [kind, setKind] = useState<
-    'advance' | 'leave' | 'overtime_extension'
-  >('advance');
-  const [amount, setAmount] = useState('');
+  // 'advance' removed from the self-service request form (audit #4).
+  // Advances must go through the canonical expenses.is_advance=TRUE
+  // path via the accounting side, not a DB-triggered mirror that
+  // would silently duplicate the GL entry and drift the cashbox.
+  const [kind, setKind] = useState<SubmitRequestKind>('leave');
   const [startsAt, setStartsAt] = useState('');
   const [endsAt, setEndsAt] = useState('');
   const [reason, setReason] = useState('');
@@ -1168,7 +1170,6 @@ function RequestModal({
     mutationFn: () =>
       employeesApi.submitRequest({
         kind,
-        amount: kind === 'advance' ? Number(amount) : undefined,
         starts_at: startsAt || undefined,
         ends_at: endsAt || undefined,
         reason: reason || undefined,
@@ -1204,7 +1205,7 @@ function RequestModal({
               نوع الطلب
             </label>
             <div className="grid grid-cols-3 gap-2">
-              {(['advance', 'leave', 'overtime_extension'] as const).map((k) => (
+              {(['leave', 'overtime_extension', 'other'] as const).map((k) => (
                 <button
                   type="button"
                   key={k}
@@ -1221,49 +1222,30 @@ function RequestModal({
             </div>
           </div>
 
-          {kind === 'advance' && (
+          <div className="grid grid-cols-2 gap-2">
             <label className="block">
               <span className="text-xs font-bold text-slate-600 mb-1 block">
-                قيمة السلفة (ج.م)
+                من
               </span>
               <input
-                type="number"
+                type="datetime-local"
                 className="input w-full"
-                value={amount}
-                onChange={(e) => setAmount(e.target.value)}
-                min={0}
-                step="0.01"
-                placeholder="0.00"
+                value={startsAt}
+                onChange={(e) => setStartsAt(e.target.value)}
               />
             </label>
-          )}
-
-          {kind !== 'advance' && (
-            <div className="grid grid-cols-2 gap-2">
-              <label className="block">
-                <span className="text-xs font-bold text-slate-600 mb-1 block">
-                  من
-                </span>
-                <input
-                  type="datetime-local"
-                  className="input w-full"
-                  value={startsAt}
-                  onChange={(e) => setStartsAt(e.target.value)}
-                />
-              </label>
-              <label className="block">
-                <span className="text-xs font-bold text-slate-600 mb-1 block">
-                  إلى
-                </span>
-                <input
-                  type="datetime-local"
-                  className="input w-full"
-                  value={endsAt}
-                  onChange={(e) => setEndsAt(e.target.value)}
-                />
-              </label>
-            </div>
-          )}
+            <label className="block">
+              <span className="text-xs font-bold text-slate-600 mb-1 block">
+                إلى
+              </span>
+              <input
+                type="datetime-local"
+                className="input w-full"
+                value={endsAt}
+                onChange={(e) => setEndsAt(e.target.value)}
+              />
+            </label>
+          </div>
 
           <label className="block">
             <span className="text-xs font-bold text-slate-600 mb-1 block">
@@ -1290,10 +1272,6 @@ function RequestModal({
               className="btn-primary"
               disabled={submit.isPending}
               onClick={() => {
-                if (kind === 'advance' && (!amount || Number(amount) <= 0)) {
-                  toast.error('يجب تحديد قيمة السلفة');
-                  return;
-                }
                 submit.mutate();
               }}
             >
