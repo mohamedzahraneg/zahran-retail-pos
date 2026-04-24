@@ -794,6 +794,13 @@ function BonusForm({ userId }: { userId: string }) {
       setNote('');
       qc.invalidateQueries({ queryKey: ['employees-team'] });
       qc.invalidateQueries({ queryKey: ['employee-user-dashboard', userId] });
+      // Any employee mutation must refresh every canonical-balance
+      // consumer — Payroll page, Financial Ledger card, dashboard —
+      // so the GL headline + gl_entries update immediately.
+      qc.invalidateQueries({ queryKey: ['payroll-balances'] });
+      qc.invalidateQueries({ queryKey: ['payroll-list'] });
+      qc.invalidateQueries({ queryKey: ['employee-ledger'] });
+      qc.invalidateQueries({ queryKey: ['employee-dashboard'] });
     },
     onError: (e: any) =>
       toast.error(e?.response?.data?.message || 'فشل الإضافة'),
@@ -878,6 +885,10 @@ function DeductionForm({ userId }: { userId: string }) {
       setReason('');
       qc.invalidateQueries({ queryKey: ['employees-team'] });
       qc.invalidateQueries({ queryKey: ['employee-user-dashboard', userId] });
+      qc.invalidateQueries({ queryKey: ['payroll-balances'] });
+      qc.invalidateQueries({ queryKey: ['payroll-list'] });
+      qc.invalidateQueries({ queryKey: ['employee-ledger'] });
+      qc.invalidateQueries({ queryKey: ['employee-dashboard'] });
     },
     onError: (e: any) =>
       toast.error(e?.response?.data?.message || 'فشل الإضافة'),
