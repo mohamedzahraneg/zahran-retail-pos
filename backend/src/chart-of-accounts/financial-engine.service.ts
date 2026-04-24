@@ -417,12 +417,24 @@ export class FinancialEngineService {
         if (l.debit === 0 && l.credit === 0) continue;
 
         if (hasPartyCols && hasEmployeeCol) {
+          // Mirror employee_user_id into employee_id. Both columns
+          // exist: employee_id (migration 039) is enforced by the
+          // trg_guard_employee_gl_dimension trigger on 1123/213, and
+          // employee_user_id (migration 071) is read by
+          // v_employee_gl_balance. Callers only set employee_user_id
+          // on EngineGlLine, so without this mirror the 039c guard
+          // rejects any engine-driven 1123/213 posting (observed on
+          // expense_reclass_to_1123 — all 4 calls returned
+          // "account 1123 requires employee_id"). The mirror is a
+          // no-op for non-employee accounts because callers leave
+          // employee_user_id null there.
+          const employeeId = l.employee_user_id ?? null;
           await q(
             `INSERT INTO journal_lines
                (entry_id, line_no, account_id, debit, credit, description,
                 cashbox_id, warehouse_id, customer_id, supplier_id, cost_center_id,
-                employee_user_id)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+                employee_user_id, employee_id)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
             [
               entry.id,
               lineNo++,
@@ -436,6 +448,7 @@ export class FinancialEngineService {
               l.supplier_id,
               l.cost_center_id,
               l.employee_user_id,
+              employeeId,
             ],
           );
         } else if (hasPartyCols) {
