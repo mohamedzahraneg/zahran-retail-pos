@@ -71,6 +71,13 @@ export interface EmployeeDashboard {
     expected: number;
     accrued: number;
     bonuses: number;
+    /**
+     * Canonical GL balance from v_employee_gl_balance (COA 1123 + 213,
+     * migration 075). Positive = employee owes company; negative =
+     * company owes employee. The UI uses this as the headline — the
+     * source-derived `net` below is shown as a breakdown only.
+     */
+    gl_balance: number;
     deductions: number;
     advances_month: number;
     advances_lifetime: number;
@@ -96,6 +103,11 @@ export interface TeamRow {
   bonuses_this_month: string;
   open_tasks: number;
   pending_requests: number;
+  /**
+   * Canonical GL balance from v_employee_gl_balance. Positive =
+   * employee owes company; negative = company owes employee.
+   */
+  gl_balance: string | number;
 }
 
 export const employeesApi = {
@@ -263,7 +275,18 @@ export interface EmployeeLedger {
     job_title?: string;
   };
   opening_balance: number;
+  /**
+   * Running balance from v_employee_ledger (source tables). Kept for
+   * the "كيف حُسب الرصيد" breakdown — may differ from `gl_balance`
+   * when opening-balance or reclassification JEs exist.
+   */
   closing_balance: number;
+  /**
+   * Canonical headline. From v_employee_gl_balance (COA 1123 + 213,
+   * migration 075). Positive = employee owes company; negative =
+   * company owes employee.
+   */
+  gl_balance: number;
   entries: EmployeeLedgerEntry[];
   totals: {
     shortages: number;

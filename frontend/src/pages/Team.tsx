@@ -515,13 +515,27 @@ function OverviewTab({ dash }: { dash?: EmployeeDashboard }) {
           </div>
         </div>
         <div className="bg-white border border-slate-200 rounded-lg p-3">
-          <div className="text-slate-500 text-[11px]">الصافي</div>
+          {/* Canonical headline — from v_employee_gl_balance.
+              Positive = employee owes company; negative = company owes
+              employee. Was `salary.net` (source-derived). */}
+          <div className="text-slate-500 text-[11px]">الرصيد النهائي من القيود</div>
           <div
             className={`font-black tabular-nums ${
-              salary.debt_warning ? 'text-rose-700' : 'text-emerald-700'
+              salary.gl_balance > 0.01
+                ? 'text-rose-700'
+                : salary.gl_balance < -0.01
+                  ? 'text-emerald-700'
+                  : 'text-slate-700'
             }`}
           >
-            {EGP(salary.net)}
+            {salary.gl_balance > 0.01
+              ? `مدين للشركة ${EGP(salary.gl_balance)}`
+              : salary.gl_balance < -0.01
+                ? `مستحق له ${EGP(-salary.gl_balance)}`
+                : 'متوازن'}
+          </div>
+          <div className="text-slate-400 text-[10px] mt-0.5">
+            الصافي من الرواتب {EGP(salary.net)}
           </div>
         </div>
       </div>
