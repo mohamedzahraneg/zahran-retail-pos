@@ -14,14 +14,35 @@
 #    SSH_HOST=72.60.184.79
 #    SSH_USER=root
 #    SSH_PASS=<تُسأل تلقائياً لو مش متوفرة>
-#    REMOTE_PATH=/opt/zahran
+#    REMOTE_PATH=/root/zahran   ← canonical; must match autodeploy's REPO_DIR
+#
+#  NOTE: this is a break-glass path. The canonical deployment mechanism is
+#  the webhook-driven `zahran-autodeploy.sh` on the VPS. Use this script
+#  only when autodeploy is unreachable. It will refuse to run unless
+#  scripts/verify-worktree.sh passes.
 # =============================================================================
 set -euo pipefail
 
 # ---- إعدادات قابلة للتعديل ----
 SSH_HOST="${SSH_HOST:-72.60.184.79}"
 SSH_USER="${SSH_USER:-root}"
-REMOTE_PATH="${REMOTE_PATH:-/opt/zahran}"
+# Canonical production path — matches autodeploy's REPO_DIR in
+# /root/zahran-autodeploy.sh. The old /opt/zahran default caused a
+# split-brain where manual deploys and autodeploy targeted different
+# directories. Override with REMOTE_PATH=... only if you know exactly
+# what you are doing.
+REMOTE_PATH="${REMOTE_PATH:-/root/zahran}"
+
+# ---- Mandatory pre-flight: no deploy from a wrong path / dirty tree ----
+SCRIPT_DIR_PRE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT_PRE="$(dirname "$SCRIPT_DIR_PRE")"
+if [[ -x "$SCRIPT_DIR_PRE/verify-worktree.sh" ]]; then
+  ( cd "$PROJECT_ROOT_PRE" && "$SCRIPT_DIR_PRE/verify-worktree.sh" ) \
+    || { echo "deploy refused: verify-worktree failed" >&2; exit 1; }
+else
+  echo "deploy refused: scripts/verify-worktree.sh missing" >&2
+  exit 1
+fi
 
 # ---- ألوان ----
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; BLUE='\033[0;34m'; NC='\033[0m'
