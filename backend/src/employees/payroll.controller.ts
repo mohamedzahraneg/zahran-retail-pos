@@ -613,34 +613,48 @@ export class PayrollController {
     // Prefix dispatch
     if (id.startsWith('bon:')) {
       const rawId = id.slice(4);
-      const [row] = await this.ds.query(
-        `UPDATE employee_bonuses
-            SET is_void = TRUE,
-                voided_at = NOW(),
-                voided_by = $2,
-                void_reason = $3
-          WHERE id = $1::bigint AND is_void = FALSE
-          RETURNING id`,
-        [rawId, userId, voidReason],
-      );
-      if (!row) throw new NotFoundException('الحافز غير موجود أو ملغى مسبقاً');
-      return { voided: true, source: 'employee_bonuses', id: rawId };
+      return this.ds.transaction(async (em) => {
+        // Engine context — needed because the is_void UPDATE cascades
+        // through mirror DELETE → fn_trg_employee_txn_post which
+        // UPDATEs journal_entries.is_void=true. Without the context,
+        // migration 068's strict guard blocks that UPDATE.
+        await em.query(
+          `SELECT set_config('app.engine_context', 'admin_void:payroll', true)`,
+        );
+        const [row] = await em.query(
+          `UPDATE employee_bonuses
+              SET is_void = TRUE,
+                  voided_at = NOW(),
+                  voided_by = $2,
+                  void_reason = $3
+            WHERE id = $1::bigint AND is_void = FALSE
+            RETURNING id`,
+          [rawId, userId, voidReason],
+        );
+        if (!row) throw new NotFoundException('الحافز غير موجود أو ملغى مسبقاً');
+        return { voided: true, source: 'employee_bonuses', id: rawId };
+      });
     }
 
     if (id.startsWith('ded:')) {
       const rawId = id.slice(4);
-      const [row] = await this.ds.query(
-        `UPDATE employee_deductions
-            SET is_void = TRUE,
-                voided_at = NOW(),
-                voided_by = $2,
-                void_reason = $3
-          WHERE id = $1::bigint AND is_void = FALSE
-          RETURNING id`,
-        [rawId, userId, voidReason],
-      );
-      if (!row) throw new NotFoundException('الخصم غير موجود أو ملغى مسبقاً');
-      return { voided: true, source: 'employee_deductions', id: rawId };
+      return this.ds.transaction(async (em) => {
+        await em.query(
+          `SELECT set_config('app.engine_context', 'admin_void:payroll', true)`,
+        );
+        const [row] = await em.query(
+          `UPDATE employee_deductions
+              SET is_void = TRUE,
+                  voided_at = NOW(),
+                  voided_by = $2,
+                  void_reason = $3
+            WHERE id = $1::bigint AND is_void = FALSE
+            RETURNING id`,
+          [rawId, userId, voidReason],
+        );
+        if (!row) throw new NotFoundException('الخصم غير موجود أو ملغى مسبقاً');
+        return { voided: true, source: 'employee_deductions', id: rawId };
+      });
     }
 
     if (id.startsWith('set:')) {
@@ -732,11 +746,18 @@ export class PayrollController {
         'قيود التسوية والتصحيح محمية — لا يمكن إلغاؤها من هذه الواجهة',
       );
     }
-    const res = await this.ds.query(
-      `DELETE FROM employee_transactions WHERE id = $1::uuid RETURNING id`,
-      [id],
-    );
-    if (!res.length) throw new NotFoundException('الحركة غير موجودة');
-    return { voided: true, source: 'employee_transactions', id };
+    // Wage DELETE also triggers fn_trg_employee_txn_post → UPDATE
+    // journal_entries.is_void=true. Same engine-context requirement.
+    return this.ds.transaction(async (em) => {
+      await em.query(
+        `SELECT set_config('app.engine_context', 'admin_void:payroll', true)`,
+      );
+      const res = await em.query(
+        `DELETE FROM employee_transactions WHERE id = $1::uuid RETURNING id`,
+        [id],
+      );
+      if (!res.length) throw new NotFoundException('الحركة غير موجودة');
+      return { voided: true, source: 'employee_transactions', id };
+    });
   }
 }
