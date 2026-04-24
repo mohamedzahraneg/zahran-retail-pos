@@ -490,10 +490,11 @@ export default function Analytics() {
           to="/suppliers"
         />
         <MiniStat
-          label="المصروف اليومي"
+          label="متوسط الإنفاق اليومي"
           value={EGP(indValue(indicators?.daily_burn))}
+          sub="من قائمة الدخل ÷ أيام الفترة"
           scope="period"
-          to="/daily-expenses"
+          to="/accounts"
         />
       </div>
 
@@ -698,12 +699,15 @@ function IndicatorTile({
 function MiniStat({
   label,
   value,
+  sub,
   color = 'slate',
   scope,
   to,
 }: {
   label: string;
   value: string;
+  /** Optional one-line hint that explains the formula / source. */
+  sub?: string;
   color?: 'slate' | 'amber' | 'rose';
   scope: KpiScope;
   to?: string;
@@ -720,17 +724,22 @@ function MiniStat({
         <ScopeBadge scope={scope} />
       </div>
       <div className="font-black text-lg font-mono mt-1">{value}</div>
-      {to && (
-        <div className="mt-0.5 text-end">
+      <div className="flex items-center justify-between gap-1 mt-0.5">
+        {sub ? (
+          <div className="text-[10px] text-slate-400 truncate">{sub}</div>
+        ) : (
+          <span />
+        )}
+        {to && (
           <Link
             to={to}
-            className="text-[10px] font-bold text-slate-500 hover:text-slate-900"
+            className="text-[10px] font-bold text-slate-500 hover:text-slate-900 whitespace-nowrap"
             title="عرض مصدر الرقم"
           >
             تفاصيل ←
           </Link>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }
