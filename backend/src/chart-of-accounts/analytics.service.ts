@@ -287,7 +287,27 @@ export class AccountingAnalyticsService {
     const cogs = Number(rev?.cogs || 0);
     const expenses = Number(exp?.expenses || 0);
     const grossProfit = revenue - cogs;
-    const netProfit = grossProfit - expenses - Number(ret?.return_value || 0);
+    // Net profit must NOT subtract cogs in addition to expenses.
+    // Chart-of-accounts account `51 تكلفة البضاعة المباعة` carries
+    // `account_type = 'expense'`, so the `expenses` query above (SUM
+    // debit−credit over every expense-type account for the period)
+    // already contains the same COGS that `grossProfit = revenue − cogs`
+    // just subtracted. The old formula `grossProfit − expenses − returns`
+    // therefore subtracted COGS twice, pulling net profit ~7.9k below
+    // the Income Statement's answer for the same window.
+    //
+    // The right formula uses revenue directly:
+    //   netProfit = revenue − expenses − returns_value
+    // which is algebraically the same shape the Income Statement uses
+    // (total_revenue − total_expenses) and produces the same answer
+    // up to the small residual between invoices-derived revenue and
+    // GL-account-411 revenue (typically < 1%, caused by rounding /
+    // tax-inclusive vs tax-exclusive handling — a separate source-of-
+    // truth alignment question out of scope here).
+    //
+    // `grossProfit` and `gross_margin_pct` still use `revenue − cogs`:
+    // those represent gross profit correctly and are not affected.
+    const netProfit = revenue - expenses - Number(ret?.return_value || 0);
     const grossMargin = revenue > 0 ? (grossProfit / revenue) * 100 : 0;
     const netMargin = revenue > 0 ? (netProfit / revenue) * 100 : 0;
     const returnRate =
