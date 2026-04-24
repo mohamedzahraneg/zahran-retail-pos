@@ -836,10 +836,19 @@ export class AccountingPostingService {
       return null;
     }
     const runner = em ?? this.ds.manager;
+    // is_advance + employee_user_id MUST be read and forwarded to the
+    // engine. FinancialEngineService.recordExpense routes the debit to
+    // 1123 Employee Receivables (tagged with employee_user_id) ONLY when
+    // both flags are present; otherwise it falls through to the expense
+    // category account (→ 529 for unmapped). Dropping these fields here
+    // caused shift-driven advances (is_advance=TRUE in the expense row)
+    // to post as DR 529 / CR 1111 with NULL employee dimension,
+    // hiding employee payouts inside miscellaneous expense and
+    // zeroing v_employee_gl_balance for the affected employees.
     const [e] = await runner.query(
       `SELECT e.id, e.expense_no, e.amount, e.cashbox_id, e.category_id,
               e.expense_date, e.is_approved, e.payment_method,
-              e.description,
+              e.description, e.is_advance, e.employee_user_id,
               ec.account_id AS category_account_id
          FROM expenses e
          LEFT JOIN expense_categories ec ON ec.id = e.category_id
@@ -859,6 +868,8 @@ export class AccountingPostingService {
       user_id: userId,
       entry_date: this.dateOnly(e.expense_date),
       description: e.description ?? undefined,
+      is_advance: e.is_advance === true,
+      employee_user_id: e.employee_user_id ?? null,
       em,
     });
     return res.ok ? { entry_id: (res as any).entry_id } : null;
