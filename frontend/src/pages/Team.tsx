@@ -1,8 +1,11 @@
 import { useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import {
   Users,
+  Users2,
+  Wallet,
   Search,
   DollarSign,
   Clock,
@@ -23,6 +26,12 @@ import {
   EmployeeDashboard,
 } from '@/api/employees.api';
 import { useAuthStore } from '@/stores/auth.store';
+// Payroll / حسابات الموظفين is now a tab inside /team (consolidation).
+// The component is rendered verbatim — no design change. Its own
+// useQuery hooks share the global TanStack cache, so mutations
+// elsewhere in Team (BonusForm, DeductionForm) continue to live-
+// refresh both tabs.
+import Payroll from './Payroll';
 
 const EGP = (n: number | string) =>
   `${Number(n || 0).toLocaleString('en-US', {
@@ -64,15 +73,9 @@ function fmtWhen(s?: string) {
 
 export default function Team() {
   const hasPermission = useAuthStore((s) => s.hasPermission);
-  const [q, setQ] = useState('');
-  const [active, setActive] = useState<TeamRow | null>(null);
 
-  const { data: team = [] } = useQuery({
-    queryKey: ['employees-team'],
-    queryFn: () => employeesApi.team(),
-    refetchInterval: 60_000,
-  });
-
+  // Pending approvals are rendered only in the الفريق tab, but we fetch
+  // at the Team level so both tabs share the same in-flight request.
   const { data: pending = [] } = useQuery({
     queryKey: ['employees-pending'],
     queryFn: () => employeesApi.pendingRequests(),
@@ -80,16 +83,16 @@ export default function Team() {
     refetchInterval: 30_000,
   });
 
-  const filtered = useMemo(() => {
-    if (!q.trim()) return team;
-    const needle = q.trim().toLowerCase();
-    return team.filter(
-      (t) =>
-        t.full_name?.toLowerCase().includes(needle) ||
-        t.username?.toLowerCase().includes(needle) ||
-        t.employee_no?.toLowerCase().includes(needle),
-    );
-  }, [team, q]);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const activeTab: 'team' | 'accounts' =
+    searchParams.get('tab') === 'accounts' ? 'accounts' : 'team';
+
+  const setTab = (next: 'team' | 'accounts') => {
+    const sp = new URLSearchParams(searchParams);
+    if (next === 'team') sp.delete('tab');
+    else sp.set('tab', next);
+    setSearchParams(sp, { replace: true });
+  };
 
   return (
     <div className="space-y-5">
@@ -100,11 +103,79 @@ export default function Team() {
             إدارة فريق العمل
           </h2>
           <p className="text-sm text-slate-500 mt-1">
-            ملفات الموظفين · المهام · الحوافز · الاستقطاعات · الطلبات
+            ملفات الموظفين · المهام · الحوافز · الاستقطاعات · الطلبات · الحسابات
           </p>
         </div>
       </div>
 
+      {/* Tab bar — two sections of one consolidated screen:
+            1. الفريق        — existing team table + pending + drawer
+            2. الحسابات      — verbatim Payroll page (balance cards +
+                               filters + transactions + add modal)
+          Permission gate for both is `employee.team.view` (same as
+          legacy /team and /payroll routes). */}
+      <div className="flex items-center gap-1 border-b border-slate-200">
+        <button
+          type="button"
+          onClick={() => setTab('team')}
+          className={`px-4 py-2 -mb-px border-b-2 text-sm font-bold transition flex items-center gap-2 ${
+            activeTab === 'team'
+              ? 'border-indigo-600 text-indigo-700'
+              : 'border-transparent text-slate-500 hover:text-slate-700'
+          }`}
+        >
+          <Users2 size={15} />
+          الفريق
+        </button>
+        <button
+          type="button"
+          onClick={() => setTab('accounts')}
+          className={`px-4 py-2 -mb-px border-b-2 text-sm font-bold transition flex items-center gap-2 ${
+            activeTab === 'accounts'
+              ? 'border-indigo-600 text-indigo-700'
+              : 'border-transparent text-slate-500 hover:text-slate-700'
+          }`}
+        >
+          <Wallet size={15} />
+          الحسابات
+        </button>
+      </div>
+
+      {activeTab === 'accounts' ? (
+        // Payroll UI rendered verbatim — shares the global TanStack
+        // cache with the rest of Team, so mutations from either tab
+        // invalidate + refetch the other automatically.
+        <Payroll />
+      ) : (
+        <TeamTab pending={pending} />
+      )}
+    </div>
+  );
+}
+
+function TeamTab({ pending }: { pending: EmployeeRequest[] }) {
+  const [q, setQ] = useState('');
+  const [active, setActive] = useState<TeamRow | null>(null);
+
+  const { data: team = [] } = useQuery({
+    queryKey: ['employees-team'],
+    queryFn: () => employeesApi.team(),
+    refetchInterval: 60_000,
+  });
+
+  const filtered = useMemo(() => {
+    if (!q) return team;
+    const needle = q.trim().toLowerCase();
+    return team.filter(
+      (t: TeamRow) =>
+        t.full_name?.toLowerCase().includes(needle) ||
+        t.username?.toLowerCase().includes(needle) ||
+        t.employee_no?.toLowerCase().includes(needle),
+    );
+  }, [team, q]);
+
+  return (
+    <div className="space-y-5">
       {pending.length > 0 && (
         <PendingInbox requests={pending} />
       )}
