@@ -1144,10 +1144,24 @@ export class EmployeesService {
             ]
           : [];
 
+      // journal_entries.reference_id is UUID-typed but employee_
+      // settlements.id is BIGSERIAL, so passing String(row.id) gave
+      // `invalid input syntax for type uuid: "N"` and blocked every
+      // settlement from ever posting (0 rows on live pre-this-fix,
+      // so the bug was latent until PR #77 first exercised the
+      // payout path). Compute a deterministic v5 UUID derived from
+      // the settlement's bigint id — idempotent on retry (same id →
+      // same uuid → engine skips duplicates), and leaves a visible
+      // `reference_id` on journal_entries that correlates 1:1 with
+      // the employee_settlements row.
+      const [{ ref }] = await em.query(
+        `SELECT uuid_generate_v5(uuid_ns_oid(), 'employee_settlement:' || $1::text) AS ref`,
+        [row.id],
+      );
       const res = await engine.recordTransaction({
         kind: 'manual_adjustment',
         reference_type: 'employee_settlement',
-        reference_id: String(row.id),
+        reference_id: ref,
         description,
         gl_lines: [dr, cr],
         cash_movements: cashMovements,
