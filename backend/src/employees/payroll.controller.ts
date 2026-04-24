@@ -52,8 +52,16 @@ import {
 class CreatePayrollDto {
   @IsUUID() employee_id!: string;
   @IsDateString() @IsOptional() txn_date?: string;
-  @IsIn(['wage', 'bonus', 'deduction', 'expense', 'advance', 'payout'])
-  type!: 'wage' | 'bonus' | 'deduction' | 'expense' | 'advance' | 'payout';
+  // 'expense' was intentionally removed (2026‑04). Its GL recipe was
+  // DR 529 مصروفات متفرقة / CR 213, hiding a real reimbursable
+  // expense inside "miscellaneous" — the same anti‑pattern PR #64/#65
+  // closed on the main expenses flow. The DTO had no category picker,
+  // so every reimbursement landed on 529. Until a proper
+  // "expense_account_code"-aware DTO + UI is designed, we refuse the
+  // type at the boundary. 0 historical rows on live — no
+  // reclassification needed.
+  @IsIn(['wage', 'bonus', 'deduction', 'advance', 'payout'])
+  type!: 'wage' | 'bonus' | 'deduction' | 'advance' | 'payout';
   @IsNumber() @IsPositive() amount!: number;
   @IsOptional() @IsString() description?: string;
   @IsOptional() @IsUUID() cashbox_id?: string;

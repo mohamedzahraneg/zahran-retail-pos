@@ -46,7 +46,6 @@ const EGP = (n: number | string) =>
 const TYPE_STYLES: Record<EmpTxnType, string> = {
   wage: 'bg-emerald-100 text-emerald-800 border-emerald-200',
   bonus: 'bg-indigo-100 text-indigo-800 border-indigo-200',
-  expense: 'bg-amber-100 text-amber-800 border-amber-200',
   deduction: 'bg-rose-100 text-rose-800 border-rose-200',
   advance: 'bg-purple-100 text-purple-800 border-purple-200',
   payout: 'bg-slate-200 text-slate-800 border-slate-300',
@@ -122,13 +121,12 @@ export default function Payroll() {
 
   // Totals for the header KPIs (filtered list).
   const totals = useMemo(() => {
-    const t = { wages: 0, bonuses: 0, deductions: 0, expenses: 0, advances: 0 };
+    const t = { wages: 0, bonuses: 0, deductions: 0, advances: 0 };
     for (const r of filteredTxns) {
       const a = Number(r.amount);
       if (r.type === 'wage') t.wages += a;
       if (r.type === 'bonus') t.bonuses += a;
       if (r.type === 'deduction') t.deductions += a;
-      if (r.type === 'expense') t.expenses += a;
       if (r.type === 'advance') t.advances += a;
     }
     return t;
@@ -275,15 +273,10 @@ export default function Payroll() {
           )}
         </div>
 
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
           <MiniStat label="يوميات" value={EGP(totals.wages)} tone="emerald" />
           <MiniStat label="مكافآت" value={EGP(totals.bonuses)} tone="indigo" />
           <MiniStat label="خصومات" value={EGP(totals.deductions)} tone="rose" />
-          <MiniStat
-            label="مصروفات (نيابة)"
-            value={EGP(totals.expenses)}
-            tone="amber"
-          />
           <MiniStat label="سلف" value={EGP(totals.advances)} tone="purple" />
         </div>
       </section>
