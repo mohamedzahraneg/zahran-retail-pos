@@ -376,10 +376,26 @@ export class FinancialHealthService {
       }
       for (const c of candidates) {
         try {
+          // Suppress re-detection when a resolved=TRUE anomaly already
+          // exists for the same (anomaly_type, affected_entity,
+          // reference_id). Otherwise the scanner re-creates a fresh
+          // resolved=FALSE row on every tick (the ux_anomalies_open_slot
+          // UNIQUE constraint lets resolved=TRUE and resolved=FALSE
+          // coexist per ref → once the open one is resolved, the slot
+          // re-opens for a duplicate). Migration 072 cleans the
+          // existing duplicates; this guard stops them from recurring.
           const res = await this.ds.query(
-            `INSERT INTO financial_anomalies
+            `WITH guard AS (
+               SELECT 1 FROM financial_anomalies
+                WHERE anomaly_type   = $2
+                  AND affected_entity = $4
+                  AND reference_id   = $5
+                  AND resolved       = TRUE
+             )
+             INSERT INTO financial_anomalies
                (severity, anomaly_type, description, affected_entity, reference_id, details)
-             VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+             SELECT $1, $2, $3, $4, $5, $6::jsonb
+              WHERE NOT EXISTS (SELECT 1 FROM guard)
              ON CONFLICT (anomaly_type, affected_entity, reference_id, resolved) DO NOTHING
              RETURNING anomaly_id`,
             [rule.sev, rule.type, c.description, c.affected_entity, c.reference_id, JSON.stringify(c.details ?? {})],

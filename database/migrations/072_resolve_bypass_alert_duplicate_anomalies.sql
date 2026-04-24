@@ -86,70 +86,102 @@
 
 BEGIN;
 
--- Engine-context so the UPDATE passes fn_engine_write_allowed. We use
--- the `migration:*` identity since this is schema-migration bookkeeping,
--- not an application flow.
+-- Engine-context so the UPDATE / DELETE passes fn_engine_write_allowed.
+-- We use the `migration:*` identity since this is schema-migration
+-- bookkeeping, not an application flow.
 SET LOCAL app.engine_context = 'migration:072_resolve_bypass_alert_duplicate_anomalies';
 
-WITH safe AS (
-  -- Only target anomalies where a paired JE is LIVE, POSTED, and BALANCED.
-  -- A row that does NOT satisfy this is untouched — it becomes an
-  -- operator-review case, which is the correct default.
-  SELECT fa.anomaly_id
-    FROM financial_anomalies fa
-   WHERE fa.anomaly_type = 'legacy_bypass_journal_entry'
-     AND fa.resolved = FALSE
-     AND (
-       -- Flavour A: affected row IS a journal_entry
-       EXISTS (
-         SELECT 1
-           FROM journal_entries je
-           JOIN journal_lines jl ON jl.entry_id = je.id
-          WHERE fa.affected_entity = 'journal_entries'
-            AND je.id::text = fa.reference_id
-            AND je.is_posted AND NOT je.is_void
-          GROUP BY je.id
-         HAVING ABS(SUM(jl.debit) - SUM(jl.credit)) < 0.01
-       )
-       -- Flavour B: affected row IS a journal_line → its entry must be balanced
-       OR EXISTS (
-         SELECT 1
-           FROM journal_lines jl
-           JOIN journal_entries je ON je.id = jl.entry_id
-           JOIN journal_lines  jlx ON jlx.entry_id = je.id
-          WHERE fa.affected_entity = 'journal_lines'
-            AND jl.id::text = fa.reference_id
-            AND je.is_posted AND NOT je.is_void
-          GROUP BY je.id
-         HAVING ABS(SUM(jlx.debit) - SUM(jlx.credit)) < 0.01
-       )
-       -- Flavour C: affected row IS a cashbox_transaction → its paired
-       -- source-document JE must be balanced
-       OR EXISTS (
-         SELECT 1
-           FROM cashbox_transactions ct
-           JOIN journal_entries je
-             ON je.reference_type::text = ct.reference_type::text
-            AND je.reference_id::text   = ct.reference_id::text
-           JOIN journal_lines jl ON jl.entry_id = je.id
-          WHERE fa.affected_entity = 'cashbox_transactions'
-            AND ct.id::text = fa.reference_id
-            AND je.is_posted AND NOT je.is_void
-          GROUP BY je.id
-         HAVING ABS(SUM(jl.debit) - SUM(jl.credit)) < 0.01
-       )
+-- ─── Step 1 — identify open anomalies whose paired JE is PROVEN balanced.
+--     These are the only ones we touch. Anything else is operator-review.
+CREATE TEMP TABLE _mig_072_safe ON COMMIT DROP AS
+SELECT fa.anomaly_id, fa.anomaly_type, fa.affected_entity, fa.reference_id
+  FROM financial_anomalies fa
+ WHERE fa.anomaly_type = 'legacy_bypass_journal_entry'
+   AND fa.resolved = FALSE
+   AND (
+     -- Flavour A: affected row IS a journal_entry
+     EXISTS (
+       SELECT 1
+         FROM journal_entries je
+         JOIN journal_lines jl ON jl.entry_id = je.id
+        WHERE fa.affected_entity = 'journal_entries'
+          AND je.id::text = fa.reference_id
+          AND je.is_posted AND NOT je.is_void
+        GROUP BY je.id
+       HAVING ABS(SUM(jl.debit) - SUM(jl.credit)) < 0.01
      )
-)
+     -- Flavour B: affected row IS a journal_line → its entry must be balanced
+     OR EXISTS (
+       SELECT 1
+         FROM journal_lines jl
+         JOIN journal_entries je ON je.id = jl.entry_id
+         JOIN journal_lines  jlx ON jlx.entry_id = je.id
+        WHERE fa.affected_entity = 'journal_lines'
+          AND jl.id::text = fa.reference_id
+          AND je.is_posted AND NOT je.is_void
+        GROUP BY je.id
+       HAVING ABS(SUM(jlx.debit) - SUM(jlx.credit)) < 0.01
+     )
+     -- Flavour C: affected row IS a cashbox_transaction → its paired
+     -- source-document JE must be balanced
+     OR EXISTS (
+       SELECT 1
+         FROM cashbox_transactions ct
+         JOIN journal_entries je
+           ON je.reference_type::text = ct.reference_type::text
+          AND je.reference_id::text   = ct.reference_id::text
+         JOIN journal_lines jl ON jl.entry_id = je.id
+        WHERE fa.affected_entity = 'cashbox_transactions'
+          AND ct.id::text = fa.reference_id
+          AND je.is_posted AND NOT je.is_void
+        GROUP BY je.id
+       HAVING ABS(SUM(jl.debit) - SUM(jl.credit)) < 0.01
+     )
+   );
+
+-- ─── Step 2 — DELETE pure duplicates.
+--
+-- If an open anomaly has a TWIN row already resolved=TRUE for the same
+-- (anomaly_type, affected_entity, reference_id), then the resolved twin
+-- already captures the event with its full history. The open row is a
+-- noisy re-detection by the scanner. The unique constraint
+-- `ux_anomalies_open_slot` prevents us from flipping the open row's
+-- resolved to TRUE (would conflict with the twin); DELETE is the
+-- correct cleanup. No audit loss — the resolved twin remains.
+DELETE FROM financial_anomalies fa
+ USING _mig_072_safe s
+ WHERE fa.anomaly_id = s.anomaly_id
+   AND EXISTS (
+     SELECT 1 FROM financial_anomalies twin
+      WHERE twin.anomaly_type    = s.anomaly_type
+        AND twin.affected_entity = s.affected_entity
+        AND twin.reference_id    = s.reference_id
+        AND twin.resolved        = TRUE
+   );
+
+-- ─── Step 3 — UPDATE any open anomaly that has NO resolved twin.
+--
+-- These are the "first sighting" cases — we mark them resolved=TRUE
+-- with the full proof note. Unique constraint is fine because no twin
+-- exists to collide with.
 UPDATE financial_anomalies fa
    SET resolved        = TRUE,
        resolved_at     = NOW(),
        resolution_note = COALESCE(
          fa.resolution_note,
-         'Resolved by migration 072 — duplicate of a historical legacy-context write. '
+         'Resolved by migration 072 — historical legacy-context write. '
          || 'The paired journal_entry is posted, non-void, and balanced (DR = CR). '
          || 'Ledger math verified correct; this is a writer-identity-only event. '
          || 'The source bypass was retired by Phase 2.4 (engine-context migration).'
        )
- WHERE fa.anomaly_id IN (SELECT anomaly_id FROM safe);
+ WHERE fa.anomaly_id IN (SELECT anomaly_id FROM _mig_072_safe)
+   AND fa.resolved = FALSE
+   AND NOT EXISTS (
+     SELECT 1 FROM financial_anomalies twin
+      WHERE twin.anomaly_type    = fa.anomaly_type
+        AND twin.affected_entity = fa.affected_entity
+        AND twin.reference_id    = fa.reference_id
+        AND twin.resolved        = TRUE
+   );
 
 COMMIT;
