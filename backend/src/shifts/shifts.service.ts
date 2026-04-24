@@ -555,16 +555,27 @@ export class ShiftsService {
     }
 
     // Variance (surplus OR deficit) → park in pending_close for review.
+    // Persist the LIVE computed expected_closing so the approver modal
+    // (which reads the shifts row directly) doesn't see the stale
+    // shift-opening value. Without this the modal showed fake variances
+    // like "+1,035 surplus" while the real variance was "-7 shortage".
     const [row] = await this.ds.query(
       `UPDATE shifts
           SET status                 = 'pending_close',
               close_requested_at     = NOW(),
               close_requested_by     = $1,
               close_requested_amount = $2::numeric,
+              expected_closing       = $5::numeric,
               close_requested_notes  = $3
         WHERE id = $4
         RETURNING *`,
-      [userId, actual, dto.notes ?? null, id],
+      [
+        userId,
+        actual,
+        dto.notes ?? null,
+        id,
+        Number(summary.expected_closing || 0),
+      ],
     );
     return {
       pending: true,
@@ -595,9 +606,13 @@ export class ShiftsService {
     }
     const actual = Number(shift.close_requested_amount || 0);
 
-    // Pre-flight: compute the expected variance so the manager sees a
-    // sensible error BEFORE close() starts the DB transaction.
-    const expected = Number(shift.expected_closing || 0);
+    // Pre-flight: compute the expected variance LIVE via computeSummary
+    // — NEVER trust the stored shifts.expected_closing here. It may be
+    // stale (pre-fix shifts were opened with expected=opening_balance
+    // and never refreshed until final close). Recomputing guarantees
+    // the manager sees the same number close() will post.
+    const summary = await this.computeSummary(shift);
+    const expected = Number(summary.expected_closing || 0);
     const variance = actual - expected;
     const hasVariance = Math.abs(variance) >= 0.01;
     if (hasVariance) {
@@ -667,14 +682,41 @@ export class ShiftsService {
     return { rejected: true, shift: row };
   }
 
-  /** Admin inbox — every shift waiting on approval. */
-  listPendingCloses() {
-    return this.ds.query(
+  /**
+   * Admin inbox — every shift waiting on approval.
+   *
+   * Enriches each row with a LIVE expected_closing + variance so the
+   * approver modal never has to re-query and never reads the stale
+   * `shifts.expected_closing` column (which, for shifts opened before
+   * the requestClose fix, equals opening_balance — causing the famous
+   * "+1,035 fake surplus" on SHF-2026-00004).
+   */
+  async listPendingCloses() {
+    const rows = await this.ds.query(
       `SELECT s.*, u.full_name AS requested_by_name, u.username AS requested_by_username
          FROM shifts s
          LEFT JOIN users u ON u.id = s.close_requested_by
         WHERE s.status = 'pending_close'
         ORDER BY s.close_requested_at DESC`,
+    );
+    return Promise.all(
+      rows.map(async (s: any) => {
+        try {
+          const live = await this.computeSummary(s);
+          const expectedLive = Number(live.expected_closing || 0);
+          const actual = Number(s.close_requested_amount || 0);
+          return {
+            ...s,
+            expected_closing_live: expectedLive,
+            variance_live: actual - expectedLive,
+          };
+        } catch {
+          // If the live compute fails for any reason fall back to the
+          // stored values so the inbox still renders. The approval
+          // path itself recomputes live anyway — this is UI-only.
+          return s;
+        }
+      }),
     );
   }
 
