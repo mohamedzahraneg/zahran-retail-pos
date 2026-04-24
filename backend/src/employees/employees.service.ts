@@ -31,6 +31,7 @@ export class EmployeesService {
               u.hire_date, u.salary_amount, u.salary_frequency,
               u.target_hours_day, u.target_hours_week, u.overtime_rate,
               u.shift_start_time, u.shift_end_time, u.late_grace_min,
+              u.ledger_reset_date,
               r.name_ar AS role_name, r.code AS role_code
          FROM users u
          LEFT JOIN roles r ON r.id = u.role_id
@@ -78,13 +79,85 @@ export class EmployeesService {
   }
 
   /**
-   * Personal dashboard payload — everything the employee sees on the
-   * home page.
+   * Resolve a selected month (YYYY-MM) into first/last day in Cairo time.
+   * Falls back to the current month when the input is missing or
+   * malformed — never throws, since this runs inside /dashboard where a
+   * bad query param shouldn't 500.
    */
-  async myDashboard(userId: string) {
+  private monthBounds(month?: string): {
+    from: string;
+    to: string;
+    label: string;
+    isCurrent: boolean;
+  } {
+    const now = new Date();
+    const todayParts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Africa/Cairo',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(now);
+    const curY = todayParts.find((x) => x.type === 'year')!.value;
+    const curM = todayParts.find((x) => x.type === 'month')!.value;
+
+    const match = (month || '').match(/^(\d{4})-(\d{2})$/);
+    const y = match ? match[1] : curY;
+    const m = match ? match[2] : curM;
+
+    const first = `${y}-${m}-01`;
+    // Last day via "first of next month − 1 day" — handled by Postgres
+    // when used as a query arg; here we just do the JS calc.
+    const dt = new Date(Date.UTC(Number(y), Number(m), 1));
+    dt.setUTCDate(dt.getUTCDate() - 1);
+    const last =
+      dt.getUTCFullYear() +
+      '-' +
+      String(dt.getUTCMonth() + 1).padStart(2, '0') +
+      '-' +
+      String(dt.getUTCDate()).padStart(2, '0');
+
+    return {
+      from: first,
+      to: last,
+      label: `${y}-${m}`,
+      isCurrent: y === curY && m === curM,
+    };
+  }
+
+  /**
+   * Day before a given YYYY-MM-DD, suitable for opening-balance lookup.
+   */
+  private dayBefore(iso: string): string {
+    const dt = new Date(iso + 'T00:00:00Z');
+    dt.setUTCDate(dt.getUTCDate() - 1);
+    return (
+      dt.getUTCFullYear() +
+      '-' +
+      String(dt.getUTCMonth() + 1).padStart(2, '0') +
+      '-' +
+      String(dt.getUTCDate()).padStart(2, '0')
+    );
+  }
+
+  /**
+   * Personal dashboard payload — everything the employee sees on the
+   * home page. Accepts an optional `month=YYYY-MM` param so the profile
+   * can scope attendance / accrual / source aggregates to the selected
+   * month. Headline GL numbers include both the live snapshot and
+   * opening/closing balances around the selected month.
+   */
+  async myDashboard(userId: string, month?: string) {
     const profile = await this.getProfile(userId);
-    const { from: mFrom, to: mTo } = this.periodBounds('month');
+    const monthSel = this.monthBounds(month);
+    const mFrom = monthSel.from;
+    const mTo = monthSel.to;
+    // The "week" strip still reflects the real current week — it's a
+    // live indicator on the self-service home screen and shouldn't
+    // shift when the admin picks a historical month for audit.
     const { from: wFrom, to: wTo } = this.periodBounds('week');
+    const resetDate: string | null = profile.ledger_reset_date
+      ? String(profile.ledger_reset_date).slice(0, 10)
+      : null;
 
     // Today's attendance row
     const [todayAtt] = await this.ds.query(
@@ -151,6 +224,42 @@ export class EmployeesService {
           AND NOT is_void`,
       [userId, mFrom, mTo],
     );
+
+    // ─── Canonical monthly wage workflow (migration 082/083/084) ───────
+    // Accrual = what was earned this month (DR 521 / CR 213 rows)
+    // Paid    = what admin actually paid out this month (employee_settlements)
+    // Remaining = max(accrual − paid, 0) for display only — GL balance
+    //             remains the source of truth for "who owes whom".
+    const [accrual] = await this.ds.query(
+      `SELECT COALESCE(SUM(amount_accrued),0)::numeric(14,2) AS amount,
+              COUNT(*)::int AS count
+         FROM employee_payable_days
+        WHERE user_id = $1 AND kind = 'wage_accrual'
+          AND work_date BETWEEN $2::date AND $3::date
+          AND NOT is_void`,
+      [userId, mFrom, mTo],
+    );
+    const [paid] = await this.ds.query(
+      `SELECT COALESCE(SUM(amount),0)::numeric(14,2) AS amount,
+              COUNT(*)::int AS count
+         FROM employee_settlements
+        WHERE user_id = $1
+          AND settlement_date BETWEEN $2::date AND $3::date
+          AND NOT is_void`,
+      [userId, mFrom, mTo],
+    );
+
+    // ─── GL opening / closing balance around the selected month ────────
+    const [openRow] = await this.ds.query(
+      `SELECT fn_employee_gl_balance_as_of($1::uuid, $2::date) AS bal`,
+      [userId, this.dayBefore(mFrom)],
+    );
+    const [closeRow] = await this.ds.query(
+      `SELECT fn_employee_gl_balance_as_of($1::uuid, $2::date) AS bal`,
+      [userId, mTo],
+    );
+    const openingGl = Number(openRow?.bal || 0);
+    const closingGl = Number(closeRow?.bal || 0);
 
     // Open tasks + pending requests
     const tasks = await this.ds.query(
@@ -313,14 +422,26 @@ export class EmployeesService {
       );
     }
 
+    const accrualInMonth = Number(accrual?.amount || 0);
+    const paidInMonth = Number(paid?.amount || 0);
+    const remainingFromAccrual = Math.max(0, accrualInMonth - paidInMonth);
+
     return {
       profile,
-      period: { month: { from: mFrom, to: mTo }, week: { from: wFrom, to: wTo } },
+      period: {
+        month: { from: mFrom, to: mTo, label: monthSel.label, is_current: monthSel.isCurrent },
+        week: { from: wFrom, to: wTo },
+      },
+      ledger_reset: {
+        date: resetDate,
+        has_reset: !!resetDate,
+      },
       attendance: {
-        today: todayAtt || null,
-        today_late_minutes: lateMinutes,
-        today_early_leave_minutes: earlyLeaveMinutes,
-        expected_end_utc: expectedEndUtc,
+        // Today's row is only meaningful when viewing the current month.
+        today: monthSel.isCurrent ? todayAtt || null : null,
+        today_late_minutes: monthSel.isCurrent ? lateMinutes : 0,
+        today_early_leave_minutes: monthSel.isCurrent ? earlyLeaveMinutes : 0,
+        expected_end_utc: monthSel.isCurrent ? expectedEndUtc : null,
         week: {
           minutes: Number(weekAgg.minutes || 0),
           days: Number(weekAgg.days || 0),
@@ -331,24 +452,38 @@ export class EmployeesService {
           days: Number(monthAgg.days || 0),
         },
       },
+      // Canonical monthly wage workflow — the new post-reset cards.
+      wage: {
+        daily_amount: salaryAmount,
+        target_minutes_day: Math.round(targetDay * 60),
+        accrual_in_month: Math.round(accrualInMonth * 100) / 100,
+        accrual_count: Number(accrual?.count || 0),
+        paid_in_month: Math.round(paidInMonth * 100) / 100,
+        paid_count: Number(paid?.count || 0),
+        remaining_from_month_accrual: Math.round(remainingFromAccrual * 100) / 100,
+      },
+      // GL balance headlines — the source of truth.
+      gl: {
+        opening_balance: Math.round(openingGl * 100) / 100,
+        closing_balance: Math.round(closingGl * 100) / 100,
+        live_snapshot: Math.round(Number(glBalance) * 100) / 100,
+      },
       salary: {
         amount: salaryAmount,
         frequency: freq,
         expected: expectedForPeriod,
+        // Legacy source-derived numbers — still shipped so the archived
+        // "السجل القديم قبل التصفير" section in the UI can render them
+        // without a second query. The main post-reset cards come from
+        // `wage` + `gl` above; `salary.*` must NOT drive headline UI.
         accrued: Math.round(accrualBase * 100) / 100,
         bonuses: Number(bonus.amount || 0),
         deductions: Number(deduct.amount || 0),
         advances_month: Number(adv.amount || 0),
         advances_lifetime: Number(advLifetime.amount || 0),
-        // Source-derived net (accrued + bonuses − deductions − advances).
-        // UI treats this as an operational breakdown, not the headline —
-        // `gl_balance` below is the canonical employee GL balance.
         net: Math.round(net * 100) / 100,
         outstanding_debt: Math.round(outstandingDebt * 100) / 100,
         debt_warning: debtWarning,
-        // Canonical from v_employee_gl_balance (COA 1123 + 213).
-        // Positive = employee owes company; negative = company owes
-        // employee. This is the headline the UI must display.
         gl_balance: Math.round(Number(glBalance) * 100) / 100,
       },
       tasks,
@@ -818,11 +953,23 @@ export class EmployeesService {
     opening_balance: number;
     closing_balance: number;
     /**
+     * GL-based opening balance truncated at (from − 1 day). Uses
+     * fn_employee_gl_balance_as_of — the canonical post-reset balance
+     * source. NULL when `from` is not supplied (full history view).
+     */
+    gl_opening_balance: number | null;
+    /**
+     * GL-based closing balance truncated at `to`. Uses
+     * fn_employee_gl_balance_as_of. NULL when `to` is not supplied.
+     */
+    gl_closing_balance: number | null;
+    /**
      * Canonical GL balance from v_employee_gl_balance (COA 1123 + 213,
-     * migration 075). Use this for the headline. `closing_balance` is
-     * the source-table running balance — kept for the breakdown
-     * equation but may differ from gl_balance when opening-balance
-     * or reclassification JEs exist (e.g. PR #73's ledger reset).
+     * migration 075). Use this for the live snapshot headline.
+     * `closing_balance` is the source-table running balance — kept for
+     * the breakdown equation but may differ from gl_balance when
+     * opening-balance or reclassification JEs exist (e.g. PR #73's
+     * ledger reset).
      */
     gl_balance: number;
     /**
@@ -1012,10 +1159,33 @@ export class EmployeesService {
       };
     });
 
+    // GL-based opening/closing around the selected range. These are the
+    // canonical post-reset numbers the UI's main cards should use; the
+    // source-delta `opening_balance` / `closing_balance` remain for the
+    // archived "السجل القديم قبل التصفير" section.
+    let glOpening: number | null = null;
+    let glClosing: number | null = null;
+    if (from) {
+      const [o] = await this.ds.query(
+        `SELECT fn_employee_gl_balance_as_of($1::uuid, $2::date) AS bal`,
+        [userId, this.dayBefore(from)],
+      );
+      glOpening = Math.round(Number(o?.bal || 0) * 100) / 100;
+    }
+    if (to) {
+      const [c] = await this.ds.query(
+        `SELECT fn_employee_gl_balance_as_of($1::uuid, $2::date) AS bal`,
+        [userId, to],
+      );
+      glClosing = Math.round(Number(c?.bal || 0) * 100) / 100;
+    }
+
     return {
       user,
       opening_balance: Math.round(opening * 100) / 100,
       closing_balance: Math.round(running * 100) / 100,
+      gl_opening_balance: glOpening,
+      gl_closing_balance: glClosing,
       gl_balance: Math.round(Number(glRow?.balance || 0) * 100) / 100,
       gl_entries,
       entries,

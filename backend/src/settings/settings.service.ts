@@ -470,6 +470,7 @@ export class SettingsService {
         { code: 'attendance.view_team',     label: 'عرض حضور الفريق' },
         { code: 'attendance.adjust',        label: 'تعديل سجل الحضور' },
         { code: 'attendance.reports',       label: 'تقارير الحضور' },
+        { code: 'employee.attendance.manage', label: 'إدارة حضور ويومية الموظفين (نيابة + تثبيت + إلغاء)' },
       ],
       'المستخدمون والأدوار': [
         { code: 'users.view',               label: 'عرض المستخدمين' },

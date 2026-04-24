@@ -120,8 +120,11 @@ export class EmployeesController {
   // ── Self-service (any authenticated user) ──────────────────────────
   @Get('me/dashboard')
   @Permissions('employee.dashboard.view')
-  myDashboard(@CurrentUser() user: JwtUser) {
-    return this.svc.myDashboard(user.userId);
+  myDashboard(
+    @CurrentUser() user: JwtUser,
+    @Query('month') month?: string,
+  ) {
+    return this.svc.myDashboard(user.userId, month);
   }
 
   @Get('me/tasks')
@@ -236,8 +239,11 @@ export class EmployeesController {
 
   @Get(':id/dashboard')
   @Permissions('employee.team.view')
-  userDashboard(@Param('id', ParseUUIDPipe) id: string) {
-    return this.svc.myDashboard(id);
+  userDashboard(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query('month') month?: string,
+  ) {
+    return this.svc.myDashboard(id, month);
   }
 
   // ── Financial Ledger (migration 060) ─────────────────────────────
