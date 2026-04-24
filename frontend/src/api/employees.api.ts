@@ -266,6 +266,21 @@ export interface EmployeeLedgerEntry {
   created_at: string;
 }
 
+export interface EmployeeGlLedgerEntry {
+  entry_no: string;
+  entry_date: string;
+  reference_type: string;
+  reference_id: string;
+  description: string;
+  account_code: '1123' | '213' | string;
+  account_name: string;
+  debit: number;
+  credit: number;
+  /** debit − credit. Positive pushes balance up (owes company more). */
+  signed_effect: number;
+  running_balance: number;
+}
+
 export interface EmployeeLedger {
   user: {
     id: string;
@@ -287,6 +302,13 @@ export interface EmployeeLedger {
    * company owes employee.
    */
   gl_balance: number;
+  /**
+   * Canonical ledger — every posted non-void journal_line tagged with
+   * the employee on accounts 1123 / 213, with running balance. Use
+   * this as the audit trail behind `gl_balance`. Includes
+   * opening-balance resets and reclassification JEs.
+   */
+  gl_entries: EmployeeGlLedgerEntry[];
   entries: EmployeeLedgerEntry[];
   totals: {
     shortages: number;

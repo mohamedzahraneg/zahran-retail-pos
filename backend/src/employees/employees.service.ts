@@ -812,6 +812,28 @@ export class EmployeesService {
      * or reclassification JEs exist (e.g. PR #73's ledger reset).
      */
     gl_balance: number;
+    /**
+     * Canonical ledger — every posted non-void journal_line tagged
+     * with the employee on accounts 1123 ذمم / 213 مستحقات, ordered
+     * chronologically with a running balance. This is the audit trail
+     * behind `gl_balance`: every reset / reclass / bonus / deduction
+     * shows up as its own row. SUM of signed_effect == gl_balance.
+     */
+    gl_entries: Array<{
+      entry_no: string;
+      entry_date: string;
+      reference_type: string;
+      reference_id: string;
+      description: string;
+      account_code: string;
+      account_name: string;
+      debit: number;
+      credit: number;
+      /** debit − credit. Positive pushes employee balance up
+       *  (they owe company more); negative pushes it down. */
+      signed_effect: number;
+      running_balance: number;
+    }>;
     entries: Array<{
       event_date: string;
       entry_type: string;
@@ -930,11 +952,59 @@ export class EmployeesService {
       [userId],
     );
 
+    // Canonical GL ledger — every posted non-void journal_line tagged
+    // with this employee on accounts 1123/213, ordered chronologically.
+    // Opening-balance resets (reference_type='employee_ledger_reset_*')
+    // and reclassification JEs (reference_type='expense_reclass_to_*')
+    // show up as their own rows. SUM(signed_effect) == gl_balance.
+    const glRaw = await this.ds.query(
+      `SELECT je.entry_no,
+              je.entry_date::text AS entry_date,
+              je.reference_type,
+              je.reference_id::text AS reference_id,
+              COALESCE(jl.description, je.description) AS description,
+              coa.code    AS account_code,
+              coa.name_ar AS account_name,
+              jl.debit::numeric(14,2)  AS debit,
+              jl.credit::numeric(14,2) AS credit,
+              jl.line_no
+         FROM journal_lines jl
+         JOIN journal_entries je ON je.id = jl.entry_id
+         JOIN chart_of_accounts coa ON coa.id = jl.account_id
+        WHERE COALESCE(jl.employee_id, jl.employee_user_id) = $1
+          AND coa.code IN ('1123', '213')
+          AND je.is_posted = TRUE
+          AND je.is_void   = FALSE
+        ORDER BY je.entry_date ASC, je.entry_no ASC, jl.line_no ASC`,
+      [userId],
+    );
+    let glRunning = 0;
+    const gl_entries = glRaw.map((r: any) => {
+      const debit = Number(r.debit);
+      const credit = Number(r.credit);
+      const signed_effect = Math.round((debit - credit) * 100) / 100;
+      glRunning = Math.round((glRunning + signed_effect) * 100) / 100;
+      return {
+        entry_no: r.entry_no,
+        entry_date: r.entry_date,
+        reference_type: r.reference_type,
+        reference_id: r.reference_id,
+        description: r.description || '',
+        account_code: r.account_code,
+        account_name: r.account_name,
+        debit,
+        credit,
+        signed_effect,
+        running_balance: glRunning,
+      };
+    });
+
     return {
       user,
       opening_balance: Math.round(opening * 100) / 100,
       closing_balance: Math.round(running * 100) / 100,
       gl_balance: Math.round(Number(glRow?.balance || 0) * 100) / 100,
+      gl_entries,
       entries,
       totals: {
         shortages: Math.round(totals.shortages * 100) / 100,

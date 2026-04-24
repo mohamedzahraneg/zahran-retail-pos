@@ -557,6 +557,97 @@ function FinancialLedgerCard({ userId }: { userId?: string }) {
         </div>
       </div>
 
+      {/* ─── Canonical GL ledger — explains gl_balance ───────────────
+           Every posted non-void journal_line on 1123 / 213 tagged
+           with this employee, chronologically. Reset + reclassification
+           JEs appear here as first-class rows. SUM(signed_effect) ==
+           gl_balance. This is the audit trail behind the headline. */}
+      <div className="space-y-2">
+        <div className="flex items-center justify-between">
+          <h4 className="text-sm font-black text-slate-800">
+            قيود اليومية — الرصيد النهائي من القيود المحاسبية
+          </h4>
+          <span className="text-[10px] text-slate-500">
+            حسابات 1123 ذمم / 213 مستحقات · مجموع = {fmt(headlineBal)}
+          </span>
+        </div>
+        {(!data.gl_entries || data.gl_entries.length === 0) ? (
+          <div className="text-center text-slate-500 text-xs py-4">
+            لا توجد قيود محاسبية مرتبطة بالموظف.
+          </div>
+        ) : (
+          <div className="overflow-x-auto border border-slate-200 rounded-lg">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="bg-slate-50 text-slate-600 text-[11px]">
+                  <th className="p-2 text-right">التاريخ</th>
+                  <th className="p-2 text-right">قيد</th>
+                  <th className="p-2 text-right">الحساب</th>
+                  <th className="p-2 text-right">المرجع</th>
+                  <th className="p-2 text-center">مدين</th>
+                  <th className="p-2 text-center">دائن</th>
+                  <th className="p-2 text-center">الأثر</th>
+                  <th className="p-2 text-center">الرصيد</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.gl_entries.map((g, i) => (
+                  <tr key={`${g.entry_no}-${i}`} className="border-t border-slate-100">
+                    <td className="p-2 tabular-nums font-mono">{g.entry_date}</td>
+                    <td className="p-2 font-mono text-[11px] text-slate-600">
+                      {g.entry_no}
+                    </td>
+                    <td className="p-2">
+                      <span
+                        className={`chip text-[10px] ${
+                          g.account_code === '1123'
+                            ? 'bg-amber-50 text-amber-700 border-amber-200'
+                            : 'bg-indigo-50 text-indigo-700 border-indigo-200'
+                        }`}
+                      >
+                        {g.account_code} {g.account_name}
+                      </span>
+                    </td>
+                    <td className="p-2 text-slate-700">
+                      <div className="text-[11px]">{g.description}</div>
+                      <div className="text-[10px] text-slate-400 font-mono">
+                        {g.reference_type}
+                      </div>
+                    </td>
+                    <td className="p-2 text-center tabular-nums">
+                      {g.debit > 0 ? fmt(g.debit) : '—'}
+                    </td>
+                    <td className="p-2 text-center tabular-nums">
+                      {g.credit > 0 ? fmt(g.credit) : '—'}
+                    </td>
+                    <td
+                      className={`p-2 text-center tabular-nums font-bold ${
+                        g.signed_effect > 0
+                          ? 'text-rose-700'
+                          : g.signed_effect < 0
+                            ? 'text-emerald-700'
+                            : 'text-slate-500'
+                      }`}
+                    >
+                      {g.signed_effect > 0 ? '+' : ''}
+                      {fmt(g.signed_effect)}
+                    </td>
+                    <td className="p-2 text-center tabular-nums font-black">
+                      {fmt(g.running_balance)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* ─── Legacy source-table log (kept as secondary history) ─── */}
+      <div className="pt-3 border-t border-slate-200 space-y-2">
+        <h4 className="text-sm font-bold text-slate-700">
+          سجل العمليات الأصلي — مصدري (لا يمثل الرصيد النهائي)
+        </h4>
       {data.entries.length === 0 ? (
         <div className="text-center text-slate-500 text-xs py-6">
           لا توجد حركات مالية في الفترة المحددة.
@@ -628,6 +719,7 @@ function FinancialLedgerCard({ userId }: { userId?: string }) {
           </table>
         </div>
       )}
+      </div>
     </div>
   );
 }
@@ -733,6 +825,10 @@ function HistoryCard({ userId }: { userId?: string }) {
       toast.success('تم صرف اليومية الكاملة كمكافأة');
       qc.invalidateQueries({ queryKey: ['employee-history-mine'] });
       qc.invalidateQueries({ queryKey: ['employee-dashboard'] });
+      qc.invalidateQueries({ queryKey: ['payroll-balances'] });
+      qc.invalidateQueries({ queryKey: ['payroll-list'] });
+      qc.invalidateQueries({ queryKey: ['employee-ledger'] });
+      qc.invalidateQueries({ queryKey: ['employees-team'] });
     },
     onError: (e: any) =>
       toast.error(e?.response?.data?.message || 'فشل صرف اليومية'),
