@@ -140,6 +140,22 @@ export class AttendanceController {
     return this.svc.adminVoidWageAccrual(payableDayId, body.reason, user.userId);
   }
 
+  @Post('admin/pay-wage')
+  @Permissions('employee.ledger.view')
+  payWage(
+    @CurrentUser() user: JwtUser,
+    @Body()
+    body: {
+      user_id: string;
+      amount: number;
+      cashbox_id: string;
+      excess_handling?: 'advance' | 'bonus';
+      notes?: string;
+    },
+  ) {
+    return this.svc.payWage(body.user_id, body, user.userId, user.permissions);
+  }
+
   @Get('payable-days')
   @Permissions('employee.attendance.manage')
   payableDays(

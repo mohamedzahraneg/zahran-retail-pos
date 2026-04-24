@@ -435,7 +435,10 @@ function AddTxnModal({
 }) {
   const [form, setForm] = useState<CreateEmpTxn>({
     employee_id: defaultEmployeeId || employees[0]?.id || '',
-    type: 'wage',
+    // Default = bonus. 'wage' is no longer a write-side option here —
+    // daily wage is recorded via the attendance / تثبيت يومية workflow
+    // (PR #88). Backend rejects type='wage' on POST /payroll with 400.
+    type: 'bonus',
     amount: 0,
     txn_date: new Date().toISOString().slice(0, 10),
     description: '',
@@ -463,6 +466,15 @@ function AddTxnModal({
             <X className="w-5 h-5" />
           </button>
         </div>
+        {/* Wage moved to the attendance/payable-day workflow (PR #88).
+            Reminder visible at the top of every entry to keep users
+            from looking for "يومية" in the type picker. */}
+        <div className="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-[11px] text-indigo-900 leading-relaxed">
+          اليومية تُسجَّل من مسار الحضور / تثبيت يومية، وليست كحركة يدوية هنا.
+          استخدم زر <span className="font-bold">«تثبيت يومية»</span> في الملف
+          الشخصي للموظف لتسجيل استحقاق اليومية، ثم
+          <span className="font-bold"> «صرف يومية» </span> لصرف المبلغ من الخزنة.
+        </div>
         <div>
           <label className="label">الموظف *</label>
           <select
@@ -482,7 +494,7 @@ function AddTxnModal({
         </div>
         <div>
           <label className="label">النوع *</label>
-          <div className="grid grid-cols-2 gap-1">
+          <div className="grid grid-cols-3 gap-1">
             {CREATE_TXN_TYPES.map((t) => (
               <button
                 key={t}

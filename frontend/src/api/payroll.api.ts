@@ -18,14 +18,19 @@ export type EmpTxnType =
 
 /**
  * Narrower union for write-side surfaces (CreateEmpTxn below, and the
- * type-picker button grid in the Payroll modal). Excludes 'advance'
- * and 'expense' — the display EmpTxnType still includes them so
- * historical rows render correctly.
+ * type-picker button grid in the Payroll modal). Excludes:
+ *   - 'advance' — canonical path is POST /accounting/expenses with
+ *                 is_advance=TRUE (audit #4 dual-write fix).
+ *   - 'wage'    — canonical path is the attendance / payable-day
+ *                 workflow (PR #88 + PR-1). Direct wage rows from
+ *                 this modal raced with payable_days inserts and
+ *                 surfaced as the user-facing duplicate-entry error.
+ *                 The backend rejects type='wage' on POST /payroll
+ *                 with a 400 + redirect to /attendance/admin/*.
  */
-export type CreatePayrollType = Exclude<EmpTxnType, 'advance'>;
+export type CreatePayrollType = Exclude<EmpTxnType, 'advance' | 'wage'>;
 
 export const CREATE_TXN_TYPES: readonly CreatePayrollType[] = [
-  'wage',
   'bonus',
   'deduction',
   'payout',
