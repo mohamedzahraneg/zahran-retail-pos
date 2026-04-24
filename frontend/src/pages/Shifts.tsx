@@ -1399,9 +1399,18 @@ function PendingCloseInbox() {
               <button
                 className="px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[11px]"
                 onClick={() => {
-                  const expected = Number(s.expected_closing || 0);
+                  // Same rule as the modal — prefer the live variance
+                  // emitted by /shifts/pending-close. Using the stale
+                  // stored column here would sometimes skip the
+                  // treatment modal for a shift that actually has a
+                  // non-zero live variance.
+                  const expected = Number(
+                    (s as any).expected_closing_live ?? s.expected_closing ?? 0,
+                  );
                   const actual = Number(s.close_requested_amount || 0);
-                  const variance = actual - expected;
+                  const variance = Number(
+                    (s as any).variance_live ?? actual - expected,
+                  );
                   if (Math.abs(variance) < 0.01) {
                     // No variance → no treatment needed, approve straight.
                     approve.mutate({ id: s.id, payload: {} });
@@ -1518,9 +1527,19 @@ function ApproveVarianceDialog({
   onConfirm: (payload: ApproveClosePayload) => void;
   pending: boolean;
 }) {
-  const expected = Number(shift.expected_closing || 0);
+  // Prefer the LIVE figures returned by /shifts/pending-close over the
+  // stored `shifts.expected_closing` column. The stored value was set
+  // once at shift open (= opening_balance) and never refreshed during
+  // pending_close for shifts opened before the backend fix — reading
+  // it directly produced the "+1,035 fake surplus vs. real -7 shortage"
+  // bug on SHF-2026-00004.
+  const expected = Number(
+    (shift as any).expected_closing_live ?? shift.expected_closing ?? 0,
+  );
   const actual = Number(shift.close_requested_amount || 0);
-  const variance = actual - expected;
+  const variance = Number(
+    (shift as any).variance_live ?? actual - expected,
+  );
   const isShortage = variance < 0;
 
   const [treatment, setTreatment] = useState<VarianceTreatment>(

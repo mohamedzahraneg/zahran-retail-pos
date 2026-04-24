@@ -113,6 +113,10 @@ export interface Shift {
   variance_type?: 'shortage' | 'overage' | 'zero' | null;
   variance_approved_by?: string | null;
   variance_approved_at?: string | null;
+  // Live values injected by /shifts/pending-close (not DB columns) —
+  // present only on that endpoint's rows. See shifts.service.listPendingCloses.
+  expected_closing_live?: number | null;
+  variance_live?: number | null;
   invoices?: Array<{
     id: string;
     invoice_no: string;
