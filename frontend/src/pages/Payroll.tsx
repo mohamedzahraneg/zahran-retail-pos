@@ -55,12 +55,15 @@ const TYPE_STYLES: Record<EmpTxnType, string> = {
 
 export default function Payroll() {
   const hasPermission = useAuthStore((s) => s.hasPermission);
-  // Write-side gate — matches the backend PayrollController, which
-  // enforces @Permissions('employee.deductions.manage') on POST /
-  // PATCH / DELETE. Route visibility is gated separately on
-  // `employee.team.view` (same permission that reveals /team and the
-  // read endpoints — see App.tsx and Sidebar.tsx).
+  const user = useAuthStore((s) => s.user);
+  // Write-side gate for CREATE/UPDATE (bonus, deduction, payout,
+  // wage) — backend enforces @Permissions('employee.deductions.manage').
   const canManage = hasPermission('employee.deductions.manage');
+  // Void gate — admin-only. Backend enforces @Roles('admin') on
+  // DELETE /payroll/:id (now void, not hard delete). Managers can
+  // create but cannot void — voids are a destructive accounting
+  // action reserved for admins.
+  const canVoid = user?.role === 'admin';
 
   const qc = useQueryClient();
   const [addOpen, setAddOpen] = useState(false);
@@ -103,9 +106,15 @@ export default function Payroll() {
   const remove = useMutation({
     mutationFn: (id: string) => payrollApi.remove(id),
     onSuccess: () => {
-      toast.success('تم حذف الحركة');
+      toast.success('تم إلغاء أثر الحركة محاسبيًا (لم يتم الحذف النهائي)');
+      // Void touches every canonical balance consumer — invalidate
+      // all of them so headline + gl_entries + team drawer refetch.
       qc.invalidateQueries({ queryKey: ['payroll-list'] });
       qc.invalidateQueries({ queryKey: ['payroll-balances'] });
+      qc.invalidateQueries({ queryKey: ['employee-ledger'] });
+      qc.invalidateQueries({ queryKey: ['employee-dashboard'] });
+      qc.invalidateQueries({ queryKey: ['employee-user-dashboard'] });
+      qc.invalidateQueries({ queryKey: ['employees-team'] });
     },
     onError: (e: any) =>
       toast.error(e?.response?.data?.message || 'فشل الحذف'),
@@ -343,15 +352,19 @@ export default function Payroll() {
                     {r.created_by_name || '—'}
                   </td>
                   <td className="p-3">
-                    {canManage && (
+                    {canVoid && (
                       <button
                         onClick={() => {
-                          if (window.confirm('حذف هذه الحركة؟')) {
+                          if (
+                            window.confirm(
+                              'سيتم إلغاء أثر هذه الحركة محاسبيًا وليس حذفها نهائيًا. هل أنت متأكد؟',
+                            )
+                          ) {
                             remove.mutate(r.id);
                           }
                         }}
                         className="icon-btn text-rose-600"
-                        title="حذف"
+                        title="إلغاء أثر الحركة (Admin only)"
                       >
                         <Trash2 className="w-4 h-4" />
                       </button>

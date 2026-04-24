@@ -22,7 +22,8 @@ import {
   IsString,
   IsUUID,
 } from 'class-validator';
-import { Permissions } from '../common/decorators/roles.decorator';
+import { Permissions, Roles } from '../common/decorators/roles.decorator';
+import { ForbiddenException } from '@nestjs/common';
 import {
   CurrentUser,
   JwtUser,
@@ -562,15 +563,180 @@ export class PayrollController {
     return row;
   }
 
+  /**
+   * Admin-only void. The Payroll UI's delete button calls this
+   * endpoint. It dispatches by the prefix encoded in the id (from
+   * the UNION SELECT in `list()`):
+   *
+   *   bon:<id>  → employee_bonuses.is_void=true → cascade
+   *               (migration 040 mirror DELETEs employee_transactions
+   *               row → migration 038 fn_trg_employee_txn_post
+   *               UPDATEs journal_entries.is_void=true)
+   *   ded:<id>  → employee_deductions.is_void=true → same cascade
+   *   set:<id>  → three-step: (a) fn_record_cashbox_txn reversing
+   *               out if method=cash/bank, (b) UPDATE
+   *               journal_entries.is_void=true for the linked JE,
+   *               (c) UPDATE employee_settlements.is_void=true
+   *   adv:<id>  → REFUSED (expense advances have their own flow;
+   *               voiding here would orphan expense_no + cashbox)
+   *   <uuid>    → employee_transactions DELETE (wage only, since
+   *               bonus/deduction/expense types are disabled and
+   *               advance/expense delegation routes through
+   *               canonical tables via PR #77). Protected
+   *               reference_types refused before delete.
+   *
+   * Protected reference types (hardcoded): never deletable from
+   * here, regardless of role —
+   *   * employee_ledger_reset_2026_04 (opening-balance adjustments)
+   *   * expense_reclass_to_1123       (expense reclassifications)
+   *
+   * Role gate: admin only. Managers/accountants can create via the
+   * regular flows but cannot void.
+   */
   @Delete(':id')
-  @Permissions('employee.deductions.manage')
-  @ApiOperation({ summary: 'حذف حركة (الـ trigger يعكس القيد تلقائياً)' })
-  async remove(@Param('id', ParseUUIDPipe) id: string) {
+  @Roles('admin')
+  @ApiOperation({
+    summary:
+      'إلغاء أثر حركة (void — ليس حذف نهائي). Admin-only.',
+  })
+  async voidTxn(
+    @Param('id') id: string,
+    @CurrentUser() user: JwtUser,
+  ) {
+    const PROTECTED_REF_TYPES = [
+      'employee_ledger_reset_2026_04',
+      'expense_reclass_to_1123',
+    ];
+    const voidReason = 'Admin void via Payroll UI';
+    const userId = user.userId;
+
+    // Prefix dispatch
+    if (id.startsWith('bon:')) {
+      const rawId = id.slice(4);
+      const [row] = await this.ds.query(
+        `UPDATE employee_bonuses
+            SET is_void = TRUE,
+                voided_at = NOW(),
+                voided_by = $2,
+                void_reason = $3
+          WHERE id = $1::bigint AND is_void = FALSE
+          RETURNING id`,
+        [rawId, userId, voidReason],
+      );
+      if (!row) throw new NotFoundException('الحافز غير موجود أو ملغى مسبقاً');
+      return { voided: true, source: 'employee_bonuses', id: rawId };
+    }
+
+    if (id.startsWith('ded:')) {
+      const rawId = id.slice(4);
+      const [row] = await this.ds.query(
+        `UPDATE employee_deductions
+            SET is_void = TRUE,
+                voided_at = NOW(),
+                voided_by = $2,
+                void_reason = $3
+          WHERE id = $1::bigint AND is_void = FALSE
+          RETURNING id`,
+        [rawId, userId, voidReason],
+      );
+      if (!row) throw new NotFoundException('الخصم غير موجود أو ملغى مسبقاً');
+      return { voided: true, source: 'employee_deductions', id: rawId };
+    }
+
+    if (id.startsWith('set:')) {
+      const rawId = id.slice(4);
+      return this.ds.transaction(async (em) => {
+        await em.query(
+          `SELECT set_config('app.engine_context', 'admin_void:payroll', true)`,
+        );
+        const [s] = await em.query(
+          `SELECT id, user_id, amount, method, cashbox_id,
+                  journal_entry_id, is_void, created_by
+             FROM employee_settlements
+            WHERE id = $1::bigint`,
+          [rawId],
+        );
+        if (!s) throw new NotFoundException('التسوية غير موجودة');
+        if (s.is_void) {
+          throw new BadRequestException('التسوية ملغاة مسبقاً');
+        }
+        // (a) Reverse cashbox if cash moved
+        if (
+          (s.method === 'cash' || s.method === 'bank') &&
+          s.cashbox_id
+        ) {
+          await em.query(
+            `SELECT fn_record_cashbox_txn($1::uuid, 'out', $2::numeric,
+                                          'employee_settlement_reversal',
+                                          'other',
+                                          $3::uuid, $4::uuid, $5)`,
+            [
+              s.cashbox_id,
+              s.amount,
+              s.journal_entry_id,
+              userId,
+              `${voidReason} — reversing settlement id=${s.id}`,
+            ],
+          );
+        }
+        // (b) Void the JE
+        if (s.journal_entry_id) {
+          await em.query(
+            `UPDATE journal_entries
+                SET is_void = TRUE,
+                    voided_at = NOW(),
+                    voided_by = $2,
+                    void_reason = $3
+              WHERE id = $1::uuid AND is_void = FALSE`,
+            [s.journal_entry_id, userId, voidReason],
+          );
+        }
+        // (c) Void the source row
+        await em.query(
+          `UPDATE employee_settlements
+              SET is_void = TRUE,
+                  voided_at = NOW(),
+                  voided_by = $2,
+                  void_reason = $3
+            WHERE id = $1::bigint`,
+          [rawId, userId, voidReason],
+        );
+        return { voided: true, source: 'employee_settlements', id: rawId };
+      });
+    }
+
+    if (id.startsWith('adv:')) {
+      throw new BadRequestException(
+        'لا يمكن إلغاء سلفة من هذه الصفحة — استخدم صفحة المصروفات اليومية',
+      );
+    }
+
+    // Fallback: UUID → employee_transactions direct insert (wage only
+    // on new writes). Refuse if the linked JE has a protected
+    // reference_type, even though those shouldn't reach the UI.
+    const [je] = await this.ds.query(
+      `SELECT je.reference_type
+         FROM journal_entries je
+        WHERE je.reference_type = 'employee_txn'
+          AND je.reference_id::text = $1
+          AND je.is_posted AND NOT je.is_void
+        LIMIT 1`,
+      [id],
+    );
+    if (!je) {
+      throw new NotFoundException('الحركة غير موجودة');
+    }
+    // Protected-ref safety (defense-in-depth; UI never exposes these)
+    if (PROTECTED_REF_TYPES.includes(je.reference_type)) {
+      throw new ForbiddenException(
+        'قيود التسوية والتصحيح محمية — لا يمكن إلغاؤها من هذه الواجهة',
+      );
+    }
     const res = await this.ds.query(
-      `DELETE FROM employee_transactions WHERE id = $1 RETURNING id`,
+      `DELETE FROM employee_transactions WHERE id = $1::uuid RETURNING id`,
       [id],
     );
     if (!res.length) throw new NotFoundException('الحركة غير موجودة');
-    return { deleted: true, id };
+    return { voided: true, source: 'employee_transactions', id };
   }
 }
