@@ -1,0 +1,16 @@
+[Unit]
+Description=Run Zahran weekly drift check every Sunday at 03:00 UTC
+Documentation=https://github.com/mohamedzahraneg/zahran-retail-pos/blob/main/docs/WORKFLOW.md
+
+[Timer]
+# Every Sunday at 03:00 UTC. Server TZ is UTC (verified via `date -u`).
+OnCalendar=Sun *-*-* 03:00:00 UTC
+# If the timer was inactive when the trigger fired (reboot, maintenance),
+# run the check at the next available opportunity.
+Persistent=true
+# Random 5-minute spread avoids thundering-herd if other VPS-wide crons exist.
+RandomizedDelaySec=300
+Unit=zahran-weekly-drift.service
+
+[Install]
+WantedBy=timers.target

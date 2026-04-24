@@ -1,0 +1,19 @@
+[Unit]
+Description=Zahran weekly drift check — read-only audit of VPS↔GitHub↔Supabase alignment
+Documentation=https://github.com/mohamedzahraneg/zahran-retail-pos/blob/main/docs/WORKFLOW.md
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/root/zahran/scripts/weekly-drift-check.sh
+# Read-only: no privilege elevation, no state directories, no restart loop.
+# Failures are captured in /var/log/zahran-weekly-drift.log and propagate
+# via the exit code to systemd (status will show failed).
+StandardOutput=journal
+StandardError=journal
+User=root
+WorkingDirectory=/root/zahran
+
+[Install]
+WantedBy=multi-user.target

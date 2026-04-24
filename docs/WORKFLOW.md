@@ -111,16 +111,85 @@ SELECT count(*) FROM engine_bypass_alerts
 
 Any of these failing = **stop and investigate**. Don't run another deploy on top of a broken chain.
 
-## Drift detection
+## Weekly drift guard
 
-Once a week, run on the VPS:
+A systemd-scheduled, read-only audit runs on the VPS every **Sunday 03:00 UTC** and catches silent drift before it becomes corruption. The script and its units live in the repo:
 
-```bash
-cd /root/zahran
-git fetch origin
-LOCAL=$(git rev-parse HEAD); REMOTE=$(git rev-parse origin/main)
-[ "$LOCAL" = "$REMOTE" ] && echo "OK" || echo "DRIFT: local=$LOCAL remote=$REMOTE"
-git status --short
+- `scripts/weekly-drift-check.sh` — the audit itself (executable)
+- `scripts/systemd/zahran-weekly-drift.service` — oneshot service unit
+- `scripts/systemd/zahran-weekly-drift.timer` — Sunday 03:00 UTC trigger
+
+### What it checks (12 invariants)
+
+| # | Invariant | Failure looks like |
+|---|---|---|
+| 1 | `/root/zahran` is a clean git tree; only `.backups`, `.zahran-quarantine`, `.env` may be untracked | `untracked file: <path>` or `dirty tracked file: <mark> <path>` |
+| 2 | HEAD not detached | `detached HEAD on /root/zahran` |
+| 3 | branch is `main` | `branch='…' — production must be on main` |
+| 4 | VPS HEAD == `origin/main` | `VPS HEAD <sha> != origin/main <sha> (ahead=… behind=…)` |
+| 5 | `api`, `web`, `redis`, `minio` containers are Up (healthy) | `container <svc> not Up(healthy): <status>` |
+| 6 | docker `db` container NOT running (dev-profile only) | `docker db container is running …` |
+| 7 | `DATABASE_URL` points at `*.pooler.supabase.com/postgres` | `DATABASE_URL points at local docker/localhost …` |
+| 8 | `public.schema_migrations` has rows, latest recorded | `schema_migrations returned 0 rows …` |
+| 9 | Unresolved bypass events in last 7 days = 0 | `engine_bypass_alerts unresolved last 7 days = N …` |
+| 10 | Trial balance (Σ DR − Σ CR) = 0.00 | `trial balance drift: DR-CR = <amount>` |
+| 11 | Cashbox drift (stored vs computed) = 0.00 | `cashbox drift: max \|stored − computed\| = <amount>` |
+| 12 | Forbidden dead-code paths never reappear | `forbidden dead-code path reappeared: <path>` |
+| +  | `scripts/deploy.sh` still invokes `verify-worktree.sh` | `scripts/deploy.sh no longer calls verify-worktree.sh …` |
+
+The bypass check (#9) specifically counts events **without** a resolved `financial_anomalies` twin — historical events that have been triaged don't produce weekly noise.
+
+### Reading the log
+
+All runs (PASS or FAIL) append a timestamped line to `/var/log/zahran-weekly-drift.log`:
+
+```
+[2026-04-24T09:36:27Z] PASS head=<sha> branch=main migrations=83 bypass_7d=0 trial=0.00 drift=0.00
+[2026-04-30T03:03:54Z] FAIL 2 issue(s)
+  - untracked file: database/ad-hoc-fix.sql
+  - engine_bypass_alerts unresolved last 7 days = 3 …
 ```
 
-Untracked files (`??`) on the VPS that are not in `.gitignore` = untracked production code. Either commit them to main or delete them — **never leave them**. Every untracked line is a future silent loss.
+Check recent runs:
+```bash
+ssh root@72.60.184.79 'tail -50 /var/log/zahran-weekly-drift.log'
+```
+
+Check timer + last service state:
+```bash
+ssh root@72.60.184.79 'systemctl status zahran-weekly-drift.timer
+                      systemctl status zahran-weekly-drift.service
+                      systemctl list-timers zahran-weekly-drift.timer'
+```
+
+### Fixing failures
+
+| Symptom | Response |
+|---|---|
+| `untracked file: <path>` | Either commit the file through a PR (if production-critical) or move it to `/root/zahran/.zahran-quarantine/` and record why it was abandoned. Never just `rm` without preserving. |
+| `VPS HEAD != origin/main` | Autodeploy timer is misbehaving. Check `systemctl status zahran-autodeploy.timer` and `/var/log/zahran-autodeploy.log`. Never fix by `git reset` on the VPS manually — let autodeploy pull normally. |
+| `container X not Up(healthy)` | `docker compose -p zahran logs <svc>` and treat as a standard incident. If the api crash-loops because the startup DB sanity check fails, re-verify `/root/zahran/.env` `DATABASE_URL`. |
+| `docker db container is running` | Someone started the dev profile on production. `docker compose -p zahran --profile dev down` to stop; investigate how it got started. |
+| `DATABASE_URL points at local…` | Immediately stop API: `docker compose -p zahran stop api`. Fix `.env`. Restart. Then verify no writes happened since the bad URL was in effect. |
+| `engine_bypass_alerts unresolved last 7 days = N` | Investigate each bypass (see `docs/DEPLOYMENT.md` §6 on-deploy verification SQL). Either triage via `financial_anomalies` resolution, or create a tracked fix PR (like migration 072 did). |
+| `trial balance drift` or `cashbox drift ≠ 0` | This is the severe case. Stop all writes (`docker compose -p zahran stop api`). Do a forensic SQL audit (see `posting.service.reverseByReference` for the reversal model). Do NOT issue manual UPDATEs to patch the numbers. |
+| `forbidden dead-code path reappeared` | Move to `.zahran-quarantine/`. Investigate how it got there — usually a manual scp / rsync outside the canonical flow. |
+
+### Running it manually
+
+```bash
+ssh root@72.60.184.79 '/root/zahran/scripts/weekly-drift-check.sh'
+# exit 0 = PASS, exit 1 = FAIL (reasons printed + logged)
+```
+
+This is safe to run at any time — every query is read-only.
+
+### Installing / reinstalling the timer
+
+From your workstation, once:
+```bash
+cd /Users/mohamedzahran/Documents/Claude/Projects/Zahran
+scp scripts/systemd/zahran-weekly-drift.{service,timer} root@72.60.184.79:/etc/systemd/system/
+ssh root@72.60.184.79 'systemctl daemon-reload && \
+                       systemctl enable --now zahran-weekly-drift.timer'
+```
