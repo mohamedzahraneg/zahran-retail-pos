@@ -12,6 +12,7 @@ import { RealtimeGateway } from '../realtime/realtime.gateway';
 import { LoyaltyService } from '../loyalty/loyalty.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { AccountingPostingService } from '../chart-of-accounts/posting.service';
+import { FinancialEngineService } from '../chart-of-accounts/financial-engine.service';
 
 @Injectable()
 export class PosService {
@@ -23,6 +24,7 @@ export class PosService {
     @Optional() private readonly loyalty?: LoyaltyService,
     @Optional() private readonly notifications?: NotificationsService,
     @Optional() private readonly posting?: AccountingPostingService,
+    @Optional() private readonly engine?: FinancialEngineService,
   ) {}
 
   /**
@@ -273,19 +275,12 @@ export class PosService {
           ],
         );
 
-        // Auto-update cashbox for cash payments.
-        if (pay.payment_method === 'cash' && cashboxId) {
-          await em.query(
-            `SELECT fn_record_cashbox_txn($1,'in',$2,'sale','invoice',$3,$4,$5)`,
-            [
-              cashboxId,
-              pay.amount,
-              invoice.id,
-              userId,
-              `بيع — فاتورة ${invoice.invoice_no}`,
-            ],
-          );
-        }
+        // Phase 2.2 migration: the cashbox leg for cash payments is no
+        // longer written here. `postInvoice()` (below) now reads the
+        // invoice_payments rows we just inserted and hands them to
+        // FinancialEngineService as `cash_movements`, so the GL post
+        // and the cashbox ledger row land atomically under the engine's
+        // canonical context (no bypass alert, no split ownership).
       }
 
       // Deduct loyalty points (if any) inside the same transaction
@@ -672,18 +667,34 @@ export class PosService {
       );
       const cashboxId = cbRef?.cashbox_id ?? null;
       if (cashboxId) {
+        // Phase 2.5: cash-side reversal now routes through the engine's
+        // sanctioned cash-only primitive. No direct fn_record_cashbox_txn
+        // call; no engine_bypass_alerts row. The GL-side reversal for an
+        // edit is a separate correctness gap tracked in the report —
+        // this turn strictly moves the cashbox leg into engine ownership.
+        if (!this.engine) {
+          throw new BadRequestException(
+            'FinancialEngineService غير متاح — لا يمكن تعديل الفاتورة',
+          );
+        }
         for (const p of origPayments) {
           if (p.payment_method !== 'cash') continue;
-          await em.query(
-            `SELECT fn_record_cashbox_txn($1,'out',$2,'sale','invoice',$3,$4,$5)`,
-            [
-              cashboxId,
-              p.amount,
-              id,
-              userId,
-              'تعديل فاتورة — عكس دفع سابق',
-            ],
-          );
+          const res = await this.engine.recordCashOnlyMovement({
+            cashbox_id: cashboxId,
+            direction: 'out',
+            amount: Number(p.amount),
+            category: 'edit_reversal',
+            reference_type: 'invoice',
+            reference_id: id,
+            user_id: userId,
+            notes: 'تعديل فاتورة — عكس دفع سابق',
+            em,
+          });
+          if (!res.ok) {
+            throw new BadRequestException(
+              `فشل عكس دفع الفاتورة: ${res.error}`,
+            );
+          }
         }
       }
 
@@ -811,16 +822,29 @@ export class PosService {
           [id, p.payment_method, p.amount, p.reference ?? null],
         );
         if (p.payment_method === 'cash' && cashboxId && Number(p.amount) > 0) {
-          await em.query(
-            `SELECT fn_record_cashbox_txn($1,'in',$2,'sale','invoice',$3,$4,$5)`,
-            [
-              cashboxId,
-              p.amount,
-              id,
-              userId,
-              'تعديل فاتورة — دفع جديد',
-            ],
-          );
+          // Phase 2.5: cash-in leg of the new payment also routes
+          // through the engine's cash-only primitive (engine:* context).
+          if (!this.engine) {
+            throw new BadRequestException(
+              'FinancialEngineService غير متاح — لا يمكن تعديل الفاتورة',
+            );
+          }
+          const res = await this.engine.recordCashOnlyMovement({
+            cashbox_id: cashboxId,
+            direction: 'in',
+            amount: Number(p.amount),
+            category: 'edit_replay',
+            reference_type: 'invoice',
+            reference_id: id,
+            user_id: userId,
+            notes: 'تعديل فاتورة — دفع جديد',
+            em,
+          });
+          if (!res.ok) {
+            throw new BadRequestException(
+              `فشل تسجيل الدفع الجديد: ${res.error}`,
+            );
+          }
         }
       }
 

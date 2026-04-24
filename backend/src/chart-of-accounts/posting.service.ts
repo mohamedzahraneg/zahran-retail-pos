@@ -1,6 +1,9 @@
 import { Injectable, Logger, Optional } from '@nestjs/common';
 import { DataSource, EntityManager } from 'typeorm';
-import { FinancialEngineService } from './financial-engine.service';
+import {
+  FinancialEngineService,
+  TransactionKind,
+} from './financial-engine.service';
 
 /**
  * Centralized journal posting for every financial event in the system.
@@ -54,11 +57,13 @@ export class AccountingPostingService {
    * now gone because the engine sets the canonical
    * `engine:recordTransaction` context.
    *
-   * Cashbox movement is still written by `pos.service` inline with
-   * the invoice payment (via `fn_record_cashbox_txn`). We pass
-   * `cash_movements: []` so the engine does NOT double-write the
-   * cashbox — keeping behaviour identical to the legacy split where
-   * POS owns cash and posting owns GL.
+   * Phase 2.2: cashbox movement now flows through the engine too — we
+   * read the invoice's cash payments and pass them as `cash_movements`
+   * so the engine writes the `cashbox_transactions` rows inside the
+   * same atomic transaction as the GL post. `pos.service` no longer
+   * calls `fn_record_cashbox_txn` inline for cash sales. Net effect:
+   * every sale is one atomic engine call; no split ownership; no
+   * `service:cashbox_fn_fallback` bypass alert.
    */
   async postInvoice(invoiceId: string, userId: string, em?: EntityManager) {
     if (!this.engine) {
@@ -160,6 +165,38 @@ export class AccountingPostingService {
     }
     if (lines.length < 2) return null;
 
+    // Phase 2.2: gather cash payments → engine cash_movements. The
+    // engine writes cashbox_transactions via fn_record_cashbox_txn
+    // (atomic with the GL post, under engine:recordTransaction context,
+    // no bypass alert). We preserve one cashbox row per individual cash
+    // payment to match the legacy per-payment audit shape.
+    const cashMoves: Array<{
+      cashbox_id: string;
+      direction: 'in' | 'out';
+      amount: number;
+      category: string;
+      notes?: string;
+    }> = [];
+    if (inv.cashbox_id) {
+      const cashPayments = await runner.query(
+        `SELECT amount
+           FROM invoice_payments
+          WHERE invoice_id = $1
+            AND payment_method = 'cash'
+            AND COALESCE(amount, 0) > 0`,
+        [invoiceId],
+      );
+      for (const p of cashPayments) {
+        cashMoves.push({
+          cashbox_id: inv.cashbox_id,
+          direction: 'in',
+          amount: Number(p.amount),
+          category: 'sale',
+          notes: `بيع — فاتورة ${inv.invoice_no}`,
+        });
+      }
+    }
+
     const res = await this.engine.recordTransaction({
       kind: 'sale',
       reference_type: 'invoice',
@@ -167,7 +204,7 @@ export class AccountingPostingService {
       entry_date: entryDate,
       description: `قيد فاتورة مبيعات ${inv.invoice_no}`,
       gl_lines: lines,
-      cash_movements: [], // pos.service already wrote the cashbox txn
+      cash_movements: cashMoves,
       user_id: userId,
       em,
     });
@@ -579,10 +616,24 @@ export class AccountingPostingService {
   }
 
   /**
-   * Reverse a posted journal entry by creating a mirror entry with
-   * debits and credits swapped. Used when the originating document is
-   * voided (invoice cancelled, customer payment voided, return rejected
-   * after approval, …).
+   * Reverse a posted journal entry — Phase 2.5 migration.
+   *
+   * Builds the swapped GL lines + reversed cashbox movements from the
+   * original document and hands them to the engine as a single balanced
+   * call with `reversal_of = <original entry id>`. The engine:
+   *   • Records a `reversal` kind JE with `reversal_of` linking back to
+   *     the original → preserves the same audit chain the legacy
+   *     implementation built.
+   *   • Flips the original to `is_void = TRUE` atomically inside the
+   *     same transaction → trial balance drops the reversed entry.
+   *   • Reverses the paired `cashbox_transactions` rows via
+   *     `fn_record_cashbox_txn` (direction inverted) → cashbox
+   *     balances stay consistent.
+   *
+   * No direct INSERTs remain; no `engine_bypass_alerts` row is logged.
+   * Idempotency is provided by the engine's own check on
+   * (reference_type='reversal', reference_id=<originalId>): a second
+   * call returns { skipped: true } with the existing reversing entry.
    */
   async reverseByReference(
     refType: string,
@@ -591,13 +642,21 @@ export class AccountingPostingService {
     userId: string,
     em?: EntityManager,
   ) {
+    if (!this.engine) {
+      this.logger.error(
+        `reverseByReference called without engine — cannot reverse ${refType}/${refId}`,
+      );
+      return { error: 'engine_unavailable' };
+    }
     const q: QueryFn = em
       ? (sql: string, params?: any[]) => em.query(sql, params)
       : (sql: string, params?: any[]) => this.ds.query(sql, params);
+
     try {
-      // Find the original posted entry.
+      // Locate the original posted-and-not-void entry for this reference.
       const [orig] = await q(
-        `SELECT id, entry_no FROM journal_entries
+        `SELECT id, entry_no, entry_date
+           FROM journal_entries
           WHERE reference_type = $1 AND reference_id = $2
             AND is_posted = TRUE AND is_void = FALSE
             AND reversal_of IS NULL
@@ -606,77 +665,70 @@ export class AccountingPostingService {
       );
       if (!orig) return null;
 
-      // Check we haven't already reversed it.
-      const [existingRev] = await q(
-        `SELECT id FROM journal_entries
-          WHERE reversal_of = $1 AND is_posted = TRUE AND is_void = FALSE
-          LIMIT 1`,
-        [orig.id],
-      );
-      if (existingRev) return { skipped: true, entry_id: existingRev.id };
-
+      // Load its lines — we'll swap DR/CR and keep every dimension
+      // (cashbox_id, warehouse_id, party tags) on the reversing lines
+      // so reports that filter by those dimensions cancel out cleanly.
       const origLines = await q(
-        `SELECT account_id, debit, credit, description, cashbox_id, warehouse_id, line_no
+        `SELECT account_id, debit, credit, description,
+                cashbox_id, warehouse_id,
+                customer_id, supplier_id
            FROM journal_lines WHERE entry_id = $1 ORDER BY line_no`,
         [orig.id],
       );
       if (!origLines.length) return null;
 
-      const today = new Date().toISOString().slice(0, 10);
-      const [{ seq }] = await q(
-        `SELECT nextval('seq_journal_entry_no') AS seq`,
-      );
-      const entryNo = `JE-${today.slice(0, 4)}-${String(seq).padStart(6, '0')}`;
+      const gl_lines = origLines.map((l: any) => ({
+        account_id: l.account_id,
+        debit: Number(l.credit || 0), // swap
+        credit: Number(l.debit || 0), // swap
+        description: l.description,
+        cashbox_id: l.cashbox_id ?? undefined,
+        warehouse_id: l.warehouse_id ?? undefined,
+        customer_id: l.customer_id ?? undefined,
+        supplier_id: l.supplier_id ?? undefined,
+      }));
 
-      const [rev] = await q(
-        `
-        INSERT INTO journal_entries
-          (entry_no, entry_date, description, reference_type, reference_id,
-           reversal_of, is_posted, posted_by, posted_at, created_by)
-        VALUES ($1,$2,$3,'reversal',$4,$5,FALSE,$6,NULL,$6)
-        RETURNING id
-        `,
-        [
-          entryNo,
-          today,
-          `عكس قيد ${orig.entry_no}: ${reason}`,
-          refId,
-          orig.id,
-          userId,
-        ],
+      // Reverse paired cashbox transactions — same reference, direction
+      // inverted. This keeps cashboxes.current_balance consistent with
+      // the trial-balance effect of the reversal.
+      const origCashRows = await q(
+        `SELECT cashbox_id, direction, amount, category, notes
+           FROM cashbox_transactions
+          WHERE reference_type::text = $1 AND reference_id::text = $2
+            AND is_void = FALSE
+          ORDER BY id`,
+        [refType, refId],
       );
+      const cash_movements = origCashRows.map((r: any) => ({
+        cashbox_id: r.cashbox_id,
+        direction: (r.direction === 'in' ? 'out' : 'in') as 'in' | 'out',
+        amount: Number(r.amount),
+        category: `reversal_${r.category ?? ''}`.slice(0, 40),
+        notes: `عكس: ${r.notes ?? ''}`.slice(0, 255),
+      }));
 
-      let n = 1;
-      for (const l of origLines) {
-        await q(
-          `INSERT INTO journal_lines
-             (entry_id, line_no, account_id, debit, credit, description, cashbox_id, warehouse_id)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-          [
-            rev.id,
-            n++,
-            l.account_id,
-            Number(l.credit || 0), // swap
-            Number(l.debit || 0), // swap
-            l.description,
-            l.cashbox_id,
-            l.warehouse_id,
-          ],
-        );
+      const res = await this.engine.recordTransaction({
+        kind: 'reversal',
+        reference_type: 'reversal',
+        reference_id: orig.id, // idempotency per original entry
+        entry_date: this.dateOnly(orig.entry_date),
+        description: `عكس قيد ${orig.entry_no}: ${reason}`,
+        gl_lines,
+        cash_movements,
+        user_id: userId,
+        em,
+        reversal_of: orig.id,
+        reversal_reason: reason,
+      });
+
+      if (!res.ok) return { error: res.error };
+      if ((res as any).skipped) {
+        return { skipped: true, entry_id: (res as any).entry_id };
       }
-
-      // Flip original to void + post reversal.
-      await q(
-        `UPDATE journal_entries SET is_void = TRUE, void_reason = $2,
-           voided_by = $3, voided_at = NOW()
-         WHERE id = $1`,
-        [orig.id, reason, userId],
-      );
-      await q(
-        `UPDATE journal_entries SET is_posted = TRUE, posted_at = NOW() WHERE id = $1`,
-        [rev.id],
-      );
-      return { entry_id: rev.id, reversed_of: orig.id };
+      return {
+        entry_id: (res as any).entry_id,
+        reversed_of: orig.id,
+      };
     } catch (err: any) {
       this.logger.error(
         `reverse ${refType}/${refId} failed: ${err?.message ?? err}`,
@@ -1004,15 +1056,19 @@ export class AccountingPostingService {
     const q: QueryFn = em
       ? (sql: string, params?: any[]) => em.query(sql, params)
       : (sql: string, params?: any[]) => this.ds.query(sql, params);
+    // Thread the EntityManager onto the query-fn closure so createEntry
+    // can hand it to the engine — keeps the GL post inside the same
+    // transaction as the source operation (invoice/return/purchase/etc).
+    (q as any).__em__ = em;
     try {
-      // Raise the engine-context GUC so migration 058/063/068's write
-      // guards allow this service to INSERT into journal_entries /
-      // journal_lines. Uses the `service:*` identity pattern introduced
-      // in migration 068 — the strict guard rejects bare 'on' now.
-      // Every write from this legacy wrapper still drops an
-      // engine_bypass_alerts row for observability until phase 2.2-2.4
-      // migrates each post method to FinancialEngineService.
-      await q(`SET LOCAL app.engine_context = 'service:posting.service'`).catch(() => undefined);
+      // Phase 2.2/2.3 migration: the actual INSERTs now run inside
+      // FinancialEngineService.recordTransaction(), which raises the
+      // canonical `engine:recordTransaction` context. We no longer need
+      // the `service:*` fallback context at this layer — keeping it would
+      // only log a stray bypass alert before the engine re-sets its own
+      // context. The engine's own idempotency check is authoritative;
+      // the one below is a micro-optimisation to short-circuit replays
+      // without opening a new transaction.
 
       // Idempotency guard — only count LIVE entries (posted, non-void).
       // A voided entry from a previous reset should NOT block re-posting.
@@ -1033,7 +1089,21 @@ export class AccountingPostingService {
     }
   }
 
-  /** Create + post a journal entry. Returns the created row. */
+  /**
+   * Create + post a journal entry — Phase 2.2/2.3 migration.
+   *
+   * Previously this method composed the INSERTs itself, which left every
+   * call (returns, purchases, supplier/customer payments, depreciation,
+   * inventory adjustments, year-close) logging an `engine_bypass_alerts`
+   * row because the write carried `service:*` context instead of
+   * `engine:*`. The recipes in each public method above are unchanged;
+   * only the final writer has moved into FinancialEngineService — the
+   * same primitive POS sales already use.
+   *
+   * Result: seven previously-legacy flows now post through the engine
+   * with no bypass alert, no direct INSERT, and with the engine's own
+   * idempotency + balance + lockdown guards in effect.
+   */
   private async createEntry(
     q: QueryFn,
     args: {
@@ -1043,9 +1113,28 @@ export class AccountingPostingService {
       reference_id: string;
       lines: PostingLine[];
       created_by: string | null;
+      /** Optional physical cash moves; engine writes via fn_record_cashbox_txn. */
+      cash_movements?: Array<{
+        cashbox_id: string;
+        direction: 'in' | 'out';
+        amount: number;
+        category: string;
+        notes?: string;
+      }>;
+      /** Optional engine kind override (else derived from reference_type). */
+      kind?: TransactionKind;
     },
   ) {
-    // Final balance check (double-layered safety — DB trigger enforces too).
+    if (!this.engine) {
+      this.logger.error(
+        `createEntry called without engine available — refusing to post ${args.reference_type}/${args.reference_id}`,
+      );
+      return { error: 'engine_unavailable' };
+    }
+
+    // Pre-flight: quick balance + non-zero check. The engine enforces
+    // this again (and the DB trigger is the final backstop) — keeping the
+    // check here preserves the same error surface callers relied on.
     const totalD = args.lines.reduce((s, l) => s + Number(l.debit || 0), 0);
     const totalC = args.lines.reduce((s, l) => s + Number(l.credit || 0), 0);
     if (Math.abs(totalD - totalC) > 0.01) {
@@ -1056,83 +1145,83 @@ export class AccountingPostingService {
     }
     if (totalD < 0.01) return null;
 
-    const [{ seq }] = await q(
-      `SELECT nextval('seq_journal_entry_no') AS seq`,
-    );
-    const entryNo = `JE-${args.entry_date.slice(0, 4)}-${String(seq).padStart(6, '0')}`;
+    // reference_type → TransactionKind. Recipes know what they're posting
+    // so we keep this mapping tight; anything unmapped routes to
+    // manual_adjustment (engine treats it like a free-form balanced entry).
+    const kind: TransactionKind =
+      args.kind ?? this.kindFromRefType(args.reference_type);
 
-    const [entry] = await q(
-      `
-      INSERT INTO journal_entries
-        (entry_no, entry_date, description, reference_type, reference_id,
-         is_posted, posted_by, posted_at, created_by)
-      VALUES ($1, $2, $3, $4, $5, FALSE, $6, NOW(), $6)
-      RETURNING id
-      `,
-      [
-        entryNo,
-        args.entry_date,
-        args.description,
-        args.reference_type,
-        args.reference_id,
-        args.created_by,
-      ],
-    );
+    // Hand the lines to the engine in-place — PostingLine and EngineGlLine
+    // overlap on every field the recipes above use (account_id + debit +
+    // credit + description + cashbox_id + warehouse_id + customer_id +
+    // supplier_id). Lines that resolve by account_code instead of
+    // account_id (a few of the newer recipes) pass through unchanged.
+    const gl_lines = args.lines.map((l) => ({
+      account_id: l.account_id,
+      account_code: l.account_code,
+      resolve_from_cashbox_id: l.resolve_from_cashbox_id,
+      debit: Number(l.debit || 0),
+      credit: Number(l.credit || 0),
+      description: l.description ?? args.description,
+      cashbox_id: l.cashbox_id ?? undefined,
+      warehouse_id: l.warehouse_id ?? undefined,
+      customer_id: l.customer_id ?? undefined,
+      supplier_id: l.supplier_id ?? undefined,
+    }));
 
-    // Insert lines
-    let n = 1;
-    const hasPartyCols = await this.hasPartyColumns(q);
-    for (const l of args.lines) {
-      if ((l.debit || 0) === 0 && (l.credit || 0) === 0) continue;
-      if (hasPartyCols) {
-        await q(
-          `
-          INSERT INTO journal_lines
-            (entry_id, line_no, account_id, debit, credit, description,
-             cashbox_id, warehouse_id, customer_id, supplier_id)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-          `,
-          [
-            entry.id,
-            n++,
-            l.account_id,
-            Number(l.debit || 0),
-            Number(l.credit || 0),
-            l.description ?? args.description,
-            l.cashbox_id ?? null,
-            l.warehouse_id ?? null,
-            l.customer_id ?? null,
-            l.supplier_id ?? null,
-          ],
-        );
-      } else {
-        await q(
-          `
-          INSERT INTO journal_lines
-            (entry_id, line_no, account_id, debit, credit, description,
-             cashbox_id, warehouse_id)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-          `,
-          [
-            entry.id,
-            n++,
-            l.account_id,
-            Number(l.debit || 0),
-            Number(l.credit || 0),
-            l.description ?? args.description,
-            l.cashbox_id ?? null,
-            l.warehouse_id ?? null,
-          ],
-        );
-      }
+    // The engine runs its own transaction unless we pass an EntityManager.
+    // All posting.service callers already execute inside the source
+    // operation's EntityManager (invoice/return/purchase/expense etc.),
+    // but createEntry only sees the QueryFn closure. We derive the em
+    // from the closure by pulling it from the wrapping `safe()` — which
+    // already threads it through. Since we don't have direct access to
+    // `em` here, we run the engine against its own transaction when we
+    // weren't given one; that stays correct because the engine is
+    // idempotent on (reference_type, reference_id), so a retry after a
+    // caller's rollback is safe.
+    //
+    // To avoid double-wrapping when safe() already has an `em`, we peek
+    // at the marker the caller can set. Missing → engine opens its own.
+    const em: EntityManager | undefined = (q as any).__em__;
+
+    const res = await this.engine.recordTransaction({
+      kind,
+      reference_type: args.reference_type,
+      reference_id: args.reference_id,
+      entry_date: args.entry_date,
+      description: args.description,
+      gl_lines,
+      cash_movements: args.cash_movements ?? [],
+      user_id: args.created_by,
+      em,
+    });
+
+    if (!res.ok) {
+      return { error: res.error };
     }
+    return { entry_id: (res as any).entry_id };
+  }
 
-    // Post (flips is_posted → TRUE; trigger validates balance).
-    await q(
-      `UPDATE journal_entries SET is_posted = TRUE, posted_at = NOW() WHERE id = $1`,
-      [entry.id],
-    );
-    return { entry_id: entry.id };
+  /** Map a posting reference_type to the engine's TransactionKind union. */
+  private kindFromRefType(refType: string): TransactionKind {
+    const m: Record<string, TransactionKind> = {
+      invoice: 'sale',
+      return: 'refund',
+      purchase: 'purchase',
+      purchase_return: 'purchase_return',
+      customer_payment: 'customer_payment',
+      supplier_payment: 'supplier_payment',
+      expense: 'expense',
+      shift_variance: 'shift_variance',
+      cashbox_transfer: 'cashbox_transfer',
+      opening_balance: 'opening_balance',
+      manual: 'manual_adjustment',
+      inventory_adjustment: 'inventory_adjustment',
+      depreciation: 'depreciation',
+      year_close: 'year_close',
+      reversal: 'reversal',
+    };
+    return m[refType] ?? 'manual_adjustment';
   }
 
   /** Fetch COA account UUID by 4-digit code (cached via Postgres). */
@@ -1180,27 +1269,20 @@ export class AccountingPostingService {
     return dt.toISOString().slice(0, 10);
   }
 
-  private _hasPartyColsCache: boolean | null = null;
-  private async hasPartyColumns(q: QueryFn): Promise<boolean> {
-    if (this._hasPartyColsCache !== null) return this._hasPartyColsCache;
-    const [row] = await q(
-      `SELECT (
-        EXISTS (SELECT 1 FROM information_schema.columns
-                 WHERE table_name='journal_lines' AND column_name='customer_id')
-        AND
-        EXISTS (SELECT 1 FROM information_schema.columns
-                 WHERE table_name='journal_lines' AND column_name='supplier_id')
-      ) AS present`,
-    );
-    this._hasPartyColsCache = !!row?.present;
-    return this._hasPartyColsCache;
-  }
 }
 
 type QueryFn = (sql: string, params?: any[]) => Promise<any[]>;
 
 interface PostingLine {
-  account_id: string;
+  /**
+   * Supply ONE of account_id / account_code / resolve_from_cashbox_id.
+   * Most recipes here pre-resolve to account_id; the newer ones (invoice,
+   * opening balance, shift close) lean on the engine's code/cashbox
+   * resolver.
+   */
+  account_id?: string;
+  account_code?: string;
+  resolve_from_cashbox_id?: string;
   debit?: number;
   credit?: number;
   description?: string;

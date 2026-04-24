@@ -17,6 +17,7 @@ import {
   RejectReturnDto,
 } from './dto/return.dto';
 import { AccountingPostingService } from '../chart-of-accounts/posting.service';
+import { FinancialEngineService } from '../chart-of-accounts/financial-engine.service';
 
 @Injectable()
 export class ReturnsService {
@@ -25,6 +26,7 @@ export class ReturnsService {
     private readonly repo: Repository<ReturnEntity>,
     private readonly ds: DataSource,
     @Optional() private readonly posting?: AccountingPostingService,
+    @Optional() private readonly engine?: FinancialEngineService,
   ) {}
 
   // ==========================================================================
@@ -273,16 +275,35 @@ export class ReturnsService {
           cashboxId = cb?.id ?? null;
         }
         if (cashboxId) {
-          await em.query(
-            `SELECT fn_record_cashbox_txn($1,'out',$2,'refund','return',$3,$4,$5)`,
-            [
-              cashboxId,
-              Number(ret.net_refund),
-              id,
-              userId,
-              `استرداد نقدي — مرتجع ${ret.return_no}`,
-            ],
-          );
+          // Phase 2.5: cash-only disbursement via the engine's sanctioned
+          // primitive. The GL side (DR 49 Sales Returns · CR Cash, plus
+          // inventory/COGS reversal when back_to_stock) was posted at
+          // approval time by AccountingPostingService.postReturn. This
+          // call only writes the physical cashbox_transactions row +
+          // updates cashboxes.current_balance under the canonical
+          // `engine:cashOnlyMovement` context — no bypass alert, no
+          // direct fn_record_cashbox_txn call.
+          if (!this.engine) {
+            throw new BadRequestException(
+              'FinancialEngineService غير متاح — لا يمكن صرف المرتجع نقدياً',
+            );
+          }
+          const res = await this.engine.recordCashOnlyMovement({
+            cashbox_id: cashboxId,
+            direction: 'out',
+            amount: Number(ret.net_refund),
+            category: 'refund',
+            reference_type: 'return',
+            reference_id: id,
+            user_id: userId,
+            notes: `استرداد نقدي — مرتجع ${ret.return_no}`,
+            em,
+          });
+          if (!res.ok) {
+            throw new BadRequestException(
+              `فشل صرف المرتجع نقدياً: ${res.error}`,
+            );
+          }
         }
       }
 
