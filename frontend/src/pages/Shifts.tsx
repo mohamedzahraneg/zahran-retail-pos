@@ -1263,6 +1263,117 @@ function ShiftDetailModal({ shift, onClose }: { shift: Shift; onClose: () => voi
             </div>
           )}
 
+          {/* PR-21 — Refund / exchange cash movements. Sourced from
+           *  cashbox_transactions (the canonical drawer-movement
+           *  table) so standalone refunds without invoices show up
+           *  correctly. Refunds are NOT operating expenses — they
+           *  get their own section. */}
+          {s && s.refund_cash_movements && s.refund_cash_movements.length > 0 && (
+            <div className="border border-rose-200 rounded-lg overflow-hidden">
+              <div className="bg-rose-50 p-3 text-sm font-bold text-rose-800 flex items-center justify-between">
+                <span>المرتجعات والاستبدالات النقدية ({s.refund_cash_movements.length})</span>
+                <span className="font-mono tabular-nums text-rose-900">
+                  صافي الأثر {EGP(-s.net_refund_cash_impact)}
+                </span>
+              </div>
+              <div className="overflow-x-auto max-h-56 overflow-y-auto">
+                <table className="min-w-full text-xs">
+                  <thead className="bg-slate-50">
+                    <tr>
+                      <th className="text-right px-2 py-2">التاريخ والوقت</th>
+                      <th className="text-right px-2 py-2">رقم العملية</th>
+                      <th className="text-right px-2 py-2">العميل</th>
+                      <th className="text-right px-2 py-2">النوع</th>
+                      <th className="text-right px-2 py-2">الاتجاه</th>
+                      <th className="text-right px-2 py-2">المبلغ</th>
+                      <th className="text-right px-2 py-2">الخزنة</th>
+                      <th className="text-right px-2 py-2">تمت بواسطة</th>
+                      <th className="text-right px-2 py-2">رقم القيد</th>
+                      <th className="text-right px-2 py-2">التأثير المحاسبي</th>
+                      <th className="text-right px-2 py-2">حالة الربط</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {s.refund_cash_movements.map((m) => (
+                      <tr key={m.id} className="border-t border-slate-100">
+                        <td className="px-2 py-1.5 font-mono tabular-nums whitespace-nowrap">
+                          {new Date(m.created_at).toLocaleString('en-GB', {
+                            timeZone: 'Africa/Cairo',
+                            hour12: false,
+                          })}
+                        </td>
+                        <td className="px-2 py-1.5 font-mono text-[11px]">{m.reference_no || '—'}</td>
+                        <td className="px-2 py-1.5">{m.customer_name || '—'}</td>
+                        <td className="px-2 py-1.5">
+                          <span className="chip text-[10px] bg-rose-50 text-rose-700 border-rose-200">
+                            {m.type_label}
+                          </span>
+                        </td>
+                        <td className="px-2 py-1.5">
+                          <span
+                            className={`chip text-[10px] ${
+                              m.direction === 'out'
+                                ? 'bg-rose-50 text-rose-700 border-rose-200'
+                                : 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                            }`}
+                          >
+                            {m.direction_label}
+                          </span>
+                        </td>
+                        <td
+                          className={`px-2 py-1.5 font-bold tabular-nums ${
+                            m.direction === 'out' ? 'text-rose-600' : 'text-emerald-700'
+                          }`}
+                        >
+                          {EGP(m.amount)}
+                        </td>
+                        <td className="px-2 py-1.5 text-slate-600">{m.cashbox_name || '—'}</td>
+                        <td className="px-2 py-1.5 text-slate-600">{m.created_by_name || '—'}</td>
+                        <td className="px-2 py-1.5 font-mono text-[10px] text-slate-500">
+                          {m.je_entry_no || '—'}
+                        </td>
+                        <td className="px-2 py-1.5 text-slate-600 text-[11px]">
+                          {m.accounting_impact}
+                        </td>
+                        <td className="px-2 py-1.5">
+                          <span
+                            className={`chip text-[10px] ${
+                              m.link_method === 'explicit'
+                                ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                : 'bg-sky-50 text-sky-700 border-sky-200'
+                            }`}
+                            title={
+                              m.link_method === 'explicit'
+                                ? 'مرتبط مباشرة بالوردية'
+                                : 'مطابقة عبر الخزنة + توقيت الوردية'
+                            }
+                          >
+                            {m.link_method === 'explicit'
+                              ? 'مرتبط بالوردية'
+                              : 'مرتبط تلقائياً بالوردية'}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="border-t border-slate-200 px-3 py-2 text-xs flex items-center justify-between bg-slate-50/50">
+                <span className="text-slate-600">
+                  خارج: <span className="font-bold tabular-nums text-rose-600">{EGP(s.total_refund_cash_out)}</span>
+                  {' · '}
+                  داخل: <span className="font-bold tabular-nums text-emerald-700">{EGP(s.total_refund_cash_in)}</span>
+                </span>
+                <span className="text-slate-700 font-bold">
+                  صافي أثر المرتجعات/الاستبدالات على الوردية:{' '}
+                  <span className="font-mono tabular-nums text-rose-700">
+                    {EGP(-s.net_refund_cash_impact)}
+                  </span>
+                </span>
+              </div>
+            </div>
+          )}
+
           {/* PR-14 — Cash-out summary block. Uses the same numbers as
            *  the expected_closing formula so the user can see exactly
            *  why the drawer is expected to be at this value. */}
@@ -1276,7 +1387,7 @@ function ShiftDetailModal({ shift, onClose }: { shift: Shift; onClose: () => voi
                 <CashOutLine label="سلف الموظفين" value={s.total_employee_advances} />
                 <CashOutLine label="صرف مستحقات الموظفين" value={s.total_employee_settlements} />
                 <CashOutLine label="مدفوعات للموردين" value={s.supplier_payments} />
-                <CashOutLine label="خصومات / مرتجعات نقدية" value={s.total_returns} />
+                <CashOutLine label="مرتجعات نقدية / استبدالات" value={s.total_refund_cash_out} />
                 <CashOutLine label="حركات نقدية أخرى" value={s.other_cash_out} />
               </div>
               <div className="border-t border-slate-300 mt-2 pt-2 flex items-center justify-between">
