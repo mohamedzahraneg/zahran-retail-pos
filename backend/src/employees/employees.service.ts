@@ -1288,31 +1288,36 @@ export class EmployeesService {
   }
 
   /**
-   * Record a settlement — a payment BY the employee that reduces their
-   * liability. When `method='cash'` and a cashbox is supplied, the
-   * engine posts the matching journal entry:
+   * Record a settlement — the company paying out cash to an employee
+   * for an amount it owes them on 213 مستحقات الموظفين, or (for
+   * payroll_deduction / other) an internal offset against another
+   * account.
    *
-   *   DR Cash Register (resolved from cashbox)
-   *   CR 1123 Employee Receivables       (tagged employee_user_id)
-   *
-   * All four methods now post a balanced JE:
-   *   * cash              — DR cashbox (resolved from cashbox.kind →
-   *                         1111) / CR 1123 — with cash movement IN
-   *   * bank              — DR cashbox (resolved from cashbox.kind →
-   *                         1113 bank or 1114 ewallet) / CR 1123 —
-   *                         with cash movement IN
-   *   * payroll_deduction — DR 213 Employee Payables / CR 1123 — no
-   *                         cash movement; clears the receivable
-   *                         against the accrued-payable, so next
-   *                         payroll run pays out net
+   * Per-method GL spec:
+   *   * cash              — DR 213 / CR cashbox (resolved from
+   *                         cashbox.kind → 1111). Cash movement OUT.
+   *   * bank              — DR 213 / CR cashbox (resolved from
+   *                         cashbox.kind → 1113 bank or 1114 ewallet).
+   *                         Cash movement OUT.
+   *   * payroll_deduction — DR 213 / CR 1123 — no cash. Clears a
+   *                         receivable against the accrued-payable
+   *                         so next payroll run pays the net.
    *   * other             — DR <offset_account_code> / CR 1123 — no
-   *                         cash movement; caller must supply the
-   *                         explicit offset account (write-off,
-   *                         inter-company receivable, etc.)
+   *                         cash; caller-supplied offset (write-off,
+   *                         inter-company receivable, etc.).
    *
-   * Before this change only 'cash' posted a JE and the other three
-   * methods created a silent settlement row that never reduced 1123
-   * — the payroll page showed a payout, but the GL did not.
+   * History notes:
+   *   * Before PR-this: cash/bank posted DR cashbox / CR 1123 with
+   *     cash IN — i.e. "employee paid us back" semantics. Every real
+   *     caller (Payroll payout, pay-wage payable settle, pay-wage
+   *     bonus settle, the settlement modal) actually means the
+   *     opposite — company pays employee. The wrong direction
+   *     surfaced as Abu Youssef's GL going from −1150 → −1250 after
+   *     a 100 EGP payout (expected −1050) — see hotfix migration 088
+   *     for the corrective reposts.
+   *   * Before PR #77: only 'cash' posted a JE and the other three
+   *     methods created a silent settlement row that never reduced
+   *     the receivable.
    */
   async recordSettlement(
     userId: string,
@@ -1375,45 +1380,55 @@ export class EmployeesService {
         ],
       );
 
-      // 2. Build the per-method GL spec. CR side is always 1123
-      // tagged with employee_user_id (039c guard requires
-      // employee_id, which the engine mirrors from employee_user_id
-      // post-PR #67).
+      // 2. Build the per-method GL spec.
+      //
+      //   cash / bank  →  DR 213 (reduce employee payable, tagged with
+      //                   employee_user_id) / CR cashbox (resolved
+      //                   from cashbox.kind). Cash movement OUT.
+      //
+      //   payroll_deduction / other  →  unchanged from the PR #77
+      //                                  shape (DR offset / CR 1123).
+      //                                  No cash movement.
       const description = `تسوية من موظف ${row.id} (${method})`.trim();
-      const dr =
-        method === 'cash' || method === 'bank'
+      const isCashOrBank = method === 'cash' || method === 'bank';
+      const dr = isCashOrBank
+        ? {
+            account_code: '213',
+            debit: dto.amount,
+            employee_user_id: userId,
+          }
+        : method === 'payroll_deduction'
           ? {
-              resolve_from_cashbox_id: dto.cashbox_id!,
+              account_code: '213',
               debit: dto.amount,
-              cashbox_id: dto.cashbox_id!,
+              employee_user_id: userId,
             }
-          : method === 'payroll_deduction'
-            ? {
-                account_code: '213',
-                debit: dto.amount,
-                employee_user_id: userId,
-              }
-            : {
-                account_code: dto.offset_account_code!,
-                debit: dto.amount,
-              };
-      const cr = {
-        account_code: '1123',
-        credit: dto.amount,
-        employee_user_id: userId,
-      };
-      const cashMovements =
-        method === 'cash' || method === 'bank'
-          ? [
-              {
-                cashbox_id: dto.cashbox_id!,
-                direction: 'in' as const,
-                amount: dto.amount,
-                category: 'employee_settlement',
-                notes: description,
-              },
-            ]
-          : [];
+          : {
+              account_code: dto.offset_account_code!,
+              debit: dto.amount,
+            };
+      const cr = isCashOrBank
+        ? {
+            resolve_from_cashbox_id: dto.cashbox_id!,
+            credit: dto.amount,
+            cashbox_id: dto.cashbox_id!,
+          }
+        : {
+            account_code: '1123',
+            credit: dto.amount,
+            employee_user_id: userId,
+          };
+      const cashMovements = isCashOrBank
+        ? [
+            {
+              cashbox_id: dto.cashbox_id!,
+              direction: 'out' as const,
+              amount: dto.amount,
+              category: 'employee_settlement',
+              notes: description,
+            },
+          ]
+        : [];
 
       // journal_entries.reference_id is UUID-typed but employee_
       // settlements.id is BIGSERIAL, so passing String(row.id) gave
