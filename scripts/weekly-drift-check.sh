@@ -18,6 +18,9 @@
 #    10. Cashbox drift = 0.00 (stored current_balance == SUM(cashbox_transactions))
 #    11. Forbidden VPS paths NOT reappearing (backend/src/payroll/*, provisioning/*, orphan frontend payroll files)
 #    12. scripts/deploy.sh still invokes verify-worktree.sh
+#    13. Refund consistency = 0 rows where GL credits cash but the
+#        cashbox_transactions mirror is missing (PR-R0; see
+#        scripts/refund-consistency-audit.sql for the query)
 #
 #  Nothing this script does mutates production. Every SQL query is a SELECT.
 # =============================================================================
@@ -199,6 +202,70 @@ if [ -n "$db_url_raw" ]; then
       fail "cashbox drift: max |stored − computed| = $drift_num"
     fi
   fi
+
+  # 13. Refund consistency (PR-R0).
+  #     Detects refunds/exchanges where the GL credited a cash-mirror
+  #     account (chart_of_accounts.code LIKE '111_') but the matching
+  #     cashbox_transactions out-row is missing or short. Each such
+  #     row desyncs GL cash from cashboxes.current_balance — invisible
+  #     to checks #9 + #10 because each side is internally balanced.
+  #     The full per-row report lives in scripts/refund-consistency-audit.sql;
+  #     this is just the count + total missing amount.
+  refund_inconsistent=$(sql_one "
+    WITH gl AS (
+      SELECT je.reference_type::text AS rt, je.reference_id AS rid,
+             SUM(jl.credit)::numeric AS gl_credit
+        FROM journal_entries je
+        JOIN journal_lines    jl  ON jl.entry_id = je.id
+        JOIN chart_of_accounts coa ON coa.id     = jl.account_id
+       WHERE je.is_posted = TRUE AND je.is_void = FALSE
+         AND coa.code LIKE '111_'
+         AND je.reference_type::text IN ('return','exchange')
+         AND je.reference_id IS NOT NULL
+         AND jl.credit > 0
+       GROUP BY je.reference_type, je.reference_id
+    ),
+    co AS (
+      SELECT ct.reference_type::text AS rt, ct.reference_id AS rid,
+             SUM(ct.amount)::numeric AS ct_out
+        FROM cashbox_transactions ct
+       WHERE ct.direction = 'out'
+         AND ct.reference_type::text IN ('return','exchange')
+       GROUP BY ct.reference_type, ct.reference_id
+    )
+    SELECT COUNT(*)::text
+      FROM gl LEFT JOIN co USING (rt, rid)
+     WHERE COALESCE(co.ct_out, 0) + 0.01 < gl.gl_credit;")
+  if [ -z "$refund_inconsistent" ]; then
+    fail "cannot compute refund consistency"
+  elif [ "$refund_inconsistent" != "0" ]; then
+    refund_total=$(sql_one "
+      WITH gl AS (
+        SELECT je.reference_type::text AS rt, je.reference_id AS rid,
+               SUM(jl.credit)::numeric AS gl_credit
+          FROM journal_entries je
+          JOIN journal_lines    jl  ON jl.entry_id = je.id
+          JOIN chart_of_accounts coa ON coa.id     = jl.account_id
+         WHERE je.is_posted = TRUE AND je.is_void = FALSE
+           AND coa.code LIKE '111_'
+           AND je.reference_type::text IN ('return','exchange')
+           AND je.reference_id IS NOT NULL
+           AND jl.credit > 0
+         GROUP BY je.reference_type, je.reference_id
+      ),
+      co AS (
+        SELECT ct.reference_type::text AS rt, ct.reference_id AS rid,
+               SUM(ct.amount)::numeric AS ct_out
+          FROM cashbox_transactions ct
+         WHERE ct.direction = 'out'
+           AND ct.reference_type::text IN ('return','exchange')
+         GROUP BY ct.reference_type, ct.reference_id
+      )
+      SELECT COALESCE(SUM(gl.gl_credit - COALESCE(co.ct_out, 0)), 0)::text
+        FROM gl LEFT JOIN co USING (rt, rid)
+       WHERE COALESCE(co.ct_out, 0) + 0.01 < gl.gl_credit;")
+    fail "refund consistency: $refund_inconsistent refund/exchange row(s) GL-credited cash but cashbox mirror is short by ${refund_total} (run scripts/refund-consistency-audit.sql for per-row detail)"
+  fi
 fi
 
 # --------------------------------------------------------------------------
@@ -230,7 +297,7 @@ fi
 # --------------------------------------------------------------------------
 {
   if [ ${#failures[@]} -eq 0 ]; then
-    echo "[$TS_HUMAN] PASS head=$LOCAL branch=$branch migrations=${migration_count:-?} bypass_7d=${bypass_7d:-?} trial=${trial_num:-?} drift=${drift_num:-?}"
+    echo "[$TS_HUMAN] PASS head=$LOCAL branch=$branch migrations=${migration_count:-?} bypass_7d=${bypass_7d:-?} trial=${trial_num:-?} drift=${drift_num:-?} refund_inconsistent=${refund_inconsistent:-?}"
   else
     echo "[$TS_HUMAN] FAIL ${#failures[@]} issue(s)"
     for f in "${failures[@]}"; do echo "  - $f"; done
