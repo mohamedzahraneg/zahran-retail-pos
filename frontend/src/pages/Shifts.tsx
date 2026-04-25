@@ -1287,6 +1287,7 @@ function ShiftDetailModal({ shift, onClose }: { shift: Shift; onClose: () => voi
                       <th className="text-right px-2 py-2">الاتجاه</th>
                       <th className="text-right px-2 py-2">المبلغ</th>
                       <th className="text-right px-2 py-2">الخزنة</th>
+                      <th className="text-right px-2 py-2">الوردية</th>
                       <th className="text-right px-2 py-2">تمت بواسطة</th>
                       <th className="text-right px-2 py-2">رقم القيد</th>
                       <th className="text-right px-2 py-2">التأثير المحاسبي</th>
@@ -1328,6 +1329,9 @@ function ShiftDetailModal({ shift, onClose }: { shift: Shift; onClose: () => voi
                           {EGP(m.amount)}
                         </td>
                         <td className="px-2 py-1.5 text-slate-600">{m.cashbox_name || '—'}</td>
+                        <td className="px-2 py-1.5 font-mono text-[11px] text-slate-700">
+                          {m.shift_no || '—'}
+                        </td>
                         <td className="px-2 py-1.5 text-slate-600">{m.created_by_name || '—'}</td>
                         <td className="px-2 py-1.5 font-mono text-[10px] text-slate-500">
                           {m.je_entry_no || '—'}

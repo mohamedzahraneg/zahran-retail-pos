@@ -237,73 +237,123 @@ export class ReturnsService {
    *   - For simplicity here we just stamp the return as refunded and log to
    *     customer ledger via an outflow in cash-desk style.
    */
-  async refund(id: string, dto: RefundReturnDto, userId: string) {
+  async refund(
+    id: string,
+    dto: RefundReturnDto,
+    userId: string,
+    userPermissions: string[] = [],
+  ) {
     const ret = await this.mustBeStatus(id, ['approved']);
 
+    // PR-R1 — explicit cash source. For cash refunds the caller MUST
+    // pick either an open/pending shift (shift_id) or a direct cashbox
+    // (cashbox_id with no shift_id). Direct cashbox is gated by
+    // `returns.refund.direct_cashbox` because it intentionally bypasses
+    // shift visibility — a cashier can no longer drain a drawer outside
+    // their own shift unless they have explicit authorization.
+    const isCash = dto.refund_method === 'cash';
+    let resolvedShiftId: string | null = null;
+    let resolvedCashboxId: string | null = null;
+
+    if (isCash) {
+      if (!dto.shift_id && !dto.cashbox_id) {
+        throw new BadRequestException(
+          'يجب اختيار وردية مفتوحة أو خزنة مباشرة لصرف المرتجع نقدياً',
+        );
+      }
+      if (dto.shift_id) {
+        const [shiftRow] = await this.ds.query(
+          `SELECT id, cashbox_id, status::text AS status
+             FROM shifts WHERE id = $1`,
+          [dto.shift_id],
+        );
+        if (!shiftRow) {
+          throw new NotFoundException('الوردية المختارة غير موجودة');
+        }
+        if (shiftRow.status !== 'open' && shiftRow.status !== 'pending_close') {
+          throw new BadRequestException(
+            'الوردية المختارة ليست مفتوحة — اختر وردية مفتوحة أو خزنة مباشرة',
+          );
+        }
+        if (
+          dto.cashbox_id &&
+          dto.cashbox_id !== shiftRow.cashbox_id
+        ) {
+          throw new BadRequestException(
+            'الخزنة المختارة لا تطابق خزنة الوردية',
+          );
+        }
+        resolvedShiftId = shiftRow.id;
+        resolvedCashboxId = shiftRow.cashbox_id;
+      } else {
+        // Direct cashbox branch — requires explicit permission.
+        const hasPerm =
+          userPermissions.includes('*') ||
+          userPermissions.includes('returns.*') ||
+          userPermissions.includes('returns.refund.direct_cashbox');
+        if (!hasPerm) {
+          throw new BadRequestException(
+            'الصرف من خزنة مباشرة يتطلب صلاحية returns.refund.direct_cashbox',
+          );
+        }
+        const [cb] = await this.ds.query(
+          `SELECT id FROM cashboxes WHERE id = $1 AND is_active = TRUE`,
+          [dto.cashbox_id],
+        );
+        if (!cb) {
+          throw new NotFoundException('الخزنة المختارة غير موجودة أو غير نشطة');
+        }
+        resolvedShiftId = null;
+        resolvedCashboxId = cb.id;
+      }
+    }
+
     return this.ds.transaction(async (em) => {
-      // Persist refund method on the return row
+      // Persist refund method + linkage on the return row
       await em.query(
         `
         UPDATE returns
            SET status        = 'refunded',
                refunded_at   = now(),
                refunded_by   = $2,
-               refund_method = $3
+               refund_method = $3,
+               shift_id      = $4,
+               cashbox_id    = $5
          WHERE id = $1
         `,
-        [id, userId, dto.refund_method],
+        [id, userId, dto.refund_method, resolvedShiftId, resolvedCashboxId],
       );
 
-      // Cash refund → deduct from cashbox automatically.
-      if (dto.refund_method === 'cash') {
-        // Look up a cashbox: prefer the user's open shift, else the warehouse default.
-        const [shift] = await em.query(
-          `SELECT cashbox_id FROM shifts
-             WHERE opened_by = $1 AND status='open'
-             ORDER BY opened_at DESC LIMIT 1`,
-          [userId],
-        );
-        let cashboxId: string | null = shift?.cashbox_id ?? null;
-        if (!cashboxId) {
-          const [cb] = await em.query(
-            `SELECT c.id FROM cashboxes c
-               JOIN returns r ON r.warehouse_id = c.warehouse_id
-              WHERE r.id = $1 AND c.is_active = true
-              ORDER BY c.created_at LIMIT 1`,
-            [id],
+      // Cash refund → deduct from the resolved cashbox via the engine.
+      if (isCash && resolvedCashboxId) {
+        // The GL side (DR 49 Sales Returns · CR Cash, plus inventory/COGS
+        // reversal when back_to_stock) was posted at approval time by
+        // AccountingPostingService.postReturn. This call only writes the
+        // physical cashbox_transactions row + updates cashboxes.current_balance
+        // under the canonical `engine:cashOnlyMovement` context — no
+        // bypass alert, no direct fn_record_cashbox_txn call.
+        if (!this.engine) {
+          throw new BadRequestException(
+            'FinancialEngineService غير متاح — لا يمكن صرف المرتجع نقدياً',
           );
-          cashboxId = cb?.id ?? null;
         }
-        if (cashboxId) {
-          // Phase 2.5: cash-only disbursement via the engine's sanctioned
-          // primitive. The GL side (DR 49 Sales Returns · CR Cash, plus
-          // inventory/COGS reversal when back_to_stock) was posted at
-          // approval time by AccountingPostingService.postReturn. This
-          // call only writes the physical cashbox_transactions row +
-          // updates cashboxes.current_balance under the canonical
-          // `engine:cashOnlyMovement` context — no bypass alert, no
-          // direct fn_record_cashbox_txn call.
-          if (!this.engine) {
-            throw new BadRequestException(
-              'FinancialEngineService غير متاح — لا يمكن صرف المرتجع نقدياً',
-            );
-          }
-          const res = await this.engine.recordCashOnlyMovement({
-            cashbox_id: cashboxId,
-            direction: 'out',
-            amount: Number(ret.net_refund),
-            category: 'refund',
-            reference_type: 'return',
-            reference_id: id,
-            user_id: userId,
-            notes: `استرداد نقدي — مرتجع ${ret.return_no}`,
-            em,
-          });
-          if (!res.ok) {
-            throw new BadRequestException(
-              `فشل صرف المرتجع نقدياً: ${res.error}`,
-            );
-          }
+        const res = await this.engine.recordCashOnlyMovement({
+          cashbox_id: resolvedCashboxId,
+          direction: 'out',
+          amount: Number(ret.net_refund),
+          category: 'refund',
+          reference_type: 'return',
+          reference_id: id,
+          user_id: userId,
+          notes: resolvedShiftId
+            ? `استرداد نقدي — مرتجع ${ret.return_no} (مرتبط بوردية)`
+            : `استرداد نقدي — مرتجع ${ret.return_no} (خزنة مباشرة)`,
+          em,
+        });
+        if (!res.ok) {
+          throw new BadRequestException(
+            `فشل صرف المرتجع نقدياً: ${res.error}`,
+          );
         }
       }
 
@@ -496,7 +546,11 @@ export class ReturnsService {
    *   - Create a new invoice (status=completed) for new items.
    *   - Record price difference as either a customer payment or refund.
    */
-  async createExchange(dto: CreateExchangeDto, userId: string) {
+  async createExchange(
+    dto: CreateExchangeDto,
+    userId: string,
+    userPermissions: string[] = [],
+  ) {
     const [invoice] = await this.ds.query(
       `SELECT * FROM invoices WHERE id = $1`,
       [dto.original_invoice_id],
@@ -526,6 +580,68 @@ export class ReturnsService {
       );
     }
 
+    // PR-R1 — explicit cash source for the cash leg of the exchange.
+    // A cash difference (in either direction) MUST come with shift_id
+    // OR cashbox_id. Equal exchanges and non-cash differences ignore
+    // both. The OUT direction (refund to customer) additionally
+    // requires returns.refund.direct_cashbox for the direct branch.
+    const cashOut = price_difference < 0 && dto.refund_method === 'cash';
+    const cashIn  = price_difference > 0 && dto.payment_method === 'cash';
+    const needsCashSource = cashOut || cashIn;
+    let resolvedShiftId: string | null = null;
+    let resolvedCashboxId: string | null = null;
+
+    if (needsCashSource) {
+      if (!dto.shift_id && !dto.cashbox_id) {
+        throw new BadRequestException(
+          'يجب اختيار وردية مفتوحة أو خزنة مباشرة لتسجيل الفرق النقدي',
+        );
+      }
+      if (dto.shift_id) {
+        const [shiftRow] = await this.ds.query(
+          `SELECT id, cashbox_id, status::text AS status
+             FROM shifts WHERE id = $1`,
+          [dto.shift_id],
+        );
+        if (!shiftRow) {
+          throw new NotFoundException('الوردية المختارة غير موجودة');
+        }
+        if (shiftRow.status !== 'open' && shiftRow.status !== 'pending_close') {
+          throw new BadRequestException(
+            'الوردية المختارة ليست مفتوحة — اختر وردية مفتوحة أو خزنة مباشرة',
+          );
+        }
+        if (dto.cashbox_id && dto.cashbox_id !== shiftRow.cashbox_id) {
+          throw new BadRequestException(
+            'الخزنة المختارة لا تطابق خزنة الوردية',
+          );
+        }
+        resolvedShiftId = shiftRow.id;
+        resolvedCashboxId = shiftRow.cashbox_id;
+      } else {
+        if (cashOut) {
+          const hasPerm =
+            userPermissions.includes('*') ||
+            userPermissions.includes('returns.*') ||
+            userPermissions.includes('returns.refund.direct_cashbox');
+          if (!hasPerm) {
+            throw new BadRequestException(
+              'صرف الفرق من خزنة مباشرة يتطلب صلاحية returns.refund.direct_cashbox',
+            );
+          }
+        }
+        const [cb] = await this.ds.query(
+          `SELECT id FROM cashboxes WHERE id = $1 AND is_active = TRUE`,
+          [dto.cashbox_id],
+        );
+        if (!cb) {
+          throw new NotFoundException('الخزنة المختارة غير موجودة أو غير نشطة');
+        }
+        resolvedShiftId = null;
+        resolvedCashboxId = cb.id;
+      }
+    }
+
     return this.ds.transaction(async (em) => {
       // 1) Create exchange header (trigger generates exchange_no)
       const [exc] = await em.query(
@@ -535,8 +651,9 @@ export class ReturnsService {
            returned_value, new_items_value,
            payment_method, refund_method,
            status, reason, reason_details,
-           handled_by, notes)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,'completed',$8,$9,$10,$11)
+           handled_by, notes,
+           shift_id, cashbox_id)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,'completed',$8,$9,$10,$11,$12,$13)
         RETURNING *
         `,
         [
@@ -551,6 +668,8 @@ export class ReturnsService {
           dto.reason_details ?? null,
           userId,
           dto.notes ?? null,
+          resolvedShiftId,
+          resolvedCashboxId,
         ],
       );
 
@@ -683,6 +802,39 @@ export class ReturnsService {
         `UPDATE exchanges SET new_invoice_id = $2, completed_at = now() WHERE id = $1`,
         [exc.id, newInv.id],
       );
+
+      // 6) PR-R1 — physical drawer movement for the cash leg of the
+      //    exchange. Goes through engine.recordCashOnlyMovement so the
+      //    cashbox + GL stay in sync (no manual cashbox.current_balance
+      //    edit, no direct journal_lines write). Equal exchanges and
+      //    non-cash differences write nothing here.
+      if ((cashOut || cashIn) && resolvedCashboxId) {
+        if (!this.engine) {
+          throw new BadRequestException(
+            'FinancialEngineService غير متاح — لا يمكن تسجيل فرق الاستبدال نقدياً',
+          );
+        }
+        const direction: 'in' | 'out' = cashOut ? 'out' : 'in';
+        const amount = Math.abs(price_difference);
+        const res = await this.engine.recordCashOnlyMovement({
+          cashbox_id: resolvedCashboxId,
+          direction,
+          amount,
+          category: 'refund', // shared bucket with returns; reference_type tells them apart
+          reference_type: 'exchange',
+          reference_id: exc.id,
+          user_id: userId,
+          notes: resolvedShiftId
+            ? `${direction === 'out' ? 'صرف' : 'تحصيل'} فرق استبدال — ${exc.exchange_no} (مرتبط بوردية)`
+            : `${direction === 'out' ? 'صرف' : 'تحصيل'} فرق استبدال — ${exc.exchange_no} (خزنة مباشرة)`,
+          em,
+        });
+        if (!res.ok) {
+          throw new BadRequestException(
+            `فشل تسجيل فرق الاستبدال نقدياً: ${res.error}`,
+          );
+        }
+      }
 
       return {
         exchange_id: exc.id,
