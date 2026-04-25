@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
@@ -18,6 +18,12 @@ import {
   Settings,
   Eye,
   ArrowLeft,
+  Banknote,
+  Receipt,
+  TrendingDown,
+  CalendarCheck,
+  FileBarChart,
+  Wallet2,
 } from 'lucide-react';
 import {
   employeesApi,
@@ -25,6 +31,7 @@ import {
   EmployeeRequest,
   EmployeeDashboard,
 } from '@/api/employees.api';
+import { attendanceApi } from '@/api/attendance.api';
 import { useAuthStore } from '@/stores/auth.store';
 // Payroll / حسابات الموظفين is now a tab inside /team (consolidation).
 // The component is rendered verbatim — no design change. Its own
@@ -78,11 +85,37 @@ function fmtWhen(s?: string) {
   return `${dow} · ${rest}`;
 }
 
+/**
+ * إدارة فريق العمل — unified Team Management workspace (PR-T1).
+ *
+ * Layout:
+ *   ┌─ Header (title + subtitle) ─────────────────────────────────┐
+ *   │ KPI strip — 6 cards (real data from /employees/team +       │
+ *   │  /attendance/summary today)                                  │
+ *   │ ┌─────────────────┬──────────────────────────────────────┐  │
+ *   │ │ Employee list   │ Profile panel                        │  │
+ *   │ │ (search +       │  · header (avatar/info/balance)       │  │
+ *   │ │  cards)         │  · mini-stats (4 cards)               │  │
+ *   │ │                 │  · tabs (ملخص + 5 placeholders)       │  │
+ *   │ └─────────────────┴──────────────────────────────────────┘  │
+ *   └─────────────────────────────────────────────────────────────┘
+ *
+ * Backward compat: the legacy ?tab=attendance / ?tab=accounts query
+ * params are preserved so the /attendance and /payroll route redirects
+ * keep working unchanged. New users land on the unified workspace by
+ * default. The legacy embedded views (AttendanceBody / Payroll) will
+ * be removed in PR-T6 once the new tabs are fully migrated.
+ */
 export default function Team() {
   const hasPermission = useAuthStore((s) => s.hasPermission);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const rawTab = searchParams.get('tab');
 
-  // Pending approvals are rendered only in the الفريق tab, but we fetch
-  // at the Team level so both tabs share the same in-flight request.
+  // Legacy tab paths — keep working until PR-T6 cleanup.
+  if (rawTab === 'accounts') return <Payroll />;
+  if (rawTab === 'attendance') return <AttendanceBody embedded />;
+
+  // Pending approvals — rendered inside the profile's موافقات tab.
   const { data: pending = [] } = useQuery({
     queryKey: ['employees-pending'],
     queryFn: () => employeesApi.pendingRequests(),
@@ -90,99 +123,690 @@ export default function Team() {
     refetchInterval: 30_000,
   });
 
-  const [searchParams, setSearchParams] = useSearchParams();
-  type TabName = 'team' | 'attendance' | 'accounts';
-  const rawTab = searchParams.get('tab');
-  const activeTab: TabName =
-    rawTab === 'accounts'
-      ? 'accounts'
-      : rawTab === 'attendance'
-        ? 'attendance'
-        : 'team';
+  const { data: team = [] } = useQuery({
+    queryKey: ['employees-team'],
+    queryFn: () => employeesApi.team(),
+    refetchInterval: 60_000,
+  });
 
-  const setTab = (next: TabName) => {
+  // Today's attendance summary — drives the "حاضر اليوم" KPI.
+  const today = useMemo(() => {
+    const d = new Date();
+    return d.toLocaleDateString('en-CA', { timeZone: 'Africa/Cairo' }); // YYYY-MM-DD
+  }, []);
+  const { data: todayRows = [] } = useQuery({
+    queryKey: ['attendance-summary-today', today],
+    queryFn: () => attendanceApi.summary(today, today),
+    enabled: hasPermission('attendance.view_team'),
+    refetchInterval: 60_000,
+  });
+  // attendance/summary returns one row per (user, day) with
+  // present_minutes > 0 when clocked in. Count distinct present users.
+  const presentToday = useMemo(() => {
+    const set = new Set<string>();
+    for (const r of (todayRows as any[]) || []) {
+      if ((r?.minutes ?? r?.present_minutes ?? 0) > 0 && r?.user_id) {
+        set.add(String(r.user_id));
+      }
+    }
+    return set.size;
+  }, [todayRows]);
+
+  // Sign convention — gl_balance > 0 means employee owes company;
+  // < 0 means company owes employee. We aggregate per-direction so
+  // KPIs match the wording the user expects.
+  const totals = useMemo(() => {
+    let totalEmployees = team.length;
+    let totalPayable = 0;     // company owes employees (sum of negative gl)
+    let totalEmployeeDebt = 0; // employees owe company (proxy for "سلف")
+    let totalAdvancesMonth = 0;
+    let totalBonusesMonth = 0;
+    for (const t of team as TeamRow[]) {
+      const gl = Number(t.gl_balance || 0);
+      if (gl < -0.01) totalPayable += -gl;
+      else if (gl > 0.01) totalEmployeeDebt += gl;
+      totalAdvancesMonth += Number(t.advances_this_month || 0);
+      totalBonusesMonth += Number(t.bonuses_this_month || 0);
+    }
+    return {
+      totalEmployees,
+      totalPayable,
+      totalEmployeeDebt,
+      totalAdvancesMonth,
+      totalBonusesMonth,
+      // المتبقي للموظفين = صافي ما تدين به الشركة لفريق العمل
+      netRemaining: totalPayable - totalEmployeeDebt,
+    };
+  }, [team]);
+
+  // Selected employee — controlled via ?employee=<id> for deep-link.
+  const selectedId = searchParams.get('employee');
+  const selected = useMemo(
+    () => (team as TeamRow[]).find((t) => t.id === selectedId) || null,
+    [team, selectedId],
+  );
+  const setSelectedId = (id: string | null) => {
     const sp = new URLSearchParams(searchParams);
-    if (next === 'team') sp.delete('tab');
-    else sp.set('tab', next);
+    if (id) sp.set('employee', id);
+    else sp.delete('employee');
     setSearchParams(sp, { replace: true });
   };
 
+  // Auto-select the first employee on first load when nothing picked
+  // and the team has rows. Saves a click on the most common path.
+  useEffect(() => {
+    if (!selectedId && team.length > 0) {
+      setSelectedId((team as TeamRow[])[0].id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [team.length, selectedId]);
+
   return (
     <div className="space-y-5">
-      <div className="flex items-center justify-between flex-wrap gap-3">
+      {/* Header */}
+      <div className="flex items-start justify-between flex-wrap gap-3 border-b border-slate-200 pb-4">
         <div>
           <h2 className="text-2xl font-black text-slate-800 flex items-center gap-2">
-            <Users className="text-indigo-600" />
+            <Users className="text-indigo-600" size={26} />
             إدارة فريق العمل
           </h2>
           <p className="text-sm text-slate-500 mt-1">
-            ملفات الموظفين · المهام · الحوافز · الاستقطاعات · الطلبات · الحسابات
+            ملفات الموظفين · الحضور · اليوميات · الحسابات · السلف · التقارير
           </p>
         </div>
       </div>
 
-      {/* Tab bar — three sections of one consolidated screen:
-            1. الفريق        — existing team table + pending + drawer
-            2. الحضور        — embedded AttendanceBody (PR-2). Inherits
-                               its own internal gating: self-clock card
-                               for everyone, admin filters/log only for
-                               admin/manager/accountant.
-            3. الحسابات      — verbatim Payroll page (balance cards +
-                               filters + transactions + add modal)
-          Outer permission gate for the route is `employee.team.view`
-          (same as legacy /team and /payroll routes). */}
-      <div className="flex items-center gap-1 border-b border-slate-200">
-        <button
-          type="button"
-          onClick={() => setTab('team')}
-          className={`px-4 py-2 -mb-px border-b-2 text-sm font-bold transition flex items-center gap-2 ${
-            activeTab === 'team'
-              ? 'border-indigo-600 text-indigo-700'
-              : 'border-transparent text-slate-500 hover:text-slate-700'
-          }`}
-        >
-          <Users2 size={15} />
-          الفريق
-        </button>
-        <button
-          type="button"
-          onClick={() => setTab('attendance')}
-          className={`px-4 py-2 -mb-px border-b-2 text-sm font-bold transition flex items-center gap-2 ${
-            activeTab === 'attendance'
-              ? 'border-indigo-600 text-indigo-700'
-              : 'border-transparent text-slate-500 hover:text-slate-700'
-          }`}
-        >
-          <Clock size={15} />
-          الحضور
-        </button>
-        <button
-          type="button"
-          onClick={() => setTab('accounts')}
-          className={`px-4 py-2 -mb-px border-b-2 text-sm font-bold transition flex items-center gap-2 ${
-            activeTab === 'accounts'
-              ? 'border-indigo-600 text-indigo-700'
-              : 'border-transparent text-slate-500 hover:text-slate-700'
-          }`}
-        >
-          <Wallet size={15} />
-          الحسابات
-        </button>
+      {/* KPI strip — 6 cards */}
+      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
+        <KpiCard
+          icon={<Users2 size={20} />}
+          tone="blue"
+          label="عدد الموظفين"
+          value={totals.totalEmployees.toString()}
+          sub={
+            hasPermission('attendance.view_team')
+              ? `حاضر اليوم: ${presentToday}`
+              : undefined
+          }
+        />
+        <KpiCard
+          icon={<CheckCircle2 size={20} />}
+          tone="green"
+          label="حاضر اليوم"
+          value={
+            hasPermission('attendance.view_team')
+              ? presentToday.toString()
+              : 'غير متاح'
+          }
+          sub={
+            hasPermission('attendance.view_team') && totals.totalEmployees > 0
+              ? `${Math.round((presentToday / totals.totalEmployees) * 100)}% من الفريق`
+              : undefined
+          }
+        />
+        <KpiCard
+          icon={<Wallet size={20} />}
+          tone="orange"
+          label="إجمالي المستحقات"
+          value={EGP(totals.totalPayable)}
+          sub="شركة مدينة لفريق العمل"
+        />
+        <KpiCard
+          icon={<DollarSign size={20} />}
+          tone="red"
+          label="إجمالي السلف"
+          value={EGP(totals.totalEmployeeDebt)}
+          sub="موظفون مدينون للشركة"
+        />
+        <KpiCard
+          icon={<TrendingDown size={20} />}
+          tone="purple"
+          label="إجمالي الخصومات"
+          value="غير متاح"
+          sub="سيُحسب في PR-T3"
+        />
+        <KpiCard
+          icon={<Banknote size={20} />}
+          tone="green"
+          label="المتبقي للموظفين"
+          value={EGP(totals.netRemaining)}
+          sub="صافي مستحق بعد السلف"
+        />
       </div>
 
-      {activeTab === 'accounts' ? (
-        // Payroll UI rendered verbatim — shares the global TanStack
-        // cache with the rest of Team, so mutations from either tab
-        // invalidate + refetch the other automatically.
-        <Payroll />
-      ) : activeTab === 'attendance' ? (
-        // Embedded body of the legacy /attendance page — same self
-        // clock-in widget + admin summary + per-row log. The shared
-        // invalidateMonthly() (PR-1) keeps Team list / Payroll cards
-        // in sync when clock-in/out fires from this tab.
-        <AttendanceBody embedded />
-      ) : (
-        <TeamTab pending={pending} />
+      {/* Two-column layout: list + profile */}
+      <div className="grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-5">
+        <EmployeeListPanel
+          team={team as TeamRow[]}
+          selectedId={selectedId}
+          onSelect={setSelectedId}
+          presentTodayIds={
+            new Set(
+              ((todayRows as any[]) || [])
+                .filter((r) => (r?.minutes ?? r?.present_minutes ?? 0) > 0)
+                .map((r) => String(r.user_id)),
+            )
+          }
+        />
+        <EmployeeProfilePanel
+          row={selected}
+          pending={pending as EmployeeRequest[]}
+        />
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────────
+ * Reusable shells — no fake data, no accounting changes
+ * ───────────────────────────────────────────────────────────────── */
+
+function KpiCard({
+  icon,
+  tone,
+  label,
+  value,
+  sub,
+}: {
+  icon: React.ReactNode;
+  tone: 'blue' | 'green' | 'red' | 'orange' | 'purple';
+  label: string;
+  value: string;
+  sub?: string;
+}) {
+  const toneMap: Record<string, { bg: string; fg: string; tile: string }> = {
+    blue:   { bg: 'bg-blue-50',   fg: 'text-blue-700',    tile: 'bg-blue-100' },
+    green:  { bg: 'bg-emerald-50', fg: 'text-emerald-700', tile: 'bg-emerald-100' },
+    red:    { bg: 'bg-rose-50',   fg: 'text-rose-700',    tile: 'bg-rose-100' },
+    orange: { bg: 'bg-amber-50',  fg: 'text-amber-700',   tile: 'bg-amber-100' },
+    purple: { bg: 'bg-violet-50', fg: 'text-violet-700',  tile: 'bg-violet-100' },
+  };
+  const t = toneMap[tone];
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white p-4 flex items-center justify-between gap-3 shadow-sm">
+      <div className="min-w-0">
+        <div className="text-xs font-bold text-slate-500">{label}</div>
+        <div className={`text-xl font-black mt-1 ${t.fg} truncate tabular-nums`}>
+          {value}
+        </div>
+        {sub && (
+          <div className="text-[11px] text-slate-400 mt-0.5">{sub}</div>
+        )}
+      </div>
+      <div className={`shrink-0 w-11 h-11 rounded-xl ${t.tile} ${t.fg} flex items-center justify-center`}>
+        {icon}
+      </div>
+    </div>
+  );
+}
+
+function EmployeeListPanel({
+  team,
+  selectedId,
+  onSelect,
+  presentTodayIds,
+}: {
+  team: TeamRow[];
+  selectedId: string | null;
+  onSelect: (id: string | null) => void;
+  presentTodayIds: Set<string>;
+}) {
+  const [q, setQ] = useState('');
+  const filtered = useMemo(() => {
+    if (!q) return team;
+    const needle = q.trim().toLowerCase();
+    return team.filter(
+      (t) =>
+        t.full_name?.toLowerCase().includes(needle) ||
+        t.username?.toLowerCase().includes(needle) ||
+        t.employee_no?.toLowerCase().includes(needle),
+    );
+  }, [team, q]);
+
+  return (
+    <aside className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm h-fit max-h-[calc(100vh-220px)] overflow-y-auto">
+      <div className="flex items-center justify-between mb-3 px-1">
+        <h3 className="text-base font-black text-slate-800">الموظفون</h3>
+        <span className="text-[11px] text-slate-400">{team.length}</span>
+      </div>
+      <div className="flex items-center gap-2 px-2 py-2 mb-3 rounded-xl border border-slate-200 bg-slate-50">
+        <Search size={14} className="text-slate-400" />
+        <input
+          className="bg-transparent flex-1 text-sm outline-none placeholder:text-slate-400"
+          placeholder="ابحث عن موظف…"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+        />
+      </div>
+      <div className="space-y-2">
+        {filtered.map((t) => (
+          <EmployeeCard
+            key={t.id}
+            row={t}
+            active={t.id === selectedId}
+            presentToday={presentTodayIds.has(t.id)}
+            onClick={() => onSelect(t.id)}
+          />
+        ))}
+        {!filtered.length && (
+          <div className="text-center text-xs text-slate-400 py-8">لا نتائج</div>
+        )}
+      </div>
+      <button
+        type="button"
+        disabled
+        title="سيتم تفعيلها في PR-T2"
+        className="w-full mt-4 rounded-xl border border-dashed border-indigo-300 text-indigo-500 bg-white py-3 text-sm font-bold cursor-not-allowed opacity-60"
+      >
+        + إضافة موظف جديد
+      </button>
+    </aside>
+  );
+}
+
+function EmployeeCard({
+  row,
+  active,
+  presentToday,
+  onClick,
+}: {
+  row: TeamRow;
+  active: boolean;
+  presentToday: boolean;
+  onClick: () => void;
+}) {
+  const gl = Number(row.gl_balance || 0);
+  const isPayable = gl < -0.01; // company owes employee
+  const isDebt = gl > 0.01;     // employee owes company
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`w-full text-right rounded-2xl border bg-white p-3 transition focus:outline-none ${
+        active
+          ? 'border-violet-300 ring-4 ring-violet-50'
+          : 'border-slate-200 hover:border-slate-300'
+      }`}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 min-w-0">
+          <span
+            className={`w-2.5 h-2.5 rounded-full shrink-0 ${
+              presentToday ? 'bg-emerald-500' : 'bg-slate-300'
+            }`}
+            title={presentToday ? 'حاضر اليوم' : 'لم يُسجَّل حضور'}
+          />
+          <div className="min-w-0">
+            <div className="font-black text-slate-800 text-sm truncate">
+              {row.full_name || row.username}
+            </div>
+            <div className="text-[11px] text-slate-500 truncate">
+              {row.role_name || row.job_title || '—'}
+            </div>
+          </div>
+        </div>
+      </div>
+      <div className="mt-2 flex items-center justify-between text-[11px] text-slate-500">
+        <span className="font-mono">{row.employee_no}</span>
+        <span>{Math.round(Number(row.minutes_this_month || 0) / 60)}س / الشهر</span>
+      </div>
+      <div
+        className={`mt-2 text-sm font-black ${
+          isPayable
+            ? 'text-emerald-700'
+            : isDebt
+              ? 'text-rose-700'
+              : 'text-slate-500'
+        }`}
+      >
+        {isPayable
+          ? `مستحق له ${EGP(-gl)}`
+          : isDebt
+            ? `مدين للشركة ${EGP(gl)}`
+            : 'متوازن'}
+      </div>
+    </button>
+  );
+}
+
+type ProfileTab =
+  | 'summary'
+  | 'attendance'
+  | 'accounts'
+  | 'advances'
+  | 'approvals'
+  | 'reports';
+
+function EmployeeProfilePanel({
+  row,
+  pending,
+}: {
+  row: TeamRow | null;
+  pending: EmployeeRequest[];
+}) {
+  const hasPermission = useAuthStore((s) => s.hasPermission);
+  const [tab, setTab] = useState<ProfileTab>('summary');
+
+  const { data: dash } = useQuery({
+    queryKey: ['employee-user-dashboard', row?.id],
+    queryFn: () => employeesApi.userDashboard(row!.id),
+    enabled: !!row?.id,
+  });
+
+  if (!row) {
+    return (
+      <section className="rounded-2xl border border-slate-200 bg-white shadow-sm flex flex-col items-center justify-center text-center p-12 min-h-[420px]">
+        <Users2 size={42} className="text-slate-300 mb-3" />
+        <h3 className="text-lg font-black text-slate-700">اختر موظفًا</h3>
+        <p className="text-sm text-slate-500 mt-1">
+          ابحث في القائمة على اليمين أو اختر موظفًا لعرض ملفه.
+        </p>
+      </section>
+    );
+  }
+
+  const gl = Number(row.gl_balance || 0);
+  const isPayable = gl < -0.01;
+  const isDebt = gl > 0.01;
+
+  const profileTabs: Array<{ key: ProfileTab; label: string; icon: React.ReactNode }> = [
+    { key: 'summary',    label: 'ملخص',                 icon: <ClipboardList size={14} /> },
+    { key: 'attendance', label: 'الحضور واليوميات',     icon: <CalendarCheck size={14} /> },
+    { key: 'accounts',   label: 'الحسابات والحركات',    icon: <Wallet2 size={14} /> },
+    { key: 'advances',   label: 'السلف والخصومات',      icon: <Receipt size={14} /> },
+    { key: 'approvals',  label: 'الموافقات والتعديلات', icon: <CheckCircle2 size={14} /> },
+    { key: 'reports',    label: 'التقارير',             icon: <FileBarChart size={14} /> },
+  ];
+
+  return (
+    <section className="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden">
+      {/* Top: actions + person card + mini-stats */}
+      <div className="p-5 border-b border-slate-100 space-y-4">
+        <div className="flex items-center justify-end gap-2 flex-wrap">
+          <ActionButton
+            label="اعتماد يومية"
+            tone="green"
+            allowed={hasPermission('employee.attendance.manage')}
+            disabledReason="سيتم تفعيلها في PR-T2"
+          />
+          <ActionButton
+            label="صرف مستحقات"
+            tone="white"
+            allowed={hasPermission('employee.ledger.view')}
+            disabledReason="سيتم تفعيلها في PR-T2"
+          />
+          <ActionButton
+            label="تسجيل حركة"
+            tone="white"
+            allowed={
+              hasPermission('employee.bonuses.manage') ||
+              hasPermission('employee.deductions.manage')
+            }
+            disabledReason="سيتم تفعيلها في PR-T3/T4"
+          />
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-[110px_1fr_240px] gap-4 items-start border border-slate-200 rounded-2xl p-4">
+          {/* Avatar placeholder */}
+          <div className="w-24 h-24 rounded-full bg-gradient-to-br from-slate-200 to-slate-50 border border-slate-200" />
+          <div>
+            <h3 className="text-2xl font-black text-slate-800 flex items-center gap-2 flex-wrap">
+              {row.full_name || row.username}
+              <span className="text-[11px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-full px-2 py-0.5">
+                نشط
+              </span>
+            </h3>
+            <div className="text-sm text-slate-500 mt-0.5">
+              {row.role_name || row.job_title || '—'}
+            </div>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-3 text-xs text-slate-500">
+              <InfoItem
+                label="تاريخ التعيين"
+                value={dash?.profile?.hire_date || 'غير متاح'}
+              />
+              <InfoItem
+                label="الرقم الوظيفي"
+                value={row.employee_no || '—'}
+              />
+              <InfoItem
+                label="رقم الهاتف"
+                value="غير متاح"
+                hint="سيُضاف في PR-T2"
+              />
+              <InfoItem
+                label="حالة اليوم"
+                value={
+                  hasPermission('attendance.view_team')
+                    ? dash?.attendance?.today
+                      ? 'حاضر'
+                      : 'لم يُسجَّل حضور'
+                    : 'غير متاح'
+                }
+              />
+            </div>
+          </div>
+          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-center">
+            <div className="text-xs text-slate-500">الرصيد النهائي</div>
+            <div
+              className={`text-2xl font-black mt-1 tabular-nums ${
+                isPayable
+                  ? 'text-emerald-700'
+                  : isDebt
+                    ? 'text-rose-700'
+                    : 'text-slate-700'
+              }`}
+            >
+              {isPayable ? EGP(-gl) : isDebt ? EGP(gl) : EGP(0)}
+            </div>
+            <div className="text-xs font-bold mt-1 text-slate-600">
+              {isPayable ? 'مستحق له' : isDebt ? 'مدين للشركة' : 'متوازن'}
+            </div>
+            <div className="text-[10px] text-slate-400 mt-2 leading-snug">
+              المستحقات + المكافآت − الخصومات − السلف − المصروف فعليًا
+            </div>
+          </div>
+        </div>
+
+        {/* Mini-stats from /employees/:id/dashboard (real data) */}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <MiniStat
+            label="مستحقات معتمدة"
+            value={dash ? EGP(dash.wage?.accrual_in_month) : '—'}
+            tone="blue"
+          />
+          <MiniStat
+            label="مصروف فعليًا"
+            value={dash ? EGP(dash.wage?.paid_in_month) : '—'}
+            tone="orange"
+          />
+          <MiniStat
+            label="سلف الشهر"
+            value={dash ? EGP(dash.salary?.advances_month) : '—'}
+            tone="purple"
+          />
+          <MiniStat
+            label="الرصيد الحي"
+            value={
+              dash
+                ? EGP(Math.abs(dash.gl?.live_snapshot ?? 0))
+                : '—'
+            }
+            tone={
+              dash && dash.gl?.live_snapshot > 0.01
+                ? 'red'
+                : dash && dash.gl?.live_snapshot < -0.01
+                  ? 'green'
+                  : 'blue'
+            }
+            hint={
+              dash && dash.gl?.live_snapshot > 0.01
+                ? 'مدين للشركة'
+                : dash && dash.gl?.live_snapshot < -0.01
+                  ? 'مستحق له'
+                  : 'متوازن'
+            }
+          />
+        </div>
+      </div>
+
+      {/* Tabs */}
+      <nav className="flex items-center gap-1 border-b border-slate-200 px-5 overflow-x-auto">
+        {profileTabs.map((t) => (
+          <button
+            key={t.key}
+            type="button"
+            onClick={() => setTab(t.key)}
+            className={`px-4 py-3 -mb-px border-b-2 text-sm font-bold transition flex items-center gap-2 whitespace-nowrap ${
+              tab === t.key
+                ? 'border-indigo-600 text-indigo-700'
+                : 'border-transparent text-slate-500 hover:text-slate-700'
+            }`}
+          >
+            {t.icon}
+            {t.label}
+          </button>
+        ))}
+      </nav>
+
+      <div className="p-5">
+        {tab === 'summary' && <OverviewTab dash={dash} />}
+        {tab === 'attendance' && (
+          <PlaceholderPanel
+            title="الحضور واليوميات"
+            message="سيتم نقل الحضور واعتماد اليومية إلى هذا التبويب في PR-T2."
+            link={{ to: `/team?tab=attendance`, label: 'فتح الواجهة الحالية للحضور' }}
+          />
+        )}
+        {tab === 'accounts' && (
+          <PlaceholderPanel
+            title="الحسابات والحركات"
+            message="سيتم نقل كشف الحساب والحركات (مع إخفاء/إظهار القيود الملغاة) في PR-T3."
+            link={{ to: `/team?tab=accounts`, label: 'فتح الواجهة الحالية للحسابات' }}
+          />
+        )}
+        {tab === 'advances' && (
+          <PlaceholderPanel
+            title="السلف والخصومات"
+            message="سيتم نقل السلف والخصومات والمكافآت — مع اختيار مصدر الصرف (وردية مفتوحة / خزنة مباشرة) — في PR-T3/T4."
+          />
+        )}
+        {tab === 'approvals' && (
+          <PlaceholderPanel
+            title="الموافقات والتعديلات"
+            message={
+              hasPermission('employee.requests.approve')
+                ? `هناك ${pending.filter((p: any) => String(p.user_id) === row.id).length} طلب معلّق لهذا الموظف. ستُعرض هنا في PR-T4.`
+                : 'سيتم نقل الموافقات وسجل التعديلات في PR-T4.'
+            }
+          />
+        )}
+        {tab === 'reports' && (
+          <PlaceholderPanel
+            title="التقارير"
+            message="سيتم نقل تقارير الموظف (طباعة / PDF / Excel) في PR-T5."
+          />
+        )}
+      </div>
+    </section>
+  );
+}
+
+function ActionButton({
+  label,
+  tone,
+  allowed,
+  disabledReason,
+}: {
+  label: string;
+  tone: 'green' | 'white';
+  allowed: boolean;
+  disabledReason: string;
+}) {
+  if (!allowed) return null; // permission-aware: hide when not allowed
+  const cls =
+    tone === 'green'
+      ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+      : 'bg-white text-slate-700 border-slate-200';
+  return (
+    <button
+      type="button"
+      disabled
+      title={disabledReason}
+      className={`px-3 py-2 rounded-xl text-sm font-bold border ${cls} cursor-not-allowed opacity-60`}
+    >
+      {label}
+    </button>
+  );
+}
+
+function InfoItem({
+  label,
+  value,
+  hint,
+}: {
+  label: string;
+  value: string;
+  hint?: string;
+}) {
+  return (
+    <div>
+      <div>{label}</div>
+      <div className="font-bold text-slate-700 mt-0.5" title={hint}>{value}</div>
+    </div>
+  );
+}
+
+function MiniStat({
+  label,
+  value,
+  tone,
+  hint,
+}: {
+  label: string;
+  value: string;
+  tone: 'blue' | 'green' | 'red' | 'orange' | 'purple';
+  hint?: string;
+}) {
+  const fg: Record<string, string> = {
+    blue:   'text-blue-700',
+    green:  'text-emerald-700',
+    red:    'text-rose-700',
+    orange: 'text-amber-700',
+    purple: 'text-violet-700',
+  };
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white p-3">
+      <div className="text-[11px] font-bold text-slate-500">{label}</div>
+      <div className={`text-lg font-black mt-1 tabular-nums ${fg[tone]}`}>
+        {value}
+      </div>
+      {hint && (
+        <div className="text-[10px] text-slate-400 mt-0.5">{hint}</div>
+      )}
+    </div>
+  );
+}
+
+function PlaceholderPanel({
+  title,
+  message,
+  link,
+}: {
+  title: string;
+  message: string;
+  link?: { to: string; label: string };
+}) {
+  return (
+    <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-8 text-center">
+      <h4 className="text-base font-black text-slate-700">{title}</h4>
+      <p className="text-sm text-slate-500 mt-2 leading-relaxed">{message}</p>
+      {link && (
+        <a
+          href={link.to}
+          className="inline-flex items-center gap-1.5 mt-4 px-3 py-2 rounded-xl bg-white border border-slate-200 text-slate-700 text-xs font-bold hover:bg-slate-100"
+        >
+          {link.label}
+        </a>
       )}
     </div>
   );
