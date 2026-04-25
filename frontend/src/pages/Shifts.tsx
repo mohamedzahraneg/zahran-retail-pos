@@ -1378,6 +1378,11 @@ function ShiftDetailModal({ shift, onClose }: { shift: Shift; onClose: () => voi
                 qc.invalidateQueries({ queryKey: ['shift-detail', shift.id] });
                 qc.invalidateQueries({ queryKey: ['shift-adjustments', shift.id] });
                 qc.invalidateQueries({ queryKey: ['shifts'] });
+                // PR-B1 follow-up: invalidate the pending-close inbox so
+                // the approval flow picks up the new actual_closing
+                // (otherwise the manager sees the stale variance from
+                // close_requested_amount).
+                qc.invalidateQueries({ queryKey: ['shifts-pending-close'] });
                 setShowAdjust(false);
               }}
             />
@@ -1576,15 +1581,24 @@ function PendingCloseInbox() {
               <button
                 className="px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[11px]"
                 onClick={() => {
-                  // Same rule as the modal — prefer the live variance
-                  // emitted by /shifts/pending-close. Using the stale
-                  // stored column here would sometimes skip the
-                  // treatment modal for a shift that actually has a
-                  // non-zero live variance.
+                  // PR-B1 follow-up: backend now emits `actual_closing_live`
+                  // on the pending-close payload — equals
+                  // shifts.actual_closing when an admin adjusted the
+                  // count via /adjust-count, falls back to
+                  // close_requested_amount otherwise. We prefer
+                  // variance_live (server-computed using the same rule)
+                  // and fall back through actual_closing_live →
+                  // actual_closing → close_requested_amount so the inbox
+                  // stays correct even on partial cache refresh.
                   const expected = Number(
                     (s as any).expected_closing_live ?? s.expected_closing ?? 0,
                   );
-                  const actual = Number(s.close_requested_amount || 0);
+                  const actual = Number(
+                    (s as any).actual_closing_live ??
+                      s.actual_closing ??
+                      s.close_requested_amount ??
+                      0,
+                  );
                   const variance = Number(
                     (s as any).variance_live ?? actual - expected,
                   );
@@ -1713,11 +1727,21 @@ function ApproveVarianceDialog({
   const expected = Number(
     (shift as any).expected_closing_live ?? shift.expected_closing ?? 0,
   );
-  const actual = Number(shift.close_requested_amount || 0);
+  // PR-B1 follow-up: prefer the post-adjust value (actual_closing) over
+  // the cashier's original close_requested_amount. Backend now emits
+  // actual_closing_live on the pending-close inbox payload; for direct
+  // call paths we fall back through actual_closing → close_requested_amount.
+  const actual = Number(
+    (shift as any).actual_closing_live ??
+      shift.actual_closing ??
+      shift.close_requested_amount ??
+      0,
+  );
   const variance = Number(
     (shift as any).variance_live ?? actual - expected,
   );
   const isShortage = variance < 0;
+  const isZeroVariance = Math.abs(variance) < 0.01;
 
   const [treatment, setTreatment] = useState<VarianceTreatment>(
     isShortage ? 'company_loss' : 'revenue',
@@ -1761,11 +1785,51 @@ function ApproveVarianceDialog({
             اعتماد الوردية — معالجة الفروقات
           </h4>
           <p className="text-xs text-slate-500">
-            وردية {shift.shift_no} — فرق: {EGP(variance)} (
-            {isShortage ? 'عجز' : 'زيادة'})
+            وردية {shift.shift_no}
+            {!isZeroVariance && (
+              <>
+                {' '}— فرق: {EGP(variance)} (
+                {isShortage ? 'عجز' : 'زيادة'})
+              </>
+            )}
           </p>
         </div>
 
+        {/* PR-B1 follow-up: when an admin adjusted the counted-cash to
+         *  match expected (or the dialog was opened with a stale value),
+         *  variance becomes 0 and there's nothing to treat. Hide the
+         *  treatment options entirely and show a one-click approve
+         *  affordance instead. */}
+        {isZeroVariance ? (
+          <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-3 text-emerald-800 text-xs space-y-2">
+            <div className="font-bold">
+              لا توجد فروقات بعد تعديل مبلغ الإقفال
+            </div>
+            <div className="text-[11px] text-emerald-700/80">
+              المبلغ المعدّل يطابق الرصيد المتوقع — يمكن اعتماد الإقفال
+              مباشرة دون الحاجة لمعالجة فروقات.
+            </div>
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={onCancel}
+                className="px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-100 text-slate-700 hover:bg-slate-200"
+                disabled={pending}
+              >
+                إلغاء
+              </button>
+              <button
+                type="button"
+                onClick={() => onConfirm({})}
+                className="px-3 py-1.5 rounded-lg text-xs font-bold bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50"
+                disabled={pending}
+              >
+                {pending ? 'جارٍ الاعتماد…' : 'اعتماد الإقفال'}
+              </button>
+            </div>
+          </div>
+        ) : (
+        <>
         <div className="text-xs space-y-2">
           <div className="font-bold text-slate-600 mb-1">طريقة المعالجة</div>
           {isShortage ? (
@@ -1879,6 +1943,8 @@ function ApproveVarianceDialog({
             {pending ? 'جاري الاعتماد…' : 'اعتماد + ترحيل القيد'}
           </button>
         </div>
+        </>
+        )}
       </div>
     </div>
   );
@@ -2016,6 +2082,11 @@ function AdjustCountModal({
           >
             {newActual ? EGP(newDiff) : '—'}
           </div>
+          {newActual && Math.abs(newDiff) < 0.01 && (
+            <div className="mt-1 text-[11px] text-emerald-700">
+              ✓ لا توجد فروقات بعد تعديل مبلغ الإقفال — يمكن اعتماد الإقفال مباشرة
+            </div>
+          )}
         </div>
 
         <div>
