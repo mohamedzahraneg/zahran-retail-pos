@@ -375,9 +375,9 @@ function CurrentShiftCard({ shift }: { shift: Shift }) {
             tone="rose"
           />
           <MiniChip
-            label="↩ مرتجعات"
-            amount={-s.total_returns}
-            count={s.return_count}
+            label="↩ مرتجعات/استبدالات"
+            amount={-(s.total_refund_cash_out || 0)}
+            count={s.refund_cash_movements?.length ?? 0}
             tone="rose"
           />
           <MiniChip
@@ -787,8 +787,8 @@ function CloseShiftModal({
             color="text-rose-600"
           />
           <Row
-            label="مرتجعات"
-            value={'- ' + EGP(s?.total_returns || 0)}
+            label={`مرتجعات/استبدالات (${s?.refund_cash_movements?.length ?? 0})`}
+            value={'- ' + EGP(s?.total_refund_cash_out || 0)}
             color="text-rose-600"
           />
           <Row
@@ -1091,8 +1091,8 @@ function ShiftDetailModal({ shift, onClose }: { shift: Shift; onClose: () => voi
                 color="text-rose-600"
               />
               <Row
-                label={`↩ مرتجعات (${s.return_count})`}
-                value={'- ' + EGP(s.total_returns)}
+                label={`↩ مرتجعات/استبدالات (${s.refund_cash_movements?.length ?? 0})`}
+                value={'- ' + EGP(s.total_refund_cash_out || 0)}
                 color="text-rose-600"
               />
               <Row
