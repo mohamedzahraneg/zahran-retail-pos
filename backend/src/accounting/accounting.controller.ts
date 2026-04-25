@@ -27,6 +27,7 @@ import {
   CreateDailyExpenseDto,
   CreateExpenseCategoryDto,
   CreateExpenseDto,
+  CreateExpenseEditRequestDto,
   ListExpensesDto,
   ReportRangeDto,
   UpdateExpenseCategoryDto,
@@ -260,6 +261,93 @@ export class AccountingController {
   @Roles('admin', 'manager')
   deleteExpense(@Param('id', ParseUUIDPipe) id: string) {
     return this.service.deleteExpense(id);
+  }
+
+  // ─── Expense edit-request workflow (migration 094) ─────────────────
+  //
+  // /accounting/expenses/:id/edit-request          POST  — file
+  // /accounting/expenses/:id/edit-requests         GET   — history
+  // /accounting/expenses/edit-requests/inbox       GET   — pending
+  // /accounting/expenses/edit-requests/:id/approve POST  — apply
+  // /accounting/expenses/edit-requests/:id/reject  POST  — reject
+  // /accounting/expenses/edit-requests/:id/cancel  POST  — cancel own
+  //
+  // RBAC:
+  //   * Filing requires `expenses.daily.edit.request` (admin / manager
+  //     / cashier — all granted in migration 094).
+  //   * Approving requires `expenses.daily.edit.approve` (admin /
+  //     manager only).
+  //   * Cancelling requires `expenses.daily.edit.request` AND being
+  //     the original requester (enforced inside the service).
+  // ───────────────────────────────────────────────────────────────────
+
+  @Post('expenses/:id/edit-request')
+  @Permissions('expenses.daily.edit.request')
+  @ApiOperation({ summary: 'طلب تعديل مصروف يومي معتمد' })
+  requestExpenseEdit(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CreateExpenseEditRequestDto,
+    @Req() req: any,
+  ) {
+    return this.service.requestExpenseEdit(
+      id,
+      { reason: dto.reason, new_values: (dto.new_values ?? {}) as Record<string, any> },
+      req.user.sub ?? req.user.id ?? req.user.userId,
+    );
+  }
+
+  @Get('expenses/:id/edit-requests')
+  @ApiOperation({ summary: 'سجل طلبات التعديل لمصروف معيّن' })
+  listEditRequestsForExpense(@Param('id', ParseUUIDPipe) id: string) {
+    return this.service.listEditRequestsForExpense(id);
+  }
+
+  @Get('expenses/edit-requests/inbox')
+  @Permissions('expenses.daily.edit.approve')
+  @ApiOperation({ summary: 'صندوق الموافقات على طلبات تعديل المصروفات' })
+  editRequestsInbox() {
+    return this.service.editRequestsInbox();
+  }
+
+  @Post('expenses/edit-requests/:id/approve')
+  @Permissions('expenses.daily.edit.approve')
+  @ApiOperation({ summary: 'الموافقة على طلب تعديل + ترحيل التصحيح' })
+  approveEditRequest(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Req() req: any,
+  ) {
+    return this.service.approveEditRequest(
+      id,
+      req.user.sub ?? req.user.id ?? req.user.userId,
+    );
+  }
+
+  @Post('expenses/edit-requests/:id/reject')
+  @Permissions('expenses.daily.edit.approve')
+  @ApiOperation({ summary: 'رفض طلب التعديل' })
+  rejectEditRequest(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() body: { reason: string },
+    @Req() req: any,
+  ) {
+    return this.service.rejectEditRequest(
+      id,
+      req.user.sub ?? req.user.id ?? req.user.userId,
+      body?.reason ?? '',
+    );
+  }
+
+  @Post('expenses/edit-requests/:id/cancel')
+  @Permissions('expenses.daily.edit.request')
+  @ApiOperation({ summary: 'إلغاء طلب تعديل (لصاحب الطلب فقط)' })
+  cancelEditRequest(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Req() req: any,
+  ) {
+    return this.service.cancelEditRequest(
+      id,
+      req.user.sub ?? req.user.id ?? req.user.userId,
+    );
   }
 
   // ─── Reports ─────────────────────────────────────────────────────────

@@ -34,7 +34,9 @@ import {
   DollarSign,
   Download,
   FileText,
+  History,
   ListPlus,
+  Pencil,
   Plus,
   Receipt,
   Sparkles,
@@ -54,6 +56,12 @@ import { shiftsApi } from '@/api/shifts.api';
 import { useAuthStore } from '@/stores/auth.store';
 import { exportToExcel, printReport } from '@/lib/exportExcel';
 import ExpensesAnalyticsPremiumTab from './ExpensesAnalyticsPremiumTab';
+import {
+  EditExpenseModal,
+  EditHistoryModal,
+  EditRequestsInboxBadge,
+  EditRequestsInboxModal,
+} from './ExpenseEditWorkflow';
 
 const DEFAULT_WAREHOUSE_ID = import.meta.env.VITE_DEFAULT_WAREHOUSE_ID as string;
 
@@ -620,6 +628,14 @@ function ExpensesRegisterTab({ ctx }: { ctx: ExpenseTabContext }) {
     openAddCategory,
   } = ctx;
 
+  // PR-11: edit-workflow modals (state local to register tab — these
+  // never apply on the analytics tab).
+  const hasPermission = useAuthStore((s) => s.hasPermission);
+  const canRequestEdit = hasPermission('expenses.daily.edit.request');
+  const [editTarget, setEditTarget] = useState<Expense | null>(null);
+  const [historyTarget, setHistoryTarget] = useState<Expense | null>(null);
+  const [showEditInbox, setShowEditInbox] = useState(false);
+
   return (
     <div className="space-y-5">
       {/* Filter bar */}
@@ -761,6 +777,10 @@ function ExpensesRegisterTab({ ctx }: { ctx: ExpenseTabContext }) {
 
       {/* Action buttons */}
       <div className="flex items-center justify-end gap-2 flex-wrap">
+        {/* PR-11: pending edit-request inbox (only renders for users with
+         *  expenses.daily.edit.approve). The component handles the
+         *  permission check internally. */}
+        <EditRequestsInboxBadge onClick={() => setShowEditInbox(true)} />
         <button className="btn-ghost text-xs flex items-center gap-1.5" onClick={exportExcel}>
           <Download size={14} /> تصدير Excel
         </button>
@@ -813,6 +833,7 @@ function ExpensesRegisterTab({ ctx }: { ctx: ExpenseTabContext }) {
                   <th className="p-2 text-right">رقم القيد</th>
                   <th className="p-2 text-center">الدفع</th>
                   <th className="p-2 text-center">الحالة</th>
+                  <th className="p-2 text-center">إجراء</th>
                 </tr>
               </thead>
               <tbody>
@@ -858,6 +879,39 @@ function ExpensesRegisterTab({ ctx }: { ctx: ExpenseTabContext }) {
                       >
                         {e.je_is_void ? 'ملغي' : e.is_approved ? 'معتمد' : 'معلّق'}
                       </span>
+                      {/* PR-11: pending edit badge */}
+                      {e.has_pending_edit_request && (
+                        <span className="block mt-1 chip text-[9px] bg-amber-50 text-amber-700 border-amber-200">
+                          طلب تعديل ⏳
+                        </span>
+                      )}
+                    </td>
+                    <td className="p-2 text-center whitespace-nowrap">
+                      <div className="flex items-center justify-center gap-1">
+                        {canRequestEdit && (
+                          <button
+                            type="button"
+                            onClick={() => setEditTarget(e)}
+                            disabled={e.has_pending_edit_request}
+                            title={
+                              e.has_pending_edit_request
+                                ? 'يوجد طلب تعديل قيد الانتظار'
+                                : 'تعديل المصروف'
+                            }
+                            className="p-1 rounded text-amber-600 hover:bg-amber-50 disabled:opacity-40 disabled:cursor-not-allowed dark:text-amber-400 dark:hover:bg-amber-500/15"
+                          >
+                            <Pencil size={13} />
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => setHistoryTarget(e)}
+                          title="سجل التعديلات"
+                          className="p-1 rounded text-indigo-600 hover:bg-indigo-50 dark:text-indigo-400 dark:hover:bg-indigo-500/15"
+                        >
+                          <History size={13} />
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -870,13 +924,30 @@ function ExpensesRegisterTab({ ctx }: { ctx: ExpenseTabContext }) {
                   <td className="p-2 text-center tabular-nums text-rose-700">
                     {EGP(totalAmount)}
                   </td>
-                  <td colSpan={7}></td>
+                  <td colSpan={8}></td>
                 </tr>
               </tfoot>
             </table>
           </div>
         )}
       </div>
+
+      {/* PR-11: edit-workflow modals */}
+      {editTarget && (
+        <EditExpenseModal
+          expense={editTarget}
+          onClose={() => setEditTarget(null)}
+        />
+      )}
+      {historyTarget && (
+        <EditHistoryModal
+          expense={historyTarget}
+          onClose={() => setHistoryTarget(null)}
+        />
+      )}
+      {showEditInbox && (
+        <EditRequestsInboxModal onClose={() => setShowEditInbox(false)} />
+      )}
     </div>
   );
 }

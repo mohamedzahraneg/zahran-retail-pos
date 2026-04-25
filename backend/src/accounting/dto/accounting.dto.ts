@@ -220,6 +220,54 @@ export class ListExpensesDto {
   offset?: number;
 }
 
+/**
+ * Edit-request DTOs (migration 094) — see accounting.service.ts for the
+ * full workflow rationale. The whitelist of editable fields lives on
+ * the service (`EDITABLE_FIELDS`); anything outside it is dropped.
+ */
+export class ExpenseEditValuesDto {
+  @IsOptional()
+  @IsUUID()
+  category_id?: string;
+
+  @IsOptional()
+  @IsNumber()
+  @IsPositive()
+  amount?: number;
+
+  @IsOptional()
+  @IsUUID()
+  cashbox_id?: string;
+
+  @IsOptional()
+  @IsDateString()
+  expense_date?: string;
+
+  @IsOptional()
+  @IsUUID()
+  employee_user_id?: string;
+
+  @IsOptional()
+  @IsString()
+  @IsIn(['cash', 'card', 'transfer', 'wallet', 'mixed'])
+  payment_method?: 'cash' | 'card' | 'transfer' | 'wallet' | 'mixed';
+
+  @IsOptional()
+  @IsString()
+  description?: string;
+}
+
+export class CreateExpenseEditRequestDto {
+  /** Required justification — minimum 5 chars (also enforced at the
+   *  DB level via CHECK constraint on expense_edit_requests.reason). */
+  @IsString()
+  @Length(5, 1000)
+  reason!: string;
+
+  @IsOptional()
+  new_values?: ExpenseEditValuesDto;
+}
+
 export class ReportRangeDto {
   @IsDateString()
   from!: string;
