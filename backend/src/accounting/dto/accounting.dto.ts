@@ -33,6 +33,17 @@ export class CreateExpenseCategoryDto {
   @IsOptional()
   @IsBoolean()
   allocate_to_cogs?: boolean;
+
+  /**
+   * COA leaf id — required for any category that will be used by the
+   * Daily Expenses screen (PR-1 strict mode rejects unmapped
+   * categories). Optional here so legacy seeders that don't carry the
+   * GL mapping yet stay valid; the strict mode is enforced at the
+   * Daily-Expense create path, not at category create.
+   */
+  @IsOptional()
+  @IsUUID()
+  account_id?: string;
 }
 
 export class UpdateExpenseCategoryDto extends PartialType(

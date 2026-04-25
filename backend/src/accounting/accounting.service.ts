@@ -31,19 +31,30 @@ export class AccountingService {
   ) {}
 
   // ─── Expense Categories ──────────────────────────────────────────────
+  /**
+   * List categories with COA mapping preview joined so the Daily
+   * Expenses screen can render the "DR <code> <name>" preview without
+   * a second round-trip. Includes `account_code` + `account_name` +
+   * `account_id` (nullable when category is unmapped).
+   */
   listCategories(includeInactive = false) {
     return this.ds.query(
-      `SELECT * FROM expense_categories
-       ${includeInactive ? '' : 'WHERE is_active = TRUE'}
-       ORDER BY name_ar`,
+      `SELECT ec.*,
+              coa.code    AS account_code,
+              coa.name_ar AS account_name_ar,
+              (ec.account_id IS NOT NULL) AS has_account
+         FROM expense_categories ec
+         LEFT JOIN chart_of_accounts coa ON coa.id = ec.account_id
+        ${includeInactive ? '' : 'WHERE ec.is_active = TRUE'}
+        ORDER BY ec.name_ar`,
     );
   }
 
   async createCategory(dto: CreateExpenseCategoryDto) {
     const [row] = await this.ds.query(
       `INSERT INTO expense_categories
-         (code, name_ar, name_en, is_fixed, allocate_to_cogs)
-       VALUES ($1,$2,$3,$4,$5)
+         (code, name_ar, name_en, is_fixed, allocate_to_cogs, account_id)
+       VALUES ($1,$2,$3,$4,$5,$6)
        RETURNING *`,
       [
         dto.code,
@@ -51,6 +62,7 @@ export class AccountingService {
         dto.name_en ?? null,
         dto.is_fixed ?? false,
         dto.allocate_to_cogs ?? false,
+        dto.account_id ?? null,
       ],
     );
     return row;
@@ -101,7 +113,20 @@ export class AccountingService {
   }
 
   // ─── Expenses ────────────────────────────────────────────────────────
-  async createExpense(dto: CreateExpenseDto, userId: string) {
+  /**
+   * Create an expense + post the GL/cashbox entries in one transaction.
+   *
+   * `opts.strictCategoryMapping` (PR-1 of Daily Expenses series): when
+   * true, the resolver refuses to fall through to the 529 catch-all.
+   * The supplied `category_id` MUST be mapped to an explicit
+   * `account_id` on `expense_categories`. Daily Expenses sets this;
+   * legacy / recurring callers do not (preserves their behaviour).
+   */
+  async createExpense(
+    dto: CreateExpenseDto,
+    userId: string,
+    opts: { strictCategoryMapping?: boolean } = {},
+  ) {
     return this.ds.transaction(async (em) => {
       // Auto-resolve cashbox_id from the user's open shift when not supplied
       // — keeps expenses tied to the shift for proper close-out reconciliation.
@@ -211,7 +236,9 @@ export class AccountingService {
         // entry in one atomic, idempotent call. Awaited; no fire-and-
         // forget. Any failure rolls back the whole createExpense
         // transaction, so a failed post leaves zero residue.
-        await this.postViaEngine(em, row, userId);
+        await this.postViaEngine(em, row, userId, {
+          strictCategoryMapping: opts.strictCategoryMapping === true,
+        });
       }
 
       return row;
@@ -228,6 +255,7 @@ export class AccountingService {
     em: import('typeorm').EntityManager,
     expense: any,
     userId: string,
+    opts: { strictCategoryMapping?: boolean } = {},
   ): Promise<void> {
     if (!this.engine) {
       // Legacy fallback — if the engine isn't wired, fall back to the
@@ -240,21 +268,29 @@ export class AccountingService {
     }
 
     // Resolve the GL account via the centralized CostAccountResolver
-    // (migration 065). Falls back to 529 if the category is unmapped.
-    // No inline lookups here — all paths go through the resolver so
-    // reporting + reconciliation see a single mapping table.
+    // (migration 065). Falls back to 529 unless `strictCategoryMapping`
+    // is set (Daily Expenses path), in which case the resolver throws
+    // UnmappedCategoryError → caught below + surfaced as 400.
     let categoryAccountId: string | null = null;
     if (this.resolver) {
       const hint =
         (expense.category_code as string | undefined) ??
         (expense.description as string | undefined) ??
         undefined;
-      const res = await this.resolver.resolve({
-        category_id: expense.category_id,
-        hint,
-        em,
-      });
-      categoryAccountId = res.account_id;
+      try {
+        const res = await this.resolver.resolve({
+          category_id: expense.category_id,
+          hint,
+          em,
+          strict: opts.strictCategoryMapping === true,
+        });
+        categoryAccountId = res.account_id;
+      } catch (err: any) {
+        if (err?.name === 'UnmappedCategoryError') {
+          throw new BadRequestException(err.message);
+        }
+        throw err;
+      }
     } else if (expense.category_id) {
       // Defensive legacy path — only hit when resolver isn't wired
       // (e.g., a stubbed unit test). Production always has the
@@ -264,6 +300,25 @@ export class AccountingService {
         [expense.category_id],
       );
       categoryAccountId = row?.account_id ?? null;
+      if (opts.strictCategoryMapping && !categoryAccountId) {
+        throw new BadRequestException(
+          'هذا البند غير مربوط بحساب محاسبي. اختر الحساب أولًا.',
+        );
+      }
+    }
+
+    // Safety net: even with the resolver, the engine accepts
+    // `category_account_id: null` and falls back to 529 internally
+    // (financial-engine.service.ts:858-860). For Daily Expenses we
+    // refuse that path entirely.
+    if (
+      opts.strictCategoryMapping &&
+      !categoryAccountId &&
+      expense.is_advance !== true
+    ) {
+      throw new BadRequestException(
+        'هذا البند غير مربوط بحساب محاسبي. اختر الحساب أولًا.',
+      );
     }
 
     const res = await this.engine.recordExpense({
@@ -345,6 +400,11 @@ export class AccountingService {
       warehouseId = wh.id;
     }
 
+    // PR-1 (Daily Expenses): strict category mapping. Refuses to fall
+    // back to 529 silently. Admin must map the category to an explicit
+    // GL account first; if the category is missing or unmapped the
+    // resolver throws and the response is a 400 with the Arabic
+    // message users see in the UI.
     return this.createExpense(
       {
         ...dto,
@@ -352,6 +412,7 @@ export class AccountingService {
         employee_user_id: effectiveEmployee,
       } as any,
       userId,
+      { strictCategoryMapping: true },
     );
   }
 

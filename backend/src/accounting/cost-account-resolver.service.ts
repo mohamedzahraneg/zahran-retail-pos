@@ -2,6 +2,21 @@ import { Injectable } from '@nestjs/common';
 import { DataSource, EntityManager } from 'typeorm';
 
 /**
+ * Sentinel error raised by `CostAccountResolver.resolve({ strict: true })`
+ * when the supplied category is missing or its `account_id` is null.
+ * Daily Expenses (PR-1) rejects the request with a 400 carrying the
+ * Arabic message above; the controller layer catches this specifically.
+ */
+export class UnmappedCategoryError extends Error {
+  constructor(public readonly categoryId: string | null) {
+    super(
+      'هذا البند غير مربوط بحساب محاسبي. اختر الحساب أولًا.',
+    );
+    this.name = 'UnmappedCategoryError';
+  }
+}
+
+/**
  * CostAccountResolver — the ONE function for turning an expense's
  * category (or a free-form hint) into a concrete chart_of_accounts
  * leaf. Called by every expense-creation path; services MUST NOT
@@ -67,15 +82,29 @@ export class CostAccountResolver {
    *   categoryId  — preferred: the DB-linked category → account_id
    *   hint        — fallback: a lowercase short label (e.g. 'rent').
    *                 Only consulted if categoryId is missing/unlinked.
+   *   strict      — when true (Daily Expenses path, PR-1 of the
+   *                 Daily Expenses series), refuse to fall through
+   *                 to either the hint map OR the 529 catch-all.
+   *                 The caller MUST supply a category whose
+   *                 `account_id` is mapped explicitly. If 529 is the
+   *                 desired account, admin must map the category to
+   *                 it — no silent fallback.
    *
-   * Returns a COA account UUID. Never returns null — the 529
-   * fallback is always present (seeded in migration 048).
+   * Returns a COA account UUID. In non-strict mode, the 529 fallback
+   * is always returned as a last resort (seeded in migration 048).
+   * In strict mode, throws `UnmappedCategoryError` when no explicit
+   * category mapping is found.
    */
   async resolve(args: {
     category_id?: string | null;
     hint?: string | null;
     em?: EntityManager;
-  }): Promise<{ account_id: string; account_code: string; source: 'category' | 'hint' | 'fallback' }> {
+    strict?: boolean;
+  }): Promise<{
+    account_id: string;
+    account_code: string;
+    source: 'category' | 'hint' | 'fallback';
+  }> {
     const runner = args.em ?? this.ds.manager;
 
     // 1. By category_id → category's linked account_id.
@@ -91,6 +120,12 @@ export class CostAccountResolver {
       if (row?.account_id) {
         return { account_id: row.account_id, account_code: row.code, source: 'category' };
       }
+    }
+
+    // Strict mode (Daily Expenses): refuse to fall through. Admin
+    // must map the category explicitly — silent 529 is forbidden.
+    if (args.strict) {
+      throw new UnmappedCategoryError(args.category_id ?? null);
     }
 
     // 2. Free-form hint → canonical map.
