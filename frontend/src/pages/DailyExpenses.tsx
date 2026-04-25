@@ -518,21 +518,21 @@ export default function DailyExpenses() {
 
   return (
     <div className="space-y-5">
-      {/* ─── Page header ─── */}
+      {/* ─── Page header (theme-aware in PR-8) ─── */}
       <div className="flex items-center gap-3">
-        <div className="p-2 rounded-xl bg-amber-100 text-amber-700">
+        <div className="p-2 rounded-xl bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300">
           <Receipt size={20} />
         </div>
         <div>
-          <h1 className="text-xl font-black text-slate-800">المصروفات اليومية</h1>
-          <p className="text-xs text-slate-500">
+          <h1 className="text-xl font-black text-slate-800 dark:text-white">المصروفات اليومية</h1>
+          <p className="text-xs text-slate-500 dark:text-slate-400">
             تسجيل مصروف يومي مرتبط بالموظف المسؤول — يُرحَّل القيد تلقائيًا
           </p>
         </div>
       </div>
 
       {/* ─── Tab bar (URL-driven via ?tab=) ─── */}
-      <div className="border-b border-slate-200">
+      <div className="border-b border-slate-200 dark:border-slate-700/40">
         <div className="flex items-center gap-1">
           <TabButton active={tab === 'register'} onClick={() => setTab('register')}>
             <Receipt size={14} /> السجل والتسجيل
@@ -582,8 +582,8 @@ function TabButton({
       onClick={onClick}
       className={`px-4 py-2 text-xs font-bold flex items-center gap-1.5 border-b-2 -mb-px transition ${
         active
-          ? 'border-indigo-600 text-indigo-700'
-          : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'
+          ? 'border-indigo-600 text-indigo-700 dark:border-indigo-400 dark:text-indigo-300'
+          : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300 dark:text-slate-400 dark:hover:text-slate-200 dark:hover:border-slate-600'
       }`}
     >
       {children}
