@@ -80,6 +80,12 @@ class SettlementDto {
   // account). Must not be 1123 itself.
   @IsOptional() @IsString() offset_account_code?: string;
   @IsOptional() @IsString() notes?: string;
+  /** PR-15 follow-up — shift_id was being stripped by NestJS's
+   *  whitelist validation because the DTO didn't declare it. The
+   *  service-layer validation in recordSettlement therefore never
+   *  fired (closed-shift checks, cashbox-mismatch checks). Declaring
+   *  it here lets the validator pass it through to the service. */
+  @IsOptional() @IsUUID() shift_id?: string;
 }
 
 class TaskDto {
