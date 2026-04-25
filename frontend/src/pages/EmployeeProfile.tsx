@@ -1459,10 +1459,25 @@ function FinancialLedgerCard({
               </thead>
               <tbody>
                 {monthEntries.map((g, i) => (
-                  <tr key={`${g.entry_no}-${i}`} className="border-t border-slate-100">
+                  <tr
+                    key={`${g.entry_no}-${i}`}
+                    className={`border-t border-slate-100 ${
+                      g.is_voided ? 'opacity-50 bg-slate-50/60' : ''
+                    }`}
+                  >
                     <td className="p-2 tabular-nums font-mono">{g.entry_date}</td>
                     <td className="p-2 font-mono text-[11px] text-slate-600">
-                      {g.entry_no}
+                      <span className={g.is_voided ? 'line-through' : ''}>
+                        {g.entry_no}
+                      </span>
+                      {g.is_voided && (
+                        <span
+                          className="chip text-[9px] bg-rose-50 text-rose-700 border-rose-200 mr-1"
+                          title={g.void_reason || 'تم إلغاء هذا القيد'}
+                        >
+                          ملغاة
+                        </span>
+                      )}
                     </td>
                     <td className="p-2">
                       <span
@@ -1476,28 +1491,46 @@ function FinancialLedgerCard({
                       </span>
                     </td>
                     <td className="p-2 text-slate-700">
-                      <div className="text-[11px]">{g.description}</div>
+                      <div
+                        className={`text-[11px] ${g.is_voided ? 'line-through' : ''}`}
+                      >
+                        {g.description}
+                      </div>
                       <div className="text-[10px] text-slate-400 font-mono">
                         {g.reference_type}
                       </div>
                     </td>
                     <td className="p-2 text-center tabular-nums">
-                      {g.debit > 0 ? fmt(g.debit) : '—'}
+                      {g.debit > 0 ? (
+                        <span className={g.is_voided ? 'line-through' : ''}>
+                          {fmt(g.debit)}
+                        </span>
+                      ) : '—'}
                     </td>
                     <td className="p-2 text-center tabular-nums">
-                      {g.credit > 0 ? fmt(g.credit) : '—'}
+                      {g.credit > 0 ? (
+                        <span className={g.is_voided ? 'line-through' : ''}>
+                          {fmt(g.credit)}
+                        </span>
+                      ) : '—'}
                     </td>
                     <td
                       className={`p-2 text-center tabular-nums font-bold ${
-                        g.signed_effect > 0
-                          ? 'text-rose-700'
-                          : g.signed_effect < 0
-                            ? 'text-emerald-700'
-                            : 'text-slate-500'
+                        g.is_voided
+                          ? 'text-slate-400'
+                          : g.signed_effect > 0
+                            ? 'text-rose-700'
+                            : g.signed_effect < 0
+                              ? 'text-emerald-700'
+                              : 'text-slate-500'
                       }`}
                     >
-                      {g.signed_effect > 0 ? '+' : ''}
-                      {fmt(g.signed_effect)}
+                      {g.is_voided ? '0.00' : (
+                        <>
+                          {g.signed_effect > 0 ? '+' : ''}
+                          {fmt(g.signed_effect)}
+                        </>
+                      )}
                     </td>
                     <td className="p-2 text-center tabular-nums font-black">
                       {fmt(g.running_balance)}

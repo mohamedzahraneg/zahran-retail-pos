@@ -3,7 +3,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { DataSource } from 'typeorm';
+import { DataSource, EntityManager } from 'typeorm';
 import { EmployeesService } from '../employees/employees.service';
 import { AccountingService } from '../accounting/accounting.service';
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -282,11 +282,20 @@ export class AttendanceService {
       approved_amount?: number;
       approval_reason?: string;
     },
+    em?: EntityManager,
   ) {
+    // PR-25 — accept an optional EntityManager so a parent transaction
+    // (adminApproveWageOverride's void+repost flow) can include the
+    // accrual post in the same atomic write set. Without this, the
+    // repost runs on a separate connection and `fn_post_employee_wage_accrual`
+    // can't see the in-flight void of the existing accrual — its
+    // idempotency check returns the OLD row's id and no replacement
+    // is created (root cause of the missing-approval bug).
+    const exec = em ?? this.ds;
     if (!reason || !reason.trim()) {
       throw new BadRequestException('السبب مطلوب');
     }
-    const [profile] = await this.ds.query(
+    const [profile] = await exec.query(
       `SELECT u.id, u.salary_amount, u.salary_frequency, u.target_hours_day
          FROM users u
         WHERE u.id = $1 AND u.is_active = TRUE`,
@@ -324,7 +333,7 @@ export class AttendanceService {
       );
     }
 
-    const [row] = await this.ds.query(
+    const [row] = await exec.query(
       `SELECT fn_post_employee_wage_accrual(
          $1::uuid, $2::date, $3::numeric,
          'admin_manual'::text, NULL::uuid, NULL::int,
@@ -367,8 +376,13 @@ export class AttendanceService {
       approved_amount?: number;
       approval_reason?: string;
     },
+    em?: EntityManager,
   ) {
-    const [att] = await this.ds.query(
+    // PR-25 — same em-passthrough pattern as adminMarkPayableDay so
+    // adminApproveWageOverride's transactional void+repost flow is
+    // truly atomic.
+    const exec = em ?? this.ds;
+    const [att] = await exec.query(
       `SELECT a.id, a.user_id, a.work_date, a.clock_out, a.duration_min,
               u.salary_amount, u.target_hours_day
          FROM attendance_records a
@@ -413,7 +427,7 @@ export class AttendanceService {
       );
     }
 
-    const [row] = await this.ds.query(
+    const [row] = await exec.query(
       `SELECT fn_post_employee_wage_accrual(
          $1::uuid, $2::date, $3::numeric,
          'attendance'::text, $4::uuid, $5::int,
@@ -494,8 +508,14 @@ export class AttendanceService {
         );
       }
 
-      // Post the new accrual. Route through the right service method
-      // based on whether there's an attendance record to link.
+      // PR-25 — Post the new accrual on the SAME EntityManager so the
+      // void above and the repost below commit (or roll back) together.
+      // Without this `em` passthrough the repost runs on a separate
+      // connection and `fn_post_employee_wage_accrual`'s idempotency
+      // check sees the OLD live row (the void is still uncommitted),
+      // returns its id, and creates no replacement — leaving the
+      // employee with a voided approval and no fresh accrual. This is
+      // exactly the bug that wiped out Abu Youssef's 2026-04-25 wage.
       if (existing?.attendance_record_id) {
         return this.adminApproveWageFromAttendance(
           existing.attendance_record_id,
@@ -505,6 +525,7 @@ export class AttendanceService {
             approved_amount: body.approved_amount,
             approval_reason: body.approval_reason,
           },
+          em,
         );
       }
       // No attendance link → admin_manual path. Reason for the row is
@@ -520,6 +541,7 @@ export class AttendanceService {
           approved_amount: body.approved_amount,
           approval_reason: body.approval_reason,
         },
+        em,
       );
     });
   }
@@ -658,6 +680,7 @@ export class AttendanceService {
           shift_id: body.shift_id,
         },
         adminId,
+        adminPermissions,
       );
       result.payable_amount_settled = r2(payablePart);
       if ((settlement as any)?.id != null) {
@@ -728,6 +751,7 @@ export class AttendanceService {
             shift_id: body.shift_id,
           },
           adminId,
+          adminPermissions,
         );
         if ((bonusSettlement as any)?.id != null) {
           result.settlement_ids.push(String((bonusSettlement as any).id));
