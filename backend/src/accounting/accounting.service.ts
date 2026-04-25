@@ -522,6 +522,19 @@ export class AccountingService {
     }
     if (filters.status === 'approved') conds.push(`e.is_approved = TRUE`);
     else if (filters.status === 'pending') conds.push(`e.is_approved = FALSE`);
+    // PR-3: register filters — employee, cashbox, shift.
+    if (filters.employee_user_id) {
+      ps.push(filters.employee_user_id);
+      conds.push(`e.employee_user_id = $${ps.length}`);
+    }
+    if (filters.cashbox_id) {
+      ps.push(filters.cashbox_id);
+      conds.push(`e.cashbox_id = $${ps.length}`);
+    }
+    if (filters.shift_id) {
+      ps.push(filters.shift_id);
+      conds.push(`e.shift_id = $${ps.length}`);
+    }
     if (filters.q) {
       ps.push(`%${filters.q}%`);
       conds.push(
@@ -532,10 +545,11 @@ export class AccountingService {
     ps.push(filters.limit ?? 100);
     ps.push(filters.offset ?? 0);
 
-    // PR-2: JOIN shifts + cashboxes + the responsible employee so the
-    // register row carries everything the UI needs without follow-up
-    // round-trips. Plus the COA-mapped account preview from PR-1
-    // (joined via expense_categories.account_id → chart_of_accounts).
+    // PR-2: JOIN shifts + cashboxes + the responsible employee.
+    // PR-3: also LATERAL-JOIN the JE so the register can show the
+    // entry_no and is_void status of the posted journal_entry. The
+    // engine writes journal_entries with reference_type='expense' AND
+    // reference_id=expenses.id; one expense → at most one JE.
     const rows = await this.ds.query(
       `SELECT e.*,
               c.name_ar     AS category_name,
@@ -548,7 +562,9 @@ export class AccountingService {
               ue.full_name  AS employee_name,
               ue.username   AS employee_username,
               cb.name_ar    AS cashbox_name,
-              s.shift_no    AS shift_no
+              s.shift_no    AS shift_no,
+              je.entry_no   AS je_entry_no,
+              je.is_void    AS je_is_void
        FROM expenses e
        LEFT JOIN expense_categories c ON c.id = e.category_id
        LEFT JOIN chart_of_accounts coa ON coa.id = c.account_id
@@ -558,6 +574,13 @@ export class AccountingService {
        LEFT JOIN users ue             ON ue.id = e.employee_user_id
        LEFT JOIN cashboxes cb         ON cb.id = e.cashbox_id
        LEFT JOIN shifts s             ON s.id  = e.shift_id
+       LEFT JOIN LATERAL (
+         SELECT entry_no, is_void
+           FROM journal_entries
+          WHERE reference_type = 'expense' AND reference_id = e.id
+          ORDER BY created_at DESC
+          LIMIT 1
+       ) je ON TRUE
        ${where}
        ORDER BY e.expense_date DESC, e.created_at DESC
        LIMIT $${ps.length - 1} OFFSET $${ps.length}`,

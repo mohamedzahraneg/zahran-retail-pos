@@ -53,6 +53,10 @@ export interface Expense {
   employee_user_id?: string | null;
   employee_name?: string | null;
   employee_username?: string | null;
+  /** PR-3: posted journal entry (latest one referenced by this expense).
+   *  NULL when the expense is still pending approval / no JE exists. */
+  je_entry_no?: string | null;
+  je_is_void?: boolean | null;
 }
 
 export interface ProfitAndLoss {
@@ -143,6 +147,10 @@ export const accountingApi = {
     category_id?: string;
     warehouse_id?: string;
     status?: 'approved' | 'pending' | 'all';
+    /** PR-3 — register filters. */
+    employee_user_id?: string;
+    cashbox_id?: string;
+    shift_id?: string;
     q?: string;
     limit?: number;
     offset?: number;
