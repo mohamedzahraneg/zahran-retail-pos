@@ -141,7 +141,7 @@ BEGIN
     'out',
     v_amount,
     'employee_settlement_direction_fix',
-    'other'::entity_type,
+    'other',
     v_old_je_id,
     v_created_by,
     v_reversal_desc
@@ -190,7 +190,7 @@ BEGIN
     'out',
     v_amount,
     'employee_settlement',
-    'other'::entity_type,
+    'other',
     v_new_je_id,
     v_created_by,
     'صرف فعلي للموظف ابو يوسف — تسوية رقم 7 (تصحيح اتجاه)'
