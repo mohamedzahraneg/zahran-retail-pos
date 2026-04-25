@@ -1090,11 +1090,15 @@ function ShiftDetailModal({ shift, onClose }: { shift: Shift; onClose: () => voi
             </div>
           )}
 
-          {/* Expenses list */}
+          {/* Operating expenses (PR-14: advances are now in their own
+           *  section below — this list shows operating expenses only). */}
           {s && s.expenses.length > 0 && (
             <div className="border border-slate-200 rounded-lg overflow-hidden">
-              <div className="bg-amber-50 p-3 text-sm font-bold text-amber-800">
-                المصروفات ({s.expenses.length})
+              <div className="bg-amber-50 p-3 text-sm font-bold text-amber-800 flex items-center justify-between">
+                <span>المصروفات التشغيلية ({s.expenses.length})</span>
+                <span className="font-mono tabular-nums text-amber-900">
+                  {EGP(s.total_operating_expenses)}
+                </span>
               </div>
               <div className="overflow-x-auto max-h-40 overflow-y-auto">
                 <table className="min-w-full text-xs">
@@ -1121,6 +1125,132 @@ function ShiftDetailModal({ shift, onClose }: { shift: Shift; onClose: () => voi
                     ))}
                   </tbody>
                 </table>
+              </div>
+            </div>
+          )}
+
+          {/* PR-14 — Employee cash movements (settlements + advances).
+           *  These are cash that left the drawer for an employee but
+           *  are NOT operating expenses — settlement is DR 213 / CR cash,
+           *  advance is DR 1123 / CR cash. They were previously invisible
+           *  in shift closing because computeSummary only looked at the
+           *  expenses table. */}
+          {s && s.employee_cash_movements && s.employee_cash_movements.length > 0 && (
+            <div className="border border-indigo-200 rounded-lg overflow-hidden">
+              <div className="bg-indigo-50 p-3 text-sm font-bold text-indigo-800 flex items-center justify-between">
+                <span>حركات موظفين نقدية ({s.employee_cash_movements.length})</span>
+                <span className="font-mono tabular-nums text-indigo-900">
+                  {EGP(s.total_employee_cash_out)}
+                </span>
+              </div>
+              <div className="overflow-x-auto max-h-56 overflow-y-auto">
+                <table className="min-w-full text-xs">
+                  <thead className="bg-slate-50">
+                    <tr>
+                      <th className="text-right px-2 py-2">التاريخ والوقت</th>
+                      <th className="text-right px-2 py-2">الموظف المستلم</th>
+                      <th className="text-right px-2 py-2">النوع</th>
+                      <th className="text-right px-2 py-2">المبلغ</th>
+                      <th className="text-right px-2 py-2">الخزنة</th>
+                      <th className="text-right px-2 py-2">تمت بواسطة</th>
+                      <th className="text-right px-2 py-2">رقم القيد</th>
+                      <th className="text-right px-2 py-2">التأثير المحاسبي</th>
+                      <th className="text-right px-2 py-2">حالة الربط</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {s.employee_cash_movements.map((m) => (
+                      <tr key={`${m.kind}-${m.id}`} className="border-t border-slate-100">
+                        <td className="px-2 py-1.5 font-mono tabular-nums whitespace-nowrap">
+                          {new Date(m.created_at).toLocaleString('en-GB', {
+                            timeZone: 'Africa/Cairo',
+                            hour12: false,
+                          })}
+                        </td>
+                        <td className="px-2 py-1.5">{m.employee_name || '—'}</td>
+                        <td className="px-2 py-1.5">
+                          <span
+                            className={`chip text-[10px] ${
+                              m.kind === 'settlement'
+                                ? 'bg-rose-50 text-rose-700 border-rose-200'
+                                : 'bg-amber-50 text-amber-700 border-amber-200'
+                            }`}
+                          >
+                            {m.type_label}
+                          </span>
+                        </td>
+                        <td className="px-2 py-1.5 font-bold tabular-nums text-rose-600">
+                          {EGP(m.amount)}
+                        </td>
+                        <td className="px-2 py-1.5 text-slate-600">
+                          {m.cashbox_name || '—'}
+                        </td>
+                        <td className="px-2 py-1.5 text-slate-600">
+                          {m.created_by_name || '—'}
+                        </td>
+                        <td className="px-2 py-1.5 font-mono text-[10px] text-slate-500">
+                          {m.je_entry_no || '—'}
+                        </td>
+                        <td className="px-2 py-1.5 text-slate-600 text-[11px]">
+                          {m.accounting_impact}
+                        </td>
+                        <td className="px-2 py-1.5">
+                          <span
+                            className={`chip text-[10px] ${
+                              m.link_method === 'explicit'
+                                ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                : 'bg-sky-50 text-sky-700 border-sky-200'
+                            }`}
+                            title={
+                              m.link_method === 'explicit'
+                                ? 'مرتبط مباشرة بالوردية عبر shift_id'
+                                : 'مطابقة عبر الخزنة + توقيت الوردية (لا يوجد shift_id بعد)'
+                            }
+                          >
+                            {m.link_method === 'explicit'
+                              ? 'مرتبط بالوردية'
+                              : 'مرتبط تلقائياً بالوردية'}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* PR-14 — Cash-out summary block. Uses the same numbers as
+           *  the expected_closing formula so the user can see exactly
+           *  why the drawer is expected to be at this value. */}
+          {s && (
+            <div className="border border-slate-200 rounded-lg p-3 bg-slate-50">
+              <div className="text-sm font-bold text-slate-800 mb-2">
+                ملخص الخروج النقدي
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs">
+                <CashOutLine label="المصروفات التشغيلية" value={s.total_operating_expenses} />
+                <CashOutLine label="سلف الموظفين" value={s.total_employee_advances} />
+                <CashOutLine label="صرف مستحقات الموظفين" value={s.total_employee_settlements} />
+                <CashOutLine label="مدفوعات للموردين" value={s.supplier_payments} />
+                <CashOutLine label="خصومات / مرتجعات نقدية" value={s.total_returns} />
+                <CashOutLine label="حركات نقدية أخرى" value={s.other_cash_out} />
+              </div>
+              <div className="border-t border-slate-300 mt-2 pt-2 flex items-center justify-between">
+                <span className="text-sm font-bold text-slate-700">
+                  إجمالي حركات الموظفين النقدية
+                </span>
+                <span className="font-mono tabular-nums font-bold text-indigo-700">
+                  {EGP(s.total_employee_cash_out)}
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-bold text-slate-800">
+                  إجمالي الخروج النقدي من الدرج
+                </span>
+                <span className="font-mono tabular-nums font-black text-rose-700">
+                  {EGP(s.total_cash_out)}
+                </span>
               </div>
             </div>
           )}
@@ -1697,6 +1827,16 @@ function ApproveVarianceDialog({
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+/* PR-14 — small one-line item used by the cash-out summary block. */
+function CashOutLine({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="flex items-center justify-between py-0.5">
+      <span className="text-slate-600">{label}</span>
+      <span className="font-mono tabular-nums text-slate-700">{EGP(value)}</span>
     </div>
   );
 }

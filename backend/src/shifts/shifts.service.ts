@@ -194,13 +194,44 @@ export class ShiftsService {
     // Expenses posted during the shift window. Match generously: same
     // cashbox OR same warehouse OR created by the shift opener — cashiers
     // often leave cashbox_id blank when adding expenses from the UI.
+    //
+    // PR-14: also classify each row as `is_employee_advance` so the UI can
+    // separate operating expenses from advances. Heuristic:
+    //   * `expenses.is_advance = TRUE`     — engine routes DR to 1123, OR
+    //   * category maps to COA code 1123  — semantic advance (admin
+    //                                       mapped a "سلف الموظفين" category
+    //                                       to Employee Receivables)
     const expenseRows = await this.ds.query(
       `
       SELECT e.id, e.expense_no, e.amount, e.description,
              ec.name_ar AS category_name, e.expense_date,
+             e.is_advance,
+             e.employee_user_id,
+             u.full_name AS employee_name,
+             e.cashbox_id,
+             cb.name_ar AS cashbox_name,
+             e.payment_method,
+             e.created_by,
+             cu.full_name AS created_by_name,
+             e.created_at,
+             e.shift_id,
+             coa.code AS account_code,
+             COALESCE(e.is_advance, FALSE)
+               OR coa.code = '1123' AS is_employee_advance,
+             je.entry_no AS je_entry_no,
              CASE WHEN e.is_approved THEN 'approved' ELSE 'pending' END AS status
         FROM expenses e
         LEFT JOIN expense_categories ec ON ec.id = e.category_id
+        LEFT JOIN chart_of_accounts coa ON coa.id = ec.account_id
+        LEFT JOIN users u  ON u.id = e.employee_user_id
+        LEFT JOIN cashboxes cb ON cb.id = e.cashbox_id
+        LEFT JOIN users cu ON cu.id = e.created_by
+        LEFT JOIN LATERAL (
+          SELECT entry_no FROM journal_entries
+           WHERE reference_type = 'expense' AND reference_id = e.id
+             AND is_void = FALSE
+           ORDER BY created_at DESC LIMIT 1
+        ) je ON TRUE
        WHERE e.created_at >= $1
          AND e.created_at <= $2
          AND (
@@ -219,20 +250,137 @@ export class ShiftsService {
         shift.opened_by,
       ],
     );
-    const totalExpenses = expenseRows.reduce(
+
+    // Split: operating expenses vs employee advances.
+    const operatingExpenseRows = expenseRows.filter(
+      (e: any) => !e.is_employee_advance,
+    );
+    const advanceExpenseRows = expenseRows.filter(
+      (e: any) => e.is_employee_advance,
+    );
+    const totalOperatingExpenses = operatingExpenseRows.reduce(
       (s: number, e: any) => s + Number(e.amount || 0),
       0,
     );
+    const totalEmployeeAdvances = advanceExpenseRows.reduce(
+      (s: number, e: any) => s + Number(e.amount || 0),
+      0,
+    );
+    // Backwards-compat alias — total_expenses was previously the
+    // sum of *all* expenses (advances + operating). Keep that meaning
+    // so older callers don't break, but the UI now uses the split.
+    const totalExpenses = totalOperatingExpenses + totalEmployeeAdvances;
+
+    // PR-14 — Employee settlement payouts (DR 213 / CR cashbox). These
+    // never made it into the previous shift summary because the existing
+    // cashbox-txns aggregation only buckets known categories and skipped
+    // `employee_settlement`. Pull them straight from the source table,
+    // joined to the JE for the entry number.
+    const settlementRows = await this.ds.query(
+      `
+      SELECT es.id::text AS id,
+             es.user_id AS employee_user_id,
+             u.full_name AS employee_name,
+             es.amount,
+             es.created_at,
+             es.settlement_date,
+             es.method,
+             es.cashbox_id,
+             cb.name_ar AS cashbox_name,
+             es.notes,
+             es.created_by,
+             cu.full_name AS created_by_name,
+             je.entry_no AS je_entry_no
+        FROM employee_settlements es
+        LEFT JOIN users u   ON u.id = es.user_id
+        LEFT JOIN cashboxes cb ON cb.id = es.cashbox_id
+        LEFT JOIN users cu  ON cu.id = es.created_by
+        LEFT JOIN journal_entries je ON je.id = es.journal_entry_id
+       WHERE es.cashbox_id = $1
+         AND es.created_at >= $2
+         AND es.created_at <= $3
+         AND es.method IN ('cash','bank')
+         AND es.is_void = FALSE
+       ORDER BY es.created_at DESC
+      `,
+      [shift.cashbox_id, shift.opened_at, upperBound],
+    );
+    const totalEmployeeSettlements = settlementRows.reduce(
+      (s: number, r: any) => s + Number(r.amount || 0),
+      0,
+    );
+
+    // Build the unified employee_cash_movements array — settlements +
+    // advance-classified expenses, with explicit / derived linkage badge
+    // and a friendly accounting-impact label for the UI.
+    const employee_cash_movements: any[] = [];
+    for (const es of settlementRows) {
+      employee_cash_movements.push({
+        kind: 'settlement',
+        id: es.id,
+        movement_type: 'settlement',
+        type_label: 'صرف مستحقات',
+        employee_user_id: es.employee_user_id,
+        employee_name: es.employee_name,
+        amount: Number(es.amount),
+        created_at: es.created_at,
+        cashbox_id: es.cashbox_id,
+        cashbox_name: es.cashbox_name,
+        payment_method: es.method,
+        description: es.notes,
+        je_entry_no: es.je_entry_no,
+        created_by_name: es.created_by_name,
+        accounting_impact: `DR 213 / CR ${es.cashbox_name ?? 'cashbox'}`,
+        link_method: 'derived', // employee_settlements has no shift_id yet
+      });
+    }
+    for (const e of advanceExpenseRows) {
+      employee_cash_movements.push({
+        kind: 'advance',
+        id: e.id,
+        movement_type: 'advance',
+        type_label: 'سلفة موظف',
+        employee_user_id: e.employee_user_id,
+        employee_name: e.employee_name,
+        amount: Number(e.amount),
+        created_at: e.created_at,
+        cashbox_id: e.cashbox_id,
+        cashbox_name: e.cashbox_name,
+        payment_method: e.payment_method,
+        description: e.description,
+        je_entry_no: e.je_entry_no,
+        created_by_name: e.created_by_name,
+        accounting_impact: `DR 1123 / CR ${e.cashbox_name ?? 'cashbox'}`,
+        link_method: e.shift_id === shift.id ? 'explicit' : 'derived',
+      });
+    }
+    employee_cash_movements.sort((a, b) =>
+      (a.created_at < b.created_at ? 1 : -1),
+    );
+
+    const totalEmployeeCashOut =
+      totalEmployeeAdvances + totalEmployeeSettlements;
 
     // Cash receipts are already the cash-method invoice payments; cash refunds
     // happen when a return is settled in cash — we proxy them by subtracting
     // total_returns here (simple model: treat every refund as cash out).
     const cashRefunds = Number(ret.total_returns || 0);
 
-    // Totals
+    // Totals — PR-14: total_cash_out now includes employee settlements
+    // (which were silently missing from the magnitude before, even though
+    // they DID move the cashbox balance through fn_record_cashbox_txn).
+    // Operating expenses + employee advances both come from the `expenses`
+    // table so their sum equals the legacy `totalExpenses` — the magnitude
+    // therefore only changes by + totalEmployeeSettlements, restoring the
+    // missing visibility for Abu Youssef-style payouts.
     const totalCashIn = cashFromSales + customerReceipts + otherCashIn;
     const totalCashOut =
-      cashRefunds + supplierPayments + totalExpenses + otherCashOut;
+      cashRefunds +
+      supplierPayments +
+      totalOperatingExpenses +
+      totalEmployeeAdvances +
+      totalEmployeeSettlements +
+      otherCashOut;
     const expectedClosing =
       Number(shift.opening_balance || 0) + totalCashIn - totalCashOut;
 
@@ -280,9 +428,22 @@ export class ShiftsService {
       // returns + expenses
       total_returns: Number(ret.total_returns),
       return_count: ret.return_count,
+      // PR-14 — `total_expenses` is kept (advances + operating) for any
+      // legacy caller; the UI uses `total_operating_expenses` plus the
+      // employee_cash_movements section below.
       total_expenses: totalExpenses,
       expense_count: expenseRows.length,
-      expenses: expenseRows,
+      expenses: operatingExpenseRows, // advances filtered out — see below
+
+      // PR-14 — Employee cash visibility split (no schema changes)
+      total_operating_expenses: totalOperatingExpenses,
+      operating_expense_count: operatingExpenseRows.length,
+      total_employee_advances: totalEmployeeAdvances,
+      employee_advance_count: advanceExpenseRows.length,
+      total_employee_settlements: totalEmployeeSettlements,
+      employee_settlement_count: settlementRows.length,
+      total_employee_cash_out: totalEmployeeCashOut,
+      employee_cash_movements,
 
       // reconciliation
       total_cash_in: totalCashIn,
