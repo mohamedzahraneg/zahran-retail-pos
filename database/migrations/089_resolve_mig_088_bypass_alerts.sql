@@ -1,103 +1,91 @@
--- Migration 089 — Resolve the 6 bypass alerts emitted by migration 088.
+-- Migration 089 — Mark migration 088's residual bypass-alert anomalies resolved.
 -- ═══════════════════════════════════════════════════════════════════════════
 --
 -- Context
 --
---   Migration 088 (PR #95 / #96) corrected Abu Youssef's wrong
---   settlement direction. Its writes were:
---     * UPDATE journal_entries SET is_void=true (the original wrong JE)
---     * INSERT journal_entries (the new corrective JE)
---     * INSERT journal_lines × 2 (the new JE's two legs)
---     * UPDATE journal_entries SET is_posted=true (the post step)
---     * 2× fn_record_cashbox_txn (reversal + real payout)
+--   Migration 088 (PR #95/#96) corrected Abu Youssef's wrong settlement
+--   direction. Its 2× fn_record_cashbox_txn calls internally re-set
+--   app.engine_context to 'service:cashbox_fn_fallback' — every write
+--   inside those atomic blocks landed under that context and migration
+--   068's enforcement trigger logged 6 rows in engine_bypass_alerts
+--   (ids 45–50). Same residual pattern migrations 072/079 cleaned up
+--   after 040/078.
 --
---   The two cashbox helper calls re-set `app.engine_context` internally
---   to `service:cashbox_fn_fallback` (its default behaviour), which
---   means every write inside their atomic blocks landed with that
---   context — including the INSERT/UPDATE on journal_entries and
---   journal_lines that fn_record_cashbox_txn does NOT do directly,
---   plus the cashbox_transactions INSERTs themselves.
+--   The auto-detector pipeline ALREADY inserted matching
+--   `financial_anomalies` rows (anomaly_type='legacy_bypass_journal_entry')
+--   for those alerts — but with `resolved=false`. The drift check
+--   pairs each alert with a `resolved=true` row, so the unresolved
+--   anomalies cause the FAIL.
 --
---   Migration 068's enforcement trigger logged 6 rows in
---   engine_bypass_alerts (ids 45–50) with context_value
---   'service:cashbox_fn_fallback'. The weekly drift check pairs each
---   alert with a resolved financial_anomalies row via NOT EXISTS on
---   (affected_entity, reference_id). Without paired rows the check
---   FAILs with `unresolved last 7 days = 6`.
+--   First attempt at this migration tried to INSERT new resolved rows
+--   alongside the existing unresolved ones — but financial_anomalies
+--   has a UNIQUE INDEX `ux_anomalies_open_slot` on
+--   (anomaly_type, affected_entity, reference_id, resolved), so the
+--   INSERT collided with the existing unresolved rows and failed.
 --
---   This is the same residual pattern migrations 072 and 079 cleaned
---   up after migrations 040 and 078 respectively. We do the same here.
+-- Fix
 --
--- Scope
+--   UPDATE the 5 existing `resolved=false` rows to `resolved=true`
+--   for the migration-088 bypass record_ids. The unique index
+--   permits a flip from false→true because (…, false) and (…, true)
+--   occupy different slots.
 --
---   * 6 paired financial_anomalies rows, one per alert id (45–50).
---   * Each row references the exact (affected_entity, reference_id)
---     so the drift check's twin lookup matches.
---   * Severity 'low'; resolved=true; resolution_note links migration
---     088 + the alert id.
+--   Affected record_ids (from engine_bypass_alerts ids 45–50):
+--     cashbox_transactions  107  (alert 45)
+--     journal_entries       887ea7c4-…  (alerts 46 INSERT + 49 UPDATE)
+--     journal_lines         d37b9f9b-…  (alert 47)
+--     journal_lines         7ff6d8f4-…  (alert 48)
+--     cashbox_transactions  108  (alert 50)
+--
+--   = 5 distinct (affected_entity, reference_id) keys. UPDATE matches
+--   exactly those 5 rows.
+--
+--   The 2 RESOLVED rows that migration 088 inserted directly
+--   (`d695de62-…` original-JE-void target + `00000000-…088` placeholder)
+--   are left alone — already correct + matching for the drift check.
+--
+-- Idempotent
+--
+--   The UPDATE has no effect on already-resolved rows. Re-running the
+--   migration is a no-op.
 --
 -- Not touched
---   * No accounting / GL / cashbox row touched.
---   * No DDL.
---   * No new permission, no new function.
---   * Other unresolved alerts (if any from unrelated activity) are
---     left for separate cleanup.
 --
--- Expected
---   * weekly drift check transitions FAIL→PASS.
---   * trial balance / cashbox drift unchanged (this migration writes
---     nothing to journal_entries or cashbox_transactions).
+--   * No INSERT, no DELETE — only an UPDATE that flips resolved.
+--   * No GL writes, no cashbox writes, no DDL, no permission changes.
+--   * Other unresolved anomalies from unrelated activity are left for
+--     separate cleanup.
 -- ═══════════════════════════════════════════════════════════════════════════
 
 BEGIN;
 
--- Pin to migration context so the financial_anomalies INSERT itself
--- doesn't trip a guard (the table is engine-write-allowed under
--- migration:* prefixes).
 SELECT set_config(
   'app.engine_context',
   'migration:089_resolve_mig_088_bypass_alerts',
   true
 );
 
--- For each of the 6 alerts (45–50) emitted by migration 088, insert
--- a paired resolved row so the drift check's NOT EXISTS clause
--- matches. Idempotent via NOT EXISTS — re-running the migration is
--- a no-op.
+DO $$
+DECLARE
+  v_updated int;
+BEGIN
+  UPDATE financial_anomalies
+     SET resolved        = TRUE,
+         resolved_at     = NOW(),
+         resolution_note = COALESCE(resolution_note,
+           'Resolved by migration 089 — paired cleanup for migration 088 settlement-direction fix. fn_record_cashbox_txn internally sets context=service:cashbox_fn_fallback, which migration 068 logs as a bypass; this is intentional + sanctioned (same pattern migration 079 used after migration 078).')
+   WHERE anomaly_type    = 'legacy_bypass_journal_entry'
+     AND resolved        = FALSE
+     AND (affected_entity, reference_id) IN (
+       ('cashbox_transactions', '107'),
+       ('cashbox_transactions', '108'),
+       ('journal_entries',      '887ea7c4-baf9-4e1b-9376-88cfbb46cb33'),
+       ('journal_lines',        'd37b9f9b-af05-4f3c-988f-436e0d6cbb1b'),
+       ('journal_lines',        '7ff6d8f4-f526-4525-a2c5-e747c719d94b')
+     );
 
-INSERT INTO financial_anomalies
-  (severity, anomaly_type, description, affected_entity, reference_id,
-   details, detected_at, resolved, resolved_at, resolution_note)
-SELECT 'low'::text,
-       'legacy_bypass_journal_entry'::text,
-       format(
-         'Controlled cleanup from migration 088 — bypass alert id=%s on %s (%s on record %s, context %s).',
-         a.id,
-         a.table_name,
-         CASE a.operation WHEN 'I' THEN 'INSERT' WHEN 'U' THEN 'UPDATE' WHEN 'D' THEN 'DELETE' ELSE a.operation END,
-         a.record_id,
-         a.context_value
-       ),
-       a.table_name,
-       a.record_id::text,
-       jsonb_build_object(
-         'migration', '089_resolve_mig_088_bypass_alerts',
-         'paired_alert_id', a.id,
-         'origin_migration', '088_hotfix_settlement_direction',
-         'context_value', a.context_value,
-         'operation', a.operation
-       ),
-       a.created_at,
-       TRUE,
-       NOW(),
-       'Resolved by migration 089 — paired cleanup for migration 088 settlement-direction fix. fn_record_cashbox_txn internally sets context=service:cashbox_fn_fallback, which migration 068 logs as a bypass; this is intentional + sanctioned (same pattern migration 079 used after 078).'
-  FROM engine_bypass_alerts a
- WHERE a.id BETWEEN 45 AND 50
-   AND NOT EXISTS (
-     SELECT 1 FROM financial_anomalies fa
-      WHERE fa.affected_entity = a.table_name
-        AND fa.reference_id   = a.record_id::text
-        AND fa.resolved       = TRUE
-   );
+  GET DIAGNOSTICS v_updated = ROW_COUNT;
+  RAISE NOTICE 'migration 089: % anomaly row(s) flipped to resolved=true', v_updated;
+END $$;
 
 COMMIT;
