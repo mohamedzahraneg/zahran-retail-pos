@@ -1,29 +1,24 @@
 /**
- * Daily Expenses screen (migration 060 — Daily Expenses series PR-1).
+ * Daily Expenses screen (migration 060 — Daily Expenses series PR-3).
  *
- * Records a daily expense, tied to a responsible employee. Behind the
- * scenes the API calls `POST /accounting/expenses/daily` which re-uses
- * the SAME expenses pipeline as the Cashboxes page — the journal entry
- * is built by FinancialEngineService, the cashbox ledger is moved
- * atomically, and the expense shows up automatically in the
- * employee's Financial Ledger tab.
+ * Records a daily expense, tied to a responsible employee. The
+ * canonical `POST /accounting/expenses/daily` builds the JE through
+ * FinancialEngineService and moves the cashbox atomically — this page
+ * is a UX layer over that pipeline.
  *
- * PR-1 changes:
- *   * Inline form converted to a centred modal (mobile-friendly +
- *     proper save/cancel UX).
- *   * Selected category renders an account preview ("سيتم ترحيل
- *     القيد: DR <code> <name> / CR <cashbox>") so admin sees exactly
- *     where the expense will land.
- *   * Submit blocks (frontend) when the chosen category has no
- *     `account_id`; backend (`createDailyExpense` strict mode) also
- *     rejects with a 400 if a request slips through, so silent
- *     fallback to 529 is impossible end-to-end.
- *   * "بند جديد" button opens a small inline modal that creates a
- *     category with a required COA leaf mapping; categories without
- *     a mapping won't reach the picker.
- *
- * No new module, no new posting engine, no duplicate cash-movement
- * logic — just a tighter UX layer over the same canonical pipeline.
+ * Series milestones:
+ *   PR-1 — strict category mapping (no silent 529 fallback) +
+ *          form-to-modal conversion + add-category modal.
+ *   PR-2 — captures expenses.shift_id + open-shift banner + register
+ *          shows shift/cashbox/employee/account.
+ *   PR-3 (this PR) — full filter bar (today/week/month/year/custom +
+ *          employee + category + cashbox + shift + status), 14-column
+ *          register with JE entry_no + Arabic day, Excel + print
+ *          (PDF) export buttons that mirror the active filters.
+ *          Also strips vendor + receipt URL from the modal per the
+ *          "short and operational" UX directive — both fields stay
+ *          on the DTO for API compatibility but no longer surface in
+ *          the form.
  */
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -31,6 +26,8 @@ import toast from 'react-hot-toast';
 import {
   AlertTriangle,
   DollarSign,
+  Download,
+  FileText,
   ListPlus,
   Plus,
   Receipt,
@@ -43,6 +40,7 @@ import { usersApi } from '@/api/users.api';
 import { cashDeskApi } from '@/api/cash-desk.api';
 import { shiftsApi } from '@/api/shifts.api';
 import { useAuthStore } from '@/stores/auth.store';
+import { exportToExcel, printReport } from '@/lib/exportExcel';
 
 const DEFAULT_WAREHOUSE_ID = import.meta.env.VITE_DEFAULT_WAREHOUSE_ID as string;
 
@@ -52,25 +50,253 @@ const EGP = (n: number | string) =>
     maximumFractionDigits: 2,
   })} ج.م`;
 
+/* ─── Date helpers (Cairo TZ) ─── */
+
+function todayCairo(): string {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Africa/Cairo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date());
+  return [
+    parts.find((p) => p.type === 'year')!.value,
+    parts.find((p) => p.type === 'month')!.value,
+    parts.find((p) => p.type === 'day')!.value,
+  ].join('-');
+}
+
+function shiftDate(iso: string, deltaDays: number): string {
+  const d = new Date(iso + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() + deltaDays);
+  return d.toISOString().slice(0, 10);
+}
+
+function startOfMonth(iso: string): string {
+  return iso.slice(0, 7) + '-01';
+}
+
+function startOfYear(iso: string): string {
+  return iso.slice(0, 4) + '-01-01';
+}
+
+const fmtArabicDay = (iso: string) =>
+  new Date(iso + 'T00:00:00').toLocaleDateString('ar-EG', {
+    timeZone: 'Africa/Cairo',
+    weekday: 'long',
+  });
+
+const fmtTimeHMS = (iso: string) =>
+  new Date(iso).toLocaleTimeString('en-GB', {
+    timeZone: 'Africa/Cairo',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+
+type RangePreset = 'day' | 'week' | 'month' | 'year' | 'custom';
+
+function presetRange(p: RangePreset): { from: string; to: string } {
+  const today = todayCairo();
+  switch (p) {
+    case 'day':
+      return { from: today, to: today };
+    case 'week':
+      return { from: shiftDate(today, -6), to: today };
+    case 'month':
+      return { from: startOfMonth(today), to: today };
+    case 'year':
+      return { from: startOfYear(today), to: today };
+    default:
+      return { from: today, to: today };
+  }
+}
+
+/* ─── Page ─── */
+
 export default function DailyExpenses() {
-  const today = new Date().toISOString().slice(0, 10);
   const [showAddExpense, setShowAddExpense] = useState(false);
   const [showAddCategory, setShowAddCategory] = useState(false);
 
-  // Today's daily expenses — a simple feed at the bottom so the user
-  // sees their recent bookings immediately after saving. PR-3 will
-  // add date-range filters; for now we keep the today-only list to
-  // limit PR-1 surface area.
-  const { data: listing } = useQuery({
-    queryKey: ['daily-expenses-list', today],
-    queryFn: () =>
-      accountingApi.listExpenses({
-        from: today,
-        to: today,
-        limit: 50,
-      }),
-    refetchInterval: 20_000,
+  // Filter state — month default keeps the page useful out of the box.
+  const [preset, setPreset] = useState<RangePreset>('month');
+  const initial = useMemo(() => presetRange('month'), []);
+  const [from, setFrom] = useState<string>(initial.from);
+  const [to, setTo] = useState<string>(initial.to);
+  const [employeeId, setEmployeeId] = useState<string>('');
+  const [categoryId, setCategoryId] = useState<string>('');
+  const [cashboxId, setCashboxId] = useState<string>('');
+  const [shiftId, setShiftId] = useState<string>('');
+  const [status, setStatus] = useState<'all' | 'approved' | 'pending'>('all');
+
+  const setRangePreset = (p: RangePreset) => {
+    setPreset(p);
+    if (p !== 'custom') {
+      const r = presetRange(p);
+      setFrom(r.from);
+      setTo(r.to);
+    }
+  };
+
+  // Picker data (shared with the Add Expense modal — react-query
+  // dedups requests via the keys).
+  const { data: categories = [] } = useQuery({
+    queryKey: ['expense-categories'],
+    queryFn: () => accountingApi.categories(),
   });
+  const { data: cashboxes = [] } = useQuery({
+    queryKey: ['cashboxes'],
+    queryFn: () => cashDeskApi.cashboxes(),
+  });
+  const { data: users = [] } = useQuery({
+    queryKey: ['users-pickable-dex'],
+    queryFn: () => usersApi.pickable(),
+  });
+  const { data: shifts = [] } = useQuery({
+    queryKey: ['shifts-pickable-dex'],
+    queryFn: () => shiftsApi.list({ status: undefined }),
+  });
+
+  const listingParams = {
+    from,
+    to,
+    employee_user_id: employeeId || undefined,
+    category_id: categoryId || undefined,
+    cashbox_id: cashboxId || undefined,
+    shift_id: shiftId || undefined,
+    status: status === 'all' ? undefined : status,
+    limit: 500,
+  };
+
+  const { data: listing, isFetching } = useQuery({
+    queryKey: ['daily-expenses-list', listingParams],
+    queryFn: () => accountingApi.listExpenses(listingParams),
+    refetchInterval: 30_000,
+  });
+
+  const items: Expense[] = listing?.items ?? [];
+  const totalAmount = listing?.total_amount ?? 0;
+
+  /* ── Exports — both use the active backend-filtered dataset ── */
+
+  const filterSummary = useMemo(() => {
+    const parts: string[] = [];
+    parts.push(`${from} → ${to}`);
+    if (employeeId) {
+      const u = (users as any[]).find((x) => x.id === employeeId);
+      if (u) parts.push(`موظف: ${u.full_name || u.username}`);
+    }
+    if (categoryId) {
+      const c = (categories as ExpenseCategory[]).find((x) => x.id === categoryId);
+      if (c) parts.push(`بند: ${c.name_ar}`);
+    }
+    if (cashboxId) {
+      const cb = (cashboxes as any[]).find((x) => x.id === cashboxId);
+      if (cb) parts.push(`خزنة: ${cb.name_ar}`);
+    }
+    if (shiftId) {
+      const sh = (shifts as any[]).find((x) => x.id === shiftId);
+      if (sh) parts.push(`وردية: ${sh.shift_no}`);
+    }
+    if (status !== 'all') parts.push(`الحالة: ${status === 'approved' ? 'معتمد' : 'معلّق'}`);
+    return parts.join(' · ');
+  }, [from, to, employeeId, categoryId, cashboxId, shiftId, status, users, categories, cashboxes, shifts]);
+
+  const authUser = useAuthStore((s) => s.user);
+
+  const handleExportExcel = () => {
+    if (!items.length) return toast.error('لا توجد سجلات لتصديرها');
+    const rows: Record<string, any>[] = items.map((e) => ({
+      'تسلسل المصروف': e.expense_no,
+      التاريخ: e.expense_date,
+      الوقت: fmtTimeHMS(e.created_at),
+      اليوم: fmtArabicDay(e.expense_date),
+      البند: e.category_name || '',
+      'كود الحساب': e.account_code || '',
+      'اسم الحساب': e.account_name_ar || '',
+      المبلغ: Number(e.amount),
+      'طريقة الدفع': e.payment_method,
+      'الموظف المسؤول': e.employee_name || e.employee_username || '',
+      'تمت بواسطة': e.created_by_name || '',
+      الخزنة: e.cashbox_name || '',
+      الوردية: e.shift_no || '',
+      'رقم القيد': e.je_entry_no || '',
+      الحالة:
+        e.je_is_void
+          ? 'ملغي'
+          : e.is_approved
+            ? 'معتمد'
+            : 'معلّق',
+      الوصف: e.description || '',
+    }));
+    rows.push({
+      'تسلسل المصروف': '',
+      التاريخ: '',
+      الوقت: '',
+      اليوم: '',
+      البند: 'إجمالي المصروفات',
+      'كود الحساب': '',
+      'اسم الحساب': '',
+      المبلغ: Number(totalAmount),
+      'طريقة الدفع': '',
+      'الموظف المسؤول': '',
+      'تمت بواسطة': '',
+      الخزنة: '',
+      الوردية: '',
+      'رقم القيد': '',
+      الحالة: '',
+      الوصف: filterSummary + (authUser ? ` · مُصدِّر: ${authUser.full_name || authUser.username}` : ''),
+    });
+    exportToExcel(`daily-expenses-${from}-to-${to}`, rows, 'المصروفات');
+  };
+
+  const handleExportPdf = () => {
+    if (!items.length) return toast.error('لا توجد سجلات لتصديرها');
+    const rowsHtml = items
+      .map(
+        (e) => `
+      <tr>
+        <td style="font-family: monospace;">${escapeHtml(e.expense_no)}</td>
+        <td>${escapeHtml(e.expense_date)} ${escapeHtml(fmtTimeHMS(e.created_at))}</td>
+        <td>${escapeHtml(fmtArabicDay(e.expense_date))}</td>
+        <td>${escapeHtml(e.category_name || '')}</td>
+        <td style="font-family: monospace;">${escapeHtml(`${e.account_code || ''} ${e.account_name_ar || ''}`.trim())}</td>
+        <td style="text-align: left;">${EGP(e.amount)}</td>
+        <td>${escapeHtml(e.employee_name || e.employee_username || '')}</td>
+        <td>${escapeHtml(e.cashbox_name || '')}</td>
+        <td style="font-family: monospace;">${escapeHtml(e.shift_no || '')}</td>
+        <td style="font-family: monospace;">${escapeHtml(e.je_entry_no || '')}</td>
+      </tr>`,
+      )
+      .join('');
+    const html = `
+      <div class="muted">${escapeHtml(filterSummary)}${authUser ? ' · مُصدِّر: ' + escapeHtml(authUser.full_name || authUser.username || '') : ''}</div>
+      <table>
+        <thead>
+          <tr>
+            <th>تسلسل</th>
+            <th>التاريخ والوقت</th>
+            <th>اليوم</th>
+            <th>البند</th>
+            <th>الحساب</th>
+            <th class="right">المبلغ</th>
+            <th>المسؤول</th>
+            <th>الخزنة</th>
+            <th>الوردية</th>
+            <th>رقم القيد</th>
+          </tr>
+        </thead>
+        <tbody>${rowsHtml}</tbody>
+        <tfoot>
+          <tr style="background:#f8fafc; font-weight:bold;">
+            <td colspan="5" style="text-align:right;">إجمالي المصروفات</td>
+            <td class="right">${EGP(totalAmount)}</td>
+            <td colspan="4"></td>
+          </tr>
+        </tfoot>
+      </table>`;
+    printReport('تقرير المصروفات اليومية', html);
+  };
 
   return (
     <div className="space-y-5">
@@ -86,7 +312,13 @@ export default function DailyExpenses() {
             </p>
           </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          <button className="btn-ghost text-xs flex items-center gap-1.5" onClick={handleExportExcel}>
+            <Download size={14} /> تصدير Excel
+          </button>
+          <button className="btn-ghost text-xs flex items-center gap-1.5" onClick={handleExportPdf}>
+            <FileText size={14} /> تصدير PDF
+          </button>
           <button
             className="btn-ghost text-xs flex items-center gap-1.5"
             onClick={() => setShowAddCategory(true)}
@@ -103,73 +335,214 @@ export default function DailyExpenses() {
         </div>
       </div>
 
-      {/* ─── Today's expenses feed ─── */}
+      {/* ─── Filter bar ─── */}
+      <div className="card p-3 space-y-3">
+        <div className="flex items-center gap-1 flex-wrap">
+          {(['day', 'week', 'month', 'year', 'custom'] as const).map((p) => {
+            const label = { day: 'اليوم', week: 'الأسبوع', month: 'الشهر', year: 'السنة', custom: 'مخصص' }[p];
+            return (
+              <button
+                key={p}
+                type="button"
+                onClick={() => setRangePreset(p)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition ${
+                  preset === p
+                    ? 'bg-indigo-600 text-white'
+                    : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                }`}
+              >
+                {label}
+              </button>
+            );
+          })}
+          <span className="text-[10px] text-slate-400 mx-2 hidden sm:inline">
+            {from} → {to}
+          </span>
+        </div>
+
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2 text-xs">
+          {preset === 'custom' && (
+            <>
+              <label className="block">
+                <span className="block text-[10px] text-slate-500 mb-0.5">من</span>
+                <input
+                  type="date"
+                  className="input input-sm w-full"
+                  value={from}
+                  onChange={(e) => setFrom(e.target.value)}
+                />
+              </label>
+              <label className="block">
+                <span className="block text-[10px] text-slate-500 mb-0.5">إلى</span>
+                <input
+                  type="date"
+                  className="input input-sm w-full"
+                  value={to}
+                  onChange={(e) => setTo(e.target.value)}
+                />
+              </label>
+            </>
+          )}
+          <label className="block">
+            <span className="block text-[10px] text-slate-500 mb-0.5">المسؤول</span>
+            <select
+              className="input input-sm w-full"
+              value={employeeId}
+              onChange={(e) => setEmployeeId(e.target.value)}
+            >
+              <option value="">— كل الموظفين —</option>
+              {(users as any[]).map((u) => (
+                <option key={u.id} value={u.id}>
+                  {u.full_name || u.username}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="block">
+            <span className="block text-[10px] text-slate-500 mb-0.5">البند</span>
+            <select
+              className="input input-sm w-full"
+              value={categoryId}
+              onChange={(e) => setCategoryId(e.target.value)}
+            >
+              <option value="">— كل البنود —</option>
+              {(categories as ExpenseCategory[]).map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name_ar}
+                  {c.account_code ? ` (${c.account_code})` : ''}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="block">
+            <span className="block text-[10px] text-slate-500 mb-0.5">الخزنة</span>
+            <select
+              className="input input-sm w-full"
+              value={cashboxId}
+              onChange={(e) => setCashboxId(e.target.value)}
+            >
+              <option value="">— كل الخزن —</option>
+              {(cashboxes as any[]).map((cb) => (
+                <option key={cb.id} value={cb.id}>
+                  {cb.name_ar}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="block">
+            <span className="block text-[10px] text-slate-500 mb-0.5">الوردية</span>
+            <select
+              className="input input-sm w-full"
+              value={shiftId}
+              onChange={(e) => setShiftId(e.target.value)}
+            >
+              <option value="">— كل الورديات —</option>
+              {(shifts as any[]).map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.shift_no} ({s.status === 'open' ? 'مفتوحة' : 'مغلقة'})
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="block">
+            <span className="block text-[10px] text-slate-500 mb-0.5">الحالة</span>
+            <select
+              className="input input-sm w-full"
+              value={status}
+              onChange={(e) => setStatus(e.target.value as any)}
+            >
+              <option value="all">— الكل —</option>
+              <option value="approved">معتمد</option>
+              <option value="pending">معلّق</option>
+            </select>
+          </label>
+        </div>
+      </div>
+
+      {/* ─── Register ─── */}
       <div className="card p-5">
-        <h3 className="font-black text-slate-800 mb-3">مصروفات اليوم</h3>
-        {!listing || listing.items.length === 0 ? (
-          <div className="text-center text-slate-500 text-xs py-6">
-            لم تُسجّل أي مصروفات اليوم بعد. اضغط «تسجيل مصروف» لإضافة أول
-            مصروف.
+        <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+          <h3 className="font-black text-slate-800">سجل المصروفات</h3>
+          <div className="text-[11px] text-slate-500">
+            {isFetching ? 'جارٍ التحميل…' : `${items.length} سجل · إجمالي ${EGP(totalAmount)}`}
+          </div>
+        </div>
+        {items.length === 0 ? (
+          <div className="text-center text-slate-500 text-xs py-8">
+            لا توجد سجلات تطابق الفلتر الحالي.
           </div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-xs">
               <thead>
                 <tr className="bg-slate-50 text-slate-600 text-[11px]">
+                  <th className="p-2 text-right">تسلسل</th>
+                  <th className="p-2 text-right">التاريخ</th>
                   <th className="p-2 text-right">الوقت</th>
+                  <th className="p-2 text-right">اليوم</th>
                   <th className="p-2 text-right">البند</th>
                   <th className="p-2 text-right">الحساب</th>
-                  <th className="p-2 text-right">الوصف</th>
+                  <th className="p-2 text-center">المبلغ</th>
                   <th className="p-2 text-right">المسؤول</th>
+                  <th className="p-2 text-right">تمت بواسطة</th>
                   <th className="p-2 text-right">الخزنة</th>
                   <th className="p-2 text-right">الوردية</th>
+                  <th className="p-2 text-right">رقم القيد</th>
                   <th className="p-2 text-center">الدفع</th>
-                  <th className="p-2 text-center">المبلغ</th>
+                  <th className="p-2 text-center">الحالة</th>
                 </tr>
               </thead>
               <tbody>
-                {listing.items.map((e: Expense) => (
+                {items.map((e) => (
                   <tr key={e.id} className="border-t border-slate-100">
-                    <td className="p-2 font-mono tabular-nums">
-                      {new Date(e.created_at).toLocaleTimeString('en-GB', {
-                        timeZone: 'Africa/Cairo',
-                        hour: '2-digit',
-                        minute: '2-digit',
-                      })}
-                    </td>
+                    <td className="p-2 font-mono text-[10px] text-slate-600">{e.expense_no}</td>
+                    <td className="p-2 font-mono tabular-nums">{e.expense_date}</td>
+                    <td className="p-2 font-mono tabular-nums">{fmtTimeHMS(e.created_at)}</td>
+                    <td className="p-2 text-slate-700">{fmtArabicDay(e.expense_date)}</td>
                     <td className="p-2">{e.category_name || '—'}</td>
                     <td className="p-2 text-slate-600 text-[10px] font-mono">
-                      {e.account_code
-                        ? `${e.account_code} ${e.account_name_ar || ''}`.trim()
-                        : '—'}
-                    </td>
-                    <td className="p-2 text-slate-700">{e.description || '—'}</td>
-                    <td className="p-2 text-slate-700 text-[11px]">
-                      {e.employee_name || e.employee_username || '—'}
-                    </td>
-                    <td className="p-2 text-slate-700 text-[11px]">
-                      {e.cashbox_name || '—'}
-                    </td>
-                    <td className="p-2 text-slate-600 font-mono text-[10px]">
-                      {e.shift_no || '—'}
-                    </td>
-                    <td className="p-2 text-center text-slate-600">
-                      {e.payment_method}
+                      {e.account_code ? `${e.account_code} ${e.account_name_ar || ''}`.trim() : '—'}
                     </td>
                     <td className="p-2 text-center font-bold tabular-nums text-rose-700">
                       {EGP(e.amount)}
+                    </td>
+                    <td className="p-2 text-slate-700 text-[11px]">
+                      {e.employee_name || e.employee_username || '—'}
+                    </td>
+                    <td className="p-2 text-slate-600 text-[11px]">
+                      {e.created_by_name || '—'}
+                    </td>
+                    <td className="p-2 text-slate-700 text-[11px]">{e.cashbox_name || '—'}</td>
+                    <td className="p-2 text-slate-600 font-mono text-[10px]">{e.shift_no || '—'}</td>
+                    <td className="p-2 text-slate-600 font-mono text-[10px]">
+                      {e.je_entry_no || '—'}
+                    </td>
+                    <td className="p-2 text-center text-slate-600">{e.payment_method}</td>
+                    <td className="p-2 text-center">
+                      <span
+                        className={`chip text-[10px] ${
+                          e.je_is_void
+                            ? 'bg-rose-50 text-rose-700 border-rose-200'
+                            : e.is_approved
+                              ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                              : 'bg-amber-50 text-amber-700 border-amber-200'
+                        }`}
+                      >
+                        {e.je_is_void ? 'ملغي' : e.is_approved ? 'معتمد' : 'معلّق'}
+                      </span>
                     </td>
                   </tr>
                 ))}
               </tbody>
               <tfoot>
                 <tr className="border-t border-slate-200 bg-slate-50 font-black">
-                  <td colSpan={8} className="p-2 text-right">
-                    إجمالي اليوم
+                  <td colSpan={6} className="p-2 text-right">
+                    الإجمالي
                   </td>
                   <td className="p-2 text-center tabular-nums text-rose-700">
-                    {EGP(listing.total_amount || 0)}
+                    {EGP(totalAmount)}
                   </td>
+                  <td colSpan={7}></td>
                 </tr>
               </tfoot>
             </table>
@@ -191,7 +564,18 @@ export default function DailyExpenses() {
   );
 }
 
-/* ─── Add expense modal ─── */
+/* ─── HTML escape for the print export ─── */
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/* ─── Add expense modal — short and operational (PR-3) ─── */
 
 function AddExpenseModal({
   onClose,
@@ -219,9 +603,7 @@ function AddExpenseModal({
   const [cashboxId, setCashboxId] = useState('');
   const [description, setDescription] = useState('');
   const [employeeId, setEmployeeId] = useState<string>(authUser?.id || '');
-  const [receiptUrl, setReceiptUrl] = useState('');
   const [expenseDate, setExpenseDate] = useState<string>(today);
-  const [vendorName, setVendorName] = useState('');
 
   const { data: categories = [] } = useQuery({
     queryKey: ['expense-categories'],
@@ -243,9 +625,7 @@ function AddExpenseModal({
   });
 
   // Auto-pick the currently open shift's cashbox the first time the
-  // cashbox dropdown renders. Resets on form remount (i.e. modal
-  // close/reopen). The shift_id itself is auto-resolved server-side
-  // (PR-2) — we don't need to send it from the form.
+  // cashbox dropdown renders. PR-2 also captures shift_id server-side.
   useEffect(() => {
     if (!cashboxId && currentShift?.cashbox_id) {
       setCashboxId(String(currentShift.cashbox_id));
@@ -256,8 +636,7 @@ function AddExpenseModal({
 
   const selectedCategory = useMemo<ExpenseCategory | null>(
     () =>
-      (categories as ExpenseCategory[]).find((c) => c.id === categoryId) ??
-      null,
+      (categories as ExpenseCategory[]).find((c) => c.id === categoryId) ?? null,
     [categories, categoryId],
   );
   const selectedCashbox = useMemo<any>(
@@ -265,11 +644,7 @@ function AddExpenseModal({
     [cashboxes, cashboxId],
   );
 
-  // Block submit when the category has no account mapping (mirror of
-  // the backend strict-mode reject; gives a friendlier UX than waiting
-  // for the 400).
-  const categoryUnmapped =
-    !!selectedCategory && !selectedCategory.account_id;
+  const categoryUnmapped = !!selectedCategory && !selectedCategory.account_id;
 
   const create = useMutation({
     mutationFn: () =>
@@ -281,9 +656,9 @@ function AddExpenseModal({
         payment_method: paymentMethod,
         expense_date: expenseDate,
         description: description || undefined,
-        receipt_url: receiptUrl || undefined,
-        vendor_name: vendorName || undefined,
         employee_user_id: employeeId,
+        // vendor_name + receipt_url removed from form per PR-3 directive;
+        // backend DTO still accepts them so legacy callers stay valid.
       }),
     onSuccess: () => {
       toast.success('تم تسجيل المصروف + ترحيل القيد');
@@ -298,9 +673,7 @@ function AddExpenseModal({
   const submit = () => {
     if (!categoryId) return toast.error('اختر نوع المصروف');
     if (categoryUnmapped) {
-      return toast.error(
-        'هذا البند غير مربوط بحساب محاسبي. اختر الحساب أولًا.',
-      );
+      return toast.error('هذا البند غير مربوط بحساب محاسبي. اختر الحساب أولًا.');
     }
     if (!amount || Number(amount) <= 0) return toast.error('أدخل مبلغ صحيح');
     if (!employeeId) return toast.error('اختر الموظف المسؤول');
@@ -312,7 +685,7 @@ function AddExpenseModal({
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div
-        className="modal-panel w-full max-w-2xl space-y-4"
+        className="modal-panel w-full max-w-lg space-y-3"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between sticky top-0 bg-white z-10 -mx-1 px-1 pb-2 border-b border-slate-100">
@@ -325,10 +698,7 @@ function AddExpenseModal({
           </button>
         </div>
 
-        {/* PR-2 — open-shift status banner. Shows the live shift number
-            so admin sees which shift the expense will be linked to.
-            When no open shift exists, switches to a clear "اختر الموظف
-            والخزنة يدوياً" prompt. */}
+        {/* Open-shift status banner (PR-2 behaviour). */}
         <div
           className={`rounded-lg border px-3 py-2 text-[11px] leading-relaxed ${
             hasOpenShift
@@ -342,19 +712,17 @@ function AddExpenseModal({
               <span className="font-bold font-mono">
                 {(currentShift as any)?.shift_no || (currentShift as any)?.id}
               </span>
-              {' '}— الخزنة محسومة تلقائيًا من الوردية. الموظف المسؤول
-              مفترض أنه أنت ما لم تُغيّره.
+              {' '}— الخزنة محسومة تلقائيًا من الوردية.
             </span>
           ) : (
             <span>
               لا توجد وردية مفتوحة لك حالياً — اختر الخزنة والموظف
-              المسؤول يدوياً، ولن يتم ربط المصروف بأي وردية.
+              المسؤول يدوياً.
             </span>
           )}
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
-          {/* Category — with inline "add" button */}
           <FieldLabel label="نوع المصروف (حساب)">
             <div className="flex items-stretch gap-1">
               <select
@@ -385,7 +753,6 @@ function AddExpenseModal({
             </div>
           </FieldLabel>
 
-          {/* Amount */}
           <FieldLabel label="المبلغ (ج.م)">
             <input
               type="number"
@@ -398,7 +765,6 @@ function AddExpenseModal({
             />
           </FieldLabel>
 
-          {/* Payment method */}
           <FieldLabel label="طريقة الدفع">
             <select
               className="input w-full"
@@ -481,38 +847,19 @@ function AddExpenseModal({
             )}
           </FieldLabel>
 
-          <FieldLabel label="المورد / الجهة (اختياري)">
-            <input
-              className="input w-full"
-              value={vendorName}
-              onChange={(e) => setVendorName(e.target.value)}
-              disabled={create.isPending}
-            />
-          </FieldLabel>
-
-          <FieldLabel label="الوصف">
-            <input
-              className="input w-full"
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              disabled={create.isPending}
-            />
-          </FieldLabel>
-
-          <FieldLabel label="رابط المرفق (اختياري)">
-            <input
-              className="input w-full"
-              placeholder="https://..."
-              value={receiptUrl}
-              onChange={(e) => setReceiptUrl(e.target.value)}
-              disabled={create.isPending}
-            />
-          </FieldLabel>
+          <div className="md:col-span-2">
+            <FieldLabel label="الوصف">
+              <input
+                className="input w-full"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                disabled={create.isPending}
+              />
+            </FieldLabel>
+          </div>
         </div>
 
-        {/* Account preview — shows DR/CR before save so admin sees
-            exactly where the expense lands. Refuses to render the
-            "ready to post" preview when the category is unmapped. */}
+        {/* Account preview — DR mapped expense / CR cashbox. */}
         {selectedCategory && (
           <div
             className={`rounded-lg border-2 px-3 py-2 text-[11px] leading-relaxed ${
@@ -527,10 +874,6 @@ function AddExpenseModal({
                 <div>
                   <div className="font-bold">
                     هذا البند غير مربوط بحساب محاسبي. اختر الحساب أولًا.
-                  </div>
-                  <div className="text-[10px] mt-0.5 opacity-80">
-                    افتح «بند جديد» لتعديل التصنيف وربطه بحساب من شجرة
-                    الحسابات، أو استخدم بنداً مربوطاً بالفعل.
                   </div>
                 </div>
               </div>
@@ -584,7 +927,7 @@ function AddExpenseModal({
   );
 }
 
-/* ─── Add category modal ─── */
+/* ─── Add category modal (unchanged from PR-1) ─── */
 
 function AddCategoryModal({ onClose }: { onClose: () => void }) {
   const qc = useQueryClient();
@@ -594,9 +937,6 @@ function AddCategoryModal({ onClose }: { onClose: () => void }) {
   const [isFixed, setIsFixed] = useState(false);
   const [allocateToCogs, setAllocateToCogs] = useState(false);
 
-  // Pull the COA so admin can pick a leaf account. Filter to
-  // expense-side leaves (account_type='expense' OR for advances:
-  // 1123 etc — but we keep it broad and let the user pick).
   const { data: accounts = [] } = useQuery({
     queryKey: ['coa-leaves-for-category'],
     queryFn: () => accountsApi.list(),
@@ -632,7 +972,6 @@ function AddCategoryModal({ onClose }: { onClose: () => void }) {
     accountId.length > 0 &&
     !create.isPending;
 
-  // Filter to leaves only — the resolver requires a leaf for posting.
   const leaves = (accounts as any[])
     .filter((a) => a.is_active && a.is_leaf)
     .sort((a, b) => String(a.code).localeCompare(String(b.code)));

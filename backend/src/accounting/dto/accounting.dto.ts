@@ -190,6 +190,21 @@ export class ListExpensesDto {
   @IsIn(['approved', 'pending', 'all'])
   status?: 'approved' | 'pending' | 'all';
 
+  /** PR-3: filter by responsible employee. */
+  @IsOptional()
+  @IsUUID()
+  employee_user_id?: string;
+
+  /** PR-3: filter by cashbox. */
+  @IsOptional()
+  @IsUUID()
+  cashbox_id?: string;
+
+  /** PR-3: filter by shift. */
+  @IsOptional()
+  @IsUUID()
+  shift_id?: string;
+
   @IsOptional()
   @IsString()
   q?: string;
