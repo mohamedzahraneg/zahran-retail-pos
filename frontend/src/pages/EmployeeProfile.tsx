@@ -737,6 +737,16 @@ export function AdminAttendancePanel({
   const [markReason, setMarkReason] = useState<string>('');
   const [showPayModal, setShowPayModal] = useState(false);
 
+  // PR-3 — wage approval mode for the "تثبيت يومية" form. Default
+  // 'full_day' preserves today's behaviour. Custom mode requires an
+  // approval reason whenever the entered amount differs from the
+  // calculated (= dailyAmount when there's no attendance link).
+  const [overrideType, setOverrideType] = useState<
+    'full_day' | 'calculated' | 'custom_amount'
+  >('full_day');
+  const [customAmount, setCustomAmount] = useState<string>('');
+  const [approvalReason, setApprovalReason] = useState<string>('');
+
   const adminClockIn = useMutation({
     mutationFn: () => attendanceApi.adminClockIn({ user_id: userId }),
     onSuccess: () => {
@@ -763,6 +773,31 @@ export function AdminAttendancePanel({
     },
     onError: (e: any) =>
       toast.error(e?.response?.data?.message || 'فشل تثبيت اليومية'),
+  });
+
+  // PR-3 — explicit approval (with override metadata). Routes through
+  // /attendance/admin/approve-wage-override so existing accruals get
+  // void+repost. New accruals (no existing) fall through to the same
+  // canonical path on the backend.
+  const approveOverride = useMutation({
+    mutationFn: (body: {
+      work_date: string;
+      override_type: 'calculated' | 'full_day' | 'custom_amount';
+      approved_amount?: number;
+      approval_reason?: string;
+      reason?: string;
+    }) =>
+      attendanceApi.adminApproveWageOverride({ user_id: userId, ...body }),
+    onSuccess: () => {
+      toast.success('تم اعتماد اليومية — DR 521 / CR 213 فقط، بدون خزنة');
+      setMarkReason('');
+      setApprovalReason('');
+      setCustomAmount('');
+      setOverrideType('full_day');
+      invalidateMonthly(qc);
+    },
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.message || 'فشل اعتماد اليومية'),
   });
 
   return (
@@ -795,9 +830,9 @@ export function AdminAttendancePanel({
           صرف يومية
         </button>
       </div>
-      <div className="pt-2 border-t border-violet-200/70">
-        <div className="text-[11px] font-bold text-violet-900 mb-2">
-          تثبيت يومية يدويًا — {EGP(dailyAmount)} / يوم
+      <div className="pt-2 border-t border-violet-200/70 space-y-3">
+        <div className="text-[11px] font-bold text-violet-900">
+          تثبيت / اعتماد يومية — {EGP(dailyAmount)} / يوم
         </div>
         <div className="flex flex-wrap items-end gap-2">
           <label className="block text-[11px] text-slate-600">
@@ -807,7 +842,7 @@ export function AdminAttendancePanel({
               className="input input-sm block mt-0.5"
               value={markDate}
               onChange={(e) => setMarkDate(e.target.value)}
-              disabled={markPayable.isPending}
+              disabled={markPayable.isPending || approveOverride.isPending}
             />
           </label>
           <label className="block text-[11px] text-slate-600 flex-1 min-w-[180px]">
@@ -818,13 +853,100 @@ export function AdminAttendancePanel({
               placeholder="مثلاً: يوم عمل بدون بصمة"
               value={markReason}
               onChange={(e) => setMarkReason(e.target.value)}
-              disabled={markPayable.isPending}
+              disabled={markPayable.isPending || approveOverride.isPending}
             />
           </label>
+        </div>
+
+        {/* PR-3 — approval mode. Default = اعتماد اليومية كاملة keeps
+            today's behaviour. Calculated mode posts the hours-based
+            calculated amount (when there's an attendance link the
+            backend computes daily × min(worked/target, 1); for admin-
+            manual without attendance, calculated == daily). Custom
+            mode requires an explicit approval reason. */}
+        <fieldset className="rounded-lg border border-violet-200 bg-white px-3 py-2 space-y-1.5">
+          <legend className="text-[10px] text-violet-900/80 px-1">
+            وضع اعتماد المبلغ
+          </legend>
+          <label className="flex items-start gap-2 text-xs text-slate-800 cursor-pointer">
+            <input
+              type="radio"
+              name="ot"
+              checked={overrideType === 'full_day'}
+              onChange={() => setOverrideType('full_day')}
+              disabled={approveOverride.isPending}
+            />
+            <span>
+              <span className="font-bold">اعتماد اليومية كاملة</span>
+              <span className="block text-[10px] text-slate-500">
+                المبلغ المعتمد = {EGP(dailyAmount)} (الافتراضي)
+              </span>
+            </span>
+          </label>
+          <label className="flex items-start gap-2 text-xs text-slate-800 cursor-pointer">
+            <input
+              type="radio"
+              name="ot"
+              checked={overrideType === 'calculated'}
+              onChange={() => setOverrideType('calculated')}
+              disabled={approveOverride.isPending}
+            />
+            <span>
+              <span className="font-bold">اعتماد المبلغ المحسوب</span>
+              <span className="block text-[10px] text-slate-500">
+                يومية × (ساعات فعلية / ساعات مستهدفة) — يحسب من الحضور
+                إن وُجد
+              </span>
+            </span>
+          </label>
+          <label className="flex items-start gap-2 text-xs text-slate-800 cursor-pointer">
+            <input
+              type="radio"
+              name="ot"
+              checked={overrideType === 'custom_amount'}
+              onChange={() => setOverrideType('custom_amount')}
+              disabled={approveOverride.isPending}
+            />
+            <span className="flex-1 min-w-0">
+              <span className="font-bold">اعتماد مبلغ مخصص</span>
+              <span className="block text-[10px] text-slate-500">
+                يدوي. يلزم سبب الاعتماد إذا اختلف عن المحسوب.
+              </span>
+              {overrideType === 'custom_amount' && (
+                <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    className="input input-sm w-32"
+                    placeholder="0.00"
+                    value={customAmount}
+                    onChange={(e) => setCustomAmount(e.target.value)}
+                    disabled={approveOverride.isPending}
+                  />
+                  <input
+                    type="text"
+                    className="input input-sm flex-1 min-w-[160px]"
+                    placeholder="سبب الاعتماد"
+                    value={approvalReason}
+                    onChange={(e) => setApprovalReason(e.target.value)}
+                    disabled={approveOverride.isPending}
+                  />
+                </div>
+              )}
+            </span>
+          </label>
+        </fieldset>
+
+        <div className="flex flex-wrap items-center gap-2">
           <button
             className="btn-primary text-xs"
             disabled={
-              markPayable.isPending || !markDate || !markReason.trim()
+              approveOverride.isPending ||
+              !markDate ||
+              !markReason.trim() ||
+              (overrideType === 'custom_amount' &&
+                (!customAmount || Number(customAmount) <= 0))
             }
             onClick={() => {
               if (!markReason.trim()) {
@@ -835,18 +957,39 @@ export function AdminAttendancePanel({
                 toast.error('لم يُحدَّد راتب يومي للموظف');
                 return;
               }
-              markPayable.mutate({
+              if (
+                overrideType === 'custom_amount' &&
+                Math.abs(Number(customAmount) - dailyAmount) > 0.005 &&
+                !approvalReason.trim()
+              ) {
+                toast.error(
+                  'سبب الاعتماد مطلوب عند إدخال مبلغ مخصص يختلف عن المحسوب',
+                );
+                return;
+              }
+              approveOverride.mutate({
                 work_date: markDate,
+                override_type: overrideType,
+                approved_amount:
+                  overrideType === 'custom_amount'
+                    ? Number(customAmount)
+                    : undefined,
+                approval_reason:
+                  overrideType === 'custom_amount'
+                    ? approvalReason.trim() || undefined
+                    : undefined,
                 reason: markReason.trim(),
               });
             }}
           >
-            تثبيت يومية
+            {approveOverride.isPending ? 'جارٍ الاعتماد…' : 'اعتماد يومية'}
           </button>
         </div>
-        <div className="text-[10px] text-violet-900/70 mt-2 leading-relaxed">
-          تثبيت اليومية يُنشئ قيدًا محاسبيًا فقط: DR 521 / CR 213. لا
-          يتحرك أي شيء في الخزنة حتى تسجيل الصرف.
+        <div className="text-[10px] text-violet-900/70 leading-relaxed">
+          الاعتماد يُنشئ قيدًا محاسبيًا فقط: DR 521 / CR 213. لا يتحرك
+          أي شيء في الخزنة حتى تسجيل الصرف. الاعتماد على يوم له تثبيت
+          سابق يُلغي القديم ويُعيد الترحيل بالقيمة الجديدة (سجل تدقيق
+          كامل).
         </div>
       </div>
       {showPayModal && (

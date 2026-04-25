@@ -413,4 +413,118 @@ describe('AttendanceService — admin + wage accrual + pay-wage', () => {
       expect(params).toEqual(['pd-1', 'خطأ إدخال', 'admin']);
     });
   });
+
+  // ── PR-3: wage approval override metadata ─────────────────────────
+  describe('adminMarkPayableDay — PR-3 override metadata', () => {
+    it('default override (no params): override_type=full_day, calculated=daily, approved=daily', async () => {
+      ds.query
+        .mockResolvedValueOnce([
+          { id: 'u1', salary_amount: 270, salary_frequency: 'daily', target_hours_day: 12 },
+        ])
+        .mockResolvedValueOnce([{ payable_day_id: 'pd-1' }]);
+
+      await service.adminMarkPayableDay('u1', '2026-04-20', 'سبب', 'admin');
+      const [, params] = ds.query.mock.calls[1];
+      expect(params[2]).toBe(270);     // approved
+      expect(params[3]).toBe(270);     // daily snapshot
+      expect(params[7]).toBe(270);     // calculated (= daily by default)
+      expect(params[8]).toBe('full_day'); // override_type
+      expect(params[9]).toBeNull();    // approval_reason (null for default)
+      expect(params[10]).toBe('admin'); // approved_by
+    });
+
+    it('custom_amount differs from calculated → requires approval_reason', async () => {
+      ds.query.mockResolvedValueOnce([
+        { id: 'u1', salary_amount: 270, target_hours_day: 12 },
+      ]);
+      await expect(
+        service.adminMarkPayableDay('u1', '2026-04-20', 'سبب', 'admin', {
+          override_type: 'custom_amount',
+          approved_amount: 100, // differs from calculated=270
+          // approval_reason missing
+        }),
+      ).rejects.toThrow('سبب الاعتماد مطلوب');
+    });
+
+    it('custom_amount with reason posts the approved amount, not the daily', async () => {
+      ds.query
+        .mockResolvedValueOnce([
+          { id: 'u1', salary_amount: 270, target_hours_day: 12 },
+        ])
+        .mockResolvedValueOnce([{ payable_day_id: 'pd-2' }]);
+
+      await service.adminMarkPayableDay('u1', '2026-04-20', 'سبب', 'admin', {
+        override_type: 'custom_amount',
+        approved_amount: 100,
+        approval_reason: 'يومية مخفضة',
+      });
+      const [, params] = ds.query.mock.calls[1];
+      expect(params[2]).toBe(100);     // approved (the GL amount)
+      expect(params[7]).toBe(270);     // calculated still = daily
+      expect(params[8]).toBe('custom_amount');
+      expect(params[9]).toBe('يومية مخفضة');
+    });
+
+    it('rejects approved_amount <= 0', async () => {
+      ds.query.mockResolvedValueOnce([
+        { id: 'u1', salary_amount: 270, target_hours_day: 12 },
+      ]);
+      await expect(
+        service.adminMarkPayableDay('u1', '2026-04-20', 'سبب', 'admin', {
+          override_type: 'custom_amount',
+          approved_amount: 0,
+        }),
+      ).rejects.toThrow('المبلغ المعتمد يجب أن يكون أكبر من صفر');
+    });
+  });
+
+  describe('adminApproveWageFromAttendance — PR-3 hours-based calculated', () => {
+    it('calculated mode posts daily × min(worked/target, 1)', async () => {
+      // 6h worked, 12h target → calc = 270 × 0.5 = 135
+      ds.query
+        .mockResolvedValueOnce([
+          {
+            id: 'att-1',
+            user_id: 'u1',
+            work_date: '2026-04-20',
+            clock_out: '2026-04-20T18:00:00Z',
+            duration_min: 360,
+            salary_amount: 270,
+            target_hours_day: 12,
+          },
+        ])
+        .mockResolvedValueOnce([{ payable_day_id: 'pd-3' }]);
+
+      await service.adminApproveWageFromAttendance('att-1', 'admin', {
+        override_type: 'calculated',
+      });
+      const [, params] = ds.query.mock.calls[1];
+      expect(params[2]).toBe(135);     // approved = calculated
+      expect(params[8]).toBe(135);     // calculated = 270 × 0.5
+      expect(params[9]).toBe('calculated');
+    });
+
+    it('overtime is capped at full daily wage in calculated mode', async () => {
+      // 18h worked, 12h target → calc capped at 270 (not 405)
+      ds.query
+        .mockResolvedValueOnce([
+          {
+            id: 'att-1',
+            user_id: 'u1',
+            work_date: '2026-04-20',
+            clock_out: 'x',
+            duration_min: 1080,
+            salary_amount: 270,
+            target_hours_day: 12,
+          },
+        ])
+        .mockResolvedValueOnce([{ payable_day_id: 'pd-4' }]);
+
+      await service.adminApproveWageFromAttendance('att-1', 'admin', {
+        override_type: 'calculated',
+      });
+      const [, params] = ds.query.mock.calls[1];
+      expect(params[8]).toBe(270);     // capped at daily
+    });
+  });
 });

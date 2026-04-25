@@ -48,6 +48,12 @@ export interface PayableDayRow {
   created_at: string;
   entry_no?: string;
   je_is_void?: boolean;
+  // PR-3 — wage approval metadata
+  calculated_amount?: string | number | null;
+  override_type?: 'calculated' | 'full_day' | 'custom_amount';
+  approval_reason?: string | null;
+  approved_by?: string | null;
+  approved_at?: string | null;
 }
 
 export const attendanceApi = {
@@ -112,6 +118,25 @@ export const attendanceApi = {
    * any excess must be classified explicitly as 'advance' (DR 1123 /
    * CR cashbox) or 'bonus' (DR 521 / CR 213 then DR 213 / CR cashbox).
    */
+  /**
+   * PR-3 — explicit approval of an existing or new payable day with
+   * three modes: calculated (hours-based), full_day (canonical), or
+   * custom_amount (admin-typed). Voids any existing live accrual for
+   * the (user, work_date) and posts a new one with the chosen mode.
+   * No cashbox movement — accrual only.
+   */
+  adminApproveWageOverride: (body: {
+    user_id: string;
+    work_date: string;
+    override_type: 'calculated' | 'full_day' | 'custom_amount';
+    approved_amount?: number;
+    approval_reason?: string;
+    reason?: string;
+  }) =>
+    unwrap<{ payable_day_id: string }>(
+      api.post('/attendance/admin/approve-wage-override', body),
+    ),
+
   adminPayWage: (body: {
     user_id: string;
     amount: number;
