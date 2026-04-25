@@ -778,7 +778,14 @@ export class ShiftsService {
     if (shift.status !== 'pending_close') {
       throw new BadRequestException('الوردية ليست في انتظار الإقفال');
     }
-    const actual = Number(shift.close_requested_amount || 0);
+    // PR-B1 follow-up: prefer actual_closing when an admin adjusted the
+    // counted-cash via /adjust-count after the cashier's request. Falls
+    // back to close_requested_amount so the legacy path (no adjustment)
+    // behaves identically.
+    const actual =
+      shift.actual_closing != null
+        ? Number(shift.actual_closing)
+        : Number(shift.close_requested_amount || 0);
 
     // Pre-flight: compute the expected variance LIVE via computeSummary
     // — NEVER trust the stored shifts.expected_closing here. It may be
@@ -878,10 +885,18 @@ export class ShiftsService {
         try {
           const live = await this.computeSummary(s);
           const expectedLive = Number(live.expected_closing || 0);
-          const actual = Number(s.close_requested_amount || 0);
+          // PR-B1 follow-up: prefer actual_closing when an admin adjusted
+          // the counted-cash via /adjust-count. close_requested_amount
+          // stays at the cashier's original submission so we use it only
+          // as a fallback when no adjustment has happened.
+          const actual =
+            s.actual_closing != null
+              ? Number(s.actual_closing)
+              : Number(s.close_requested_amount || 0);
           return {
             ...s,
             expected_closing_live: expectedLive,
+            actual_closing_live: actual,
             variance_live: actual - expectedLive,
           };
         } catch {
