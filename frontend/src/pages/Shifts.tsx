@@ -9,6 +9,7 @@ import {
   Square,
   X,
   DollarSign,
+  Download,
   TrendingUp,
   TrendingDown,
   FileText,
@@ -26,6 +27,11 @@ import {
 } from '@/api/shifts.api';
 import { cashDeskApi } from '@/api/cash-desk.api';
 import { usersApi } from '@/api/users.api';
+import { exportMultiSheet, printReport } from '@/lib/exportExcel';
+import {
+  buildShiftReportHtml,
+  buildShiftReportSheets,
+} from './shiftReportBuilder';
 
 const EGP = (n: number | string) =>
   `${Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ج.م`;
@@ -732,6 +738,18 @@ function CloseShiftModal({
   return (
     <Modal title={`إغلاق الوردية ${shift.shift_no}`} onClose={onClose}>
       <div className="space-y-4">
+        {/* PR-B2 — export the live (pre-close) snapshot for review.
+         *  Adjustments don't apply to an open shift so we pass [].
+         *  The summary already reflects the LIVE state because
+         *  shift-summary refetches on close-modal open. */}
+        {s && (
+          <ShiftReportExportBar
+            shift={shift}
+            summary={s}
+            adjustments={[]}
+          />
+        )}
+
         {/* Running tally pre-close */}
         <div className="bg-slate-50 rounded-lg p-3 space-y-1 text-sm">
           <Row label="رصيد افتتاحي" value={EGP(s?.opening_balance || 0)} />
@@ -992,6 +1010,17 @@ function ShiftDetailModal({ shift, onClose }: { shift: Shift; onClose: () => voi
         <div className="p-10 text-center text-slate-400">جاري التحميل…</div>
       ) : (
         <div className="space-y-4">
+          {/* PR-B2 — single-shift report exports. Uses already-loaded
+           *  summary + adjustments — no additional fetches, no
+           *  backend changes. */}
+          {detail && s && (
+            <ShiftReportExportBar
+              shift={detail}
+              summary={s}
+              adjustments={adjustments}
+            />
+          )}
+
           {/* Top stats */}
           <div className="grid md:grid-cols-4 gap-3">
             <MiniStat
@@ -1956,6 +1985,79 @@ function CashOutLine({ label, value }: { label: string; value: number }) {
     <div className="flex items-center justify-between py-0.5">
       <span className="text-slate-600">{label}</span>
       <span className="font-mono tabular-nums text-slate-700">{EGP(value)}</span>
+    </div>
+  );
+}
+
+/* ──────────────────────────────────────────────────────────────────
+ * PR-B2 — Single-shift report export bar.
+ *
+ * Three buttons: طباعة الوردية / PDF / Excel. Pulls already-loaded
+ * summary + adjustments (passed by the parent modal) into the pure
+ * builder helpers in shiftReportBuilder.ts. No fetches, no backend
+ * changes. PDF reuses printReport so users can pick "Save as PDF" in
+ * the browser print dialog (same path Daily Expenses PDF uses).
+ * ────────────────────────────────────────────────────────────────── */
+
+function ShiftReportExportBar({
+  shift,
+  summary,
+  adjustments,
+}: {
+  shift: Shift;
+  summary: ShiftSummary;
+  adjustments: ShiftCountAdjustment[];
+}) {
+  const authUser = useAuthStore((s) => s.user);
+  const generatedBy = authUser?.full_name || authUser?.username || null;
+  const reportTitle = `تقرير وردية ${shift.shift_no}`;
+
+  const onPrint = () => {
+    const html = buildShiftReportHtml({
+      shift,
+      summary,
+      adjustments,
+      generatedByName: generatedBy,
+    });
+    printReport(reportTitle, html);
+  };
+
+  const onExcel = () => {
+    const sheets = buildShiftReportSheets({
+      shift,
+      summary,
+      adjustments,
+      generatedByName: generatedBy,
+    });
+    exportMultiSheet(`shift-${shift.shift_no}`, sheets);
+  };
+
+  return (
+    <div className="flex items-center justify-end gap-2 pb-1 border-b border-slate-100">
+      <button
+        type="button"
+        onClick={onPrint}
+        className="px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-100 text-slate-700 hover:bg-slate-200 flex items-center gap-1.5"
+        title="طباعة تقرير الوردية"
+      >
+        <FileText size={13} /> طباعة الوردية
+      </button>
+      <button
+        type="button"
+        onClick={onPrint}
+        className="px-3 py-1.5 rounded-lg text-xs font-bold bg-rose-50 text-rose-700 border border-rose-200 hover:bg-rose-100 flex items-center gap-1.5"
+        title="حوار الطباعة يسمح بحفظ التقرير كملف PDF"
+      >
+        <FileText size={13} /> تصدير PDF
+      </button>
+      <button
+        type="button"
+        onClick={onExcel}
+        className="px-3 py-1.5 rounded-lg text-xs font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 flex items-center gap-1.5"
+        title="تصدير الوردية كملف Excel متعدد الأوراق"
+      >
+        <Download size={13} /> تصدير Excel
+      </button>
     </div>
   );
 }
