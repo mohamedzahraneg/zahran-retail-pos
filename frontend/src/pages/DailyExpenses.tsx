@@ -191,6 +191,8 @@ function presetRange(p: RangePreset): { from: string; to: string } {
 /* ─── Filter / data shape shared between tabs (PR-6) ───────────────── */
 
 export type ExpenseFilterStatus = 'all' | 'approved' | 'pending';
+/** PR-12 — edit-request state filter for the register. */
+export type ExpenseEditFilter = 'all' | 'none' | 'pending' | 'approved' | 'rejected';
 
 export interface DailyExpenseFilters {
   preset: RangePreset;
@@ -201,6 +203,8 @@ export interface DailyExpenseFilters {
   cashboxId: string;
   shiftId: string;
   status: ExpenseFilterStatus;
+  /** PR-12 — narrow the register by edit-request state. */
+  editStatus: ExpenseEditFilter;
 }
 
 /** Plumbing handed down to BOTH tabs. Premium analytics consumes the
@@ -283,6 +287,9 @@ export default function DailyExpenses() {
   const [cashboxId, setCashboxId] = useState<string>('');
   const [shiftId, setShiftId] = useState<string>('');
   const [status, setStatus] = useState<ExpenseFilterStatus>('all');
+  // PR-12 — edit-status filter (lifted to the shell so analytics
+  // tab inherits it via the same ctx).
+  const [editStatus, setEditStatus] = useState<ExpenseEditFilter>('all');
 
   const setRangePreset = (p: RangePreset) => {
     setPreset(p);
@@ -304,6 +311,7 @@ export default function DailyExpenses() {
     if (patch.cashboxId !== undefined) setCashboxId(patch.cashboxId);
     if (patch.shiftId !== undefined) setShiftId(patch.shiftId);
     if (patch.status !== undefined) setStatus(patch.status);
+    if (patch.editStatus !== undefined) setEditStatus(patch.editStatus);
   };
 
   /** Restore every filter to its pristine default. */
@@ -317,6 +325,7 @@ export default function DailyExpenses() {
     setCashboxId('');
     setShiftId('');
     setStatus('all');
+    setEditStatus('all');
   };
 
   const filtersDirty =
@@ -325,7 +334,8 @@ export default function DailyExpenses() {
     !!categoryId ||
     !!cashboxId ||
     !!shiftId ||
-    status !== 'all';
+    status !== 'all' ||
+    editStatus !== 'all';
 
   // Picker data (shared with the Add Expense modal — react-query
   // dedups requests via the keys).
@@ -354,6 +364,7 @@ export default function DailyExpenses() {
     cashbox_id: cashboxId || undefined,
     shift_id: shiftId || undefined,
     status: status === 'all' ? undefined : status,
+    edit_status: editStatus === 'all' ? undefined : editStatus,
     limit: 500,
   };
 
@@ -503,7 +514,7 @@ export default function DailyExpenses() {
   };
 
   const ctx: ExpenseTabContext = {
-    filters: { preset, from, to, employeeId, categoryId, cashboxId, shiftId, status },
+    filters: { preset, from, to, employeeId, categoryId, cashboxId, shiftId, status, editStatus },
     setFilter,
     setRangePreset,
     resetFilters,
@@ -610,7 +621,7 @@ function TabButton({
 
 function ExpensesRegisterTab({ ctx }: { ctx: ExpenseTabContext }) {
   const {
-    filters: { preset, from, to, employeeId, categoryId, cashboxId, shiftId, status },
+    filters: { preset, from, to, employeeId, categoryId, cashboxId, shiftId, status, editStatus },
     setFilter,
     setRangePreset,
     resetFilters,
@@ -632,12 +643,47 @@ function ExpensesRegisterTab({ ctx }: { ctx: ExpenseTabContext }) {
   // never apply on the analytics tab).
   const hasPermission = useAuthStore((s) => s.hasPermission);
   const canRequestEdit = hasPermission('expenses.daily.edit.request');
+  const canApproveEdit = hasPermission('expenses.daily.edit.approve');
   const [editTarget, setEditTarget] = useState<Expense | null>(null);
   const [historyTarget, setHistoryTarget] = useState<Expense | null>(null);
   const [showEditInbox, setShowEditInbox] = useState(false);
 
+  // PR-12 — pending edit-request count (only fetched if user can
+  // approve, otherwise the alert isn't shown).
+  const { data: pendingInbox = [] } = useQuery({
+    queryKey: ['expense-edit-inbox'],
+    queryFn: () => accountingApi.editRequestsInbox(),
+    enabled: canApproveEdit,
+    refetchInterval: 30_000,
+  });
+  const pendingCount = pendingInbox.length;
+
   return (
     <div className="space-y-5">
+      {/* PR-12: top alert when pending edit requests exist */}
+      {canApproveEdit && pendingCount > 0 && (
+        <div className="rounded-2xl border border-amber-300 bg-amber-50 dark:border-amber-500/30 dark:bg-amber-500/10 p-3 flex items-center justify-between gap-3 flex-wrap">
+          <div className="flex items-center gap-2 text-sm">
+            <span className="p-1.5 rounded-lg bg-amber-100 dark:bg-amber-500/20 text-amber-700 dark:text-amber-300">
+              <AlertTriangle size={16} />
+            </span>
+            <span className="text-amber-900 dark:text-amber-200 font-bold">
+              طلبات تعديل معلقة
+            </span>
+            <span className="px-2 py-0.5 rounded-full bg-rose-600 text-white text-[11px] font-extrabold tabular-nums">
+              {pendingCount}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowEditInbox(true)}
+            className="px-3 py-1.5 rounded-lg text-xs font-bold bg-amber-600 text-white hover:bg-amber-700"
+          >
+            عرض الطلبات
+          </button>
+        </div>
+      )}
+
       {/* Filter bar */}
       <div className="card p-3 space-y-3">
         <div className="flex items-center gap-1 flex-wrap">
@@ -772,6 +818,21 @@ function ExpensesRegisterTab({ ctx }: { ctx: ExpenseTabContext }) {
               <option value="pending">معلّق</option>
             </select>
           </label>
+          {/* PR-12: edit-state filter */}
+          <label className="block">
+            <span className="block text-[10px] text-slate-500 mb-0.5">حالة التعديل</span>
+            <select
+              className="input input-sm w-full"
+              value={editStatus}
+              onChange={(e) => setFilter({ editStatus: e.target.value as ExpenseEditFilter })}
+            >
+              <option value="all">— كل المصروفات —</option>
+              <option value="none">بدون تعديلات</option>
+              <option value="pending">بها طلب تعديل معلق</option>
+              <option value="approved">تم تعديلها</option>
+              <option value="rejected">طلب تعديل مرفوض</option>
+            </select>
+          </label>
         </div>
       </div>
 
@@ -879,12 +940,23 @@ function ExpensesRegisterTab({ ctx }: { ctx: ExpenseTabContext }) {
                       >
                         {e.je_is_void ? 'ملغي' : e.is_approved ? 'معتمد' : 'معلّق'}
                       </span>
-                      {/* PR-11: pending edit badge */}
-                      {e.has_pending_edit_request && (
-                        <span className="block mt-1 chip text-[9px] bg-amber-50 text-amber-700 border-amber-200">
+                      {/* PR-12: edit-state badges (one per row at most) */}
+                      {e.has_pending_edit_request ? (
+                        <span className="block mt-1 chip text-[9px] bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-500/15 dark:text-amber-300 dark:border-amber-500/30">
                           طلب تعديل ⏳
                         </span>
-                      )}
+                      ) : (e.approved_edit_count ?? 0) > 0 ? (
+                        <span
+                          className="block mt-1 chip text-[9px] bg-indigo-50 text-indigo-700 border-indigo-200 dark:bg-indigo-500/15 dark:text-indigo-300 dark:border-indigo-500/30"
+                          title={`${e.approved_edit_count} تعديل معتمد`}
+                        >
+                          تم تعديله ({e.approved_edit_count})
+                        </span>
+                      ) : (e.rejected_edit_count ?? 0) > 0 ? (
+                        <span className="block mt-1 chip text-[9px] bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-500/15 dark:text-rose-300 dark:border-rose-500/30">
+                          تعديل مرفوض
+                        </span>
+                      ) : null}
                     </td>
                     <td className="p-2 text-center whitespace-nowrap">
                       <div className="flex items-center justify-center gap-1">

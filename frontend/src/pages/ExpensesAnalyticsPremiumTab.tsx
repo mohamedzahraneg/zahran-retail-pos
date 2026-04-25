@@ -476,6 +476,14 @@ export default function ExpensesAnalyticsPremiumTab({
     staleTime: 60_000,
   });
 
+  /* ── PR-12 — edit-request stats for the same period (drives the
+   *  audit KPI section + the smart alerts in the health card). */
+  const { data: editStats } = useQuery({
+    queryKey: ['expense-edit-stats', from, to],
+    queryFn: () => accountingApi.editRequestsStats({ from, to }),
+    staleTime: 30_000,
+  });
+
   /* ── Live "آخر تحديث" timestamp ── */
   const [lastUpdated, setLastUpdated] = useState(() => Date.now());
   useEffect(() => {
@@ -622,6 +630,42 @@ export default function ExpensesAnalyticsPremiumTab({
       });
     }
 
+    /* PR-12 — alerts derived from edit-request data. */
+    if (editStats) {
+      if ((editStats.pending_count ?? 0) > 0) {
+        alerts.push({
+          msg: `${editStats.pending_count} طلب تعديل بانتظار الموافقة`,
+          severity: 'warn',
+        });
+      }
+      if (
+        (editStats.distinct_edited_expenses ?? 0) > 0 &&
+        count > 0 &&
+        editStats.distinct_edited_expenses / count > 0.3
+      ) {
+        const pct = (
+          (editStats.distinct_edited_expenses / count) * 100
+        ).toFixed(0);
+        alerts.push({
+          msg: `نسبة المصروفات المعدلة مرتفعة: ${pct}% من حركات الفترة`,
+          severity: 'warn',
+        });
+      }
+      if (
+        (editStats.rejected_count ?? 0) > 0 &&
+        editStats.total_count > 0 &&
+        editStats.rejected_count / editStats.total_count > 0.2
+      ) {
+        const pct = (
+          (editStats.rejected_count / editStats.total_count) * 100
+        ).toFixed(0);
+        alerts.push({
+          msg: `معدل رفض طلبات التعديل مرتفع: ${pct}% (${editStats.rejected_count} من ${editStats.total_count})`,
+          severity: 'warn',
+        });
+      }
+    }
+
     const critCount = alerts.filter((a) => a.severity === 'crit').length;
     const warnCount = alerts.filter((a) => a.severity === 'warn').length;
     const health =
@@ -641,7 +685,7 @@ export default function ExpensesAnalyticsPremiumTab({
       topN, topCategories,
       alerts, health, impactFor,
     };
-  }, [items, prevItems, prevLabel]);
+  }, [items, prevItems, prevLabel, editStats]);
 
   /* ── KPI deltas ── */
   const periodRevenue = Number(pnl?.net_revenue || 0);
@@ -1092,6 +1136,56 @@ export default function ExpensesAnalyticsPremiumTab({
         </div>
       </div>
 
+      {/* ─── PR-12 — Audit & controls KPIs (only renders if there's
+       *   any edit-request data in the period — keeps the dashboard
+       *   tidy when audit is irrelevant). ─── */}
+      {editStats && (editStats.total_count > 0 || editStats.pending_count > 0) && (
+        <div className={CARD_PAD}>
+          <h3 className={`text-[15px] font-black ${TEXT_STRONG} mb-3 flex items-center gap-2`}>
+            <AlertTriangle size={14} className="text-amber-600 dark:text-amber-400" />
+            الرقابة والتعديلات
+          </h3>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <AuditKpi
+              tone="amber"
+              label="طلبات تعديل معلقة"
+              value={editStats.pending_count}
+              hint={
+                editStats.distinct_pending_expenses
+                  ? `على ${editStats.distinct_pending_expenses} مصروف`
+                  : 'لا يوجد'
+              }
+            />
+            <AuditKpi
+              tone="indigo"
+              label="مصروفات تم تعديلها"
+              value={editStats.distinct_edited_expenses}
+              hint={`${editStats.approved_count} طلب موافَق عليه`}
+            />
+            <AuditKpi
+              tone="rose"
+              label="طلبات مرفوضة"
+              value={editStats.rejected_count}
+              hint={
+                editStats.total_count > 0
+                  ? `${((editStats.rejected_count / editStats.total_count) * 100).toFixed(0)}% من إجمالي الطلبات`
+                  : '—'
+              }
+            />
+            <AuditKpi
+              tone="slate"
+              label="نسبة المصروفات المعدلة"
+              value={
+                stats.count > 0
+                  ? `${((editStats.distinct_edited_expenses / stats.count) * 100).toFixed(1)}%`
+                  : '—'
+              }
+              hint={`من ${stats.count} حركة`}
+            />
+          </div>
+        </div>
+      )}
+
       {/* ─── Breakdown grid (4 donuts) ─── */}
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
         <BreakdownDonut title="حسب البند" icon={<PieIcon size={14} />} rows={stats.byCategory} total={stats.total} />
@@ -1315,6 +1409,46 @@ function CompareRow({
           ? '—'
           : `${up ? '↑' : '↓'} ${Math.abs(delta).toFixed(1)}${isPercentagePoints ? ' نقطة' : '%'}`}
       </span>
+    </div>
+  );
+}
+
+/* ─── PR-12 — small audit KPI tile (used by the new audit section) ─── */
+
+function AuditKpi({
+  label,
+  value,
+  hint,
+  tone,
+}: {
+  label: string;
+  value: number | string;
+  hint?: string;
+  tone: 'amber' | 'indigo' | 'rose' | 'slate';
+}) {
+  const accent = {
+    amber: 'border-amber-200 dark:border-amber-500/30',
+    indigo: 'border-indigo-200 dark:border-indigo-500/30',
+    rose: 'border-rose-200 dark:border-rose-500/30',
+    slate: 'border-slate-200 dark:border-slate-700/40',
+  }[tone];
+  const text = {
+    amber: 'text-amber-700 dark:text-amber-300',
+    indigo: 'text-indigo-700 dark:text-indigo-300',
+    rose: 'text-rose-700 dark:text-rose-300',
+    slate: 'text-slate-700 dark:text-slate-200',
+  }[tone];
+  return (
+    <div
+      className={`rounded-xl border ${accent} bg-white dark:bg-slate-900/60 p-3 flex flex-col`}
+    >
+      <span className="text-[11px] text-slate-500 dark:text-slate-400 font-bold mb-1">
+        {label}
+      </span>
+      <span className={`text-[20px] font-black tabular-nums ${text}`}>{value}</span>
+      {hint && (
+        <span className="text-[10px] text-slate-500 dark:text-slate-400 mt-1">{hint}</span>
+      )}
     </div>
   );
 }

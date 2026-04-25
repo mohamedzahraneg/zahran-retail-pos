@@ -205,6 +205,16 @@ export class ListExpensesDto {
   @IsUUID()
   shift_id?: string;
 
+  /** PR-12: filter the register by edit-request state.
+   *    none      — no edit requests in history
+   *    pending   — has at least one pending request
+   *    approved  — has at least one approved (i.e. was edited)
+   *    rejected  — has at least one rejected request
+   *    any       — has any edit request (pending OR decided) */
+  @IsOptional()
+  @IsIn(['none', 'pending', 'approved', 'rejected', 'any'])
+  edit_status?: 'none' | 'pending' | 'approved' | 'rejected' | 'any';
+
   @IsOptional()
   @IsString()
   q?: string;

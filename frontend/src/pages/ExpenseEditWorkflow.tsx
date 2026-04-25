@@ -24,6 +24,7 @@ import {
   AlertTriangle,
   CheckCircle2,
   Clock,
+  Download,
   Inbox,
   Pencil,
   History as HistoryIcon,
@@ -40,6 +41,7 @@ import {
 import { cashDeskApi } from '@/api/cash-desk.api';
 import { usersApi } from '@/api/users.api';
 import { useAuthStore } from '@/stores/auth.store';
+import { exportToExcel } from '@/lib/exportExcel';
 
 const EGP = (n: number | string | null | undefined) =>
   `${Number(n || 0).toLocaleString('en-US', {
@@ -83,6 +85,18 @@ const STATUS_LABEL: Record<ExpenseEditRequest['status'], string> = {
   approved: 'تمت الموافقة',
   rejected: 'مرفوض',
   cancelled: 'ملغى',
+};
+
+/** Pretty field names for the diff rows. Falls back to the raw key
+ *  when a field isn't mapped (forward-compatible). */
+const FIELD_LABEL_AR: Record<string, string> = {
+  category_id: 'البند',
+  amount: 'المبلغ',
+  cashbox_id: 'الخزنة',
+  expense_date: 'التاريخ',
+  employee_user_id: 'الموظف المسؤول',
+  payment_method: 'طريقة الدفع',
+  description: 'الوصف',
 };
 
 const STATUS_TONE: Record<ExpenseEditRequest['status'], string> = {
@@ -643,6 +657,46 @@ export function EditHistoryModal({
       toast.error(e?.response?.data?.message || 'فشل الإلغاء'),
   });
 
+  /** PR-12 — Excel export of the audit history. One row per
+   *  changed field across every request so the spreadsheet is
+   *  flat-friendly (filter / pivot / etc). */
+  const exportHistoryExcel = () => {
+    if (!history.length) {
+      toast.error('لا توجد بيانات للتصدير');
+      return;
+    }
+    const rows: Record<string, any>[] = [];
+    for (const r of history) {
+      const fields = Object.keys(r.new_values || {});
+      const baseRow = {
+        'رقم المصروف': expense.expense_no,
+        'رقم الطلب': r.id,
+        'مقدّم الطلب': r.requested_by_name || '',
+        'تاريخ الطلب': fmtDateTime(r.requested_at),
+        السبب: r.reason,
+        الحالة: STATUS_LABEL[r.status],
+        'صاحب القرار': r.decided_by_name || '',
+        'تاريخ القرار': fmtDateTime(r.decided_at),
+        'سبب الرفض': r.rejection_reason || '',
+        'القيد الملغى': r.voided_je_no || '',
+        'القيد الجديد': r.applied_je_no || '',
+      };
+      if (fields.length === 0) {
+        rows.push({ ...baseRow, الحقل: '—', 'القيمة القديمة': '', 'القيمة الجديدة': '' });
+      } else {
+        for (const f of fields) {
+          rows.push({
+            ...baseRow,
+            الحقل: FIELD_LABEL_AR[f] ?? f,
+            'القيمة القديمة': String((r.old_values as any)?.[f] ?? ''),
+            'القيمة الجديدة': String((r.new_values as any)?.[f] ?? ''),
+          });
+        }
+      }
+    }
+    exportToExcel(`expense-edit-history-${expense.expense_no}`, rows, 'سجل التعديلات');
+  };
+
   return (
     <ModalShell
       title={`سجل التعديلات — ${expense.expense_no}`}
@@ -695,23 +749,38 @@ export function EditHistoryModal({
                 {r.reason}
               </div>
 
-              <div className="rounded border border-slate-200 dark:border-slate-700/40 px-2 py-1.5">
-                <div className="grid grid-cols-3 gap-1 text-[10px] font-extrabold text-slate-500 dark:text-slate-400 mb-1 pb-1 border-b border-slate-100 dark:border-slate-700/40">
+              <div className="rounded-lg border border-slate-200 dark:border-slate-700/40 overflow-hidden">
+                <div className="grid grid-cols-[1fr_1.4fr_1.4fr] gap-1 text-[10px] font-extrabold text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-900/60 px-2.5 py-1.5">
                   <span>الحقل</span>
-                  <span>قبل</span>
-                  <span>بعد</span>
+                  <span>قبل التعديل</span>
+                  <span>بعد التعديل</span>
                 </div>
-                {Object.keys(r.new_values || {}).map((k) => (
-                  <div key={k} className="grid grid-cols-3 gap-1 text-[10.5px] py-0.5">
-                    <span className="text-slate-600 dark:text-slate-400">{k}</span>
-                    <span className="text-rose-600 dark:text-rose-400 line-through truncate">
-                      {String((r.old_values as any)?.[k] ?? '—')}
-                    </span>
-                    <span className="text-emerald-600 dark:text-emerald-400 truncate">
-                      {String((r.new_values as any)?.[k] ?? '—')}
-                    </span>
-                  </div>
-                ))}
+                {Object.keys(r.new_values || {}).map((k) => {
+                  const oldRaw = (r.old_values as any)?.[k];
+                  const newRaw = (r.new_values as any)?.[k];
+                  const fmt = (v: any) => {
+                    if (v === null || v === undefined || v === '') return '—';
+                    if (k === 'amount') return EGP(v);
+                    if (k === 'expense_date') return fmtDateOnly(v);
+                    return String(v);
+                  };
+                  return (
+                    <div
+                      key={k}
+                      className="grid grid-cols-[1fr_1.4fr_1.4fr] gap-1 text-[11px] px-2.5 py-1.5 border-t border-slate-100 dark:border-slate-700/40"
+                    >
+                      <span className="text-slate-700 dark:text-slate-300 font-bold">
+                        {FIELD_LABEL_AR[k] ?? k}
+                      </span>
+                      <span className="text-rose-600 dark:text-rose-400 line-through truncate">
+                        {fmt(oldRaw)}
+                      </span>
+                      <span className="text-emerald-600 dark:text-emerald-400 font-bold truncate">
+                        {fmt(newRaw)}
+                      </span>
+                    </div>
+                  );
+                })}
               </div>
 
               {(r.status === 'approved' || r.status === 'rejected' || r.status === 'cancelled') && (
@@ -746,7 +815,15 @@ export function EditHistoryModal({
         </div>
       )}
 
-      <div className="flex items-center justify-end pt-3 border-t border-slate-100 dark:border-slate-700/40">
+      <div className="flex items-center justify-between pt-3 border-t border-slate-100 dark:border-slate-700/40">
+        <button
+          type="button"
+          onClick={exportHistoryExcel}
+          disabled={history.length === 0}
+          className="px-3 py-1.5 rounded-lg text-xs font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 dark:bg-emerald-500/15 dark:text-emerald-300 dark:border-emerald-500/30 dark:hover:bg-emerald-500/25 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5"
+        >
+          <Download size={13} /> تصدير سجل التعديلات
+        </button>
         <button
           type="button"
           onClick={onClose}
@@ -803,6 +880,20 @@ export function EditRequestsInboxModal({ onClose }: { onClose: () => void }) {
     refetchInterval: 30_000,
   });
   const [active, setActive] = useState<ExpenseEditRequest | null>(null);
+  // PR-12 — quick search inside the inbox (matches expense_no /
+  // requester / reason / changed-fields).
+  const [search, setSearch] = useState('');
+  const filteredInbox = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return inbox;
+    return inbox.filter((r) => {
+      const fields = Object.keys(r.new_values || {}).join(' ');
+      const haystack = [
+        r.expense_no, r.requested_by_name, r.reason, fields,
+      ].filter(Boolean).join(' ').toLowerCase();
+      return haystack.includes(q);
+    });
+  }, [inbox, search]);
 
   return (
     <>
@@ -812,17 +903,27 @@ export function EditRequestsInboxModal({ onClose }: { onClose: () => void }) {
         onClose={onClose}
         size="xl"
       >
+        {/* Inbox-level search (PR-12) */}
+        <input
+          type="text"
+          placeholder="ابحث برقم المصروف / مقدّم الطلب / السبب / الحقول…"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          className="input input-sm w-full mb-2"
+        />
         {isFetching ? (
           <div className="text-center text-xs text-slate-500 dark:text-slate-400 py-8">
             جارٍ التحميل…
           </div>
-        ) : inbox.length === 0 ? (
+        ) : filteredInbox.length === 0 ? (
           <div className="text-center text-xs text-slate-500 dark:text-slate-400 py-8">
-            لا توجد طلبات تعديل قيد الانتظار ✓
+            {inbox.length === 0
+              ? 'لا توجد طلبات تعديل قيد الانتظار ✓'
+              : 'لا توجد طلبات تطابق البحث.'}
           </div>
         ) : (
           <div className="space-y-2">
-            {inbox.map((r) => {
+            {filteredInbox.map((r) => {
               const accountingFields = ['category_id', 'amount', 'cashbox_id', 'expense_date', 'payment_method'];
               const accountingChanged = Object.keys(r.new_values || {}).some(
                 (k) => accountingFields.includes(k),
