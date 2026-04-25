@@ -26,9 +26,14 @@ export interface Expense {
   warehouse_id: string;
   warehouse_name?: string;
   cashbox_id: string | null;
+  /** PR-2: name joined from cashboxes. NULL when expense has no cashbox. */
+  cashbox_name?: string | null;
   category_id: string;
   category_name?: string;
   category_code?: string;
+  /** PR-1: COA preview joined via expense_categories.account_id. */
+  account_code?: string | null;
+  account_name_ar?: string | null;
   amount: number;
   payment_method: 'cash' | 'card' | 'transfer' | 'wallet' | 'mixed';
   expense_date: string;
@@ -41,6 +46,13 @@ export interface Expense {
   created_by: string | null;
   created_by_name?: string;
   created_at: string;
+  /** PR-2: open shift the expense was recorded under. NULL if none. */
+  shift_id?: string | null;
+  shift_no?: string | null;
+  /** PR-2: responsible employee (from users join via employee_user_id). */
+  employee_user_id?: string | null;
+  employee_name?: string | null;
+  employee_username?: string | null;
 }
 
 export interface ProfitAndLoss {

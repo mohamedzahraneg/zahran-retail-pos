@@ -117,8 +117,12 @@ export default function DailyExpenses() {
               <thead>
                 <tr className="bg-slate-50 text-slate-600 text-[11px]">
                   <th className="p-2 text-right">الوقت</th>
-                  <th className="p-2 text-right">النوع</th>
+                  <th className="p-2 text-right">البند</th>
+                  <th className="p-2 text-right">الحساب</th>
                   <th className="p-2 text-right">الوصف</th>
+                  <th className="p-2 text-right">المسؤول</th>
+                  <th className="p-2 text-right">الخزنة</th>
+                  <th className="p-2 text-right">الوردية</th>
                   <th className="p-2 text-center">الدفع</th>
                   <th className="p-2 text-center">المبلغ</th>
                 </tr>
@@ -134,7 +138,21 @@ export default function DailyExpenses() {
                       })}
                     </td>
                     <td className="p-2">{e.category_name || '—'}</td>
+                    <td className="p-2 text-slate-600 text-[10px] font-mono">
+                      {e.account_code
+                        ? `${e.account_code} ${e.account_name_ar || ''}`.trim()
+                        : '—'}
+                    </td>
                     <td className="p-2 text-slate-700">{e.description || '—'}</td>
+                    <td className="p-2 text-slate-700 text-[11px]">
+                      {e.employee_name || e.employee_username || '—'}
+                    </td>
+                    <td className="p-2 text-slate-700 text-[11px]">
+                      {e.cashbox_name || '—'}
+                    </td>
+                    <td className="p-2 text-slate-600 font-mono text-[10px]">
+                      {e.shift_no || '—'}
+                    </td>
                     <td className="p-2 text-center text-slate-600">
                       {e.payment_method}
                     </td>
@@ -146,7 +164,7 @@ export default function DailyExpenses() {
               </tbody>
               <tfoot>
                 <tr className="border-t border-slate-200 bg-slate-50 font-black">
-                  <td colSpan={4} className="p-2 text-right">
+                  <td colSpan={8} className="p-2 text-right">
                     إجمالي اليوم
                   </td>
                   <td className="p-2 text-center tabular-nums text-rose-700">
@@ -226,12 +244,15 @@ function AddExpenseModal({
 
   // Auto-pick the currently open shift's cashbox the first time the
   // cashbox dropdown renders. Resets on form remount (i.e. modal
-  // close/reopen).
+  // close/reopen). The shift_id itself is auto-resolved server-side
+  // (PR-2) — we don't need to send it from the form.
   useEffect(() => {
     if (!cashboxId && currentShift?.cashbox_id) {
       setCashboxId(String(currentShift.cashbox_id));
     }
   }, [currentShift, cashboxId]);
+
+  const hasOpenShift = !!(currentShift?.id && currentShift?.cashbox_id);
 
   const selectedCategory = useMemo<ExpenseCategory | null>(
     () =>
@@ -302,6 +323,34 @@ function AddExpenseModal({
           <button onClick={onClose} className="icon-btn" disabled={create.isPending}>
             <X className="w-5 h-5" />
           </button>
+        </div>
+
+        {/* PR-2 — open-shift status banner. Shows the live shift number
+            so admin sees which shift the expense will be linked to.
+            When no open shift exists, switches to a clear "اختر الموظف
+            والخزنة يدوياً" prompt. */}
+        <div
+          className={`rounded-lg border px-3 py-2 text-[11px] leading-relaxed ${
+            hasOpenShift
+              ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
+              : 'border-amber-200 bg-amber-50 text-amber-900'
+          }`}
+        >
+          {hasOpenShift ? (
+            <span>
+              مرتبط بالوردية المفتوحة:{' '}
+              <span className="font-bold font-mono">
+                {(currentShift as any)?.shift_no || (currentShift as any)?.id}
+              </span>
+              {' '}— الخزنة محسومة تلقائيًا من الوردية. الموظف المسؤول
+              مفترض أنه أنت ما لم تُغيّره.
+            </span>
+          ) : (
+            <span>
+              لا توجد وردية مفتوحة لك حالياً — اختر الخزنة والموظف
+              المسؤول يدوياً، ولن يتم ربط المصروف بأي وردية.
+            </span>
+          )}
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
