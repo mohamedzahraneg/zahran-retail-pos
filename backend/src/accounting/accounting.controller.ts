@@ -309,6 +309,15 @@ export class AccountingController {
     return this.service.editRequestsInbox();
   }
 
+  @Get('expenses/edit-requests/stats')
+  @ApiOperation({ summary: 'إحصائيات طلبات تعديل المصروفات للوحة التحليلات' })
+  editRequestsStats(
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    return this.service.editRequestsStats({ from, to });
+  }
+
   @Post('expenses/edit-requests/:id/approve')
   @Permissions('expenses.daily.edit.approve')
   @ApiOperation({ summary: 'الموافقة على طلب تعديل + ترحيل التصحيح' })

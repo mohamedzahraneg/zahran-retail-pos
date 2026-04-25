@@ -60,6 +60,11 @@ export interface Expense {
   /** PR-11 (migration 094): TRUE iff there's a pending edit request
    *  on this expense. The register renders a small badge when set. */
   has_pending_edit_request?: boolean;
+  /** PR-12 — rolled-up edit-request state used by the row badges + filter. */
+  last_edit_status?: 'pending' | 'approved' | 'rejected' | 'cancelled' | null;
+  edit_request_count?: number;
+  approved_edit_count?: number;
+  rejected_edit_count?: number;
 }
 
 export interface ProfitAndLoss {
@@ -154,6 +159,8 @@ export const accountingApi = {
     employee_user_id?: string;
     cashbox_id?: string;
     shift_id?: string;
+    /** PR-12 — filter by edit-request state. */
+    edit_status?: 'none' | 'pending' | 'approved' | 'rejected' | 'any';
     q?: string;
     limit?: number;
     offset?: number;
@@ -291,7 +298,23 @@ export const accountingApi = {
     unwrap<{ ok: true }>(
       api.post(`/accounting/expenses/edit-requests/${id}/cancel`),
     ),
+  /** PR-12 — aggregated stats for the analytics audit KPI section. */
+  editRequestsStats: (params: { from?: string; to?: string }) =>
+    unwrap<ExpenseEditStats>(
+      api.get('/accounting/expenses/edit-requests/stats', { params }),
+    ),
 };
+
+export interface ExpenseEditStats {
+  pending_count: number;
+  approved_count: number;
+  rejected_count: number;
+  cancelled_count: number;
+  total_count: number;
+  distinct_edited_expenses: number;
+  distinct_pending_expenses: number;
+  total_expenses_in_range: number;
+}
 
 /** Editable fields the workflow accepts — must match the backend's
  *  EDITABLE_FIELDS whitelist in accounting.service.ts. */

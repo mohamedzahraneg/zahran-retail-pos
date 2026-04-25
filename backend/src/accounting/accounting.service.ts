@@ -541,6 +541,30 @@ export class AccountingService {
         `(e.description ILIKE $${ps.length} OR e.vendor_name ILIKE $${ps.length} OR e.expense_no ILIKE $${ps.length})`,
       );
     }
+    // PR-12 — edit-status filter. Implemented as EXISTS subqueries on
+    // expense_edit_requests so the index `ix_expense_edit_requests_pending`
+    // (partial, status='pending') stays usable when filtering pending.
+    if (filters.edit_status === 'none') {
+      conds.push(
+        `NOT EXISTS (SELECT 1 FROM expense_edit_requests r WHERE r.expense_id = e.id)`,
+      );
+    } else if (filters.edit_status === 'pending') {
+      conds.push(
+        `EXISTS (SELECT 1 FROM expense_edit_requests r WHERE r.expense_id = e.id AND r.status = 'pending')`,
+      );
+    } else if (filters.edit_status === 'approved') {
+      conds.push(
+        `EXISTS (SELECT 1 FROM expense_edit_requests r WHERE r.expense_id = e.id AND r.status = 'approved')`,
+      );
+    } else if (filters.edit_status === 'rejected') {
+      conds.push(
+        `EXISTS (SELECT 1 FROM expense_edit_requests r WHERE r.expense_id = e.id AND r.status = 'rejected')`,
+      );
+    } else if (filters.edit_status === 'any') {
+      conds.push(
+        `EXISTS (SELECT 1 FROM expense_edit_requests r WHERE r.expense_id = e.id)`,
+      );
+    }
     const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
     ps.push(filters.limit ?? 100);
     ps.push(filters.offset ?? 0);
@@ -565,7 +589,11 @@ export class AccountingService {
               s.shift_no    AS shift_no,
               je.entry_no   AS je_entry_no,
               je.is_void    AS je_is_void,
-              COALESCE(er.has_pending_edit_request, FALSE) AS has_pending_edit_request
+              COALESCE(er.has_pending_edit_request, FALSE) AS has_pending_edit_request,
+              er.last_edit_status        AS last_edit_status,
+              COALESCE(er.edit_request_count,    0) AS edit_request_count,
+              COALESCE(er.approved_edit_count,   0) AS approved_edit_count,
+              COALESCE(er.rejected_edit_count,   0) AS rejected_edit_count
        FROM expenses e
        LEFT JOIN expense_categories c ON c.id = e.category_id
        LEFT JOIN chart_of_accounts coa ON coa.id = c.account_id
@@ -583,12 +611,25 @@ export class AccountingService {
           LIMIT 1
        ) je ON TRUE
        LEFT JOIN LATERAL (
-         -- PR-11 (migration 094): expose a boolean so the register row
-         -- can render the "pending edit" badge in a single round-trip.
-         SELECT TRUE AS has_pending_edit_request
+         -- PR-11 (migration 094) + PR-12: rolled-up edit-request state
+         -- so the register can render badges + filter on edit status
+         -- in a single round-trip.
+         --
+         --   has_pending_edit_request   — at least one pending request
+         --   last_edit_status           — status of the latest request
+         --                                (pending / approved / rejected
+         --                                 / cancelled), NULL when none
+         --   edit_request_count         — total requests on this expense
+         --                                across the whole lifetime
+         --   approved_edit_count        — non-zero when row was edited
+         SELECT
+           BOOL_OR(status = 'pending')                                 AS has_pending_edit_request,
+           (ARRAY_AGG(status ORDER BY requested_at DESC))[1]           AS last_edit_status,
+           COUNT(*)::int                                               AS edit_request_count,
+           COUNT(*) FILTER (WHERE status = 'approved')::int            AS approved_edit_count,
+           COUNT(*) FILTER (WHERE status = 'rejected')::int            AS rejected_edit_count
            FROM expense_edit_requests
-          WHERE expense_id = e.id AND status = 'pending'
-          LIMIT 1
+          WHERE expense_id = e.id
        ) er ON TRUE
        ${where}
        ORDER BY e.expense_date DESC, e.created_at DESC
@@ -1189,6 +1230,41 @@ export class AccountingService {
         WHERE r.status = 'pending'
         ORDER BY r.requested_at ASC`,
     );
+  }
+
+  /** Aggregated edit-request stats for the analytics tab's audit
+   *  KPIs. Counts requests inside the date range AND distinct expenses
+   *  that have any edit. Optional `from`/`to` mirror the listing
+   *  filter so the analytics card stays in lock-step with the
+   *  register total. */
+  async editRequestsStats(filters: { from?: string; to?: string }) {
+    const conds: string[] = [];
+    const ps: any[] = [];
+    if (filters.from) {
+      ps.push(filters.from);
+      conds.push(`e.expense_date >= $${ps.length}`);
+    }
+    if (filters.to) {
+      ps.push(filters.to);
+      conds.push(`e.expense_date <= $${ps.length}`);
+    }
+    const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+    const [row] = await this.ds.query(
+      `SELECT
+         COUNT(*) FILTER (WHERE r.status = 'pending')::int    AS pending_count,
+         COUNT(*) FILTER (WHERE r.status = 'approved')::int   AS approved_count,
+         COUNT(*) FILTER (WHERE r.status = 'rejected')::int   AS rejected_count,
+         COUNT(*) FILTER (WHERE r.status = 'cancelled')::int  AS cancelled_count,
+         COUNT(*)::int                                        AS total_count,
+         COUNT(DISTINCT e.id) FILTER (WHERE r.status = 'approved')::int  AS distinct_edited_expenses,
+         COUNT(DISTINCT e.id) FILTER (WHERE r.status = 'pending')::int   AS distinct_pending_expenses,
+         (SELECT COUNT(*)::int FROM expenses e2 ${where ? where.replace(/e\./g, 'e2.') : ''}) AS total_expenses_in_range
+         FROM expense_edit_requests r
+         JOIN expenses e ON e.id = r.expense_id
+       ${where}`,
+      ps,
+    );
+    return row;
   }
 
   async cancelEditRequest(requestId: string, userId: string) {
