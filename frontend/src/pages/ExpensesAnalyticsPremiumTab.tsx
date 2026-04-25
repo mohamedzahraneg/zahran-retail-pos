@@ -683,9 +683,11 @@ export default function ExpensesAnalyticsPremiumTab({
 
   /* ─── Render ─── */
   return (
-    <div className="space-y-4" dir="rtl">
-      {/* ─── Top header (no card — flows with the page) ─── */}
-      <div className="flex items-start justify-between gap-4 flex-wrap pb-3 border-b border-slate-200 dark:border-slate-700/40">
+    <div className="space-y-3" dir="rtl">
+      {/* PR-9: header has no border-b separator any more (the tab bar
+       * already provides one above) and uses tighter pb so the dashboard
+       * starts higher up the viewport. */}
+      <div className="flex items-center justify-between gap-3 flex-wrap pb-1">
         <div className="flex items-center gap-3">
           <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-blue-600 to-violet-600 flex items-center justify-center text-white shadow-lg shadow-blue-900/20">
             <Sparkles size={22} />

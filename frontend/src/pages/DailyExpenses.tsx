@@ -517,19 +517,26 @@ export default function DailyExpenses() {
   };
 
   return (
-    <div className="space-y-5">
-      {/* ─── Page header (theme-aware in PR-8) ─── */}
-      <div className="flex items-center gap-3">
-        <div className="p-2 rounded-xl bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300">
-          <Receipt size={20} />
+    /* PR-9: tighten the gap between tab bar and analytics header so the
+     * dashboard fills the viewport faster. Register tab keeps the
+     * roomier `space-y-5` (matches the rest of the operational pages). */
+    <div className={tab === 'analytics' ? 'space-y-3' : 'space-y-5'}>
+      {/* Generic page header — only on the register tab. The analytics
+       * tab gets its own bigger title, so this would be a duplicate
+       * stack of headers eating ~80px of viewport (PR-9 fix). */}
+      {tab === 'register' && (
+        <div className="flex items-center gap-3">
+          <div className="p-2 rounded-xl bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300">
+            <Receipt size={20} />
+          </div>
+          <div>
+            <h1 className="text-xl font-black text-slate-800 dark:text-white">المصروفات اليومية</h1>
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              تسجيل مصروف يومي مرتبط بالموظف المسؤول — يُرحَّل القيد تلقائيًا
+            </p>
+          </div>
         </div>
-        <div>
-          <h1 className="text-xl font-black text-slate-800 dark:text-white">المصروفات اليومية</h1>
-          <p className="text-xs text-slate-500 dark:text-slate-400">
-            تسجيل مصروف يومي مرتبط بالموظف المسؤول — يُرحَّل القيد تلقائيًا
-          </p>
-        </div>
-      </div>
+      )}
 
       {/* ─── Tab bar (URL-driven via ?tab=) ─── */}
       <div className="border-b border-slate-200 dark:border-slate-700/40">
