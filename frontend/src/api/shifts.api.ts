@@ -29,6 +29,40 @@ export interface ShiftExpenseRow {
   category_name: string | null;
   expense_date: string;
   status: string;
+  /** PR-14 — joined fields used by the cash-out section. */
+  employee_name?: string | null;
+  cashbox_name?: string | null;
+  payment_method?: string;
+  created_by_name?: string | null;
+  je_entry_no?: string | null;
+}
+
+/** PR-14 — every cash row that left the drawer for an employee
+ *  (settlement payout or expense flagged as advance). The shift
+ *  closing renders these in their own "حركات موظفين نقدية" section
+ *  so they're never confused with operating expenses. */
+export interface EmployeeCashMovement {
+  kind: 'settlement' | 'advance';
+  id: string;
+  movement_type: 'settlement' | 'advance';
+  /** Arabic display label used by the table — صرف مستحقات / سلفة موظف. */
+  type_label: string;
+  employee_user_id: string | null;
+  employee_name: string | null;
+  amount: number;
+  created_at: string;
+  cashbox_id: string | null;
+  cashbox_name: string | null;
+  payment_method: string | null;
+  description: string | null;
+  je_entry_no: string | null;
+  created_by_name: string | null;
+  /** Friendly accounting impact label for the table cell.
+   *  e.g. "DR 213 / CR الخزينة الرئيسية". */
+  accounting_impact: string;
+  /** explicit = row carries shift_id, derived = matched by
+   *  cashbox_id + time window. */
+  link_method: 'explicit' | 'derived';
 }
 
 export interface ShiftSummary {
@@ -58,9 +92,21 @@ export interface ShiftSummary {
   // Returns + expenses
   total_returns: number;
   return_count: number;
+  /** Sum of advances + operating expenses (legacy semantic). */
   total_expenses: number;
   expense_count: number;
+  /** Operating expenses only (advances filtered out — PR-14). */
   expenses: ShiftExpenseRow[];
+
+  // PR-14 — employee cash split (no schema changes)
+  total_operating_expenses: number;
+  operating_expense_count: number;
+  total_employee_advances: number;
+  employee_advance_count: number;
+  total_employee_settlements: number;
+  employee_settlement_count: number;
+  total_employee_cash_out: number;
+  employee_cash_movements: EmployeeCashMovement[];
 
   // Reconciliation
   total_cash_in: number;
