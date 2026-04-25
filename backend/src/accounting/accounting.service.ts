@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
   Optional,
@@ -14,7 +15,6 @@ import {
   UpdateExpenseCategoryDto,
   UpdateExpenseDto,
 } from './dto/accounting.dto';
-import { ForbiddenException } from '@nestjs/common';
 import { AccountingPostingService } from '../chart-of-accounts/posting.service';
 import { FinancialEngineService } from '../chart-of-accounts/financial-engine.service';
 import { ExpenseApprovalService } from './approval.service';
@@ -564,7 +564,8 @@ export class AccountingService {
               cb.name_ar    AS cashbox_name,
               s.shift_no    AS shift_no,
               je.entry_no   AS je_entry_no,
-              je.is_void    AS je_is_void
+              je.is_void    AS je_is_void,
+              COALESCE(er.has_pending_edit_request, FALSE) AS has_pending_edit_request
        FROM expenses e
        LEFT JOIN expense_categories c ON c.id = e.category_id
        LEFT JOIN chart_of_accounts coa ON coa.id = c.account_id
@@ -581,6 +582,14 @@ export class AccountingService {
           ORDER BY created_at DESC
           LIMIT 1
        ) je ON TRUE
+       LEFT JOIN LATERAL (
+         -- PR-11 (migration 094): expose a boolean so the register row
+         -- can render the "pending edit" badge in a single round-trip.
+         SELECT TRUE AS has_pending_edit_request
+           FROM expense_edit_requests
+          WHERE expense_id = e.id AND status = 'pending'
+          LIMIT 1
+       ) er ON TRUE
        ${where}
        ORDER BY e.expense_date DESC, e.created_at DESC
        LIMIT $${ps.length - 1} OFFSET $${ps.length}`,
@@ -1011,5 +1020,476 @@ export class AccountingService {
       pending_expenses: pendingRow.pending_expenses,
       pending_amount: Number(pendingRow.pending_amount),
     };
+  }
+
+  // ─── Expense edit-request workflow (migration 094) ──────────────────
+  //
+  // Approved expenses can no longer be `updateExpense`d directly (the
+  // method's own guard rejects them on line 455). The workflow below
+  // is the only safe path to correct an already-posted expense:
+  //   * `requestExpenseEdit` snapshots the editable fields and queues
+  //     a pending request with a required reason.
+  //   * `approveEditRequest` (the heart of the workflow) atomically
+  //     voids the original JE + cashbox movement via the engine's
+  //     `reversal_of` mechanism, updates the expenses row in place,
+  //     and posts a fresh JE with the corrected values. Trial balance
+  //     stays at 0; cashbox drift stays at 0.
+  //   * `rejectEditRequest` / `cancelEditRequest` close the request
+  //     without touching accounting.
+  // The audit trail (requested_by, decided_by, voided/applied JE ids,
+  // old/new values, reason) lives in `expense_edit_requests`.
+  //
+  // Description-only / employee-only / payment_method-only edits skip
+  // the void+repost — the row is updated in place, audit log records
+  // the change.
+  // ──────────────────────────────────────────────────────────────────
+
+  /** Editable fields the workflow accepts. Anything outside this set is
+   *  rejected at DTO validation; this constant is the source of truth
+   *  used by `requestExpenseEdit`, `approveEditRequest`, and the audit
+   *  snapshot. */
+  private readonly EDITABLE_FIELDS = [
+    'category_id',
+    'amount',
+    'cashbox_id',
+    'expense_date',
+    'employee_user_id',
+    'payment_method',
+    'description',
+  ] as const;
+
+  /** Subset of editable fields whose change requires void + repost. */
+  private readonly ACCOUNTING_FIELDS = [
+    'category_id',
+    'amount',
+    'cashbox_id',
+    'expense_date',
+    'payment_method',
+  ] as const;
+
+  async requestExpenseEdit(
+    expenseId: string,
+    dto: { reason: string; new_values: Record<string, any> },
+    userId: string,
+  ) {
+    const reason = (dto.reason || '').trim();
+    if (reason.length < 5) {
+      throw new BadRequestException('سبب التعديل مطلوب (5 أحرف على الأقل)');
+    }
+
+    const [expense] = await this.ds.query(
+      `SELECT id, expense_no, category_id, amount, cashbox_id,
+              expense_date, employee_user_id, payment_method, description,
+              is_advance
+         FROM expenses WHERE id = $1`,
+      [expenseId],
+    );
+    if (!expense) throw new NotFoundException('expense not found');
+
+    // Refuse a second pending request on the same expense — keeps the
+    // approver's inbox unambiguous and prevents racing edits.
+    const [pending] = await this.ds.query(
+      `SELECT id FROM expense_edit_requests
+        WHERE expense_id = $1 AND status = 'pending' LIMIT 1`,
+      [expenseId],
+    );
+    if (pending) {
+      throw new BadRequestException(
+        'هناك طلب تعديل معلق بالفعل لهذا المصروف',
+      );
+    }
+
+    // Strip undefined / unknown fields. Whitelist only what's editable.
+    const cleanNew: Record<string, any> = {};
+    for (const k of this.EDITABLE_FIELDS) {
+      if ((dto.new_values ?? {})[k] !== undefined) {
+        cleanNew[k] = (dto.new_values as any)[k];
+      }
+    }
+    if (!Object.keys(cleanNew).length) {
+      throw new BadRequestException('لا توجد تغييرات لتسجيلها');
+    }
+
+    // Snapshot OLD values for the same set of editable fields. Coerce
+    // expense_date through ISO so the JSON snapshot is stable.
+    const oldValues: Record<string, any> = {};
+    for (const k of this.EDITABLE_FIELDS) {
+      const v = (expense as any)[k];
+      if (k === 'expense_date' && v) {
+        oldValues[k] =
+          typeof v === 'string' ? v : new Date(v).toISOString().slice(0, 10);
+      } else if (k === 'amount') {
+        oldValues[k] = Number(v ?? 0);
+      } else {
+        oldValues[k] = v ?? null;
+      }
+    }
+
+    // Reject no-op requests (every new value matches the existing one).
+    let hasDiff = false;
+    for (const [k, v] of Object.entries(cleanNew)) {
+      const a = String(v ?? '');
+      const b = String((oldValues as any)[k] ?? '');
+      if (a !== b) {
+        hasDiff = true;
+        break;
+      }
+    }
+    if (!hasDiff) {
+      throw new BadRequestException('القيم الجديدة مطابقة للحالية');
+    }
+
+    const [row] = await this.ds.query(
+      `INSERT INTO expense_edit_requests
+         (expense_id, requested_by, reason, old_values, new_values)
+       VALUES ($1, $2, $3, $4::jsonb, $5::jsonb)
+       RETURNING *`,
+      [
+        expenseId,
+        userId,
+        reason,
+        JSON.stringify(oldValues),
+        JSON.stringify(cleanNew),
+      ],
+    );
+    return row;
+  }
+
+  async listEditRequestsForExpense(expenseId: string) {
+    return this.ds.query(
+      `SELECT r.*,
+              ru.full_name AS requested_by_name,
+              du.full_name AS decided_by_name,
+              jv.entry_no  AS voided_je_no,
+              ja.entry_no  AS applied_je_no
+         FROM expense_edit_requests r
+         LEFT JOIN users ru             ON ru.id = r.requested_by
+         LEFT JOIN users du             ON du.id = r.decided_by
+         LEFT JOIN journal_entries jv   ON jv.id = r.voided_je_id
+         LEFT JOIN journal_entries ja   ON ja.id = r.applied_je_id
+        WHERE r.expense_id = $1
+        ORDER BY r.requested_at DESC`,
+      [expenseId],
+    );
+  }
+
+  async editRequestsInbox() {
+    return this.ds.query(
+      `SELECT r.*,
+              e.expense_no,
+              e.amount AS current_amount,
+              ru.full_name AS requested_by_name,
+              c.name_ar    AS current_category_name,
+              cb.name_ar   AS current_cashbox_name
+         FROM expense_edit_requests r
+         JOIN expenses e                ON e.id = r.expense_id
+         LEFT JOIN expense_categories c ON c.id = e.category_id
+         LEFT JOIN cashboxes cb         ON cb.id = e.cashbox_id
+         LEFT JOIN users ru             ON ru.id = r.requested_by
+        WHERE r.status = 'pending'
+        ORDER BY r.requested_at ASC`,
+    );
+  }
+
+  async cancelEditRequest(requestId: string, userId: string) {
+    const [r] = await this.ds.query(
+      `SELECT id, status, requested_by FROM expense_edit_requests WHERE id = $1`,
+      [requestId],
+    );
+    if (!r) throw new NotFoundException('request not found');
+    if (r.status !== 'pending') {
+      throw new BadRequestException('لا يمكن إلغاء طلب تم البتّ فيه');
+    }
+    if (String(r.requested_by) !== String(userId)) {
+      throw new ForbiddenException('لا يمكنك إلغاء طلب آخر');
+    }
+    await this.ds.query(
+      `UPDATE expense_edit_requests
+          SET status           = 'cancelled',
+              decided_by       = $1,
+              decided_at       = NOW(),
+              rejection_reason = 'cancelled by requester'
+        WHERE id = $2`,
+      [userId, requestId],
+    );
+    return { ok: true };
+  }
+
+  async rejectEditRequest(
+    requestId: string,
+    userId: string,
+    reason: string,
+  ) {
+    if (!reason || reason.trim().length < 3) {
+      throw new BadRequestException('سبب الرفض مطلوب');
+    }
+    return await this.ds.transaction(async (em) => {
+      const [r] = await em.query(
+        `SELECT id, status FROM expense_edit_requests WHERE id = $1 FOR UPDATE`,
+        [requestId],
+      );
+      if (!r) throw new NotFoundException('request not found');
+      if (r.status !== 'pending') {
+        throw new BadRequestException('تم البتّ في هذا الطلب بالفعل');
+      }
+      await em.query(
+        `UPDATE expense_edit_requests
+            SET status           = 'rejected',
+                decided_by       = $1,
+                decided_at       = NOW(),
+                rejection_reason = $2
+          WHERE id = $3`,
+        [userId, reason.trim(), requestId],
+      );
+      return { ok: true };
+    });
+  }
+
+  /**
+   * Approve an edit request — see the section header above for the
+   * design rationale. Atomic transaction: either every step succeeds
+   * (void + update + repost + audit close) or none do.
+   *
+   * The engine's `reversal_of` flag is what makes the void safe:
+   *   - the engine writes a balanced reversing JE
+   *   - the engine flips the original entry's `is_void` to TRUE
+   *   - the engine posts the matching reversing cashbox_transactions
+   *   - all of the above happens inside the same DB transaction we
+   *     opened here, so a later step's failure rolls everything back
+   *
+   * The fresh corrected JE is posted via `recordExpense` exactly the
+   * way an initial expense is posted. The engine's idempotency guard
+   * (financial-engine.service.ts:281-295) explicitly allows re-using
+   * the same `(reference_type='expense', reference_id=expense.id)`
+   * pair once the prior entry has been voided.
+   */
+  async approveEditRequest(requestId: string, approverId: string) {
+    return await this.ds.transaction(async (em) => {
+      const [r] = await em.query(
+        `SELECT * FROM expense_edit_requests WHERE id = $1 FOR UPDATE`,
+        [requestId],
+      );
+      if (!r) throw new NotFoundException('request not found');
+      if (r.status !== 'pending') {
+        throw new BadRequestException('تم البتّ في هذا الطلب بالفعل');
+      }
+
+      const oldV = (r.old_values as Record<string, any>) || {};
+      const newV = (r.new_values as Record<string, any>) || {};
+
+      const [expense] = await em.query(
+        `SELECT * FROM expenses WHERE id = $1 FOR UPDATE`,
+        [r.expense_id],
+      );
+      if (!expense) throw new NotFoundException('expense not found');
+
+      const accountingChanged = this.ACCOUNTING_FIELDS.some(
+        (k) =>
+          k in newV &&
+          String((newV as any)[k] ?? '') !== String((oldV as any)[k] ?? ''),
+      );
+
+      let voidedJeId: string | null = null;
+      let appliedJeId: string | null = null;
+
+      if (accountingChanged) {
+        // Locate the live JE for this expense. There may be NONE if the
+        // expense was never approved (legacy data) — in that case we
+        // simply skip the void step and let the corrected JE post fresh.
+        const [oldJe] = await em.query(
+          `SELECT id, entry_no FROM journal_entries
+            WHERE reference_type = 'expense' AND reference_id = $1
+              AND is_void = FALSE
+            ORDER BY created_at DESC LIMIT 1`,
+          [r.expense_id],
+        );
+
+        if (oldJe) {
+          const oldAmount = Number(
+            (oldV as any).amount ?? expense.amount,
+          );
+          const oldPm = (oldV as any).payment_method ?? expense.payment_method;
+          const oldCashbox = (oldV as any).cashbox_id ?? expense.cashbox_id;
+          const oldCategoryAccountId = await this.resolveCategoryAccountId(
+            em,
+            (oldV as any).category_id ?? expense.category_id,
+          );
+
+          // Build the reversal: flip DR ↔ CR + flip cash direction.
+          // Original posting was DR <category-or-529> / CR <cash-or-AP>;
+          // reversal is DR <cash-or-AP> / CR <category-or-529>.
+          const isCash = oldPm === 'cash' && !!oldCashbox;
+          const reversalDr: any = isCash
+            ? {
+                resolve_from_cashbox_id: oldCashbox,
+                debit: oldAmount,
+                cashbox_id: oldCashbox,
+              }
+            : { account_code: '210', debit: oldAmount };
+          const reversalCr: any = oldCategoryAccountId
+            ? { account_id: oldCategoryAccountId, credit: oldAmount }
+            : { account_code: '529', credit: oldAmount };
+
+          if (!this.engine) {
+            throw new BadRequestException(
+              'محرّك الترحيل غير مهيأ — لا يمكن تعديل المصروف',
+            );
+          }
+          const revRes = await this.engine.recordTransaction({
+            kind: 'expense',
+            reference_type: 'expense_edit_reversal',
+            reference_id: r.id,
+            entry_date:
+              (oldV as any).expense_date ?? expense.expense_date,
+            description: `إلغاء مصروف ${expense.expense_no} — طلب تعديل`,
+            gl_lines: [reversalDr, reversalCr],
+            cash_movements: isCash
+              ? [
+                  {
+                    cashbox_id: oldCashbox,
+                    direction: 'in', // flipped from the original 'out'
+                    amount: oldAmount,
+                    category: 'expense_edit_reversal',
+                    notes: `عكس مصروف ${expense.expense_no}`,
+                  },
+                ]
+              : [],
+            user_id: approverId,
+            em,
+            reversal_of: oldJe.id,
+            reversal_reason: `طلب تعديل #${r.id} — ${r.reason}`,
+          });
+          if (!revRes.ok) {
+            throw new BadRequestException(
+              `فشل عكس القيد الأصلي: ${(revRes as any).error}`,
+            );
+          }
+          voidedJeId = oldJe.id;
+        }
+      }
+
+      // Apply field updates — merge new values onto the current row.
+      const merged: any = { ...expense };
+      for (const k of this.EDITABLE_FIELDS) {
+        if (k in newV) merged[k] = (newV as any)[k];
+      }
+      await em.query(
+        `UPDATE expenses
+            SET category_id      = $1,
+                amount           = $2,
+                cashbox_id       = $3,
+                expense_date     = $4,
+                employee_user_id = $5,
+                payment_method   = $6,
+                description      = $7,
+                updated_at       = NOW()
+          WHERE id = $8`,
+        [
+          merged.category_id,
+          merged.amount,
+          merged.cashbox_id,
+          merged.expense_date,
+          merged.employee_user_id,
+          merged.payment_method,
+          merged.description,
+          r.expense_id,
+        ],
+      );
+
+      if (accountingChanged) {
+        // Strict mapping — same gate the Daily Expenses create path
+        // applies. If the new category isn't mapped, the request is
+        // rejected (the user must map the COA leaf first).
+        const newCategoryAccountId = await this.resolveCategoryAccountId(
+          em,
+          merged.category_id,
+          true,
+        );
+
+        if (!this.engine) {
+          throw new BadRequestException(
+            'محرّك الترحيل غير مهيأ — لا يمكن تعديل المصروف',
+          );
+        }
+        const newRes = await this.engine.recordExpense({
+          expense_id: r.expense_id,
+          expense_no: merged.expense_no,
+          amount: Number(merged.amount),
+          category_account_id: newCategoryAccountId,
+          cashbox_id: merged.cashbox_id,
+          payment_method: merged.payment_method,
+          user_id: approverId,
+          entry_date: merged.expense_date,
+          em,
+          description: merged.description ?? undefined,
+          is_advance: merged.is_advance === true,
+          employee_user_id: merged.employee_user_id ?? null,
+        });
+        if (!newRes.ok) {
+          throw new BadRequestException(
+            `فشل ترحيل المصروف بعد التعديل: ${(newRes as any).error}`,
+          );
+        }
+        if ('entry_id' in newRes && newRes.entry_id) {
+          appliedJeId = newRes.entry_id;
+        }
+      }
+
+      await em.query(
+        `UPDATE expense_edit_requests
+            SET status        = 'approved',
+                decided_by    = $1,
+                decided_at    = NOW(),
+                voided_je_id  = $2,
+                applied_je_id = $3
+          WHERE id = $4`,
+        [approverId, voidedJeId, appliedJeId, requestId],
+      );
+
+      return {
+        ok: true,
+        accounting_corrected: accountingChanged,
+        voided_je_id: voidedJeId,
+        applied_je_id: appliedJeId,
+      };
+    });
+  }
+
+  /** Resolve a category id to its COA leaf via the existing resolver
+   *  (or the category row's `account_id` column when the resolver isn't
+   *  wired). Same fallback semantics as the create path. */
+  private async resolveCategoryAccountId(
+    em: import('typeorm').EntityManager,
+    categoryId: string | null,
+    strict = false,
+  ): Promise<string | null> {
+    if (!categoryId) {
+      if (strict) {
+        throw new BadRequestException(
+          'هذا البند غير مربوط بحساب محاسبي. اختر الحساب أولًا.',
+        );
+      }
+      return null;
+    }
+    if (this.resolver) {
+      try {
+        const res = await this.resolver.resolve({
+          category_id: categoryId,
+          em,
+          strict,
+        });
+        return res.account_id;
+      } catch (err: any) {
+        if (err?.name === 'UnmappedCategoryError') {
+          throw new BadRequestException(err.message);
+        }
+        throw err;
+      }
+    }
+    const [row] = await em.query(
+      `SELECT account_id FROM expense_categories WHERE id = $1`,
+      [categoryId],
+    );
+    return row?.account_id ?? null;
   }
 }

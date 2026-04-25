@@ -57,6 +57,9 @@ export interface Expense {
    *  NULL when the expense is still pending approval / no JE exists. */
   je_entry_no?: string | null;
   je_is_void?: boolean | null;
+  /** PR-11 (migration 094): TRUE iff there's a pending edit request
+   *  on this expense. The register renders a small badge when set. */
+  has_pending_edit_request?: boolean;
 }
 
 export interface ProfitAndLoss {
@@ -250,7 +253,87 @@ export const accountingApi = {
     unwrap<any>(api.post(`/accounting/approvals/${id}/reject`, { reason })),
   approvalsForExpense: (expenseId: string) =>
     unwrap<ApprovalRow[]>(api.get(`/accounting/approvals/expense/${expenseId}`)),
+
+  // ── Edit-request workflow (migration 094) ─────────────────────────
+  /** File a new edit request on an existing expense. The reason field
+   *  must be at least 5 characters (also enforced server-side). */
+  requestExpenseEdit: (
+    expenseId: string,
+    body: { reason: string; new_values: Partial<ExpenseEditableValues> },
+  ) =>
+    unwrap<ExpenseEditRequest>(
+      api.post(`/accounting/expenses/${expenseId}/edit-request`, body),
+    ),
+  /** Full edit history for one expense — used by the audit modal. */
+  listEditRequestsForExpense: (expenseId: string) =>
+    unwrap<ExpenseEditRequest[]>(
+      api.get(`/accounting/expenses/${expenseId}/edit-requests`),
+    ),
+  /** Pending edit requests across the system — used by the inbox. */
+  editRequestsInbox: () =>
+    unwrap<ExpenseEditRequest[]>(
+      api.get('/accounting/expenses/edit-requests/inbox'),
+    ),
+  /** Approve a pending edit request. Triggers the void+repost flow on
+   *  the backend if accounting fields changed. */
+  approveEditRequest: (id: string) =>
+    unwrap<{
+      ok: true;
+      accounting_corrected: boolean;
+      voided_je_id: string | null;
+      applied_je_id: string | null;
+    }>(api.post(`/accounting/expenses/edit-requests/${id}/approve`)),
+  rejectEditRequest: (id: string, reason: string) =>
+    unwrap<{ ok: true }>(
+      api.post(`/accounting/expenses/edit-requests/${id}/reject`, { reason }),
+    ),
+  cancelEditRequest: (id: string) =>
+    unwrap<{ ok: true }>(
+      api.post(`/accounting/expenses/edit-requests/${id}/cancel`),
+    ),
 };
+
+/** Editable fields the workflow accepts — must match the backend's
+ *  EDITABLE_FIELDS whitelist in accounting.service.ts. */
+export interface ExpenseEditableValues {
+  category_id: string;
+  amount: number;
+  cashbox_id: string | null;
+  expense_date: string;
+  employee_user_id: string | null;
+  payment_method: 'cash' | 'card' | 'transfer' | 'wallet' | 'mixed';
+  description: string | null;
+}
+
+export interface ExpenseEditRequest {
+  id: string;
+  expense_id: string;
+  requested_by: string;
+  requested_by_name?: string;
+  requested_at: string;
+  reason: string;
+  /** Snapshot of editable fields at request time. */
+  old_values: Partial<ExpenseEditableValues>;
+  /** What the requester wants to change. Subset of editable fields. */
+  new_values: Partial<ExpenseEditableValues>;
+  status: 'pending' | 'approved' | 'rejected' | 'cancelled';
+  decided_by: string | null;
+  decided_by_name?: string;
+  decided_at: string | null;
+  rejection_reason: string | null;
+  /** JE that was voided on approval (if accounting changed). */
+  voided_je_id: string | null;
+  voided_je_no?: string | null;
+  /** Fresh corrected JE posted on approval (if accounting changed). */
+  applied_je_id: string | null;
+  applied_je_no?: string | null;
+  created_at: string;
+  /** Inbox-only joined fields (only present in editRequestsInbox response). */
+  expense_no?: string;
+  current_amount?: number;
+  current_category_name?: string | null;
+  current_cashbox_name?: string | null;
+}
 
 export interface ApprovalRule {
   id: string;
