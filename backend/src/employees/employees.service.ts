@@ -1205,11 +1205,17 @@ export class EmployeesService {
     // Opening-balance resets (reference_type='employee_ledger_reset_*')
     // and reclassification JEs (reference_type='expense_reclass_to_*')
     // show up as their own rows. SUM(signed_effect) == gl_balance.
+    // PR-25 — include voided JEs in the response so wage approvals
+    // that the admin later reverted are still visible (with an
+    // is_voided flag the UI uses to render them faded + a "ملغاة"
+    // chip). Voided rows do NOT contribute to running_balance.
     const glRaw = await this.ds.query(
       `SELECT je.entry_no,
               je.entry_date::text AS entry_date,
               je.reference_type,
               je.reference_id::text AS reference_id,
+              je.is_void AS is_voided,
+              je.void_reason,
               COALESCE(jl.description, je.description) AS description,
               coa.code    AS account_code,
               coa.name_ar AS account_name,
@@ -1222,7 +1228,6 @@ export class EmployeesService {
         WHERE COALESCE(jl.employee_id, jl.employee_user_id) = $1
           AND coa.code IN ('1123', '213')
           AND je.is_posted = TRUE
-          AND je.is_void   = FALSE
         ORDER BY je.entry_date ASC, je.entry_no ASC, jl.line_no ASC`,
       [userId],
     );
@@ -1230,7 +1235,13 @@ export class EmployeesService {
     const gl_entries = glRaw.map((r: any) => {
       const debit = Number(r.debit);
       const credit = Number(r.credit);
-      const signed_effect = Math.round((debit - credit) * 100) / 100;
+      const isVoided = r.is_voided === true;
+      // Voided rows have zero economic effect — they're shown for
+      // audit (so the admin can see what was reverted) but never
+      // move the running balance.
+      const signed_effect = isVoided
+        ? 0
+        : Math.round((debit - credit) * 100) / 100;
       glRunning = Math.round((glRunning + signed_effect) * 100) / 100;
       return {
         entry_no: r.entry_no,
@@ -1244,6 +1255,8 @@ export class EmployeesService {
         credit,
         signed_effect,
         running_balance: glRunning,
+        is_voided: isVoided,
+        void_reason: r.void_reason || null,
       };
     });
 
@@ -1342,6 +1355,7 @@ export class EmployeesService {
       shift_id?: string;
     },
     createdBy: string,
+    userPermissions: string[] = [],
   ) {
     if (!dto.amount || dto.amount <= 0) {
       throw new BadRequestException('قيمة التسوية يجب أن تكون أكبر من صفر');
@@ -1373,6 +1387,28 @@ export class EmployeesService {
       }
       resolvedCashboxId = resolvedCashboxId ?? shift.cashbox_id;
       resolvedShiftId = shift.id;
+    }
+
+    // PR-25 — direct-cashbox payouts (shift_id omitted, cashbox_id
+    // supplied, method = cash/bank) are explicitly NOT attached to any
+    // shift's closing summary. That bypass requires its own permission
+    // so a cashier can't drain a drawer outside their own shift's
+    // visibility — same loophole PR-R1 closed for refunds via
+    // returns.refund.direct_cashbox.
+    const isDirectCashbox =
+      !dto.shift_id &&
+      !!resolvedCashboxId &&
+      (method === 'cash' || method === 'bank');
+    if (isDirectCashbox) {
+      const hasPerm =
+        userPermissions.includes('*') ||
+        userPermissions.includes('employees.*') ||
+        userPermissions.includes('employees.settlement.direct_cashbox');
+      if (!hasPerm) {
+        throw new BadRequestException(
+          'الصرف من خزنة مباشرة (بدون وردية) يتطلب صلاحية employees.settlement.direct_cashbox — اختر وردية مفتوحة بدلاً من ذلك',
+        );
+      }
     }
 
     // Per-method pre-conditions — fail early so we never create a

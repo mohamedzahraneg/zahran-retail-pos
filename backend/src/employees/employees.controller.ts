@@ -280,7 +280,7 @@ export class EmployeesController {
     @Body() dto: SettlementDto,
     @CurrentUser() user: JwtUser,
   ) {
-    return this.svc.recordSettlement(id, dto, user.userId);
+    return this.svc.recordSettlement(id, dto, user.userId, user.permissions ?? []);
   }
 
   @Get('me/history')

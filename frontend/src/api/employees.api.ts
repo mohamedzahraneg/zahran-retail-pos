@@ -345,9 +345,15 @@ export interface EmployeeGlLedgerEntry {
   account_name: string;
   debit: number;
   credit: number;
-  /** debit − credit. Positive pushes balance up (owes company more). */
+  /** debit − credit. Positive pushes balance up (owes company more).
+   *  Always 0 for voided rows — they have no economic effect. */
   signed_effect: number;
   running_balance: number;
+  /** PR-25 — voided JEs are now included in the response (so admins
+   *  can see what was reverted). Render with strikethrough + "ملغاة"
+   *  chip; signed_effect is forced to 0 server-side. */
+  is_voided?: boolean;
+  void_reason?: string | null;
 }
 
 export interface EmployeeLedger {

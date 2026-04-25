@@ -133,6 +133,9 @@ describe('EmployeesService.recordSettlement — cash/bank direction', () => {
         cashbox_id: 'cashbox-uuid',
       },
       'admin-uuid',
+      // PR-25 — direct-cashbox branch (no shift_id) now requires this
+      // permission; tests exercise the cash-out path so we grant it.
+      ['employees.settlement.direct_cashbox'],
     );
 
     const [args] = engine.recordTransaction.mock.calls[0];
@@ -172,6 +175,7 @@ describe('EmployeesService.recordSettlement — cash/bank direction', () => {
       'employee-uuid',
       { amount: 50, method: 'bank', cashbox_id: 'bank-cashbox-uuid' },
       'admin-uuid',
+      ['employees.settlement.direct_cashbox'],
     );
     const [args] = engine.recordTransaction.mock.calls[0];
     expect(args.gl_lines[0].account_code).toBe('213');
@@ -223,5 +227,22 @@ describe('EmployeesService.recordSettlement — cash/bank direction', () => {
     expect(args.gl_lines[0].account_code).toBe('1114');
     expect(args.gl_lines[1].account_code).toBe('1123');
     expect(args.cash_movements).toHaveLength(0);
+  });
+
+  // PR-25 — direct-cashbox payouts (shift_id omitted, cashbox_id set,
+  // method = cash/bank) require employees.settlement.direct_cashbox.
+  // Wildcards (* / employees.*) satisfy. This test prevents the gate
+  // from being silently dropped in a future refactor.
+  it('rejects direct-cashbox cash settlement without the perm', async () => {
+    await expect(
+      service.recordSettlement(
+        'employee-uuid',
+        { amount: 100, method: 'cash', cashbox_id: 'cashbox-uuid' },
+        'admin-uuid',
+        [], // no perms
+      ),
+    ).rejects.toThrow(/employees\.settlement\.direct_cashbox/);
+    // Engine must NOT have been touched on the rejection path.
+    expect(engine.recordTransaction).not.toHaveBeenCalled();
   });
 });

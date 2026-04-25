@@ -495,6 +495,7 @@ export class SettingsService {
         { code: 'employee.deductions.view', label: 'عرض الاستقطاعات' },
         { code: 'employee.deductions.manage', label: 'إضافة/تعديل استقطاعات' },
         { code: 'employee.ledger.view',     label: 'عرض الملف المالي للموظف وصرف المستحقات' },
+        { code: 'employees.settlement.direct_cashbox', label: 'صرف مستحقات/يومية من خزنة مباشرة (بدون وردية)' },
         { code: 'payroll.void',             label: 'إلغاء حركة رواتب (للأدمن فقط)' },
         { code: 'employee.tasks.assign',    label: 'إسناد مهام للموظفين' },
         { code: 'employee.tasks.view_team', label: 'عرض مهام كل الموظفين' },
