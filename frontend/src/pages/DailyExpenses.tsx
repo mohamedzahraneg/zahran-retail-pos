@@ -83,20 +83,47 @@ const EGP = (n: number | string) =>
     maximumFractionDigits: 2,
   })} ج.م`;
 
-/* ─── Date helpers (Cairo TZ) ─── */
+/* ─── Date helpers (Cairo TZ) ───────────────────────────────────────
+ *
+ * Backend returns `expense_date` as a Postgres `date` column. node-pg
+ * deserializes it into a JS Date at the server's local midnight, which
+ * then gets JSON-stringified to a UTC ISO timestamp like
+ * "2026-04-24T21:00:00.000Z" (= 2026-04-25 midnight Cairo). Several
+ * earlier helpers naïvely concatenated `+ 'T00:00:00'` onto that
+ * string → `Invalid Date`. The helpers below normalise any
+ * date-shaped input back to a Cairo `YYYY-MM-DD`.
+ * ──────────────────────────────────────────────────────────────────── */
 
-function todayCairo(): string {
+const _ymdParts = (d: Date) => {
   const parts = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Africa/Cairo',
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
-  }).formatToParts(new Date());
-  return [
-    parts.find((p) => p.type === 'year')!.value,
-    parts.find((p) => p.type === 'month')!.value,
-    parts.find((p) => p.type === 'day')!.value,
-  ].join('-');
+  }).formatToParts(d);
+  return {
+    y: parts.find((p) => p.type === 'year')!.value,
+    m: parts.find((p) => p.type === 'month')!.value,
+    d: parts.find((p) => p.type === 'day')!.value,
+  };
+};
+
+function todayCairo(): string {
+  const { y, m, d } = _ymdParts(new Date());
+  return `${y}-${m}-${d}`;
+}
+
+/** Normalise "YYYY-MM-DD", a full ISO timestamp, or a Date into the
+ *  Cairo calendar-day `YYYY-MM-DD`. Returns '' on bad input. */
+function toCairoYMD(input: string | Date | null | undefined): string {
+  if (!input) return '';
+  if (typeof input === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(input)) {
+    return input;
+  }
+  const d = input instanceof Date ? input : new Date(input);
+  if (isNaN(d.getTime())) return '';
+  const { y, m, d: dd } = _ymdParts(d);
+  return `${y}-${m}-${dd}`;
 }
 
 function shiftDate(iso: string, deltaDays: number): string {
@@ -113,19 +140,47 @@ function startOfYear(iso: string): string {
   return iso.slice(0, 4) + '-01-01';
 }
 
-const fmtArabicDay = (iso: string) =>
-  new Date(iso + 'T00:00:00').toLocaleDateString('ar-EG', {
+/** Render any expense date field as `dd/mm/yyyy` in Cairo TZ. */
+const fmtDateDMY = (input: string | Date | null | undefined) => {
+  const ymd = toCairoYMD(input);
+  if (!ymd) return '—';
+  const [y, m, d] = ymd.split('-');
+  return `${d}/${m}/${y}`;
+};
+
+/** Arabic weekday (Cairo TZ) for any date input. Never returns
+ *  "Invalid Date" — falls back to '—'. */
+const fmtArabicDay = (input: string | Date | null | undefined) => {
+  const ymd = toCairoYMD(input);
+  if (!ymd) return '—';
+  // Anchor at noon UTC so the weekday stays stable across DST.
+  const d = new Date(ymd + 'T12:00:00Z');
+  if (isNaN(d.getTime())) return '—';
+  return d.toLocaleDateString('ar-EG', {
     timeZone: 'Africa/Cairo',
     weekday: 'long',
   });
+};
 
-const fmtTimeHMS = (iso: string) =>
-  new Date(iso).toLocaleTimeString('en-GB', {
+const fmtTimeHMS = (iso: string | Date | null | undefined) => {
+  if (!iso) return '—';
+  const d = iso instanceof Date ? iso : new Date(iso);
+  if (isNaN(d.getTime())) return '—';
+  return d.toLocaleTimeString('en-GB', {
     timeZone: 'Africa/Cairo',
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',
   });
+};
+
+/** Numeric tail of an expense_no string ("EXP-2026-000025" → "25"). */
+const expenseSeqDisplay = (no: string | null | undefined): string => {
+  if (!no) return '—';
+  const m = String(no).match(/(\d+)\s*$/);
+  if (!m) return String(no);
+  return String(parseInt(m[1], 10) || 0);
+};
 
 type RangePreset = 'day' | 'week' | 'month' | 'year' | 'custom';
 
@@ -151,9 +206,11 @@ export default function DailyExpenses() {
   const [showAddExpense, setShowAddExpense] = useState(false);
   const [showAddCategory, setShowAddCategory] = useState(false);
 
-  // Filter state — month default keeps the page useful out of the box.
-  const [preset, setPreset] = useState<RangePreset>('month');
-  const initial = useMemo(() => presetRange('month'), []);
+  // Filter state — default = TODAY (per PR-5 directive). Previous
+  // default 'month' silently widened the result set and confused
+  // operators who expected "today's expenses" on page open.
+  const [preset, setPreset] = useState<RangePreset>('day');
+  const initial = useMemo(() => presetRange('day'), []);
   const [from, setFrom] = useState<string>(initial.from);
   const [to, setTo] = useState<string>(initial.to);
   const [employeeId, setEmployeeId] = useState<string>('');
@@ -170,6 +227,27 @@ export default function DailyExpenses() {
       setTo(r.to);
     }
   };
+
+  /** Restore every filter to its pristine default — today + كل الموظفين/البنود/etc. */
+  const resetFilters = () => {
+    const r = presetRange('day');
+    setPreset('day');
+    setFrom(r.from);
+    setTo(r.to);
+    setEmployeeId('');
+    setCategoryId('');
+    setCashboxId('');
+    setShiftId('');
+    setStatus('all');
+  };
+
+  const filtersDirty =
+    preset !== 'day' ||
+    !!employeeId ||
+    !!categoryId ||
+    !!cashboxId ||
+    !!shiftId ||
+    status !== 'all';
 
   // Picker data (shared with the Add Expense modal — react-query
   // dedups requests via the keys).
@@ -214,7 +292,7 @@ export default function DailyExpenses() {
 
   const filterSummary = useMemo(() => {
     const parts: string[] = [];
-    parts.push(`${from} → ${to}`);
+    parts.push(`${fmtDateDMY(from)} → ${fmtDateDMY(to)}`);
     if (employeeId) {
       const u = (users as any[]).find((x) => x.id === employeeId);
       if (u) parts.push(`موظف: ${u.full_name || u.username}`);
@@ -240,8 +318,9 @@ export default function DailyExpenses() {
   const handleExportExcel = () => {
     if (!items.length) return toast.error('لا توجد سجلات لتصديرها');
     const rows: Record<string, any>[] = items.map((e) => ({
-      'تسلسل المصروف': e.expense_no,
-      التاريخ: e.expense_date,
+      'تسلسل المصروف': expenseSeqDisplay(e.expense_no),
+      'رقم المصروف الكامل': e.expense_no,
+      التاريخ: fmtDateDMY(e.expense_date),
       الوقت: fmtTimeHMS(e.created_at),
       اليوم: fmtArabicDay(e.expense_date),
       البند: e.category_name || '',
@@ -264,6 +343,7 @@ export default function DailyExpenses() {
     }));
     rows.push({
       'تسلسل المصروف': '',
+      'رقم المصروف الكامل': '',
       التاريخ: '',
       الوقت: '',
       اليوم: '',
@@ -289,8 +369,8 @@ export default function DailyExpenses() {
       .map(
         (e) => `
       <tr>
-        <td style="font-family: monospace;">${escapeHtml(e.expense_no)}</td>
-        <td>${escapeHtml(e.expense_date)} ${escapeHtml(fmtTimeHMS(e.created_at))}</td>
+        <td style="font-family: monospace;" title="${escapeHtml(e.expense_no)}">${escapeHtml(expenseSeqDisplay(e.expense_no))}</td>
+        <td>${escapeHtml(fmtDateDMY(e.expense_date))} ${escapeHtml(fmtTimeHMS(e.created_at))}</td>
         <td>${escapeHtml(fmtArabicDay(e.expense_date))}</td>
         <td>${escapeHtml(e.category_name || '')}</td>
         <td style="font-family: monospace;">${escapeHtml(`${e.account_code || ''} ${e.account_name_ar || ''}`.trim())}</td>
@@ -333,42 +413,23 @@ export default function DailyExpenses() {
 
   return (
     <div className="space-y-5">
-      <div className="flex items-center justify-between flex-wrap gap-3">
-        <div className="flex items-center gap-3">
-          <div className="p-2 rounded-xl bg-amber-100 text-amber-700">
-            <Receipt size={20} />
-          </div>
-          <div>
-            <h1 className="text-xl font-black text-slate-800">المصروفات اليومية</h1>
-            <p className="text-xs text-slate-500">
-              تسجيل مصروف يومي مرتبط بالموظف المسؤول — يُرحَّل القيد تلقائيًا
-            </p>
-          </div>
+      {/* ─── 1. Page header ─── */}
+      <div className="flex items-center gap-3">
+        <div className="p-2 rounded-xl bg-amber-100 text-amber-700">
+          <Receipt size={20} />
         </div>
-        <div className="flex items-center gap-2 flex-wrap">
-          <button className="btn-ghost text-xs flex items-center gap-1.5" onClick={handleExportExcel}>
-            <Download size={14} /> تصدير Excel
-          </button>
-          <button className="btn-ghost text-xs flex items-center gap-1.5" onClick={handleExportPdf}>
-            <FileText size={14} /> تصدير PDF
-          </button>
-          <button
-            className="btn-ghost text-xs flex items-center gap-1.5"
-            onClick={() => setShowAddCategory(true)}
-            title="أضف بند مصروف جديد مرتبط بحساب محاسبي"
-          >
-            <ListPlus size={14} /> بند جديد
-          </button>
-          <button
-            className="btn-primary text-xs flex items-center gap-1.5"
-            onClick={() => setShowAddExpense(true)}
-          >
-            <Plus size={14} /> تسجيل مصروف
-          </button>
+        <div>
+          <h1 className="text-xl font-black text-slate-800">المصروفات اليومية</h1>
+          <p className="text-xs text-slate-500">
+            تسجيل مصروف يومي مرتبط بالموظف المسؤول — يُرحَّل القيد تلقائيًا
+          </p>
         </div>
       </div>
 
-      {/* ─── Filter bar ─── */}
+      {/* ─── 2. Smart Expense Analytics (PR-4, repositioned in PR-5) ─── */}
+      <AnalyticsSection items={items} from={from} to={to} totalAmount={Number(totalAmount)} />
+
+      {/* ─── 3. Filter bar ─── */}
       <div className="card p-3 space-y-3">
         <div className="flex items-center gap-1 flex-wrap">
           {(['day', 'week', 'month', 'year', 'custom'] as const).map((p) => {
@@ -389,8 +450,21 @@ export default function DailyExpenses() {
             );
           })}
           <span className="text-[10px] text-slate-400 mx-2 hidden sm:inline">
-            {from} → {to}
+            {fmtDateDMY(from)} → {fmtDateDMY(to)}
           </span>
+          <button
+            type="button"
+            onClick={resetFilters}
+            disabled={!filtersDirty}
+            title="استعادة الفلاتر الافتراضية (اليوم + كل الموظفين/البنود/الخزن/الورديات)"
+            className={`mr-auto px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1 ${
+              filtersDirty
+                ? 'bg-rose-50 text-rose-700 border border-rose-200 hover:bg-rose-100'
+                : 'bg-slate-50 text-slate-400 border border-slate-200 cursor-not-allowed'
+            }`}
+          >
+            <X size={12} /> مسح الفلاتر
+          </button>
         </div>
 
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2 text-xs">
@@ -492,7 +566,30 @@ export default function DailyExpenses() {
         </div>
       </div>
 
-      {/* ─── Register ─── */}
+      {/* ─── 4. Action buttons row ─── */}
+      <div className="flex items-center justify-end gap-2 flex-wrap">
+        <button className="btn-ghost text-xs flex items-center gap-1.5" onClick={handleExportExcel}>
+          <Download size={14} /> تصدير Excel
+        </button>
+        <button className="btn-ghost text-xs flex items-center gap-1.5" onClick={handleExportPdf}>
+          <FileText size={14} /> تصدير PDF
+        </button>
+        <button
+          className="btn-ghost text-xs flex items-center gap-1.5"
+          onClick={() => setShowAddCategory(true)}
+          title="أضف بند مصروف جديد مرتبط بحساب محاسبي"
+        >
+          <ListPlus size={14} /> إضافة بند
+        </button>
+        <button
+          className="btn-primary text-xs flex items-center gap-1.5"
+          onClick={() => setShowAddExpense(true)}
+        >
+          <Plus size={14} /> إضافة مصروف
+        </button>
+      </div>
+
+      {/* ─── 5. Register ─── */}
       <div className="card p-5">
         <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
           <h3 className="font-black text-slate-800">سجل المصروفات</h3>
@@ -528,8 +625,13 @@ export default function DailyExpenses() {
               <tbody>
                 {items.map((e) => (
                   <tr key={e.id} className="border-t border-slate-100">
-                    <td className="p-2 font-mono text-[10px] text-slate-600">{e.expense_no}</td>
-                    <td className="p-2 font-mono tabular-nums">{e.expense_date}</td>
+                    <td
+                      className="p-2 font-mono text-[11px] text-slate-700 tabular-nums"
+                      title={e.expense_no}
+                    >
+                      {expenseSeqDisplay(e.expense_no)}
+                    </td>
+                    <td className="p-2 font-mono tabular-nums">{fmtDateDMY(e.expense_date)}</td>
                     <td className="p-2 font-mono tabular-nums">{fmtTimeHMS(e.created_at)}</td>
                     <td className="p-2 text-slate-700">{fmtArabicDay(e.expense_date)}</td>
                     <td className="p-2">{e.category_name || '—'}</td>
@@ -582,9 +684,6 @@ export default function DailyExpenses() {
           </div>
         )}
       </div>
-
-      {/* ─── PR-4 · Smart Expense Analytics ─── */}
-      <AnalyticsSection items={items} from={from} to={to} totalAmount={Number(totalAmount)} />
 
       {showAddExpense && (
         <AddExpenseModal
@@ -1182,15 +1281,18 @@ function AnalyticsSection({
       .sort((a, b) => Number(b.amount || 0) - Number(a.amount || 0))
       .slice(0, 5);
 
-    // Daily trend — always per-day granularity (per PR-4 spec).
+    // Daily trend — always per-day granularity (per PR-4 spec). Bucket
+    // by Cairo calendar day so a Cairo-evening expense doesn't drift
+    // into the previous bar.
     const dailyMap = new Map<string, number>();
     items.forEach((e) => {
-      const d = e.expense_date;
+      const d = toCairoYMD(e.expense_date);
+      if (!d) return;
       dailyMap.set(d, (dailyMap.get(d) || 0) + Number(e.amount || 0));
     });
     const dailyTrend = Array.from(dailyMap.entries())
       .sort(([a], [b]) => a.localeCompare(b))
-      .map(([date, total]) => ({ date, total }));
+      .map(([date, total]) => ({ date, label: fmtDateDMY(date), total }));
 
     return {
       count,
@@ -1231,7 +1333,7 @@ function AnalyticsSection({
         <Sparkles size={18} className="text-indigo-600" />
         <h3 className="font-black text-slate-800 text-sm">تحليل ذكي للمصروفات</h3>
         <span className="text-[10px] text-slate-400">
-          {from} → {to}
+          {fmtDateDMY(from)} → {fmtDateDMY(to)}
         </span>
         {totalDrift > 0.01 && (
           <span className="chip text-[10px] bg-rose-50 text-rose-700 border-rose-200">
@@ -1297,7 +1399,7 @@ function AnalyticsSection({
           <div style={{ height: 220 }}>
             <Bar
               data={{
-                labels: stats.dailyTrend.map((d) => d.date),
+                labels: stats.dailyTrend.map((d) => d.label),
                 datasets: [
                   {
                     label: 'مصروفات اليوم',
@@ -1358,8 +1460,8 @@ function AnalyticsSection({
                 tone="slate"
               />
               <p className="text-[10px] text-slate-400 mt-1.5 leading-relaxed">
-                الإيراد والربح تُحسب لكامل الفترة ({from} → {to}). فلاتر
-                الموظف/الخزنة/الوردية تخص المصروفات فقط.
+                الإيراد والربح تُحسب لكامل الفترة ({fmtDateDMY(from)} → {fmtDateDMY(to)}).
+                فلاتر الموظف/الخزنة/الوردية تخص المصروفات فقط.
               </p>
             </div>
           </div>
@@ -1418,7 +1520,7 @@ function AnalyticsSection({
                 {stats.topN.map((e, i) => (
                   <tr key={e.id} className="border-t border-slate-100">
                     <td className="p-2 font-mono text-[10px] text-slate-500">{i + 1}</td>
-                    <td className="p-2 font-mono tabular-nums">{e.expense_date}</td>
+                    <td className="p-2 font-mono tabular-nums">{fmtDateDMY(e.expense_date)}</td>
                     <td className="p-2">{e.category_name || '—'}</td>
                     <td className="p-2 text-slate-700 text-[11px]">
                       {e.employee_name || e.employee_username || '—'}
