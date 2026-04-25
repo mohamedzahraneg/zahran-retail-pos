@@ -65,6 +65,28 @@ export interface EmployeeCashMovement {
   link_method: 'explicit' | 'derived';
 }
 
+/** PR-21 — one cashbox movement that came from a return refund or
+ *  an exchange cash difference. Sourced from cashbox_transactions
+ *  joined to returns/exchanges/journal_entries. */
+export interface RefundCashMovement {
+  id: string;
+  kind: 'return' | 'exchange';
+  /** Friendly Arabic label — مرتجع نقدي / فرق استبدال. */
+  type_label: string;
+  direction: 'in' | 'out';
+  /** Friendly Arabic label — داخل / خارج. */
+  direction_label: string;
+  amount: number;
+  reference_no: string | null;
+  customer_name: string | null;
+  cashbox_name: string | null;
+  created_at: string;
+  created_by_name: string | null;
+  je_entry_no: string | null;
+  accounting_impact: string;
+  link_method: 'derived' | 'explicit';
+}
+
 /** PR-B1 — one row in the shift counted-cash adjustment audit. */
 export interface ShiftCountAdjustment {
   id: string;
@@ -123,6 +145,13 @@ export interface ShiftSummary {
   employee_settlement_count: number;
   total_employee_cash_out: number;
   employee_cash_movements: EmployeeCashMovement[];
+
+  // PR-21 — Refund / exchange cash visibility (sourced from
+  // cashbox_transactions where reference_type IN ('return','exchange'))
+  total_refund_cash_out: number;
+  total_refund_cash_in: number;
+  net_refund_cash_impact: number;
+  refund_cash_movements: RefundCashMovement[];
 
   // Reconciliation
   total_cash_in: number;

@@ -374,21 +374,103 @@ export class ShiftsService {
     const totalEmployeeCashOut =
       totalEmployeeAdvances + totalEmployeeSettlements;
 
-    // Cash receipts are already the cash-method invoice payments; cash refunds
-    // happen when a return is settled in cash — we proxy them by subtracting
-    // total_returns here (simple model: treat every refund as cash out).
-    const cashRefunds = Number(ret.total_returns || 0);
+    // PR-21 — Refund / exchange cash movements visible at row level.
+    //
+    // Pulls from cashbox_transactions directly (NOT from `returns`)
+    // because:
+    //   1. After PR #97 reconciliation, every cash refund has a CT
+    //      mirror — so this query is the source of truth for what
+    //      physically left the drawer.
+    //   2. Standalone refunds (no original_invoice_id) are invisible
+    //      to the existing `total_returns` query (it joins through
+    //      invoices) — they only show up here.
+    //   3. Same `cashbox + time-window` derivation pattern PR-14
+    //      uses for settlements.
+    const refundCtRows = await this.ds.query(
+      `
+      SELECT ct.id::text AS ct_id,
+             ct.amount::numeric AS amount,
+             ct.direction::text AS direction,
+             ct.reference_type::text AS reference_type,
+             ct.reference_id AS reference_id,
+             ct.created_at,
+             ct.user_id AS created_by,
+             u.full_name AS created_by_name,
+             ct.notes,
+             cb.name_ar AS cashbox_name,
+             r.return_no AS return_no,
+             r.refund_method::text AS refund_method,
+             cust.full_name AS customer_name,
+             je.entry_no AS je_entry_no
+        FROM cashbox_transactions ct
+        LEFT JOIN cashboxes cb         ON cb.id = ct.cashbox_id
+        LEFT JOIN users u              ON u.id  = ct.user_id
+        LEFT JOIN returns r            ON ct.reference_type::text = 'return'
+                                       AND r.id = ct.reference_id
+        LEFT JOIN customers cust       ON cust.id = r.customer_id
+        LEFT JOIN journal_entries je   ON je.reference_type::text IN ('return','exchange')
+                                       AND je.reference_id = ct.reference_id
+                                       AND je.is_void = FALSE
+       WHERE ct.cashbox_id = $1
+         AND ct.created_at >= $2
+         AND ct.created_at <= $3
+         AND ct.reference_type::text IN ('return', 'exchange')
+       ORDER BY ct.created_at DESC
+      `,
+      [shift.cashbox_id, shift.opened_at, upperBound],
+    );
 
-    // Totals — PR-14: total_cash_out now includes employee settlements
-    // (which were silently missing from the magnitude before, even though
-    // they DID move the cashbox balance through fn_record_cashbox_txn).
-    // Operating expenses + employee advances both come from the `expenses`
-    // table so their sum equals the legacy `totalExpenses` — the magnitude
-    // therefore only changes by + totalEmployeeSettlements, restoring the
-    // missing visibility for Abu Youssef-style payouts.
-    const totalCashIn = cashFromSales + customerReceipts + otherCashIn;
+    const refund_cash_movements: any[] = refundCtRows.map((c: any) => {
+      const amt = Number(c.amount);
+      return {
+        id: c.ct_id,
+        kind: c.reference_type, // 'return' | 'exchange'
+        type_label:
+          c.reference_type === 'return'
+            ? 'مرتجع نقدي'
+            : 'فرق استبدال',
+        direction: c.direction,
+        direction_label: c.direction === 'out' ? 'خارج' : 'داخل',
+        amount: amt,
+        reference_no: c.return_no || null,
+        customer_name: c.customer_name || null,
+        cashbox_name: c.cashbox_name || null,
+        created_at: c.created_at,
+        created_by_name: c.created_by_name || null,
+        je_entry_no: c.je_entry_no || null,
+        accounting_impact:
+          c.direction === 'out'
+            ? `DR مردودات مبيعات / CR ${c.cashbox_name ?? 'cashbox'}`
+            : `DR ${c.cashbox_name ?? 'cashbox'} / CR إيرادات`,
+        // Linkage method — derived because returns/exchanges don't
+        // carry shift_id yet (PR-R1 will add it).
+        link_method: 'derived' as const,
+      };
+    });
+
+    const totalRefundCashOut = refund_cash_movements
+      .filter((m) => m.direction === 'out')
+      .reduce((s, m) => s + m.amount, 0);
+    const totalRefundCashIn = refund_cash_movements
+      .filter((m) => m.direction === 'in')
+      .reduce((s, m) => s + m.amount, 0);
+    const netRefundCashImpact = totalRefundCashOut - totalRefundCashIn;
+
+    // PR-21 — Use cashbox_transactions as the canonical source for
+    // refund cash movement (totalRefundCashOut/In above). The legacy
+    // `total_returns` field (from ret.total_returns above) joins
+    // through invoices and misses standalone refunds; it's kept for
+    // backwards-compat callers but no longer drives totalCashOut to
+    // avoid double-counting normal invoiced refunds.
+    const cashRefundsLegacy = Number(ret.total_returns || 0);
+
+    // Totals — PR-14 added employee settlements to total_cash_out;
+    // PR-21 swaps `cashRefundsLegacy` for `totalRefundCashOut` (the
+    // CT-derived figure) so standalone refunds without invoices show
+    // correctly and invoiced refunds aren't double-counted.
+    const totalCashIn = cashFromSales + customerReceipts + otherCashIn + totalRefundCashIn;
     const totalCashOut =
-      cashRefunds +
+      totalRefundCashOut +
       supplierPayments +
       totalOperatingExpenses +
       totalEmployeeAdvances +
@@ -457,6 +539,12 @@ export class ShiftsService {
       employee_settlement_count: settlementRows.length,
       total_employee_cash_out: totalEmployeeCashOut,
       employee_cash_movements,
+
+      // PR-21 — Refund / exchange cash visibility
+      total_refund_cash_out: totalRefundCashOut,
+      total_refund_cash_in: totalRefundCashIn,
+      net_refund_cash_impact: netRefundCashImpact,
+      refund_cash_movements,
 
       // reconciliation
       total_cash_in: totalCashIn,
