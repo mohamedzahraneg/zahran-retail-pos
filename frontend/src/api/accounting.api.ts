@@ -187,6 +187,10 @@ export const accountingApi = {
     receipt_url?: string;
     vendor_name?: string;
     employee_user_id: string;
+    /** PR-15 — explicit shift linkage from the source selector. */
+    shift_id?: string;
+    /** PR-15 — explicit advance flag (was previously read via dto-as-any). */
+    is_advance?: boolean;
   }) => unwrap<Expense>(api.post('/accounting/expenses/daily', body)),
   updateExpense: (id: string, body: Partial<Expense>) =>
     unwrap<Expense>(api.patch(`/accounting/expenses/${id}`, body)),

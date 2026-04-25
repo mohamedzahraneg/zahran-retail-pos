@@ -143,6 +143,8 @@ export const attendanceApi = {
     cashbox_id: string;
     excess_handling?: 'advance' | 'bonus';
     notes?: string;
+    /** PR-15 — explicit shift linkage from the source selector. */
+    shift_id?: string;
   }) =>
     unwrap<{
       payable_before: number;

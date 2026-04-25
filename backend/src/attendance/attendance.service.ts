@@ -585,6 +585,11 @@ export class AttendanceService {
       cashbox_id: string;
       excess_handling?: 'advance' | 'bonus';
       notes?: string;
+      /** PR-15 — explicit shift linkage. When supplied, both the
+       *  settlement leg and the advance/bonus excess leg propagate
+       *  the same shift_id so the whole transaction shows up
+       *  consistently in the source shift's closing. */
+      shift_id?: string;
     },
     adminId: string,
     adminPermissions: string[] = [],
@@ -650,6 +655,7 @@ export class AttendanceService {
           method: 'cash',
           cashbox_id: body.cashbox_id,
           notes: baseNote || 'صرف يومية — الجزء المستحق',
+          shift_id: body.shift_id,
         },
         adminId,
       );
@@ -686,6 +692,11 @@ export class AttendanceService {
             description: baseNote || 'زيادة عن اليومية — سلفة للموظف',
             employee_user_id: targetUserId,
             is_advance: true,
+            // PR-15 — propagate shift linkage to the advance leg too,
+            // so an open-shift Pay Wage with excess routes the whole
+            // amount (settlement + advance) to the same shift's
+            // closing.
+            shift_id: body.shift_id,
           } as any,
           adminId,
           adminPermissions,
@@ -714,6 +725,7 @@ export class AttendanceService {
             method: 'cash',
             cashbox_id: body.cashbox_id,
             notes: baseNote || 'صرف المكافأة الزائدة',
+            shift_id: body.shift_id,
           },
           adminId,
         );

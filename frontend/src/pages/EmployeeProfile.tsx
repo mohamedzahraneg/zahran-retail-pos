@@ -26,6 +26,7 @@ import {
 import { attendanceApi } from '@/api/attendance.api';
 import { useAuthStore } from '@/stores/auth.store';
 import { invalidateMonthly } from '@/utils/employee-cache';
+import { CashSourceSelector, CashSource } from '@/components/CashSourceSelector';
 
 // ═══ Month picker helpers ═════════════════════════════════════════════
 // Single place for YYYY-MM parsing / default / bounds so the page and
@@ -1030,28 +1031,19 @@ function PayWageModal({
   onClose: () => void;
   onSuccess: () => void;
 }) {
-  // Reading the cashbox list inline to avoid an extra prop drill — same
-  // 60s cache the rest of the app uses.
-  const { data: cashboxes } = useQuery({
-    queryKey: ['cashboxes', 'active'],
-    queryFn: async () => {
-      const m = await import('@/api/cash-desk.api');
-      return m.cashDeskApi.cashboxes(false);
-    },
-    staleTime: 60_000,
-  });
-
   const payableBalance = Math.max(0, -Number(liveGlBalance || 0));
   const [amount, setAmount] = useState<string>('');
-  const [cashboxId, setCashboxId] = useState<string>('');
+  // PR-15 — replaces the bare cashbox dropdown with the structured
+  // CashSource so we capture both the chosen mode AND the resulting
+  // (shift_id, cashbox_id) pair in one place. payWage propagates
+  // shift_id to BOTH the settlement leg and any advance/bonus excess
+  // leg so the whole transaction shows up in the source shift.
+  const [cashSource, setCashSource] = useState<CashSource>({
+    mode: 'unset', shift_id: null, cashbox_id: null,
+  });
+  const cashboxId = cashSource.cashbox_id || '';
   const [excessHandling, setExcessHandling] = useState<'advance' | 'bonus' | ''>('');
   const [notes, setNotes] = useState<string>('');
-
-  useEffect(() => {
-    if (!cashboxId && cashboxes && cashboxes.length > 0) {
-      setCashboxId((cashboxes[0] as any).id);
-    }
-  }, [cashboxes, cashboxId]);
 
   const amtNum = Number(amount || 0);
   const r2 = (n: number) => Math.round(n * 100) / 100;
@@ -1068,6 +1060,12 @@ function PayWageModal({
         cashbox_id: cashboxId,
         excess_handling: excessHandling || undefined,
         notes: notes.trim() || undefined,
+        // PR-15 — propagate explicit shift linkage from the source
+        // selector. The backend forwards it to recordSettlement and
+        // (if there's excess) createDailyExpense, so both legs land
+        // on the same shift's closing.
+        shift_id:
+          cashSource.mode === 'open_shift' ? cashSource.shift_id : undefined,
       }),
     onSuccess: (r) => {
       const parts: string[] = [];
@@ -1193,22 +1191,15 @@ function PayWageModal({
           />
         </div>
 
-        <div>
-          <label className="label">الخزنة *</label>
-          <select
-            className="input"
-            value={cashboxId}
-            onChange={(e) => setCashboxId(e.target.value)}
-            disabled={pay.isPending}
-          >
-            <option value="">— اختر خزنة —</option>
-            {(cashboxes || []).map((c: any) => (
-              <option key={c.id} value={c.id}>
-                {c.name_ar || c.name}
-              </option>
-            ))}
-          </select>
-        </div>
+        {/* PR-15 — structured cash-source selector replaces the bare
+         *  cashbox dropdown. Operator picks open shift (records
+         *  shift_id on every leg of the payout) or direct cashbox
+         *  (no shift link). */}
+        <CashSourceSelector
+          value={cashSource}
+          onChange={setCashSource}
+          disabled={pay.isPending}
+        />
 
         {/* Live split preview. */}
         {amtNum > 0 && (

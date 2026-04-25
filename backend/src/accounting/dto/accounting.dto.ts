@@ -167,6 +167,26 @@ export class CreateDailyExpenseDto {
 
   @IsUUID()
   employee_user_id!: string;
+
+  /**
+   * PR-15 — explicit shift linkage from the source selector.
+   * When supplied:
+   *   - shift must be in 'open' or 'pending_close' status
+   *   - cashbox_id (if also supplied) must match the shift's cashbox
+   *   - if cashbox_id is omitted it's derived from the shift
+   * When omitted, the existing auto-resolve from the user's open shift
+   * (accounting.service.ts:131-148) still applies.
+   */
+  @IsOptional()
+  @IsUUID()
+  shift_id?: string;
+
+  /** Mark as employee advance (DR 1123 / CR cash) instead of an
+   *  operating expense. Already accepted via the legacy
+   *  `(dto as any).is_advance` path; declared here in PR-15 to make
+   *  the API contract explicit. */
+  @IsOptional()
+  is_advance?: boolean;
 }
 
 export class ListExpensesDto {

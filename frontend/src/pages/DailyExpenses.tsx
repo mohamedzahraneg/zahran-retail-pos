@@ -62,6 +62,7 @@ import {
   EditRequestsInboxBadge,
   EditRequestsInboxModal,
 } from './ExpenseEditWorkflow';
+import { CashSourceSelector, CashSource } from '@/components/CashSourceSelector';
 
 const DEFAULT_WAREHOUSE_ID = import.meta.env.VITE_DEFAULT_WAREHOUSE_ID as string;
 
@@ -1061,7 +1062,13 @@ function AddExpenseModal({
   const [paymentMethod, setPaymentMethod] = useState<
     'cash' | 'card' | 'transfer' | 'wallet' | 'mixed'
   >('cash');
-  const [cashboxId, setCashboxId] = useState('');
+  // PR-15 — replaces the bare cashboxId state with the structured
+  // CashSource so we capture both the chosen mode AND the resulting
+  // (shift_id, cashbox_id) pair in one place.
+  const [cashSource, setCashSource] = useState<CashSource>({
+    mode: 'unset', shift_id: null, cashbox_id: null,
+  });
+  const cashboxId = cashSource.cashbox_id || '';
   const [description, setDescription] = useState('');
   const [employeeId, setEmployeeId] = useState<string>(authUser?.id || '');
   const [expenseDate, setExpenseDate] = useState<string>(today);
@@ -1085,24 +1092,16 @@ function AddExpenseModal({
     staleTime: 60_000,
   });
 
-  // Auto-pick the currently open shift's cashbox the first time the
-  // cashbox dropdown renders. PR-2 also captures shift_id server-side.
-  useEffect(() => {
-    if (!cashboxId && currentShift?.cashbox_id) {
-      setCashboxId(String(currentShift.cashbox_id));
-    }
-  }, [currentShift, cashboxId]);
-
   const hasOpenShift = !!(currentShift?.id && currentShift?.cashbox_id);
+  const selectedCashbox = useMemo<any>(
+    () => (cashboxes as any[]).find((c) => c.id === cashboxId) ?? null,
+    [cashboxes, cashboxId],
+  );
 
   const selectedCategory = useMemo<ExpenseCategory | null>(
     () =>
       (categories as ExpenseCategory[]).find((c) => c.id === categoryId) ?? null,
     [categories, categoryId],
-  );
-  const selectedCashbox = useMemo<any>(
-    () => (cashboxes as any[]).find((c) => c.id === cashboxId) ?? null,
-    [cashboxes, cashboxId],
   );
 
   const categoryUnmapped = !!selectedCategory && !selectedCategory.account_id;
@@ -1111,7 +1110,12 @@ function AddExpenseModal({
     mutationFn: () =>
       accountingApi.createDailyExpense({
         warehouse_id: DEFAULT_WAREHOUSE_ID,
-        cashbox_id: paymentMethod === 'cash' ? cashboxId || undefined : undefined,
+        cashbox_id:
+          paymentMethod === 'cash' ? cashboxId || undefined : undefined,
+        // PR-15 — propagate explicit shift linkage from the source
+        // selector (only when the operator picked the open-shift mode).
+        shift_id:
+          cashSource.mode === 'open_shift' ? cashSource.shift_id : undefined,
         category_id: categoryId,
         amount: Number(amount),
         payment_method: paymentMethod,
@@ -1251,21 +1255,17 @@ function AddExpenseModal({
           </FieldLabel>
 
           {paymentMethod === 'cash' && (
-            <FieldLabel label="الخزنة">
-              <select
-                className="input w-full"
-                value={cashboxId}
-                onChange={(e) => setCashboxId(e.target.value)}
+            <div className="md:col-span-2">
+              {/* PR-15 — replaces the bare cashbox dropdown with the
+               *  source selector. The user explicitly chooses "open
+               *  shift" (records shift_id) or "direct cashbox" (no
+               *  shift link). */}
+              <CashSourceSelector
+                value={cashSource}
+                onChange={setCashSource}
                 disabled={create.isPending}
-              >
-                <option value="">اختر…</option>
-                {(cashboxes as any[]).map((cb: any) => (
-                  <option key={cb.id} value={cb.id}>
-                    {cb.name_ar} — رصيد {EGP(cb.current_balance || 0)}
-                  </option>
-                ))}
-              </select>
-            </FieldLabel>
+              />
+            </div>
           )}
 
           <FieldLabel label="التاريخ">
