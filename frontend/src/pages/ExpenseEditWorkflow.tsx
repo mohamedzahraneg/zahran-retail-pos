@@ -148,26 +148,70 @@ function ModalShell({
 }
 
 /* ─── Field render helper ─── */
+//
+// PR-13 — clearer diff row:
+//   * Label column shows ONLY the field name (e.g. "الوصف")
+//   * Old/new cells use rose / emerald background tints + colour, no
+//     strikethrough so long text stays readable
+//   * Long-text fields (description) flip the row to a stacked layout
+//     with full word-wrap so multi-line content doesn't get truncated
+const LONG_TEXT_FIELDS = new Set(['description']);
 
-function ValueRow({
+function DiffRow({
+  fieldKey,
   label,
   oldValue,
   newValue,
-  changed,
 }: {
+  /** raw field key — used to decide between inline vs stacked layout */
+  fieldKey?: string;
   label: string;
   oldValue: React.ReactNode;
-  newValue?: React.ReactNode;
-  changed?: boolean;
+  newValue: React.ReactNode;
 }) {
+  const isLong = fieldKey ? LONG_TEXT_FIELDS.has(fieldKey) : false;
+  const oldCellCls =
+    'rounded-md px-2.5 py-1.5 bg-rose-50 text-rose-800 ' +
+    'dark:bg-rose-500/10 dark:text-rose-200 whitespace-pre-wrap break-words';
+  const newCellCls =
+    'rounded-md px-2.5 py-1.5 bg-emerald-50 text-emerald-800 font-bold ' +
+    'dark:bg-emerald-500/10 dark:text-emerald-200 whitespace-pre-wrap break-words';
+
+  if (isLong) {
+    // Stacked layout for long text — label on its own line, then two
+    // full-width readable boxes underneath.
+    return (
+      <div className="border-t border-slate-100 dark:border-slate-700/40 px-2.5 py-2">
+        <div className="text-[11px] font-extrabold text-slate-700 dark:text-slate-200 mb-1.5">
+          {label}
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[12px]">
+          <div>
+            <div className="text-[10px] text-slate-500 dark:text-slate-400 mb-0.5 font-bold">
+              القيمة القديمة
+            </div>
+            <div className={oldCellCls}>{oldValue ?? '—'}</div>
+          </div>
+          <div>
+            <div className="text-[10px] text-slate-500 dark:text-slate-400 mb-0.5 font-bold">
+              القيمة الجديدة
+            </div>
+            <div className={newCellCls}>{newValue ?? '—'}</div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Inline 3-column layout for short scalar fields.
   return (
-    <div className={`grid grid-cols-3 gap-2 py-1.5 text-xs items-center ${changed ? 'font-bold' : ''}`}>
-      <span className="text-slate-500 dark:text-slate-400">{label}</span>
-      <span className={changed ? 'text-rose-600 dark:text-rose-400 line-through' : 'text-slate-700 dark:text-slate-300'}>
+    <div className="grid grid-cols-[1fr_1.4fr_1.4fr] gap-2 items-center px-2.5 py-1.5 border-t border-slate-100 dark:border-slate-700/40 text-[12px]">
+      <span className="text-slate-700 dark:text-slate-200 font-bold">{label}</span>
+      <span className={oldCellCls + ' text-center tabular-nums'}>
         {oldValue ?? '—'}
       </span>
-      <span className={changed ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-700 dark:text-slate-300'}>
-        {newValue ?? oldValue ?? '—'}
+      <span className={newCellCls + ' text-center tabular-nums'}>
+        {newValue ?? '—'}
       </span>
     </div>
   );
@@ -395,44 +439,44 @@ export function EditExpenseModal({
 
       {/* Before / after preview */}
       {hasChanges && (
-        <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 dark:bg-slate-950/40 dark:border-slate-700/40 p-3 space-y-1">
-          <div className="grid grid-cols-3 gap-2 text-[10px] font-extrabold text-slate-500 dark:text-slate-400 pb-2 border-b border-slate-200 dark:border-slate-700/40">
+        <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 dark:bg-slate-950/40 dark:border-slate-700/40 overflow-hidden">
+          <div className="grid grid-cols-[1fr_1.4fr_1.4fr] gap-2 text-[10px] font-extrabold text-slate-500 dark:text-slate-400 px-2.5 py-1.5 bg-slate-100/60 dark:bg-slate-900/60">
             <span>الحقل</span>
-            <span>القيمة الحالية</span>
-            <span>القيمة الجديدة</span>
+            <span className="text-center">القيمة الحالية</span>
+            <span className="text-center">القيمة الجديدة</span>
           </div>
           {'category_id' in diff && (
-            <ValueRow label="البند" changed
+            <DiffRow fieldKey="category_id" label="البند"
               oldValue={expense.category_name || '—'}
-              newValue={selectedCategory?.name_ar || categoryId} />
+              newValue={selectedCategory?.name_ar || categoryId || '—'} />
           )}
           {'amount' in diff && (
-            <ValueRow label="المبلغ" changed
+            <DiffRow fieldKey="amount" label="المبلغ"
               oldValue={EGP(expense.amount)}
               newValue={EGP(amount)} />
           )}
           {'expense_date' in diff && (
-            <ValueRow label="التاريخ" changed
+            <DiffRow fieldKey="expense_date" label="التاريخ"
               oldValue={fmtDateOnly(expense.expense_date)}
               newValue={fmtDateOnly(expenseDate)} />
           )}
           {'cashbox_id' in diff && (
-            <ValueRow label="الخزنة" changed
+            <DiffRow fieldKey="cashbox_id" label="الخزنة"
               oldValue={expense.cashbox_name || '— بدون —'}
               newValue={selectedCashbox?.name_ar || '— بدون —'} />
           )}
           {'employee_user_id' in diff && (
-            <ValueRow label="الموظف المسؤول" changed
+            <DiffRow fieldKey="employee_user_id" label="الموظف المسؤول"
               oldValue={expense.employee_name || expense.employee_username || '— غير محدد —'}
               newValue={selectedEmployee?.full_name || selectedEmployee?.username || '— غير محدد —'} />
           )}
           {'payment_method' in diff && (
-            <ValueRow label="طريقة الدفع" changed
+            <DiffRow fieldKey="payment_method" label="طريقة الدفع"
               oldValue={expense.payment_method}
               newValue={paymentMethod} />
           )}
           {'description' in diff && (
-            <ValueRow label="الوصف" changed
+            <DiffRow fieldKey="description" label="الوصف"
               oldValue={expense.description || '—'}
               newValue={description || '—'} />
           )}
@@ -543,23 +587,34 @@ export function EditRequestApproveModal({
         <InfoChip label="تاريخ الطلب" value={fmtDateTime(request.requested_at)} />
       </div>
 
+      {/* Reason for the EDIT REQUEST — distinct from any "description"
+       *  field on the expense itself. Kept in its own clearly-labelled
+       *  amber section so the two never get confused (PR-13). */}
       <div className="rounded-xl border border-amber-200 bg-amber-50 dark:bg-amber-500/10 dark:border-amber-500/30 p-3 text-xs">
-        <div className="text-[10px] font-extrabold text-amber-700 dark:text-amber-300 mb-1">سبب التعديل</div>
-        <div className="text-slate-700 dark:text-slate-200">{request.reason}</div>
+        <div className="text-[10px] font-extrabold text-amber-700 dark:text-amber-300 mb-1">
+          سبب التعديل (لماذا طُلب التعديل)
+        </div>
+        <div className="text-slate-700 dark:text-slate-200 whitespace-pre-wrap break-words">
+          {request.reason}
+        </div>
       </div>
 
-      <div className="rounded-xl border border-slate-200 dark:border-slate-700/40 bg-white dark:bg-slate-950/40 p-3">
-        <div className="grid grid-cols-3 gap-2 text-[10px] font-extrabold text-slate-500 dark:text-slate-400 pb-2 border-b border-slate-200 dark:border-slate-700/40">
+      <div className="rounded-xl border border-slate-200 dark:border-slate-700/40 bg-white dark:bg-slate-950/40 overflow-hidden">
+        <div className="grid grid-cols-[1fr_1.4fr_1.4fr] gap-2 text-[10px] font-extrabold text-slate-500 dark:text-slate-400 px-2.5 py-1.5 bg-slate-50 dark:bg-slate-900/60">
           <span>الحقل</span>
-          <span>القيمة القديمة</span>
-          <span>القيمة الجديدة</span>
+          <span className="text-center">القيمة القديمة</span>
+          <span className="text-center">القيمة الجديدة</span>
         </div>
         {fields
           .filter(([k]) => k in newV)
           .map(([k, label, fmt]) => (
-            <ValueRow key={k} label={label} changed
+            <DiffRow
+              key={k}
+              fieldKey={k}
+              label={label}
               oldValue={fmt((oldV as any)[k])}
-              newValue={fmt((newV as any)[k])} />
+              newValue={fmt((newV as any)[k])}
+            />
           ))}
       </div>
 
@@ -744,16 +799,24 @@ export function EditHistoryModal({
                 )}
               </div>
 
-              <div className="text-[11px] text-slate-700 dark:text-slate-300 bg-slate-50 dark:bg-slate-900/40 px-2 py-1.5 rounded">
-                <span className="font-extrabold text-slate-500 dark:text-slate-400">السبب: </span>
-                {r.reason}
+              {/* PR-13 — call out the request reason explicitly so it
+               *  doesn't get confused with the expense's `description`
+               *  field, which (when edited) appears in the diff table
+               *  below as a separate row. */}
+              <div className="rounded-lg border border-amber-200 bg-amber-50 dark:bg-amber-500/10 dark:border-amber-500/30 px-3 py-2">
+                <div className="text-[10px] font-extrabold text-amber-700 dark:text-amber-300 mb-0.5">
+                  سبب التعديل
+                </div>
+                <div className="text-[12px] text-slate-800 dark:text-slate-200 whitespace-pre-wrap break-words">
+                  {r.reason}
+                </div>
               </div>
 
               <div className="rounded-lg border border-slate-200 dark:border-slate-700/40 overflow-hidden">
                 <div className="grid grid-cols-[1fr_1.4fr_1.4fr] gap-1 text-[10px] font-extrabold text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-900/60 px-2.5 py-1.5">
                   <span>الحقل</span>
-                  <span>قبل التعديل</span>
-                  <span>بعد التعديل</span>
+                  <span className="text-center">القيمة القديمة</span>
+                  <span className="text-center">القيمة الجديدة</span>
                 </div>
                 {Object.keys(r.new_values || {}).map((k) => {
                   const oldRaw = (r.old_values as any)?.[k];
@@ -765,20 +828,13 @@ export function EditHistoryModal({
                     return String(v);
                   };
                   return (
-                    <div
+                    <DiffRow
                       key={k}
-                      className="grid grid-cols-[1fr_1.4fr_1.4fr] gap-1 text-[11px] px-2.5 py-1.5 border-t border-slate-100 dark:border-slate-700/40"
-                    >
-                      <span className="text-slate-700 dark:text-slate-300 font-bold">
-                        {FIELD_LABEL_AR[k] ?? k}
-                      </span>
-                      <span className="text-rose-600 dark:text-rose-400 line-through truncate">
-                        {fmt(oldRaw)}
-                      </span>
-                      <span className="text-emerald-600 dark:text-emerald-400 font-bold truncate">
-                        {fmt(newRaw)}
-                      </span>
-                    </div>
+                      fieldKey={k}
+                      label={FIELD_LABEL_AR[k] ?? k}
+                      oldValue={fmt(oldRaw)}
+                      newValue={fmt(newRaw)}
+                    />
                   );
                 })}
               </div>
