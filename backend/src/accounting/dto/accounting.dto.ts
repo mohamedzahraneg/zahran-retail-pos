@@ -104,6 +104,16 @@ export class CreateExpenseDto {
   /** Mark the expense as a recoverable advance to be settled by the employee. */
   @IsOptional()
   is_advance?: boolean;
+
+  /**
+   * Open shift the expense was recorded under (PR-2 Daily Expenses
+   * series). Optional — when absent, the service auto-resolves it
+   * from the user's open shift (or, if a cashbox is supplied without
+   * a shift, from the cashbox's currently-open shift).
+   */
+  @IsOptional()
+  @IsUUID()
+  shift_id?: string;
 }
 
 export class UpdateExpenseDto extends PartialType(CreateExpenseDto) {}
