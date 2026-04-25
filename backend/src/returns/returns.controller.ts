@@ -78,7 +78,7 @@ export class ReturnsController {
     @Body() dto: RefundReturnDto,
     @CurrentUser() user: JwtUser,
   ) {
-    return this.svc.refund(id, dto, user.userId);
+    return this.svc.refund(id, dto, user.userId, user.permissions ?? []);
   }
 
   @Post('returns/:id/reject')
@@ -100,7 +100,7 @@ export class ReturnsController {
       'إرجاع منتج واستبداله بآخر في خطوة واحدة (مع حساب فرق السعر)',
   })
   exchange(@Body() dto: CreateExchangeDto, @CurrentUser() user: JwtUser) {
-    return this.svc.createExchange(dto, user.userId);
+    return this.svc.createExchange(dto, user.userId, user.permissions ?? []);
   }
 
   @Get('exchanges')

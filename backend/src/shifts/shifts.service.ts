@@ -386,8 +386,61 @@ export class ShiftsService {
     //      invoices) — they only show up here.
     //   3. Same `cashbox + time-window` derivation pattern PR-14
     //      uses for settlements.
+    // PR-R1 — Three-way linkage:
+    //   · explicit  → returns.shift_id / exchanges.shift_id matches THIS shift
+    //   · derived   → no explicit shift_id on the source row; legacy fallback
+    //                 via cashbox + time-window match (pre-R1 behaviour)
+    //   · unlinked  → source row has cashbox_id set but shift_id IS NULL
+    //                 (i.e. "direct cashbox" branch) → MUST NOT appear here
+    //
+    // Implementation:
+    //   1. Pull every CT row in the shift's (cashbox + window).
+    //   2. LEFT JOIN to source-of-truth shift_id from returns/exchanges.
+    //   3. Filter:
+    //        include when source.shift_id = THIS shift            (explicit)
+    //        include when source.shift_id IS NULL AND source.cashbox_id IS NULL (legacy → derived)
+    //        EXCLUDE when source.shift_id IS NOT NULL but ≠ THIS shift  (belongs to another shift)
+    //        EXCLUDE when source.shift_id IS NULL but cashbox_id IS NOT NULL (direct-cashbox: not for any shift)
+    //   4. UNION rows that have explicit shift_id = THIS shift but
+    //      whose CT happens to fall outside the window (defense — same
+    //      shift, atomic write, should never happen but cheap guard).
     const refundCtRows = await this.ds.query(
       `
+      WITH ct_in_window AS (
+        SELECT ct.id, ct.amount, ct.direction, ct.reference_type, ct.reference_id,
+               ct.created_at, ct.user_id, ct.notes, ct.cashbox_id
+          FROM cashbox_transactions ct
+         WHERE ct.cashbox_id = $1
+           AND ct.created_at >= $2
+           AND ct.created_at <= $3
+           AND ct.reference_type::text IN ('return','exchange')
+      ),
+      ct_with_source AS (
+        SELECT ct.*,
+               CASE ct.reference_type::text
+                 WHEN 'return'   THEN r.shift_id
+                 WHEN 'exchange' THEN e.shift_id
+               END AS src_shift_id,
+               CASE ct.reference_type::text
+                 WHEN 'return'   THEN r.cashbox_id
+                 WHEN 'exchange' THEN e.cashbox_id
+               END AS src_cashbox_id
+          FROM ct_in_window ct
+          LEFT JOIN returns   r ON ct.reference_type::text = 'return'
+                                AND r.id = ct.reference_id
+          LEFT JOIN exchanges e ON ct.reference_type::text = 'exchange'
+                                AND e.id = ct.reference_id
+      ),
+      eligible AS (
+        SELECT ct.*,
+               CASE
+                 WHEN ct.src_shift_id = $4              THEN 'explicit'
+                 WHEN ct.src_shift_id IS NULL
+                  AND ct.src_cashbox_id IS NULL         THEN 'derived'
+                 ELSE NULL  -- another shift's row, or a direct-cashbox row
+               END AS link_method
+          FROM ct_with_source ct
+      )
       SELECT ct.id::text AS ct_id,
              ct.amount::numeric AS amount,
              ct.direction::text AS direction,
@@ -400,41 +453,48 @@ export class ShiftsService {
              cb.name_ar AS cashbox_name,
              r.return_no AS return_no,
              r.refund_method::text AS refund_method,
-             cust.full_name AS customer_name,
-             je.entry_no AS je_entry_no
-        FROM cashbox_transactions ct
+             e.exchange_no AS exchange_no,
+             COALESCE(cust_r.full_name, cust_e.full_name) AS customer_name,
+             je.entry_no AS je_entry_no,
+             ct.link_method AS link_method,
+             $5::text AS shift_no
+        FROM eligible ct
         LEFT JOIN cashboxes cb         ON cb.id = ct.cashbox_id
         LEFT JOIN users u              ON u.id  = ct.user_id
         LEFT JOIN returns r            ON ct.reference_type::text = 'return'
                                        AND r.id = ct.reference_id
-        LEFT JOIN customers cust       ON cust.id = r.customer_id
+        LEFT JOIN exchanges e          ON ct.reference_type::text = 'exchange'
+                                       AND e.id = ct.reference_id
+        LEFT JOIN customers cust_r     ON cust_r.id = r.customer_id
+        LEFT JOIN customers cust_e     ON cust_e.id = e.customer_id
         LEFT JOIN journal_entries je   ON je.reference_type::text IN ('return','exchange')
                                        AND je.reference_id = ct.reference_id
                                        AND je.is_void = FALSE
-       WHERE ct.cashbox_id = $1
-         AND ct.created_at >= $2
-         AND ct.created_at <= $3
-         AND ct.reference_type::text IN ('return', 'exchange')
+       WHERE ct.link_method IS NOT NULL
        ORDER BY ct.created_at DESC
       `,
-      [shift.cashbox_id, shift.opened_at, upperBound],
+      [shift.cashbox_id, shift.opened_at, upperBound, shift.id, shift.shift_no],
     );
 
     const refund_cash_movements: any[] = refundCtRows.map((c: any) => {
       const amt = Number(c.amount);
+      const isReturn = c.reference_type === 'return';
       return {
         id: c.ct_id,
         kind: c.reference_type, // 'return' | 'exchange'
-        type_label:
-          c.reference_type === 'return'
-            ? 'مرتجع نقدي'
-            : 'فرق استبدال',
+        type_label: isReturn ? 'مرتجع نقدي' : 'فرق استبدال',
         direction: c.direction,
         direction_label: c.direction === 'out' ? 'خارج' : 'داخل',
         amount: amt,
-        reference_no: c.return_no || null,
+        reference_no: isReturn
+          ? c.return_no || null
+          : c.exchange_no || null,
         customer_name: c.customer_name || null,
         cashbox_name: c.cashbox_name || null,
+        shift_no: c.shift_no || null, // PR-R1 — populated for the
+                                      // closing shift (always THIS one
+                                      // since direct-cashbox + cross-shift
+                                      // rows are excluded in the WHERE)
         created_at: c.created_at,
         created_by_name: c.created_by_name || null,
         je_entry_no: c.je_entry_no || null,
@@ -442,9 +502,7 @@ export class ShiftsService {
           c.direction === 'out'
             ? `DR مردودات مبيعات / CR ${c.cashbox_name ?? 'cashbox'}`
             : `DR ${c.cashbox_name ?? 'cashbox'} / CR إيرادات`,
-        // Linkage method — derived because returns/exchanges don't
-        // carry shift_id yet (PR-R1 will add it).
-        link_method: 'derived' as const,
+        link_method: c.link_method as 'explicit' | 'derived',
       };
     });
 

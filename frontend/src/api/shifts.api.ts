@@ -80,6 +80,10 @@ export interface RefundCashMovement {
   reference_no: string | null;
   customer_name: string | null;
   cashbox_name: string | null;
+  /** PR-R1 — shift number this row is attributed to (always the
+   *  closing shift since direct-cashbox + cross-shift rows are
+   *  excluded server-side). */
+  shift_no?: string | null;
   created_at: string;
   created_by_name: string | null;
   je_entry_no: string | null;

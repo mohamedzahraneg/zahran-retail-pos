@@ -26,6 +26,10 @@ import {
 } from '@/api/returns.api';
 import { productsApi } from '@/api/products.api';
 import { Trash2 } from 'lucide-react';
+import {
+  CashSourceSelector,
+  CashSource,
+} from '@/components/CashSourceSelector';
 
 const EGP = (n: number | string) => `${Number(n).toFixed(0)} ج.م`;
 
@@ -1028,6 +1032,15 @@ function CreateExchangeModal({ onClose }: { onClose: () => void }) {
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('cash');
   const [refundMethod, setRefundMethod] = useState<PaymentMethod>('cash');
   const [notes, setNotes] = useState('');
+  // PR-R1 — explicit cash source for the cash leg of the exchange.
+  // Used only when the price difference is non-zero AND the chosen
+  // method for the relevant direction is 'cash'. Equal exchanges and
+  // non-cash differences ignore it.
+  const [cashSource, setCashSource] = useState<CashSource>({
+    mode: 'unset',
+    shift_id: null,
+    cashbox_id: null,
+  });
 
   const lookupMut = useMutation({
     mutationFn: () => returnsApi.lookupInvoice(invoiceNo),
@@ -1111,6 +1124,12 @@ function CreateExchangeModal({ onClose }: { onClose: () => void }) {
     }
   };
 
+  // PR-R1 — when the cash leg is required (non-zero diff + cash method
+  // for the relevant direction) the operator must pick a source.
+  const needsCashSource =
+    (diff < 0 && refundMethod === 'cash') ||
+    (diff > 0 && paymentMethod === 'cash');
+
   const submitMut = useMutation({
     mutationFn: () => {
       if (!lookup) return Promise.reject(new Error('ابحث عن الفاتورة أولاً'));
@@ -1118,6 +1137,11 @@ function CreateExchangeModal({ onClose }: { onClose: () => void }) {
         return Promise.reject(new Error('اختر الأصناف المُرجعة من الفاتورة'));
       if (newItems.length === 0)
         return Promise.reject(new Error('أضف الأصناف الجديدة'));
+      if (needsCashSource && cashSource.mode === 'unset') {
+        return Promise.reject(
+          new Error('اختر مصدر/وجهة النقدية للفرق'),
+        );
+      }
       return returnsApi.exchange({
         original_invoice_id: lookup.invoice.id,
         returned_items: returnedLines.map((l) => ({
@@ -1134,6 +1158,12 @@ function CreateExchangeModal({ onClose }: { onClose: () => void }) {
         refund_method: diff < 0 ? refundMethod : undefined,
         reason,
         notes: notes || undefined,
+        ...(needsCashSource && cashSource.mode === 'open_shift'
+          ? { shift_id: cashSource.shift_id }
+          : {}),
+        ...(needsCashSource && cashSource.mode === 'direct_cashbox'
+          ? { cashbox_id: cashSource.cashbox_id }
+          : {}),
       });
     },
     onSuccess: (r) => {
@@ -1491,6 +1521,20 @@ function CreateExchangeModal({ onClose }: { onClose: () => void }) {
               </select>
             </Field>
           )}
+          {needsCashSource && (
+            <div className="mt-3">
+              <div className="text-xs font-bold text-slate-700 dark:text-slate-200 mb-1">
+                {diff < 0
+                  ? 'مصدر صرف فرق الاستبدال (نقدي)'
+                  : 'وجهة تحصيل فرق الاستبدال (نقدي)'}
+              </div>
+              <CashSourceSelector
+                value={cashSource}
+                onChange={setCashSource}
+                disabled={submitMut.isPending}
+              />
+            </div>
+          )}
           <div className="grid md:grid-cols-2 gap-3">
             <Field label="سبب الاستبدال">
               <select
@@ -1594,9 +1638,27 @@ function RefundModal({
     ret.refund_method || 'cash',
   );
   const [reference, setReference] = useState('');
+  // PR-R1 — explicit cash source. Default to 'unset'; CashSourceSelector
+  // will pre-pick the user's open shift when there's exactly one.
+  const [source, setSource] = useState<CashSource>({
+    mode: 'unset',
+    shift_id: null,
+    cashbox_id: null,
+  });
+  const isCash = method === 'cash';
+  const ready = !isCash || source.mode !== 'unset';
   const mut = useMutation({
     mutationFn: () =>
-      returnsApi.refund(ret.id, { refund_method: method, reference }),
+      returnsApi.refund(ret.id, {
+        refund_method: method,
+        reference,
+        ...(isCash && source.mode === 'open_shift'
+          ? { shift_id: source.shift_id }
+          : {}),
+        ...(isCash && source.mode === 'direct_cashbox'
+          ? { cashbox_id: source.cashbox_id }
+          : {}),
+      }),
     onSuccess: () => {
       toast.success('تم صرف المبلغ للعميل');
       onSuccess();
@@ -1633,12 +1695,21 @@ function RefundModal({
           />
         </Field>
       )}
+      {isCash && (
+        <div className="mt-3">
+          <CashSourceSelector
+            value={source}
+            onChange={setSource}
+            disabled={mut.isPending}
+          />
+        </div>
+      )}
       <div className="mt-5 flex gap-2 justify-end">
         <button className="btn-secondary" onClick={onClose}>
           إلغاء
         </button>
         <button
-          disabled={mut.isPending}
+          disabled={mut.isPending || !ready}
           onClick={() => mut.mutate()}
           className="btn-primary"
         >

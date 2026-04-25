@@ -135,6 +135,12 @@ export interface CreateExchangePayload {
   reason?: ReturnReason;
   reason_details?: string;
   notes?: string;
+  /** PR-R1 — required when there is a non-zero cash difference (in
+   *  either direction). Equal exchanges and non-cash differences omit
+   *  both. Direct-cashbox refund direction additionally requires the
+   *  returns.refund.direct_cashbox permission. */
+  shift_id?: string;
+  cashbox_id?: string;
 }
 
 // ---- Exchange list --------------------------------------------------------
@@ -180,8 +186,20 @@ export const returnsApi = {
   approve: (id: string, notes?: string) =>
     unwrap<ReturnDetails>(api.post(`/returns/${id}/approve`, { notes })),
 
-  refund: (id: string, payload: { refund_method: PaymentMethod; reference?: string; notes?: string }) =>
-    unwrap<ReturnDetails>(api.post(`/returns/${id}/refund`, payload)),
+  refund: (
+    id: string,
+    payload: {
+      refund_method: PaymentMethod;
+      reference?: string;
+      notes?: string;
+      /** PR-R1 — required when refund_method='cash'. Pass either
+       *  shift_id (open/pending shift; cashbox is taken from it) or
+       *  cashbox_id alone (direct cashbox; shift_id stays null and
+       *  requires returns.refund.direct_cashbox permission). */
+      shift_id?: string;
+      cashbox_id?: string;
+    },
+  ) => unwrap<ReturnDetails>(api.post(`/returns/${id}/refund`, payload)),
 
   reject: (id: string, reason: string) =>
     unwrap<ReturnDetails>(api.post(`/returns/${id}/reject`, { reason })),

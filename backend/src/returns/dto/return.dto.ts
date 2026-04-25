@@ -127,6 +127,21 @@ export class RefundReturnDto {
   @IsIn(PAYMENT_METHODS as unknown as string[])
   refund_method: PaymentMethod;
 
+  /** PR-R1 — when refund_method='cash', exactly one of (shift_id) or
+   *  (cashbox_id with shift_id null) must be supplied. The service
+   *  validates the open/pending state and cashbox-shift consistency. */
+  @ApiPropertyOptional({
+    description:
+      'Open/pending shift the cash refund is paid from. If set, cashbox_id is taken from the shift.',
+  })
+  @IsOptional() @IsUUID() shift_id?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Direct cashbox the cash refund is paid from. Used only when shift_id is null. Requires returns.refund.direct_cashbox permission.',
+  })
+  @IsOptional() @IsUUID() cashbox_id?: string;
+
   @ApiPropertyOptional() @IsOptional() @IsString() reference?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() notes?: string;
 }
@@ -192,6 +207,22 @@ export class CreateExchangeDto {
 
   @ApiPropertyOptional() @IsOptional() @IsString() reason_details?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() notes?: string;
+
+  /** PR-R1 — when there is a non-zero cash difference (in either
+   *  direction), exactly one of (shift_id) or (cashbox_id with shift_id
+   *  null) must be supplied. The service validates the open/pending
+   *  state and cashbox-shift consistency. Equal exchanges ignore both. */
+  @ApiPropertyOptional({
+    description:
+      'Open/pending shift the exchange-difference cash flows through. If set, cashbox_id is taken from the shift.',
+  })
+  @IsOptional() @IsUUID() shift_id?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Direct cashbox the exchange-difference cash flows through. Used only when shift_id is null. Refund direction additionally requires returns.refund.direct_cashbox permission.',
+  })
+  @IsOptional() @IsUUID() cashbox_id?: string;
 }
 
 // ---- Query filters ---------------------------------------------------------
