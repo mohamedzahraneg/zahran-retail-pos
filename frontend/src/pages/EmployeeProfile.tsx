@@ -289,8 +289,9 @@ function EmployeeDashboardBody({
 }) {
   const qc = useQueryClient();
   const { profile, attendance, salary, tasks, requests, recommendations } = data;
-  const hasPermission = useAuthStore((s) => s.hasPermission);
-  const canManageAttendance = hasPermission('employee.attendance.manage');
+  // Self-service /me intentionally renders no admin-on-behalf controls
+  // — those moved to the Team drawer in this PR. We still keep the
+  // monthly view + self-clock + attendance log here.
   const wage = data.wage;
   const gl = data.gl;
   const ledgerReset = data.ledger_reset;
@@ -453,17 +454,15 @@ function EmployeeDashboardBody({
         </div>
       )}
 
-      {/* ─── Month selector + admin attendance controls ─── */}
+      {/* ─── Month selector ─── */}
       <MonthSelectorBar monthSel={monthSel} />
 
-      {canManageAttendance && (
-        <AdminAttendancePanel
-          userId={profile.id}
-          fullName={profile.full_name}
-          dailyAmount={Number(wage?.daily_amount ?? 0)}
-          liveGlBalance={Number(gl?.live_snapshot ?? 0)}
-        />
-      )}
+      {/* AdminAttendancePanel was previously rendered here (PR #88) for
+          any user with `employee.attendance.manage`. As of this PR the
+          self-service profile shows ONLY self-service tools — admin
+          controls live in the Team drawer's "حضور / يومية" tab and on
+          /team?tab=attendance. The component itself is exported below
+          and reused by Team.tsx. */}
 
       {/* ─── Attendance cards (monthly) ─── */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
@@ -718,7 +717,7 @@ function MonthSelectorBar({ monthSel }: { monthSel: MonthSelector }) {
    movement. Payout / settlement still lives in the existing employee
    settlement flow (Team drawer).  */
 
-function AdminAttendancePanel({
+export function AdminAttendancePanel({
   userId,
   fullName,
   dailyAmount,
@@ -1583,12 +1582,16 @@ function HistoryCard({ userId }: { userId?: string }) {
         <table className="w-full text-xs">
           <thead className="bg-slate-50 text-slate-600">
             <tr>
-              <th className="p-2 text-right">اليوم</th>
-              <th className="p-2 text-center">الحضور</th>
-              <th className="p-2 text-center">الانصراف</th>
-              <th className="p-2 text-center">ساعات فعلية</th>
+              <th className="p-2 text-right">التاريخ / اليوم</th>
+              <th className="p-2 text-center">حضور</th>
+              <th className="p-2 text-center">انصراف</th>
+              <th className="p-2 text-center">مدة العمل</th>
+              <th className="p-2 text-center">الهدف</th>
+              <th className="p-2 text-center">المتبقي</th>
               <th className="p-2 text-center">إضافي</th>
-              <th className="p-2 text-center">تأخير/نقص</th>
+              <th className="p-2 text-center">تأخير</th>
+              <th className="p-2 text-center">انصراف مبكر</th>
+              <th className="p-2 text-center">الحالة</th>
               <th className="p-2 text-center">المستحق</th>
               <th className="p-2 text-center">حوافز</th>
               <th className="p-2 text-center">خصم</th>
@@ -1601,10 +1604,30 @@ function HistoryCard({ userId }: { userId?: string }) {
               const h = fmtDayHeader(d.day);
               const earned = Number((d as any).earned_hours_based || 0);
               const earnedOt = Number((d as any).earned_overtime || 0);
+              const targetMin =
+                Number((d as any).target_min || targetDayHr * 60);
+              const lateMin = Number((d as any).late_min || 0);
+              const earlyLeaveMin = Number((d as any).early_leave_min || 0);
               const canShowFullDay =
                 canGrantFullDay &&
                 Number(d.minutes || 0) > 0 &&
                 earned < fullDayWage - 0.01;
+              // Status:
+              //   • completed: clock_in + clock_out both set
+              //   • active:    clock_in only (still working)
+              //   • absent:    no record for the day
+              const status: 'completed' | 'active' | 'absent' =
+                d.first_in && d.last_out
+                  ? 'completed'
+                  : d.first_in
+                    ? 'active'
+                    : 'absent';
+              const statusChip =
+                status === 'completed'
+                  ? { cls: 'bg-emerald-50 text-emerald-700 border-emerald-200', txt: 'مكتمل' }
+                  : status === 'active'
+                    ? { cls: 'bg-amber-50 text-amber-700 border-amber-200', txt: 'جاري' }
+                    : { cls: 'bg-slate-50 text-slate-500 border-slate-200', txt: 'غياب' };
               return (
                 <tr key={d.day}>
                   <td className="p-2 font-medium text-slate-700">
@@ -1626,6 +1649,14 @@ function HistoryCard({ userId }: { userId?: string }) {
                   <td className="p-2 text-center tabular-nums font-bold">
                     {d.minutes ? fmtMinutes(d.minutes) : '—'}
                   </td>
+                  <td className="p-2 text-center tabular-nums text-slate-600">
+                    {fmtMinutes(targetMin)}
+                  </td>
+                  <td className="p-2 text-center tabular-nums text-rose-700">
+                    {d.undertime_min && d.minutes
+                      ? `−${fmtMinutes(d.undertime_min)}`
+                      : '—'}
+                  </td>
                   <td className="p-2 text-center tabular-nums text-emerald-700 font-bold">
                     {d.overtime_min
                       ? `+${fmtMinutes(d.overtime_min)}`
@@ -1636,10 +1667,18 @@ function HistoryCard({ userId }: { userId?: string }) {
                       </div>
                     )}
                   </td>
-                  <td className="p-2 text-center tabular-nums text-rose-700 font-bold">
-                    {d.undertime_min && d.minutes
-                      ? `-${fmtMinutes(d.undertime_min)}`
-                      : '—'}
+                  <td className="p-2 text-center tabular-nums text-amber-700">
+                    {lateMin > 0 ? `${lateMin}د` : '—'}
+                  </td>
+                  <td className="p-2 text-center tabular-nums text-amber-700">
+                    {earlyLeaveMin > 0 ? `${earlyLeaveMin}د` : '—'}
+                  </td>
+                  <td className="p-2 text-center">
+                    <span
+                      className={`chip text-[10px] ${statusChip.cls}`}
+                    >
+                      {statusChip.txt}
+                    </span>
                   </td>
                   <td className="p-2 text-center tabular-nums">
                     {d.minutes ? (
@@ -1686,7 +1725,7 @@ function HistoryCard({ userId }: { userId?: string }) {
             {!days.length && (
               <tr>
                 <td
-                  colSpan={canGrantFullDay ? 11 : 10}
+                  colSpan={canGrantFullDay ? 15 : 14}
                   className="p-10 text-center text-slate-400"
                 >
                   لا سجل في الفترة المحددة

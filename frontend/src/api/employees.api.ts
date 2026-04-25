@@ -253,6 +253,12 @@ export const employeesApi = {
         minutes: number;
         overtime_min: number;
         undertime_min: number;
+        /** Target minutes for the day (target_hours_day × 60). */
+        target_min: number;
+        /** Lateness past shift_start + grace, Cairo TZ, in minutes. */
+        late_min: number;
+        /** Early-leave before shift_end, Cairo TZ, in minutes. */
+        early_leave_min: number;
         first_in: string | null;
         last_out: string | null;
         bonuses: string;
