@@ -963,18 +963,73 @@ function PayWageModal({
           </button>
         </div>
 
-        <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-[11px] text-emerald-900 leading-relaxed">
-          المتبقي مستحق على 213:{' '}
-          <span className="font-black tabular-nums">
-            {EGP(payableBalance)}
-          </span>
-          {payableBalance === 0 && (
-            <span className="block mt-0.5 text-emerald-800/80">
-              لا يوجد مستحق متبقٍّ — أي مبلغ يُصرف الآن سيُعامَل كزيادة
-              ويجب تصنيفها.
-            </span>
-          )}
+        {/* Always show BOTH balances side-by-side: the 213 payable
+            amount (what we owe him today, normally payable) and the
+            canonical final GL balance (the headline number, sign-aware).
+            Showing only the 213 amount hid cases where the employee
+            owes the company — admin couldn't tell why "lا يوجد مستحق
+            متبقٍّ" was appearing. */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+          <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-[11px] text-emerald-900 leading-relaxed">
+            <div className="text-[10px] text-emerald-700/80">
+              رصيد المستحقات (حساب 213)
+            </div>
+            <div className="font-black tabular-nums text-sm mt-0.5">
+              {EGP(payableBalance)}
+            </div>
+            <div className="text-[10px] text-emerald-800/80 mt-0.5">
+              {payableBalance > 0
+                ? 'الجزء القابل للصرف نقدًا مباشرة'
+                : 'لا يوجد مستحق متبقٍّ على 213'}
+            </div>
+          </div>
+          <div
+            className={`rounded-lg border px-3 py-2 text-[11px] leading-relaxed ${
+              liveGlBalance > 0.01
+                ? 'border-rose-200 bg-rose-50 text-rose-900'
+                : liveGlBalance < -0.01
+                  ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
+                  : 'border-slate-200 bg-slate-50 text-slate-700'
+            }`}
+          >
+            <div className="text-[10px] opacity-70">
+              الرصيد النهائي من القيود (213 + 1123)
+            </div>
+            <div className="font-black tabular-nums text-sm mt-0.5">
+              {liveGlBalance > 0.01
+                ? `عليه للشركة ${EGP(liveGlBalance)}`
+                : liveGlBalance < -0.01
+                  ? `مستحق له ${EGP(-liveGlBalance)}`
+                  : 'متوازن'}
+            </div>
+            <div className="text-[10px] opacity-70 mt-0.5">
+              v_employee_gl_balance — موجب = الموظف عليه للشركة
+            </div>
+          </div>
         </div>
+
+        {/* Admin warning when the employee owes the company on net.
+            We don't BLOCK the payout (server still validates), but
+            we make it explicit that any cash leaving for this
+            employee right now is excess and must be classified as
+            advance or bonus. Daily wage accrual reduces the debt
+            without moving cash. */}
+        {liveGlBalance > 0.01 && (
+          <div className="rounded-lg border-2 border-amber-300 bg-amber-50 px-3 py-2 text-[11px] text-amber-900 leading-relaxed flex items-start gap-2">
+            <AlertTriangle className="text-amber-600 shrink-0 mt-0.5" size={14} />
+            <div>
+              <div className="font-bold mb-0.5">
+                الموظف عليه مديونية للشركة
+              </div>
+              <div>
+                تثبيت اليومية سيقلل هذه المديونية على حساب 213، ولا يوجد
+                صرف نقدي عادي متاح الآن. أي مبلغ يُصرف نقدًا يجب تصنيفه
+                صراحةً كسلفة أو مكافأة (تزيد المديونية أو ترصيد الموظف
+                حسب التصنيف).
+              </div>
+            </div>
+          </div>
+        )}
 
         <div>
           <label className="label">المبلغ المراد صرفه نقدًا *</label>
