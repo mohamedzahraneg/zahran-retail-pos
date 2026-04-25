@@ -53,6 +53,7 @@ import { cashDeskApi } from '@/api/cash-desk.api';
 import { shiftsApi } from '@/api/shifts.api';
 import { useAuthStore } from '@/stores/auth.store';
 import { exportToExcel, printReport } from '@/lib/exportExcel';
+import ExpensesAnalyticsPremiumTab from './ExpensesAnalyticsPremiumTab';
 
 const DEFAULT_WAREHOUSE_ID = import.meta.env.VITE_DEFAULT_WAREHOUSE_ID as string;
 
@@ -873,40 +874,6 @@ function ExpensesRegisterTab({ ctx }: { ctx: ExpenseTabContext }) {
   );
 }
 
-/* ─── Premium analytics tab — placeholder shell (PR-6) ───────────────
- *
- * Receives the full ExpenseTabContext via `ctx` so when the premium
- * design lands it can render KPIs / charts / breakdowns from the same
- * filtered `items` and the same period P&L the register sees. The
- * placeholder is intentionally inert: no data fetching, no fake
- * numbers, no chart libs imported until the premium markup arrives.
- * ──────────────────────────────────────────────────────────────────── */
-
-function ExpensesAnalyticsPremiumTab({ ctx }: { ctx: ExpenseTabContext }) {
-  const { items, totalAmount, isFetching } = ctx;
-
-  return (
-    <div className="card p-8 flex flex-col items-center justify-center text-center gap-3 min-h-[280px]">
-      <div className="p-3 rounded-2xl bg-indigo-50 text-indigo-600">
-        <Sparkles size={28} />
-      </div>
-      <h3 className="text-base font-black text-slate-800">
-        سيتم تطبيق لوحة تحليلات المصروفات الاحترافية هنا
-      </h3>
-      <p className="text-xs text-slate-500 max-w-md leading-relaxed">
-        هذه التبويبة جاهزة لاستقبال التصميم الاحترافي القادم. كل البيانات
-        المطلوبة (المصروفات المُفلترة، الإيرادات والربح للفترة، الفلاتر،
-        قوائم الموظفين والبنود والخزن والورديات) متاحة عبر السياق المشترك
-        مع تبويبة السجل.
-      </p>
-      <div className="text-[10px] text-slate-400 mt-2 font-mono">
-        {isFetching
-          ? 'جارٍ تحميل البيانات…'
-          : `${items.length} مصروف ضمن الفلتر · إجمالي ${EGP(totalAmount)}`}
-      </div>
-    </div>
-  );
-}
 
 /* ─── HTML escape for the print export ─── */
 
