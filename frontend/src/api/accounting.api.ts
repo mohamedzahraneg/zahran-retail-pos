@@ -9,6 +9,15 @@ export interface ExpenseCategory {
   allocate_to_cogs: boolean;
   is_active: boolean;
   created_at: string;
+  /** COA leaf this category posts to. Required for Daily Expenses
+   *  (PR-1 strict mode); legacy categories without it block submit. */
+  account_id?: string | null;
+  /** Joined preview fields from `chart_of_accounts` (PR-1) — let the
+   *  Daily Expenses modal render "DR <code> <name>" without a second
+   *  round-trip. NULL when category is unmapped. */
+  account_code?: string | null;
+  account_name_ar?: string | null;
+  has_account?: boolean;
 }
 
 export interface Expense {
