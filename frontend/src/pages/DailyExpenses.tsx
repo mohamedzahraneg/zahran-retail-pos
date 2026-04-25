@@ -27,53 +27,32 @@
  */
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useSearchParams } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import {
   AlertTriangle,
-  BarChart3,
   DollarSign,
   Download,
   FileText,
-  Hash,
   ListPlus,
-  PieChart as PieIcon,
   Plus,
   Receipt,
   Sparkles,
-  TrendingDown,
-  TrendingUp,
   Users,
-  Wallet,
   X,
 } from 'lucide-react';
-import { Bar, Doughnut } from 'react-chartjs-2';
 import {
-  Chart as ChartJS,
-  CategoryScale,
-  LinearScale,
-  BarElement,
-  ArcElement,
-  Title,
-  Tooltip,
-  Legend,
-} from 'chart.js';
-import { accountingApi, ExpenseCategory, Expense } from '@/api/accounting.api';
+  accountingApi,
+  ExpenseCategory,
+  Expense,
+  ProfitAndLoss,
+} from '@/api/accounting.api';
 import { accountsApi } from '@/api/accounts.api';
 import { usersApi } from '@/api/users.api';
 import { cashDeskApi } from '@/api/cash-desk.api';
 import { shiftsApi } from '@/api/shifts.api';
 import { useAuthStore } from '@/stores/auth.store';
 import { exportToExcel, printReport } from '@/lib/exportExcel';
-
-ChartJS.register(
-  CategoryScale,
-  LinearScale,
-  BarElement,
-  ArcElement,
-  Title,
-  Tooltip,
-  Legend,
-);
 
 const DEFAULT_WAREHOUSE_ID = import.meta.env.VITE_DEFAULT_WAREHOUSE_ID as string;
 
@@ -200,15 +179,92 @@ function presetRange(p: RangePreset): { from: string; to: string } {
   }
 }
 
-/* ─── Page ─── */
+/* ─── Filter / data shape shared between tabs (PR-6) ───────────────── */
+
+export type ExpenseFilterStatus = 'all' | 'approved' | 'pending';
+
+export interface DailyExpenseFilters {
+  preset: RangePreset;
+  from: string;
+  to: string;
+  employeeId: string;
+  categoryId: string;
+  cashboxId: string;
+  shiftId: string;
+  status: ExpenseFilterStatus;
+}
+
+/** Plumbing handed down to BOTH tabs. Premium analytics consumes the
+ *  same items / filters / handlers as the register so the two views
+ *  stay in lock-step (clicking a category bar in analytics will set
+ *  the register filter without a refetch). */
+export interface ExpenseTabContext {
+  /** Current filter state (read-only — use `setFilter` to mutate). */
+  filters: DailyExpenseFilters;
+  /** Patch one or many filter fields. Date preset is set via `setRangePreset`. */
+  setFilter: (patch: Partial<DailyExpenseFilters>) => void;
+  /** Switch the date preset and recompute from/to (no-op for 'custom'). */
+  setRangePreset: (p: RangePreset) => void;
+  /** Reset all filters to pristine defaults (today + كل الموظفين/البنود/…). */
+  resetFilters: () => void;
+  /** True iff any filter has drifted from its default. */
+  filtersDirty: boolean;
+
+  /** Backend-filtered register rows (same array drives analytics). */
+  items: Expense[];
+  /** Sum of `amount` across `items`, from the backend response. */
+  totalAmount: number;
+  /** Live status of the listing query. */
+  isFetching: boolean;
+  /** Force a register refetch (used by the refresh button + post-save). */
+  refresh: () => void;
+
+  /** Picker data — shared so each tab doesn't duplicate the round-trips. */
+  categories: ExpenseCategory[];
+  cashboxes: any[];
+  users: any[];
+  shifts: any[];
+
+  /** Period P&L (revenue / op-ex / net profit) for the analytics tab.
+   *  Period-only — never narrowed by employee/cashbox/shift, since the
+   *  sales total can't be sliced by an expense's responsible employee
+   *  without inventing data. May be `undefined` while loading. */
+  pnl: ProfitAndLoss | undefined;
+  isPnlFetching: boolean;
+
+  /** Export the current filtered register as `.xlsx`. */
+  exportExcel: () => void;
+  /** Print-friendly PDF dialog of the current filtered register. */
+  exportPdf: () => void;
+
+  /** Modal openers (live in the page shell so they overlay any tab). */
+  openAddExpense: () => void;
+  openAddCategory: () => void;
+}
+
+/* ─── Page shell — owns tab state + lifts everything the tabs need ─── */
+
+type DailyExpenseTab = 'register' | 'analytics';
 
 export default function DailyExpenses() {
+  const qc = useQueryClient();
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  const tab: DailyExpenseTab =
+    searchParams.get('tab') === 'analytics' ? 'analytics' : 'register';
+
+  const setTab = (next: DailyExpenseTab) => {
+    const sp = new URLSearchParams(searchParams);
+    if (next === 'register') sp.delete('tab');
+    else sp.set('tab', next);
+    setSearchParams(sp, { replace: true });
+  };
+
   const [showAddExpense, setShowAddExpense] = useState(false);
   const [showAddCategory, setShowAddCategory] = useState(false);
 
-  // Filter state — default = TODAY (per PR-5 directive). Previous
-  // default 'month' silently widened the result set and confused
-  // operators who expected "today's expenses" on page open.
+  // Filter state — default = TODAY (per PR-5). State lives here at the
+  // page shell so register and analytics tabs stay in lock-step.
   const [preset, setPreset] = useState<RangePreset>('day');
   const initial = useMemo(() => presetRange('day'), []);
   const [from, setFrom] = useState<string>(initial.from);
@@ -217,7 +273,7 @@ export default function DailyExpenses() {
   const [categoryId, setCategoryId] = useState<string>('');
   const [cashboxId, setCashboxId] = useState<string>('');
   const [shiftId, setShiftId] = useState<string>('');
-  const [status, setStatus] = useState<'all' | 'approved' | 'pending'>('all');
+  const [status, setStatus] = useState<ExpenseFilterStatus>('all');
 
   const setRangePreset = (p: RangePreset) => {
     setPreset(p);
@@ -228,7 +284,20 @@ export default function DailyExpenses() {
     }
   };
 
-  /** Restore every filter to its pristine default — today + كل الموظفين/البنود/etc. */
+  /** Patch any subset of filter fields in one call. The date preset
+   *  must go through `setRangePreset` because it also adjusts from/to. */
+  const setFilter = (patch: Partial<DailyExpenseFilters>) => {
+    if (patch.preset !== undefined) setRangePreset(patch.preset);
+    if (patch.from !== undefined) setFrom(patch.from);
+    if (patch.to !== undefined) setTo(patch.to);
+    if (patch.employeeId !== undefined) setEmployeeId(patch.employeeId);
+    if (patch.categoryId !== undefined) setCategoryId(patch.categoryId);
+    if (patch.cashboxId !== undefined) setCashboxId(patch.cashboxId);
+    if (patch.shiftId !== undefined) setShiftId(patch.shiftId);
+    if (patch.status !== undefined) setStatus(patch.status);
+  };
+
+  /** Restore every filter to its pristine default. */
   const resetFilters = () => {
     const r = presetRange('day');
     setPreset('day');
@@ -287,6 +356,19 @@ export default function DailyExpenses() {
 
   const items: Expense[] = listing?.items ?? [];
   const totalAmount = listing?.total_amount ?? 0;
+
+  // Period P&L for the analytics tab. Period-only (no narrowing
+  // filters) — see ExpenseTabContext.pnl docs.
+  const { data: pnl, isFetching: isPnlFetching } = useQuery({
+    queryKey: ['daily-expenses-pnl', from, to],
+    queryFn: () => accountingApi.profitAndLoss({ from, to }),
+    staleTime: 60_000,
+  });
+
+  const refresh = () => {
+    qc.invalidateQueries({ queryKey: ['daily-expenses-list'] });
+    qc.invalidateQueries({ queryKey: ['daily-expenses-pnl'] });
+  };
 
   /* ── Exports — both use the active backend-filtered dataset ── */
 
@@ -411,9 +493,31 @@ export default function DailyExpenses() {
     printReport('تقرير المصروفات اليومية', html);
   };
 
+  const ctx: ExpenseTabContext = {
+    filters: { preset, from, to, employeeId, categoryId, cashboxId, shiftId, status },
+    setFilter,
+    setRangePreset,
+    resetFilters,
+    filtersDirty,
+    items,
+    totalAmount: Number(totalAmount),
+    isFetching,
+    refresh,
+    categories: categories as ExpenseCategory[],
+    cashboxes: cashboxes as any[],
+    users: users as any[],
+    shifts: shifts as any[],
+    pnl,
+    isPnlFetching,
+    exportExcel: handleExportExcel,
+    exportPdf: handleExportPdf,
+    openAddExpense: () => setShowAddExpense(true),
+    openAddCategory: () => setShowAddCategory(true),
+  };
+
   return (
     <div className="space-y-5">
-      {/* ─── 1. Page header ─── */}
+      {/* ─── Page header ─── */}
       <div className="flex items-center gap-3">
         <div className="p-2 rounded-xl bg-amber-100 text-amber-700">
           <Receipt size={20} />
@@ -426,10 +530,91 @@ export default function DailyExpenses() {
         </div>
       </div>
 
-      {/* ─── 2. Smart Expense Analytics (PR-4, repositioned in PR-5) ─── */}
-      <AnalyticsSection items={items} from={from} to={to} totalAmount={Number(totalAmount)} />
+      {/* ─── Tab bar (URL-driven via ?tab=) ─── */}
+      <div className="border-b border-slate-200">
+        <div className="flex items-center gap-1">
+          <TabButton active={tab === 'register'} onClick={() => setTab('register')}>
+            <Receipt size={14} /> السجل والتسجيل
+          </TabButton>
+          <TabButton active={tab === 'analytics'} onClick={() => setTab('analytics')}>
+            <Sparkles size={14} /> تحليلات المصروفات
+          </TabButton>
+        </div>
+      </div>
 
-      {/* ─── 3. Filter bar ─── */}
+      {/* ─── Active tab body ─── */}
+      {tab === 'register' ? (
+        <ExpensesRegisterTab ctx={ctx} />
+      ) : (
+        <ExpensesAnalyticsPremiumTab ctx={ctx} />
+      )}
+
+      {/* ─── Modals (page-level so they overlay any tab) ─── */}
+      {showAddExpense && (
+        <AddExpenseModal
+          onClose={() => setShowAddExpense(false)}
+          onSaved={() => setShowAddExpense(false)}
+          onAddCategory={() => setShowAddCategory(true)}
+        />
+      )}
+      {showAddCategory && (
+        <AddCategoryModal onClose={() => setShowAddCategory(false)} />
+      )}
+    </div>
+  );
+}
+
+/* ─── Tab button ─── */
+
+function TabButton({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`px-4 py-2 text-xs font-bold flex items-center gap-1.5 border-b-2 -mb-px transition ${
+        active
+          ? 'border-indigo-600 text-indigo-700'
+          : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
+/* ─── Register tab — filters + actions + register table ────────────── */
+
+function ExpensesRegisterTab({ ctx }: { ctx: ExpenseTabContext }) {
+  const {
+    filters: { preset, from, to, employeeId, categoryId, cashboxId, shiftId, status },
+    setFilter,
+    setRangePreset,
+    resetFilters,
+    filtersDirty,
+    items,
+    totalAmount,
+    isFetching,
+    categories,
+    cashboxes,
+    users,
+    shifts,
+    exportExcel,
+    exportPdf,
+    openAddExpense,
+    openAddCategory,
+  } = ctx;
+
+  return (
+    <div className="space-y-5">
+      {/* Filter bar */}
       <div className="card p-3 space-y-3">
         <div className="flex items-center gap-1 flex-wrap">
           {(['day', 'week', 'month', 'year', 'custom'] as const).map((p) => {
@@ -476,7 +661,7 @@ export default function DailyExpenses() {
                   type="date"
                   className="input input-sm w-full"
                   value={from}
-                  onChange={(e) => setFrom(e.target.value)}
+                  onChange={(e) => setFilter({ from: e.target.value })}
                 />
               </label>
               <label className="block">
@@ -485,7 +670,7 @@ export default function DailyExpenses() {
                   type="date"
                   className="input input-sm w-full"
                   value={to}
-                  onChange={(e) => setTo(e.target.value)}
+                  onChange={(e) => setFilter({ to: e.target.value })}
                 />
               </label>
             </>
@@ -495,10 +680,10 @@ export default function DailyExpenses() {
             <select
               className="input input-sm w-full"
               value={employeeId}
-              onChange={(e) => setEmployeeId(e.target.value)}
+              onChange={(e) => setFilter({ employeeId: e.target.value })}
             >
               <option value="">— كل الموظفين —</option>
-              {(users as any[]).map((u) => (
+              {users.map((u) => (
                 <option key={u.id} value={u.id}>
                   {u.full_name || u.username}
                 </option>
@@ -510,10 +695,10 @@ export default function DailyExpenses() {
             <select
               className="input input-sm w-full"
               value={categoryId}
-              onChange={(e) => setCategoryId(e.target.value)}
+              onChange={(e) => setFilter({ categoryId: e.target.value })}
             >
               <option value="">— كل البنود —</option>
-              {(categories as ExpenseCategory[]).map((c) => (
+              {categories.map((c) => (
                 <option key={c.id} value={c.id}>
                   {c.name_ar}
                   {c.account_code ? ` (${c.account_code})` : ''}
@@ -526,10 +711,10 @@ export default function DailyExpenses() {
             <select
               className="input input-sm w-full"
               value={cashboxId}
-              onChange={(e) => setCashboxId(e.target.value)}
+              onChange={(e) => setFilter({ cashboxId: e.target.value })}
             >
               <option value="">— كل الخزن —</option>
-              {(cashboxes as any[]).map((cb) => (
+              {cashboxes.map((cb) => (
                 <option key={cb.id} value={cb.id}>
                   {cb.name_ar}
                 </option>
@@ -541,10 +726,10 @@ export default function DailyExpenses() {
             <select
               className="input input-sm w-full"
               value={shiftId}
-              onChange={(e) => setShiftId(e.target.value)}
+              onChange={(e) => setFilter({ shiftId: e.target.value })}
             >
               <option value="">— كل الورديات —</option>
-              {(shifts as any[]).map((s) => (
+              {shifts.map((s) => (
                 <option key={s.id} value={s.id}>
                   {s.shift_no} ({s.status === 'open' ? 'مفتوحة' : 'مغلقة'})
                 </option>
@@ -556,7 +741,7 @@ export default function DailyExpenses() {
             <select
               className="input input-sm w-full"
               value={status}
-              onChange={(e) => setStatus(e.target.value as any)}
+              onChange={(e) => setFilter({ status: e.target.value as ExpenseFilterStatus })}
             >
               <option value="all">— الكل —</option>
               <option value="approved">معتمد</option>
@@ -566,30 +751,30 @@ export default function DailyExpenses() {
         </div>
       </div>
 
-      {/* ─── 4. Action buttons row ─── */}
+      {/* Action buttons */}
       <div className="flex items-center justify-end gap-2 flex-wrap">
-        <button className="btn-ghost text-xs flex items-center gap-1.5" onClick={handleExportExcel}>
+        <button className="btn-ghost text-xs flex items-center gap-1.5" onClick={exportExcel}>
           <Download size={14} /> تصدير Excel
         </button>
-        <button className="btn-ghost text-xs flex items-center gap-1.5" onClick={handleExportPdf}>
+        <button className="btn-ghost text-xs flex items-center gap-1.5" onClick={exportPdf}>
           <FileText size={14} /> تصدير PDF
         </button>
         <button
           className="btn-ghost text-xs flex items-center gap-1.5"
-          onClick={() => setShowAddCategory(true)}
+          onClick={openAddCategory}
           title="أضف بند مصروف جديد مرتبط بحساب محاسبي"
         >
           <ListPlus size={14} /> إضافة بند
         </button>
         <button
           className="btn-primary text-xs flex items-center gap-1.5"
-          onClick={() => setShowAddExpense(true)}
+          onClick={openAddExpense}
         >
           <Plus size={14} /> إضافة مصروف
         </button>
       </div>
 
-      {/* ─── 5. Register ─── */}
+      {/* Register table */}
       <div className="card p-5">
         <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
           <h3 className="font-black text-slate-800">سجل المصروفات</h3>
@@ -684,17 +869,41 @@ export default function DailyExpenses() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
 
-      {showAddExpense && (
-        <AddExpenseModal
-          onClose={() => setShowAddExpense(false)}
-          onSaved={() => setShowAddExpense(false)}
-          onAddCategory={() => setShowAddCategory(true)}
-        />
-      )}
-      {showAddCategory && (
-        <AddCategoryModal onClose={() => setShowAddCategory(false)} />
-      )}
+/* ─── Premium analytics tab — placeholder shell (PR-6) ───────────────
+ *
+ * Receives the full ExpenseTabContext via `ctx` so when the premium
+ * design lands it can render KPIs / charts / breakdowns from the same
+ * filtered `items` and the same period P&L the register sees. The
+ * placeholder is intentionally inert: no data fetching, no fake
+ * numbers, no chart libs imported until the premium markup arrives.
+ * ──────────────────────────────────────────────────────────────────── */
+
+function ExpensesAnalyticsPremiumTab({ ctx }: { ctx: ExpenseTabContext }) {
+  const { items, totalAmount, isFetching } = ctx;
+
+  return (
+    <div className="card p-8 flex flex-col items-center justify-center text-center gap-3 min-h-[280px]">
+      <div className="p-3 rounded-2xl bg-indigo-50 text-indigo-600">
+        <Sparkles size={28} />
+      </div>
+      <h3 className="text-base font-black text-slate-800">
+        سيتم تطبيق لوحة تحليلات المصروفات الاحترافية هنا
+      </h3>
+      <p className="text-xs text-slate-500 max-w-md leading-relaxed">
+        هذه التبويبة جاهزة لاستقبال التصميم الاحترافي القادم. كل البيانات
+        المطلوبة (المصروفات المُفلترة، الإيرادات والربح للفترة، الفلاتر،
+        قوائم الموظفين والبنود والخزن والورديات) متاحة عبر السياق المشترك
+        مع تبويبة السجل.
+      </p>
+      <div className="text-[10px] text-slate-400 mt-2 font-mono">
+        {isFetching
+          ? 'جارٍ تحميل البيانات…'
+          : `${items.length} مصروف ضمن الفلتر · إجمالي ${EGP(totalAmount)}`}
+      </div>
     </div>
   );
 }
@@ -1224,481 +1433,3 @@ function FieldLabel({
   );
 }
 
-/* ─── PR-4 · Smart Expense Analytics ──────────────────────────────────
- *
- * One section, twelve cards/charts. All expense numbers come from the
- * same `items` array driving the register, so totals match exactly.
- * Revenue + profit come from /accounting/reports/profit-and-loss using
- * period-only (from/to) — employee/cashbox/shift filters from PR-3
- * intentionally do NOT narrow revenue (the period sales total isn't
- * sliced by an expense's responsible employee or cashbox; pretending
- * otherwise would invent data).
- * ──────────────────────────────────────────────────────────────────── */
-
-function AnalyticsSection({
-  items,
-  from,
-  to,
-  totalAmount,
-}: {
-  items: Expense[];
-  from: string;
-  to: string;
-  totalAmount: number;
-}) {
-  const { data: pnl } = useQuery({
-    queryKey: ['daily-expenses-pnl', from, to],
-    queryFn: () => accountingApi.profitAndLoss({ from, to }),
-    staleTime: 60_000,
-  });
-
-  const stats = useMemo(() => {
-    const count = items.length;
-    const total = items.reduce((s, e) => s + Number(e.amount || 0), 0);
-    const avg = count > 0 ? total / count : 0;
-
-    const groupBy = (key: (e: Expense) => string) => {
-      const m = new Map<string, { label: string; total: number; count: number }>();
-      items.forEach((e) => {
-        const k = key(e);
-        const cur = m.get(k) || { label: k, total: 0, count: 0 };
-        cur.total += Number(e.amount || 0);
-        cur.count += 1;
-        m.set(k, cur);
-      });
-      return Array.from(m.values()).sort((a, b) => b.total - a.total);
-    };
-
-    const byCategory = groupBy((e) => e.category_name || '— غير محدد —');
-    const byEmployee = groupBy(
-      (e) => e.employee_name || e.employee_username || '— غير محدد —',
-    );
-    const byCashbox = groupBy((e) => e.cashbox_name || '— بدون خزنة —');
-    const byShift = groupBy((e) => e.shift_no || '— بدون وردية —');
-
-    const topN = items
-      .slice()
-      .sort((a, b) => Number(b.amount || 0) - Number(a.amount || 0))
-      .slice(0, 5);
-
-    // Daily trend — always per-day granularity (per PR-4 spec). Bucket
-    // by Cairo calendar day so a Cairo-evening expense doesn't drift
-    // into the previous bar.
-    const dailyMap = new Map<string, number>();
-    items.forEach((e) => {
-      const d = toCairoYMD(e.expense_date);
-      if (!d) return;
-      dailyMap.set(d, (dailyMap.get(d) || 0) + Number(e.amount || 0));
-    });
-    const dailyTrend = Array.from(dailyMap.entries())
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([date, total]) => ({ date, label: fmtDateDMY(date), total }));
-
-    return {
-      count,
-      total,
-      avg,
-      byCategory,
-      byEmployee,
-      byCashbox,
-      byShift,
-      topN,
-      dailyTrend,
-    };
-  }, [items]);
-
-  const periodRevenue = Number(pnl?.net_revenue || 0);
-  const periodNetProfit = Number(pnl?.net_profit || 0);
-  const periodOpEx = Number(pnl?.operating_expenses || 0);
-  const expensesAsPctOfRevenue =
-    periodRevenue > 0 ? (stats.total / periodRevenue) * 100 : 0;
-
-  // Sanity: register total vs computed total should be equal (both
-  // come from `items`). Show as a footnote if off (would only happen
-  // on a bug).
-  const totalDrift = Math.abs(stats.total - totalAmount);
-
-  if (items.length === 0) {
-    return (
-      <div className="card p-5 text-center text-xs text-slate-500">
-        <Sparkles size={20} className="mx-auto mb-2 text-slate-300" />
-        لا توجد بيانات كافية للتحليل في الفترة الحالية.
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-4">
-      <div className="flex items-center gap-2">
-        <Sparkles size={18} className="text-indigo-600" />
-        <h3 className="font-black text-slate-800 text-sm">تحليل ذكي للمصروفات</h3>
-        <span className="text-[10px] text-slate-400">
-          {fmtDateDMY(from)} → {fmtDateDMY(to)}
-        </span>
-        {totalDrift > 0.01 && (
-          <span className="chip text-[10px] bg-rose-50 text-rose-700 border-rose-200">
-            تنبيه: فرق {EGP(totalDrift)} بين الإجمالي والتفصيل
-          </span>
-        )}
-      </div>
-
-      {/* ─── Headline KPIs (5) ─── */}
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-        <KpiCard
-          icon={<DollarSign size={16} />}
-          tone="rose"
-          label="إجمالي المصروفات"
-          value={EGP(stats.total)}
-          hint={`${stats.count} سجل`}
-        />
-        <KpiCard
-          icon={<Hash size={16} />}
-          tone="slate"
-          label="عدد المصروفات"
-          value={stats.count.toLocaleString('en-US')}
-          hint="ضمن الفلتر"
-        />
-        <KpiCard
-          icon={<BarChart3 size={16} />}
-          tone="indigo"
-          label="متوسط المصروف"
-          value={EGP(stats.avg)}
-          hint="إجمالي ÷ عدد"
-        />
-        <KpiCard
-          icon={<TrendingDown size={16} />}
-          tone="amber"
-          label="نسبة من الإيرادات"
-          value={
-            periodRevenue > 0
-              ? `${expensesAsPctOfRevenue.toFixed(1)}%`
-              : '—'
-          }
-          hint={periodRevenue > 0 ? `إيراد الفترة ${EGP(periodRevenue)}` : 'لا توجد إيرادات'}
-        />
-        <KpiCard
-          icon={periodNetProfit >= 0 ? <TrendingUp size={16} /> : <TrendingDown size={16} />}
-          tone={periodNetProfit >= 0 ? 'emerald' : 'rose'}
-          label="صافي ربح الفترة"
-          value={EGP(periodNetProfit)}
-          hint="من تقرير الأرباح"
-        />
-      </div>
-
-      {/* ─── Daily trend chart + Revenue linkage ─── */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
-        <div className="card p-4 lg:col-span-2">
-          <div className="flex items-center justify-between mb-2">
-            <h4 className="text-xs font-black text-slate-700 flex items-center gap-1.5">
-              <BarChart3 size={14} /> الاتجاه اليومي للمصروفات
-            </h4>
-            <span className="text-[10px] text-slate-400">
-              {stats.dailyTrend.length} يوم
-            </span>
-          </div>
-          <div style={{ height: 220 }}>
-            <Bar
-              data={{
-                labels: stats.dailyTrend.map((d) => d.label),
-                datasets: [
-                  {
-                    label: 'مصروفات اليوم',
-                    data: stats.dailyTrend.map((d) => d.total),
-                    backgroundColor: 'rgba(244, 63, 94, 0.7)',
-                    borderColor: 'rgba(190, 18, 60, 1)',
-                    borderWidth: 1,
-                    borderRadius: 4,
-                  },
-                ],
-              }}
-              options={{
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {
-                  legend: { display: false },
-                  tooltip: {
-                    callbacks: {
-                      label: (ctx) => EGP(Number(ctx.parsed.y || 0)),
-                    },
-                  },
-                },
-                scales: {
-                  x: { ticks: { font: { size: 10 } } },
-                  y: {
-                    beginAtZero: true,
-                    ticks: {
-                      font: { size: 10 },
-                      callback: (v) => `${Number(v).toLocaleString('en-US')}`,
-                    },
-                  },
-                },
-              }}
-            />
-          </div>
-        </div>
-
-        <div className="card p-4 space-y-3">
-          <h4 className="text-xs font-black text-slate-700 flex items-center gap-1.5">
-            <TrendingUp size={14} /> ارتباط الإيرادات والربح
-          </h4>
-          <div className="space-y-2 text-xs">
-            <RevenueRow label="إيراد الفترة" value={EGP(periodRevenue)} tone="emerald" />
-            <RevenueRow
-              label="مصروفات تشغيل (P&L)"
-              value={EGP(periodOpEx)}
-              tone="rose"
-            />
-            <RevenueRow
-              label="صافي الربح"
-              value={EGP(periodNetProfit)}
-              tone={periodNetProfit >= 0 ? 'emerald' : 'rose'}
-            />
-            <div className="border-t border-slate-100 pt-2 mt-2">
-              <RevenueRow
-                label="مصروفات الفلتر الحالي"
-                value={EGP(stats.total)}
-                tone="slate"
-              />
-              <p className="text-[10px] text-slate-400 mt-1.5 leading-relaxed">
-                الإيراد والربح تُحسب لكامل الفترة ({fmtDateDMY(from)} → {fmtDateDMY(to)}).
-                فلاتر الموظف/الخزنة/الوردية تخص المصروفات فقط.
-              </p>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* ─── Breakdowns (4) ─── */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-        <BreakdownCard
-          title="حسب البند"
-          icon={<PieIcon size={14} />}
-          rows={stats.byCategory}
-          total={stats.total}
-        />
-        <BreakdownCard
-          title="حسب الموظف المسؤول"
-          icon={<Users size={14} />}
-          rows={stats.byEmployee}
-          total={stats.total}
-        />
-        <BreakdownCard
-          title="حسب الخزنة"
-          icon={<Wallet size={14} />}
-          rows={stats.byCashbox}
-          total={stats.total}
-        />
-        <BreakdownCard
-          title="حسب الوردية"
-          icon={<Hash size={14} />}
-          rows={stats.byShift}
-          total={stats.total}
-        />
-      </div>
-
-      {/* ─── Top-5 individual expenses ─── */}
-      <div className="card p-4">
-        <h4 className="text-xs font-black text-slate-700 mb-3 flex items-center gap-1.5">
-          <TrendingUp size={14} /> أعلى 5 مصروفات
-        </h4>
-        {stats.topN.length === 0 ? (
-          <div className="text-center text-slate-500 text-xs py-4">لا توجد سجلات.</div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs">
-              <thead>
-                <tr className="bg-slate-50 text-slate-600 text-[11px]">
-                  <th className="p-2 text-right">#</th>
-                  <th className="p-2 text-right">التاريخ</th>
-                  <th className="p-2 text-right">البند</th>
-                  <th className="p-2 text-right">المسؤول</th>
-                  <th className="p-2 text-center">المبلغ</th>
-                  <th className="p-2 text-right">الوصف</th>
-                </tr>
-              </thead>
-              <tbody>
-                {stats.topN.map((e, i) => (
-                  <tr key={e.id} className="border-t border-slate-100">
-                    <td className="p-2 font-mono text-[10px] text-slate-500">{i + 1}</td>
-                    <td className="p-2 font-mono tabular-nums">{fmtDateDMY(e.expense_date)}</td>
-                    <td className="p-2">{e.category_name || '—'}</td>
-                    <td className="p-2 text-slate-700 text-[11px]">
-                      {e.employee_name || e.employee_username || '—'}
-                    </td>
-                    <td className="p-2 text-center font-bold tabular-nums text-rose-700">
-                      {EGP(e.amount)}
-                    </td>
-                    <td className="p-2 text-slate-600 text-[11px] truncate max-w-xs">
-                      {e.description || '—'}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/* ─── Small UI helpers used only by AnalyticsSection ─── */
-
-function KpiCard({
-  icon,
-  tone,
-  label,
-  value,
-  hint,
-}: {
-  icon: React.ReactNode;
-  tone: 'rose' | 'emerald' | 'indigo' | 'amber' | 'slate';
-  label: string;
-  value: string;
-  hint?: string;
-}) {
-  const toneMap = {
-    rose: 'bg-rose-50 text-rose-700',
-    emerald: 'bg-emerald-50 text-emerald-700',
-    indigo: 'bg-indigo-50 text-indigo-700',
-    amber: 'bg-amber-50 text-amber-700',
-    slate: 'bg-slate-100 text-slate-700',
-  } as const;
-  return (
-    <div className="card p-3 space-y-1.5">
-      <div className="flex items-center justify-between">
-        <span className="text-[10px] text-slate-500 font-bold">{label}</span>
-        <span className={`p-1 rounded ${toneMap[tone]}`}>{icon}</span>
-      </div>
-      <div className="text-base font-black text-slate-800 tabular-nums">{value}</div>
-      {hint && <div className="text-[10px] text-slate-400">{hint}</div>}
-    </div>
-  );
-}
-
-function RevenueRow({
-  label,
-  value,
-  tone,
-}: {
-  label: string;
-  value: string;
-  tone: 'rose' | 'emerald' | 'slate';
-}) {
-  const toneMap = {
-    rose: 'text-rose-700',
-    emerald: 'text-emerald-700',
-    slate: 'text-slate-700',
-  } as const;
-  return (
-    <div className="flex items-center justify-between">
-      <span className="text-slate-600">{label}</span>
-      <span className={`font-black tabular-nums ${toneMap[tone]}`}>{value}</span>
-    </div>
-  );
-}
-
-function BreakdownCard({
-  title,
-  icon,
-  rows,
-  total,
-}: {
-  title: string;
-  icon: React.ReactNode;
-  rows: Array<{ label: string; total: number; count: number }>;
-  total: number;
-}) {
-  // Group rows past the top-6 into "أخرى" so the doughnut stays
-  // legible. The list below the chart still shows everything.
-  const TOP = 6;
-  const top = rows.slice(0, TOP);
-  const rest = rows.slice(TOP);
-  const restTotal = rest.reduce((s, r) => s + r.total, 0);
-  const chartLabels = [
-    ...top.map((r) => r.label),
-    ...(rest.length > 0 ? [`أخرى (${rest.length})`] : []),
-  ];
-  const chartData = [
-    ...top.map((r) => r.total),
-    ...(rest.length > 0 ? [restTotal] : []),
-  ];
-
-  // Cycled palette — keeps cards visually distinct without pulling in
-  // a colour library.
-  const palette = [
-    '#6366f1', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6',
-    '#06b6d4', '#94a3b8',
-  ];
-
-  return (
-    <div className="card p-4">
-      <h4 className="text-xs font-black text-slate-700 mb-3 flex items-center gap-1.5">
-        {icon} {title}
-      </h4>
-      {rows.length === 0 ? (
-        <div className="text-center text-slate-500 text-xs py-4">لا توجد بيانات.</div>
-      ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-center">
-          <div style={{ height: 180 }}>
-            <Doughnut
-              data={{
-                labels: chartLabels,
-                datasets: [
-                  {
-                    data: chartData,
-                    backgroundColor: chartLabels.map((_, i) => palette[i % palette.length]),
-                    borderWidth: 1,
-                    borderColor: '#fff',
-                  },
-                ],
-              }}
-              options={{
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {
-                  legend: { display: false },
-                  tooltip: {
-                    callbacks: {
-                      label: (ctx) => {
-                        const v = Number(ctx.parsed) || 0;
-                        const pct = total > 0 ? ((v / total) * 100).toFixed(1) : '0.0';
-                        return `${ctx.label}: ${EGP(v)} (${pct}%)`;
-                      },
-                    },
-                  },
-                },
-                cutout: '60%',
-              }}
-            />
-          </div>
-          <div className="space-y-1.5 max-h-[180px] overflow-y-auto pr-1">
-            {rows.slice(0, 8).map((r, i) => {
-              const pct = total > 0 ? (r.total / total) * 100 : 0;
-              return (
-                <div key={r.label + i} className="flex items-center justify-between text-[11px]">
-                  <span className="flex items-center gap-1.5 truncate max-w-[55%]">
-                    <span
-                      className="w-2 h-2 rounded-sm shrink-0"
-                      style={{ background: palette[i % palette.length] }}
-                    />
-                    <span className="truncate">{r.label}</span>
-                  </span>
-                  <span className="text-slate-700 font-bold tabular-nums">
-                    {EGP(r.total)}{' '}
-                    <span className="text-[9px] text-slate-400">{pct.toFixed(1)}%</span>
-                  </span>
-                </div>
-              );
-            })}
-            {rows.length > 8 && (
-              <div className="text-[10px] text-slate-400 text-center pt-1">
-                +{rows.length - 8} عناصر أخرى
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
