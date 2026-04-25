@@ -977,4 +977,126 @@ export class ShiftsService {
     const summary = await this.computeSummary(row);
     return { ...row, summary };
   }
+
+  // ─── PR-B1 — Shift counted-cash adjustment workflow (migration 096)
+  //
+  //   Permission-gated correction for typos / miscounts in
+  //   shifts.actual_closing. NOT an accounting transaction:
+  //     · NO journal_entries created
+  //     · NO cashbox_transactions created
+  //     · NO cashboxes.current_balance change
+  //     · NO FinancialEngine call
+  //   Pure metadata UPDATE on shifts.actual_closing — Postgres
+  //   recomputes shifts.difference (GENERATED column) automatically.
+  //   Audit row inserted into shift_count_adjustments with old/new
+  //   actual/expected/difference snapshots so the trail is fully
+  //   reconstructable later.
+  //   Permission gate (`shifts.close.adjust`) is enforced at the
+  //   controller layer; the service trusts the caller has been
+  //   authorised already.
+  // ────────────────────────────────────────────────────────────────
+
+  async adjustCount(
+    shiftId: string,
+    dto: { new_actual_closing: number; reason: string },
+    userId: string,
+  ) {
+    const reason = (dto.reason || '').trim();
+    if (reason.length < 5) {
+      throw new BadRequestException(
+        'سبب التعديل مطلوب (5 أحرف على الأقل)',
+      );
+    }
+    const newActual = Number(dto.new_actual_closing);
+    if (!Number.isFinite(newActual) || newActual < 0) {
+      throw new BadRequestException(
+        'المبلغ المعدّل يجب أن يكون رقمًا موجبًا',
+      );
+    }
+    return this.ds.transaction(async (em) => {
+      // Lock the row so concurrent close + adjust don't race.
+      const [shift] = await em.query(
+        `SELECT id, shift_no, actual_closing, expected_closing,
+                difference, status, closed_at
+           FROM shifts WHERE id = $1 FOR UPDATE`,
+        [shiftId],
+      );
+      if (!shift) throw new NotFoundException('الوردية غير موجودة');
+
+      const oldActual =
+        shift.actual_closing == null ? null : Number(shift.actual_closing);
+      const oldExpected =
+        shift.expected_closing == null ? null : Number(shift.expected_closing);
+      const oldDiff =
+        oldActual !== null && oldExpected !== null
+          ? oldActual - oldExpected
+          : null;
+
+      // No-op guard — refuse to log noise when the new value matches
+      // the old value to two decimals.
+      if (oldActual !== null && Math.abs(oldActual - newActual) < 0.005) {
+        throw new BadRequestException(
+          'القيمة الجديدة مطابقة للقيمة الحالية',
+        );
+      }
+
+      // Apply the correction. The GENERATED `difference` column
+      // recomputes automatically; expected_closing is stored on the
+      // row at close time and stays as-is here (it's the
+      // computeSummary value from when the close was submitted).
+      await em.query(
+        `UPDATE shifts SET actual_closing = $1 WHERE id = $2`,
+        [newActual, shiftId],
+      );
+      const newDiff =
+        oldExpected !== null ? newActual - oldExpected : null;
+
+      // Insert the audit row.
+      const [audit] = await em.query(
+        `INSERT INTO shift_count_adjustments
+           (shift_id, old_actual_closing, new_actual_closing,
+            old_expected_closing, new_expected_closing,
+            old_difference, new_difference,
+            reason, adjusted_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         RETURNING *`,
+        [
+          shiftId,
+          oldActual,
+          newActual,
+          oldExpected,
+          oldExpected,
+          oldDiff,
+          newDiff,
+          reason,
+          userId,
+        ],
+      );
+
+      // Return the updated shift + the new audit row so the UI can
+      // show both in a single round-trip.
+      const [updated] = await em.query(
+        `SELECT s.*,
+                cb.name_ar AS cashbox_name,
+                u1.full_name AS opened_by_name
+           FROM shifts s
+           LEFT JOIN cashboxes cb ON cb.id = s.cashbox_id
+           LEFT JOIN users u1     ON u1.id = s.opened_by
+          WHERE s.id = $1`,
+        [shiftId],
+      );
+      return { shift: updated, adjustment: audit };
+    });
+  }
+
+  async listAdjustments(shiftId: string) {
+    return this.ds.query(
+      `SELECT a.*, u.full_name AS adjusted_by_name
+         FROM shift_count_adjustments a
+         LEFT JOIN users u ON u.id = a.adjusted_by
+        WHERE a.shift_id = $1
+        ORDER BY a.adjusted_at DESC`,
+      [shiftId],
+    );
+  }
 }
