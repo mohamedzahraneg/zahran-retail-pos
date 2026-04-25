@@ -1328,6 +1328,18 @@ export class EmployeesService {
       cashbox_id?: string;
       offset_account_code?: string;
       notes?: string;
+      /**
+       * PR-15 — explicit shift linkage. When supplied:
+       *   - shift must be in 'open' or 'pending_close' status
+       *   - if cashbox_id is also supplied it must equal the shift's
+       *     cashbox_id (otherwise the settlement would be attributed
+       *     to the wrong drawer)
+       *   - if cashbox_id is omitted we derive it from the shift
+       * When omitted, the settlement is recorded with shift_id=NULL
+       * (the historical "direct cashbox" path) — shift-closing falls
+       * back to the derived (cashbox+time-window) match for visibility.
+       */
+      shift_id?: string;
     },
     createdBy: string,
   ) {
@@ -1336,9 +1348,36 @@ export class EmployeesService {
     }
     const method = dto.method ?? 'cash';
 
+    // PR-15 — shift validation + cashbox derivation. Runs before the
+    // method pre-conditions so a bad shift is caught with a friendly
+    // Arabic error instead of a downstream "cashbox required".
+    let resolvedCashboxId = dto.cashbox_id;
+    let resolvedShiftId: string | null = null;
+    if (dto.shift_id) {
+      const [shift] = await this.ds.query(
+        `SELECT id, status, cashbox_id FROM shifts WHERE id = $1`,
+        [dto.shift_id],
+      );
+      if (!shift) {
+        throw new BadRequestException('الوردية المختارة غير موجودة');
+      }
+      if (shift.status !== 'open' && shift.status !== 'pending_close') {
+        throw new BadRequestException(
+          'لا يمكن الصرف من وردية مغلقة — اختر وردية مفتوحة أو خزنة مباشرة',
+        );
+      }
+      if (resolvedCashboxId && resolvedCashboxId !== shift.cashbox_id) {
+        throw new BadRequestException(
+          'الخزنة المختارة لا تطابق خزنة الوردية المختارة',
+        );
+      }
+      resolvedCashboxId = resolvedCashboxId ?? shift.cashbox_id;
+      resolvedShiftId = shift.id;
+    }
+
     // Per-method pre-conditions — fail early so we never create a
     // settlement row without the inputs needed to post its JE.
-    if ((method === 'cash' || method === 'bank') && !dto.cashbox_id) {
+    if ((method === 'cash' || method === 'bank') && !resolvedCashboxId) {
       throw new BadRequestException(
         method === 'cash'
           ? 'تسوية نقدية تتطلب اختيار خزنة'
@@ -1364,19 +1403,24 @@ export class EmployeesService {
 
     return this.ds.transaction(async (em) => {
       // 1. Insert the settlement row (journal_entry_id filled in below).
+      // PR-15 — shift_id column added in migration 095. Stored as NULL
+      // when the operator chose the direct-cashbox path.
       const [row] = await em.query(
         `INSERT INTO employee_settlements
-           (user_id, amount, settlement_date, method, cashbox_id, notes, created_by)
-         VALUES ($1, $2, COALESCE($3::date, CURRENT_DATE), $4, $5, $6, $7)
+           (user_id, amount, settlement_date, method, cashbox_id,
+            notes, created_by, shift_id)
+         VALUES ($1, $2, COALESCE($3::date, CURRENT_DATE),
+                 $4, $5, $6, $7, $8)
          RETURNING *`,
         [
           userId,
           dto.amount,
           dto.settlement_date || null,
           method,
-          dto.cashbox_id || null,
+          resolvedCashboxId || null,
           dto.notes || null,
           createdBy,
+          resolvedShiftId,
         ],
       );
 
@@ -1409,9 +1453,9 @@ export class EmployeesService {
             };
       const cr = isCashOrBank
         ? {
-            resolve_from_cashbox_id: dto.cashbox_id!,
+            resolve_from_cashbox_id: resolvedCashboxId!,
             credit: dto.amount,
-            cashbox_id: dto.cashbox_id!,
+            cashbox_id: resolvedCashboxId!,
           }
         : {
             account_code: '1123',
@@ -1421,7 +1465,7 @@ export class EmployeesService {
       const cashMovements = isCashOrBank
         ? [
             {
-              cashbox_id: dto.cashbox_id!,
+              cashbox_id: resolvedCashboxId!,
               direction: 'out' as const,
               amount: dto.amount,
               category: 'employee_settlement',

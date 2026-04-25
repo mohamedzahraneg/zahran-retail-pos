@@ -179,6 +179,8 @@ export class AttendanceController {
       cashbox_id: string;
       excess_handling?: 'advance' | 'bonus';
       notes?: string;
+      /** PR-15 — explicit shift linkage from the source selector. */
+      shift_id?: string;
     },
   ) {
     return this.svc.payWage(body.user_id, body, user.userId, user.permissions);

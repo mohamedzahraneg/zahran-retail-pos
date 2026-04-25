@@ -271,11 +271,11 @@ export class ShiftsService {
     // so older callers don't break, but the UI now uses the split.
     const totalExpenses = totalOperatingExpenses + totalEmployeeAdvances;
 
-    // PR-14 — Employee settlement payouts (DR 213 / CR cashbox). These
-    // never made it into the previous shift summary because the existing
-    // cashbox-txns aggregation only buckets known categories and skipped
-    // `employee_settlement`. Pull them straight from the source table,
-    // joined to the JE for the entry number.
+    // PR-14 — Employee settlement payouts (DR 213 / CR cashbox).
+    // PR-15 — Match by EITHER explicit shift_id OR (cashbox+window)
+    // for legacy rows. The `link_method` column tells the UI which
+    // path matched so the badge can render "مرتبط بالوردية" (explicit)
+    // or "مرتبط تلقائياً بالوردية" (derived).
     const settlementRows = await this.ds.query(
       `
       SELECT es.id::text AS id,
@@ -290,20 +290,30 @@ export class ShiftsService {
              es.notes,
              es.created_by,
              cu.full_name AS created_by_name,
-             je.entry_no AS je_entry_no
+             je.entry_no AS je_entry_no,
+             CASE
+               WHEN es.shift_id = $1 THEN 'explicit'
+               ELSE 'derived'
+             END AS link_method
         FROM employee_settlements es
         LEFT JOIN users u   ON u.id = es.user_id
         LEFT JOIN cashboxes cb ON cb.id = es.cashbox_id
         LEFT JOIN users cu  ON cu.id = es.created_by
         LEFT JOIN journal_entries je ON je.id = es.journal_entry_id
-       WHERE es.cashbox_id = $1
-         AND es.created_at >= $2
-         AND es.created_at <= $3
+       WHERE (
+               es.shift_id = $1
+               OR (
+                 es.shift_id IS NULL
+                 AND es.cashbox_id = $2
+                 AND es.created_at >= $3
+                 AND es.created_at <= $4
+               )
+             )
          AND es.method IN ('cash','bank')
          AND es.is_void = FALSE
        ORDER BY es.created_at DESC
       `,
-      [shift.cashbox_id, shift.opened_at, upperBound],
+      [shift.id, shift.cashbox_id, shift.opened_at, upperBound],
     );
     const totalEmployeeSettlements = settlementRows.reduce(
       (s: number, r: any) => s + Number(r.amount || 0),
@@ -331,7 +341,10 @@ export class ShiftsService {
         je_entry_no: es.je_entry_no,
         created_by_name: es.created_by_name,
         accounting_impact: `DR 213 / CR ${es.cashbox_name ?? 'cashbox'}`,
-        link_method: 'derived', // employee_settlements has no shift_id yet
+        // PR-15 — explicit when employee_settlements.shift_id matches,
+        // derived for legacy rows backfilled by cashbox+window only
+        // (or rows that span multiple overlapping shifts).
+        link_method: es.link_method,
       });
     }
     for (const e of advanceExpenseRows) {

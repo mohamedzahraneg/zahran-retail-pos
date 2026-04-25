@@ -135,6 +135,34 @@ export class AccountingService {
       let cashboxId = dto.cashbox_id ?? null;
       let shiftId: string | null = (dto as any).shift_id ?? null;
 
+      // PR-15 — when the caller picked an explicit shift via the
+      // source selector, validate it before auto-resolution. Catches
+      // closed shifts and cashbox mismatch with friendly Arabic errors
+      // instead of letting the row land on the wrong drawer.
+      if (shiftId) {
+        const [pickedShift] = await em.query(
+          `SELECT id, status, cashbox_id FROM shifts WHERE id = $1`,
+          [shiftId],
+        );
+        if (!pickedShift) {
+          throw new BadRequestException('الوردية المختارة غير موجودة');
+        }
+        if (
+          pickedShift.status !== 'open' &&
+          pickedShift.status !== 'pending_close'
+        ) {
+          throw new BadRequestException(
+            'لا يمكن الصرف من وردية مغلقة — اختر وردية مفتوحة أو خزنة مباشرة',
+          );
+        }
+        if (cashboxId && cashboxId !== pickedShift.cashbox_id) {
+          throw new BadRequestException(
+            'الخزنة المختارة لا تطابق خزنة الوردية المختارة',
+          );
+        }
+        cashboxId = cashboxId ?? pickedShift.cashbox_id;
+      }
+
       // Single lookup whether we need cashbox, shift, or both.
       if (!cashboxId || !shiftId) {
         const [openShift] = await em.query(
