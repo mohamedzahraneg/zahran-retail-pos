@@ -65,6 +65,22 @@ export interface EmployeeCashMovement {
   link_method: 'explicit' | 'derived';
 }
 
+/** PR-B1 — one row in the shift counted-cash adjustment audit. */
+export interface ShiftCountAdjustment {
+  id: string;
+  shift_id: string;
+  old_actual_closing: number | string | null;
+  new_actual_closing: number | string;
+  old_expected_closing: number | string | null;
+  new_expected_closing: number | string | null;
+  old_difference: number | string | null;
+  new_difference: number | string | null;
+  reason: string;
+  adjusted_by: string;
+  adjusted_by_name?: string | null;
+  adjusted_at: string;
+}
+
 export interface ShiftSummary {
   shift_id: string;
   shift_no: string;
@@ -191,6 +207,14 @@ export const shiftsApi = {
   get: (id: string) => unwrap<Shift>(api.get(`/shifts/${id}`)),
 
   summary: (id: string) => unwrap<ShiftSummary>(api.get(`/shifts/${id}/summary`)),
+
+  // PR-B1 — counted-cash adjustment workflow
+  adjustCount: (id: string, body: { new_actual_closing: number; reason: string }) =>
+    unwrap<{ shift: Shift; adjustment: ShiftCountAdjustment }>(
+      api.post(`/shifts/${id}/adjust-count`, body),
+    ),
+  listAdjustments: (id: string) =>
+    unwrap<ShiftCountAdjustment[]>(api.get(`/shifts/${id}/adjustments`)),
 
   open: (payload: OpenShiftPayload) =>
     unwrap<Shift>(api.post('/shifts/open', payload)),

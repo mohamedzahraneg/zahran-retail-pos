@@ -120,4 +120,26 @@ export class ShiftsController {
   summary(@Param('id', ParseUUIDPipe) id: string) {
     return this.svc.summary(id);
   }
+
+  // ─── PR-B1 — Counted-cash adjustment workflow (migration 096) ───
+  // POST /shifts/:id/adjust-count → permission-gated correction
+  // GET  /shifts/:id/adjustments  → audit history (any viewer)
+  // ────────────────────────────────────────────────────────────────
+
+  @Post(':id/adjust-count')
+  @Permissions('shifts.close.adjust')
+  @ApiOperation({ summary: 'تعديل مبلغ الإقفال للوردية (تصحيح العد)' })
+  adjustCount(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() body: { new_actual_closing: number; reason: string },
+    @CurrentUser() user: JwtUser,
+  ) {
+    return this.svc.adjustCount(id, body, user.userId);
+  }
+
+  @Get(':id/adjustments')
+  @ApiOperation({ summary: 'سجل تعديلات مبلغ الإقفال للوردية' })
+  listAdjustments(@Param('id', ParseUUIDPipe) id: string) {
+    return this.svc.listAdjustments(id);
+  }
 }

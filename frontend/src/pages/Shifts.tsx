@@ -20,6 +20,7 @@ import {
   Shift,
   OpenShiftPayload,
   ShiftSummary,
+  ShiftCountAdjustment,
   VarianceTreatment,
   ApproveClosePayload,
 } from '@/api/shifts.api';
@@ -954,6 +955,10 @@ function Row({ label, value, color }: { label: string; value: string; color?: st
 function ShiftDetailModal({ shift, onClose }: { shift: Shift; onClose: () => void }) {
   const qc = useQueryClient();
   const [showClose, setShowClose] = useState(false);
+  // PR-B1 — counted-cash adjustment modal state.
+  const [showAdjust, setShowAdjust] = useState(false);
+  const hasPermission = useAuthStore((s) => s.hasPermission);
+  const canAdjustCount = hasPermission('shifts.close.adjust');
 
   // Always fetch the live detail (includes summary + full invoice list) so the
   // modal is correct for both open and closed shifts — never rely on the row
@@ -963,6 +968,15 @@ function ShiftDetailModal({ shift, onClose }: { shift: Shift; onClose: () => voi
     queryFn: () => shiftsApi.get(shift.id),
     refetchInterval: shift.status === 'open' ? 15_000 : false,
     initialData: shift,
+  });
+
+  // PR-B1 — pull adjustment history alongside the detail. Shown both
+  // to the operator (read-only) and to admins (history under the
+  // adjust button).
+  const { data: adjustments = [] } = useQuery({
+    queryKey: ['shift-adjustments', shift.id],
+    queryFn: () => shiftsApi.listAdjustments(shift.id),
+    staleTime: 30_000,
   });
 
   const s: ShiftSummary | undefined = detail?.summary;
@@ -1319,6 +1333,30 @@ function ShiftDetailModal({ shift, onClose }: { shift: Shift; onClose: () => voi
             );
           })()}
 
+          {/* PR-B1 — adjust counted cash (permission-gated). Only
+           *  shown after the cashier submitted a count (so we have
+           *  something to correct). Not an accounting transaction —
+           *  see migration 096 header. */}
+          {!isOpen && canAdjustCount && detail && (
+            <div className="flex items-center justify-end pt-1">
+              <button
+                type="button"
+                className="px-3 py-1.5 rounded-lg text-xs font-bold bg-amber-50 text-amber-800 border border-amber-200 hover:bg-amber-100"
+                onClick={() => setShowAdjust(true)}
+              >
+                ✎ تعديل مبلغ الإقفال
+              </button>
+            </div>
+          )}
+
+          {/* PR-B1 — adjustment history (always rendered when a shift
+           *  has any adjustments, regardless of permission — anyone
+           *  who can view the shift can see why the counted cash
+           *  changed). */}
+          {!isOpen && (
+            <ShiftAdjustmentHistory adjustments={adjustments} />
+          )}
+
           {isOpen && (
             <div className="flex items-center justify-end pt-2">
               <button
@@ -1328,6 +1366,21 @@ function ShiftDetailModal({ shift, onClose }: { shift: Shift; onClose: () => voi
                 <Square size={16} /> إغلاق الوردية الآن
               </button>
             </div>
+          )}
+
+          {/* PR-B1 — adjustment modal */}
+          {showAdjust && detail && (
+            <AdjustCountModal
+              shift={detail}
+              currentExpected={Number(s?.expected_closing || 0)}
+              onClose={() => setShowAdjust(false)}
+              onSaved={() => {
+                qc.invalidateQueries({ queryKey: ['shift-detail', shift.id] });
+                qc.invalidateQueries({ queryKey: ['shift-adjustments', shift.id] });
+                qc.invalidateQueries({ queryKey: ['shifts'] });
+                setShowAdjust(false);
+              }}
+            />
           )}
 
           {/* Invoice list */}
@@ -1837,6 +1890,231 @@ function CashOutLine({ label, value }: { label: string; value: number }) {
     <div className="flex items-center justify-between py-0.5">
       <span className="text-slate-600">{label}</span>
       <span className="font-mono tabular-nums text-slate-700">{EGP(value)}</span>
+    </div>
+  );
+}
+
+/* ──────────────────────────────────────────────────────────────────
+ * PR-B1 — Counted-cash adjustment modal + history table.
+ *
+ * The adjustment is metadata-only: it UPDATEs shifts.actual_closing
+ * and writes one audit row. shifts.difference is a generated column
+ * so the new diff falls out automatically. NO journal_entries, NO
+ * cashbox_transactions, NO cashbox balance change.
+ * ────────────────────────────────────────────────────────────────── */
+
+function AdjustCountModal({
+  shift,
+  currentExpected,
+  onClose,
+  onSaved,
+}: {
+  shift: Shift;
+  currentExpected: number;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const currentActual = Number(
+    (shift as any).actual_closing ??
+      (shift as any).close_requested_amount ??
+      0,
+  );
+  const currentDiff = currentActual - currentExpected;
+  const [newActual, setNewActual] = useState<string>(
+    currentActual ? String(currentActual) : '',
+  );
+  const [reason, setReason] = useState('');
+
+  const newActualNum = Number(newActual || 0);
+  const newDiff = newActualNum - currentExpected;
+  const reasonValid = reason.trim().length >= 5;
+  const amountValid =
+    Number.isFinite(newActualNum) &&
+    newActualNum >= 0 &&
+    Math.abs(newActualNum - currentActual) > 0.005;
+  const canSave = reasonValid && amountValid;
+
+  const save = useMutation({
+    mutationFn: () =>
+      shiftsApi.adjustCount(shift.id, {
+        new_actual_closing: newActualNum,
+        reason: reason.trim(),
+      }),
+    onSuccess: () => {
+      toast.success('تم تعديل مبلغ الإقفال');
+      onSaved();
+    },
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.message || 'فشل التعديل'),
+  });
+
+  return (
+    <Modal title={`تعديل مبلغ الإقفال — ${shift.shift_no}`} onClose={onClose}>
+      <div className="space-y-4">
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[12px] text-amber-900">
+          <span className="font-bold">ملاحظة محاسبية: </span>
+          هذا التصحيح يعدّل المبلغ المُبلَّغ من الكاشير فقط — لا يتم إنشاء أي
+          قيد محاسبي ولا حركة خزنة. الرصيد الفعلي للخزنة لا يتغير.
+        </div>
+
+        <div className="grid grid-cols-2 gap-3 text-sm">
+          <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+            <div className="text-[10px] text-slate-500 font-bold mb-1">
+              الرصيد المتوقع
+            </div>
+            <div className="font-black tabular-nums text-slate-800">
+              {EGP(currentExpected)}
+            </div>
+          </div>
+          <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+            <div className="text-[10px] text-slate-500 font-bold mb-1">
+              المبلغ الحالي (المُبلَّغ)
+            </div>
+            <div className="font-black tabular-nums text-slate-800">
+              {EGP(currentActual)}
+            </div>
+            <div
+              className={`text-[10px] mt-1 tabular-nums ${
+                currentDiff < -0.01
+                  ? 'text-rose-600'
+                  : currentDiff > 0.01
+                    ? 'text-emerald-600'
+                    : 'text-slate-500'
+              }`}
+            >
+              الفرق: {EGP(currentDiff)}
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <label className="label">المبلغ الصحيح *</label>
+          <input
+            type="number"
+            min="0"
+            step="0.01"
+            className="input"
+            value={newActual}
+            placeholder="0.00"
+            onChange={(e) => setNewActual(e.target.value)}
+            disabled={save.isPending}
+          />
+        </div>
+
+        <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2">
+          <div className="text-[10px] text-emerald-700 font-bold mb-1">
+            الفرق الجديد بعد التعديل
+          </div>
+          <div
+            className={`font-black tabular-nums text-base ${
+              newDiff < -0.01
+                ? 'text-rose-600'
+                : newDiff > 0.01
+                  ? 'text-emerald-600'
+                  : 'text-emerald-700'
+            }`}
+          >
+            {newActual ? EGP(newDiff) : '—'}
+          </div>
+        </div>
+
+        <div>
+          <label className="label text-rose-600">سبب التعديل (مطلوب) *</label>
+          <textarea
+            className="input"
+            rows={2}
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            placeholder="مثال: الكاشير أدخل 1500 بالخطأ بدلاً من 1050 — تم التحقق من العد يدوياً"
+            disabled={save.isPending}
+          />
+        </div>
+
+        <div className="flex items-center justify-end gap-2 border-t border-slate-200 pt-3">
+          <button
+            type="button"
+            className="px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-100 text-slate-700 hover:bg-slate-200"
+            onClick={onClose}
+            disabled={save.isPending}
+          >
+            إلغاء
+          </button>
+          <button
+            type="button"
+            className="px-4 py-1.5 rounded-lg text-xs font-bold bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            onClick={() => save.mutate()}
+            disabled={!canSave || save.isPending}
+          >
+            {save.isPending ? 'جارٍ الحفظ…' : 'حفظ التعديل'}
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function ShiftAdjustmentHistory({
+  adjustments,
+}: {
+  adjustments: ShiftCountAdjustment[];
+}) {
+  return (
+    <div className="border border-slate-200 rounded-lg overflow-hidden">
+      <div className="bg-slate-50 p-3 text-sm font-bold flex items-center justify-between">
+        <span>سجل تعديلات مبلغ الإقفال</span>
+        <span className="text-[11px] text-slate-500">
+          {adjustments.length} تعديل
+        </span>
+      </div>
+      {adjustments.length === 0 ? (
+        <div className="text-center text-xs text-slate-500 py-6">
+          لا توجد تعديلات على مبلغ الإقفال
+        </div>
+      ) : (
+        <div className="overflow-x-auto max-h-56 overflow-y-auto">
+          <table className="min-w-full text-xs">
+            <thead className="bg-slate-100">
+              <tr>
+                <th className="text-right px-2 py-2">التاريخ والوقت</th>
+                <th className="text-right px-2 py-2">من عدّل</th>
+                <th className="text-right px-2 py-2">السبب</th>
+                <th className="text-right px-2 py-2">المبلغ القديم</th>
+                <th className="text-right px-2 py-2">المبلغ الجديد</th>
+                <th className="text-right px-2 py-2">الفرق القديم</th>
+                <th className="text-right px-2 py-2">الفرق الجديد</th>
+              </tr>
+            </thead>
+            <tbody>
+              {adjustments.map((a) => (
+                <tr key={a.id} className="border-t border-slate-100">
+                  <td className="px-2 py-1.5 font-mono tabular-nums whitespace-nowrap">
+                    {new Date(a.adjusted_at).toLocaleString('en-GB', {
+                      timeZone: 'Africa/Cairo',
+                      hour12: false,
+                    })}
+                  </td>
+                  <td className="px-2 py-1.5">{a.adjusted_by_name || '—'}</td>
+                  <td className="px-2 py-1.5 text-slate-700 max-w-[260px] truncate" title={a.reason}>
+                    {a.reason}
+                  </td>
+                  <td className="px-2 py-1.5 text-rose-600 font-mono tabular-nums">
+                    {a.old_actual_closing == null ? '—' : EGP(Number(a.old_actual_closing))}
+                  </td>
+                  <td className="px-2 py-1.5 text-emerald-700 font-mono tabular-nums font-bold">
+                    {EGP(Number(a.new_actual_closing))}
+                  </td>
+                  <td className="px-2 py-1.5 font-mono tabular-nums">
+                    {a.old_difference == null ? '—' : EGP(Number(a.old_difference))}
+                  </td>
+                  <td className="px-2 py-1.5 font-mono tabular-nums">
+                    {a.new_difference == null ? '—' : EGP(Number(a.new_difference))}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
