@@ -140,6 +140,34 @@ export class AttendanceController {
     return this.svc.adminVoidWageAccrual(payableDayId, body.reason, user.userId);
   }
 
+  /**
+   * PR-3: Approve a wage override for (user_id, work_date). Voids any
+   * existing live accrual and posts a new one with the chosen
+   * override_type + approved_amount + approval_reason. No cashbox
+   * movement.
+   */
+  @Post('admin/approve-wage-override')
+  @Permissions('employee.attendance.manage')
+  adminApproveWageOverride(
+    @CurrentUser() user: JwtUser,
+    @Body()
+    body: {
+      user_id: string;
+      work_date: string;
+      override_type: 'calculated' | 'full_day' | 'custom_amount';
+      approved_amount?: number;
+      approval_reason?: string;
+      reason?: string;
+    },
+  ) {
+    return this.svc.adminApproveWageOverride(
+      body.user_id,
+      body.work_date,
+      body,
+      user.userId,
+    );
+  }
+
   @Post('admin/pay-wage')
   @Permissions('employee.ledger.view')
   payWage(

@@ -265,12 +265,23 @@ export class AttendanceService {
    * Mark a work_date as payable for an employee without requiring
    * attendance rows. Reason is mandatory. Creates (or reuses) the
    * wage_accrual row and posts DR 521 / CR 213 exactly once.
+   *
+   * PR-3: optional override params. When omitted, behaviour is exactly
+   * what it was before (full-day rule). When supplied, recorded on
+   * employee_payable_days.calculated_amount / override_type /
+   * approval_reason / approved_by + posted GL amount = approved.
    */
   async adminMarkPayableDay(
     targetUserId: string,
     workDate: string,
     reason: string,
     adminId: string,
+    override?: {
+      calculated_amount?: number;
+      override_type?: 'calculated' | 'full_day' | 'custom_amount';
+      approved_amount?: number;
+      approval_reason?: string;
+    },
   ) {
     if (!reason || !reason.trim()) {
       throw new BadRequestException('السبب مطلوب');
@@ -290,19 +301,47 @@ export class AttendanceService {
       ? Math.round(Number(profile.target_hours_day) * 60)
       : null;
 
+    // Without attendance there's no hours-based "calculated" — admin
+    // is asserting a payable day, so calculated defaults to the full
+    // daily wage. Override-type defaults to 'full_day' (today's
+    // canonical behaviour).
+    const calculated = Number(override?.calculated_amount ?? daily);
+    const overrideType = override?.override_type ?? 'full_day';
+    const approved = Number(
+      override?.approved_amount ??
+        (overrideType === 'calculated' ? calculated : daily),
+    );
+    if (!(approved > 0)) {
+      throw new BadRequestException('المبلغ المعتمد يجب أن يكون أكبر من صفر');
+    }
+    if (
+      overrideType === 'custom_amount' &&
+      Math.abs(approved - calculated) > 0.005 &&
+      !override?.approval_reason?.trim()
+    ) {
+      throw new BadRequestException(
+        'سبب الاعتماد مطلوب عند إدخال مبلغ مخصص يختلف عن المبلغ المحسوب',
+      );
+    }
+
     const [row] = await this.ds.query(
       `SELECT fn_post_employee_wage_accrual(
          $1::uuid, $2::date, $3::numeric,
          'admin_manual'::text, NULL::uuid, NULL::int,
-         $4::numeric, $5::int, $6::text, $7::uuid
+         $4::numeric, $5::int, $6::text, $7::uuid,
+         $8::numeric, $9::text, $10::text, $11::uuid
        ) AS payable_day_id`,
       [
         targetUserId,
         workDate,
-        daily,
+        approved,
         daily,
         targetMinutes,
         reason.trim(),
+        adminId,
+        calculated,
+        overrideType,
+        override?.approval_reason?.trim() || null,
         adminId,
       ],
     );
@@ -313,10 +352,21 @@ export class AttendanceService {
    * Approve wage accrual from an existing attendance record. Idempotent
    * — calling twice for the same (user, work_date) returns the first
    * payable_day_id.
+   *
+   * PR-3: optional override params. When omitted, behaviour is exactly
+   * what it was before (full-day rule, today's canonical Option A).
+   * When supplied, calculated_amount = daily_wage × min(worked/target,
+   * 1) — capped at daily_wage. approved_amount can be calculated /
+   * full / custom; the JE posts the approved amount.
    */
   async adminApproveWageFromAttendance(
     attendanceId: string,
     adminId: string,
+    override?: {
+      override_type?: 'calculated' | 'full_day' | 'custom_amount';
+      approved_amount?: number;
+      approval_reason?: string;
+    },
   ) {
     const [att] = await this.ds.query(
       `SELECT a.id, a.user_id, a.work_date, a.clock_out, a.duration_min,
@@ -337,25 +387,141 @@ export class AttendanceService {
     const targetMinutes = att.target_hours_day
       ? Math.round(Number(att.target_hours_day) * 60)
       : null;
+    const workedMinutes = att.duration_min ? Number(att.duration_min) : 0;
+
+    // Hours-based calculated amount, capped at full daily wage.
+    const calculated =
+      targetMinutes && targetMinutes > 0
+        ? Math.round(daily * Math.min(workedMinutes / targetMinutes, 1) * 100) / 100
+        : daily;
+
+    const overrideType = override?.override_type ?? 'full_day';
+    const approved = Number(
+      override?.approved_amount ??
+        (overrideType === 'calculated' ? calculated : daily),
+    );
+    if (!(approved > 0)) {
+      throw new BadRequestException('المبلغ المعتمد يجب أن يكون أكبر من صفر');
+    }
+    if (
+      overrideType === 'custom_amount' &&
+      Math.abs(approved - calculated) > 0.005 &&
+      !override?.approval_reason?.trim()
+    ) {
+      throw new BadRequestException(
+        'سبب الاعتماد مطلوب عند إدخال مبلغ مخصص يختلف عن المبلغ المحسوب',
+      );
+    }
 
     const [row] = await this.ds.query(
       `SELECT fn_post_employee_wage_accrual(
          $1::uuid, $2::date, $3::numeric,
          'attendance'::text, $4::uuid, $5::int,
-         $6::numeric, $7::int, NULL::text, $8::uuid
+         $6::numeric, $7::int, NULL::text, $8::uuid,
+         $9::numeric, $10::text, $11::text, $12::uuid
        ) AS payable_day_id`,
       [
         att.user_id,
         att.work_date,
-        daily,
+        approved,
         att.id,
         att.duration_min || null,
         daily,
         targetMinutes,
         adminId,
+        calculated,
+        overrideType,
+        override?.approval_reason?.trim() || null,
+        adminId,
       ],
     );
     return { payable_day_id: row.payable_day_id };
+  }
+
+  /**
+   * Approve a wage override that adjusts an existing accrual. Uses the
+   * void+repost pattern (PR #89's `fn_void_employee_wage_accrual` +
+   * `fn_post_employee_wage_accrual`) so the audit trail captures both
+   * the original and the corrected accrual as distinct rows.
+   *
+   * Use cases:
+   *   * Existing accrual is full_day but admin wants to switch to
+   *     hours-based calculated amount.
+   *   * Existing accrual is calculated but admin wants to bump up to
+   *     full_day for an approved exception.
+   *   * Admin enters a custom amount that differs from both.
+   *
+   * If no live accrual exists for the (user, date), falls through to
+   * `adminMarkPayableDay` (admin_manual source).
+   */
+  async adminApproveWageOverride(
+    targetUserId: string,
+    workDate: string,
+    body: {
+      override_type: 'calculated' | 'full_day' | 'custom_amount';
+      approved_amount?: number;
+      approval_reason?: string;
+      reason?: string; // for the new admin_manual row when no existing accrual
+    },
+    adminId: string,
+  ) {
+    if (
+      !body?.override_type ||
+      !['calculated', 'full_day', 'custom_amount'].includes(body.override_type)
+    ) {
+      throw new BadRequestException(
+        'override_type يجب أن يكون calculated أو full_day أو custom_amount',
+      );
+    }
+
+    return this.ds.transaction(async (em) => {
+      const [existing] = await em.query(
+        `SELECT id, attendance_record_id, source
+           FROM employee_payable_days
+          WHERE user_id = $1 AND work_date = $2::date
+            AND kind = 'wage_accrual' AND NOT is_void
+          LIMIT 1`,
+        [targetUserId, workDate],
+      );
+
+      // Void existing accrual (if any) so the partial UNIQUE index
+      // permits the new posting. Reason captured for audit.
+      if (existing) {
+        const voidReason = `تعديل الاعتماد إلى ${body.override_type}${body.approval_reason ? ` — ${body.approval_reason.trim()}` : ''}`;
+        await em.query(
+          `SELECT fn_void_employee_wage_accrual($1::uuid, $2::text, $3::uuid)`,
+          [existing.id, voidReason, adminId],
+        );
+      }
+
+      // Post the new accrual. Route through the right service method
+      // based on whether there's an attendance record to link.
+      if (existing?.attendance_record_id) {
+        return this.adminApproveWageFromAttendance(
+          existing.attendance_record_id,
+          adminId,
+          {
+            override_type: body.override_type,
+            approved_amount: body.approved_amount,
+            approval_reason: body.approval_reason,
+          },
+        );
+      }
+      // No attendance link → admin_manual path. Reason for the row is
+      // either the supplied `reason` or "تعديل اعتماد سابق".
+      return this.adminMarkPayableDay(
+        targetUserId,
+        workDate,
+        body.reason?.trim() ||
+          (existing ? 'تعديل اعتماد سابق' : 'اعتماد يدوي للأدمن'),
+        adminId,
+        {
+          override_type: body.override_type,
+          approved_amount: body.approved_amount,
+          approval_reason: body.approval_reason,
+        },
+      );
+    });
   }
 
   async adminVoidWageAccrual(
