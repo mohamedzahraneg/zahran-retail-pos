@@ -26,8 +26,25 @@ export interface CommissionDetailRow {
   completed_at: string;
   customer_name: string | null;
   eligible_total: string;
+  /** invoices.grand_total — for collection-ratio KPI on Overview */
+  grand_total: string;
+  /** invoices.paid_total — for collection-ratio KPI on Overview */
+  paid_total: string;
   commission_rate: string;
   commission: string;
+}
+
+/**
+ * One row per category contributing to a salesperson's eligible sales
+ * in the window. `category_id = null` means the products lack
+ * category_id (returned with the label "غير مصنّف"). Empty array =
+ * no items in the window.
+ */
+export interface CommissionCategoryBreakdownRow {
+  category_id: string | null;
+  category_name: string;
+  invoices_count: string;
+  total: string;
 }
 
 export const commissionsApi = {
@@ -42,6 +59,13 @@ export const commissionsApi = {
   detail: (userId: string, from: string, to: string) =>
     unwrap<CommissionDetailRow[]>(
       api.get(`/commissions/${userId}/detail`, { params: { from, to } }),
+    ),
+
+  categoryBreakdown: (userId: string, from: string, to: string) =>
+    unwrap<CommissionCategoryBreakdownRow[]>(
+      api.get(`/commissions/${userId}/category-breakdown`, {
+        params: { from, to },
+      }),
     ),
 
   updateRate: (userId: string, commission_rate: number) =>
