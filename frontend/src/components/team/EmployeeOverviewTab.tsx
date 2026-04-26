@@ -29,7 +29,7 @@
  *     "مؤشر أداء تقديري" so users understand it's a heuristic.
  */
 
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
   Receipt,
@@ -39,21 +39,20 @@ import {
   TrendingUp,
   Percent,
   TrendingDown,
-  Award,
-  Star,
   Calculator,
   Users,
-  Sparkles,
-  Briefcase,
   Building2,
   Hash,
   Calendar,
+  PieChart,
+  Award,
+  Star,
 } from 'lucide-react';
 import { TeamRow, employeesApi } from '@/api/employees.api';
 import {
   commissionsApi,
   CommissionDetailRow,
-  CommissionSummaryRow,
+  CommissionCategoryBreakdownRow,
 } from '@/api/commissions.api';
 
 const EGP = (n: number | string | null | undefined) =>
@@ -83,7 +82,10 @@ interface PeriodBounds {
   to: string;
 }
 
-function monthBounds(): PeriodBounds {
+type PeriodMode = 'daily' | 'weekly' | 'monthly' | 'custom';
+
+/** YYYY-MM-DD for "today" anchored in Cairo. */
+function cairoTodayParts() {
   const today = new Date();
   const parts = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Africa/Cairo',
@@ -91,28 +93,50 @@ function monthBounds(): PeriodBounds {
     month: '2-digit',
     day: '2-digit',
   }).formatToParts(today);
-  const y = parts.find((p) => p.type === 'year')!.value;
-  const m = parts.find((p) => p.type === 'month')!.value;
-  const d = parts.find((p) => p.type === 'day')!.value;
-  return { from: `${y}-${m}-01`, to: `${y}-${m}-${d}` };
+  return {
+    y: parseInt(parts.find((p) => p.type === 'year')!.value, 10),
+    m: parseInt(parts.find((p) => p.type === 'month')!.value, 10),
+    d: parseInt(parts.find((p) => p.type === 'day')!.value, 10),
+  };
 }
 
-function previousMonthBounds(): PeriodBounds {
-  const today = new Date();
-  const cairoToday = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Africa/Cairo',
-    year: 'numeric',
-    month: '2-digit',
-  }).formatToParts(today);
-  const y = parseInt(cairoToday.find((p) => p.type === 'year')!.value, 10);
-  const m = parseInt(cairoToday.find((p) => p.type === 'month')!.value, 10);
-  const prevY = m === 1 ? y - 1 : y;
-  const prevM = m === 1 ? 12 : m - 1;
-  const lastDay = new Date(prevY, prevM, 0).getDate();
-  const pad = (n: number) => String(n).padStart(2, '0');
+const pad = (n: number) => String(n).padStart(2, '0');
+const ymd = (y: number, m: number, d: number) => `${y}-${pad(m)}-${pad(d)}`;
+
+/** Produce {from, to} for a given period mode anchored on today (Cairo). */
+function periodBoundsFor(
+  mode: PeriodMode,
+  custom?: { from: string; to: string },
+): PeriodBounds {
+  const { y, m, d } = cairoTodayParts();
+  const today = ymd(y, m, d);
+  if (mode === 'daily') return { from: today, to: today };
+  if (mode === 'weekly') {
+    // last 7 days inclusive
+    const ms = new Date(`${today}T00:00:00Z`).getTime() - 6 * 86400_000;
+    const from = new Date(ms);
+    return {
+      from: ymd(from.getUTCFullYear(), from.getUTCMonth() + 1, from.getUTCDate()),
+      to: today,
+    };
+  }
+  if (mode === 'monthly') return { from: ymd(y, m, 1), to: today };
+  if (mode === 'custom' && custom) return custom;
+  return { from: ymd(y, m, 1), to: today };
+}
+
+/** Previous period of the same length (for delta KPIs). */
+function previousPeriodBoundsFor(current: PeriodBounds): PeriodBounds {
+  const fromMs = new Date(`${current.from}T00:00:00Z`).getTime();
+  const toMs = new Date(`${current.to}T00:00:00Z`).getTime();
+  const len = (toMs - fromMs) / 86400_000 + 1;
+  const prevToMs = fromMs - 86400_000;
+  const prevFromMs = prevToMs - (len - 1) * 86400_000;
+  const f = new Date(prevFromMs);
+  const t = new Date(prevToMs);
   return {
-    from: `${prevY}-${pad(prevM)}-01`,
-    to: `${prevY}-${pad(prevM)}-${pad(lastDay)}`,
+    from: ymd(f.getUTCFullYear(), f.getUTCMonth() + 1, f.getUTCDate()),
+    to: ymd(t.getUTCFullYear(), t.getUTCMonth() + 1, t.getUTCDate()),
   };
 }
 
@@ -122,27 +146,42 @@ function previousMonthBounds(): PeriodBounds {
 
 export function EmployeeOverviewTab({ employee }: { employee: TeamRow }) {
   const userId = employee.id;
-  const month = useMemo(() => monthBounds(), []);
-  const prevMonth = useMemo(() => previousMonthBounds(), []);
+
+  // PR-T4.5 — period filter (يومي / أسبوعي / شهري / مخصص). Default:
+  // monthly to match the prior fixed-month behavior. All sales panels
+  // re-derive from this single period state.
+  const [periodMode, setPeriodMode] = useState<PeriodMode>('monthly');
+  const [custom, setCustom] = useState<PeriodBounds>(() =>
+    periodBoundsFor('monthly'),
+  );
+  const period = useMemo(
+    () => periodBoundsFor(periodMode, custom),
+    [periodMode, custom],
+  );
+  const prevPeriod = useMemo(() => previousPeriodBoundsFor(period), [period]);
 
   const { data: dash } = useQuery({
     queryKey: ['employee-user-dashboard', userId],
     queryFn: () => employeesApi.userDashboard(userId),
   });
 
-  // PR-T4.4 — sales data is now driven by the per-invoice detail
-  // endpoint (which returns rows for ANY salesperson, regardless of
-  // their commission_rate) instead of the summary endpoint (which
-  // backend filters to users with commission_rate > 0 OR past
-  // line_commissions). This way every employee with linked invoices
-  // sees the sales dashboard, even at 0% commission.
+  // PR-T4.4 — sales data is driven by the per-invoice detail endpoint
+  // (returns rows for ANY salesperson regardless of commission_rate).
+  // PR-T4.5 — paid_total / grand_total now also returned for the
+  // collection KPIs, and a separate categoryBreakdown query feeds the
+  // donut panel.
   const { data: detail = [] } = useQuery({
-    queryKey: ['commissions-detail', userId, month.from, month.to],
-    queryFn: () => commissionsApi.detail(userId, month.from, month.to),
+    queryKey: ['commissions-detail', userId, period.from, period.to],
+    queryFn: () => commissionsApi.detail(userId, period.from, period.to),
   });
   const { data: prevDetail = [] } = useQuery({
-    queryKey: ['commissions-detail', userId, prevMonth.from, prevMonth.to],
-    queryFn: () => commissionsApi.detail(userId, prevMonth.from, prevMonth.to),
+    queryKey: ['commissions-detail', userId, prevPeriod.from, prevPeriod.to],
+    queryFn: () => commissionsApi.detail(userId, prevPeriod.from, prevPeriod.to),
+  });
+  const { data: categoryBreakdown = [] } = useQuery({
+    queryKey: ['commissions-category-breakdown', userId, period.from, period.to],
+    queryFn: () =>
+      commissionsApi.categoryBreakdown(userId, period.from, period.to),
   });
 
   const detailRows = detail as CommissionDetailRow[];
@@ -173,6 +212,43 @@ export function EmployeeOverviewTab({ employee }: { employee: TeamRow }) {
   );
   const avgInvoice = invoicesCount > 0 ? eligibleSales / invoicesCount : 0;
   const prevAvgInvoice = prevInvoicesCount > 0 ? prevEligibleSales / prevInvoicesCount : 0;
+
+  // PR-T4.5 — collection KPIs (تحصيلات / نسبة التحصيل). Source: the
+  // detail rows now carry inv.paid_total + inv.grand_total.
+  // collectionsAvailable = at least one invoice in the window has a
+  // paid_total > 0 (otherwise we render "غير متاح" rather than a
+  // misleading 0).
+  const collectionsTotal = useMemo(
+    () => detailRows.reduce((s, r) => s + Number(r.paid_total || 0), 0),
+    [detailRows],
+  );
+  const grandTotal = useMemo(
+    () => detailRows.reduce((s, r) => s + Number(r.grand_total || 0), 0),
+    [detailRows],
+  );
+  const collectionsAvailable = detailRows.some(
+    (r) => Number(r.paid_total || 0) > 0,
+  );
+  const collectionRatio =
+    collectionsAvailable && grandTotal > 0
+      ? (collectionsTotal / grandTotal) * 100
+      : null;
+  const prevCollectionsTotal = useMemo(
+    () => prevDetailRows.reduce((s, r) => s + Number(r.paid_total || 0), 0),
+    [prevDetailRows],
+  );
+
+  const categoryRows = categoryBreakdown as CommissionCategoryBreakdownRow[];
+  const categoryRowsValid = categoryRows.filter(
+    (r) => r.category_id !== null && Number(r.total) > 0,
+  );
+  const categoryUnclassified = categoryRows
+    .filter((r) => r.category_id === null)
+    .reduce((s, r) => s + Number(r.total || 0), 0);
+  const categoryClassifiedTotal = categoryRowsValid.reduce(
+    (s, r) => s + Number(r.total || 0),
+    0,
+  );
 
   const monthDays = dash?.attendance?.month?.days ?? 0;
   const monthMinutes = dash?.attendance?.month?.minutes ?? 0;
@@ -254,9 +330,21 @@ export function EmployeeOverviewTab({ employee }: { employee: TeamRow }) {
           balance / actions) lives on the parent EmployeeProfilePanel
           header in Team.tsx. The Overview tab now starts directly
           with the period chip + KPI cards. */}
-      <PeriodHeader from={month.from} to={month.to} />
+      <PeriodHeader
+        from={period.from}
+        to={period.to}
+        mode={periodMode}
+        onModeChange={setPeriodMode}
+        custom={custom}
+        onCustomChange={setCustom}
+      />
 
-      {/* MAIN KPI ROW — sales focus when salesperson, else payroll focus */}
+      {/* MAIN KPI ROW — sales focus when salesperson, else payroll focus.
+          PR-T4.5 — sales row matches the reference design: 5 cards in
+          green/blue/orange/purple/rose tones (sales / invoices / avg /
+          collected / collection ratio). Commission moves to its own
+          dedicated panel below since it's logically a percentage-of-
+          sales rollup, not a sales KPI itself. */}
       {isSalesperson ? (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
           <BigKpi
@@ -267,18 +355,18 @@ export function EmployeeOverviewTab({ employee }: { employee: TeamRow }) {
             sub={
               prevEligibleSales > 0
                 ? changeLabel(eligibleSales - prevEligibleSales, true)
-                : undefined
+                : 'لا بيانات للفترة السابقة'
             }
           />
           <BigKpi
             tone="blue"
             icon={<Receipt size={26} />}
             label="عدد فواتير المبيعات"
-            value={invoicesCount.toLocaleString('en-US')}
+            value={`${invoicesCount.toLocaleString('en-US')} فاتورة`}
             sub={
               prevInvoicesCount > 0
-                ? `فاتورة · ${changeLabel(invoicesCount - prevInvoicesCount, false)}`
-                : 'فاتورة'
+                ? changeLabel(invoicesCount - prevInvoicesCount, false)
+                : 'لا بيانات للفترة السابقة'
             }
           />
           <BigKpi
@@ -289,35 +377,35 @@ export function EmployeeOverviewTab({ employee }: { employee: TeamRow }) {
             sub={
               prevAvgInvoice > 0
                 ? changeLabel(avgInvoice - prevAvgInvoice, true)
-                : undefined
+                : 'لا بيانات للفترة السابقة'
             }
           />
           <BigKpi
             tone="purple"
             icon={<Wallet size={26} />}
-            label="عمولة الموظف (الفترة)"
-            value={
-              commissionRate > 0
-                ? EGP(commissionAmount)
-                : 'لا توجد نسبة عمولة محددة'
-            }
+            label="تحصيلات نقدية"
+            value={collectionsAvailable ? EGP(collectionsTotal) : 'غير متاح'}
             sub={
-              commissionRate > 0
-                ? prevCommissionAmount > 0
-                  ? `بمعدل ${commissionRate}% · ${changeLabel(commissionAmount - prevCommissionAmount, true)}`
-                  : `بمعدل عمولة ${commissionRate}%`
-                : 'يمكن تحديد نسبة من إعدادات العمولات'
+              !collectionsAvailable
+                ? 'لا بيانات تحصيل في الفترة'
+                : prevCollectionsTotal > 0
+                  ? changeLabel(collectionsTotal - prevCollectionsTotal, true)
+                  : 'من إجمالي قيمة الفاتورة'
             }
           />
           <BigKpi
             tone="rose"
             icon={<Percent size={26} />}
-            label="معدل العمولة"
-            value={commissionRate > 0 ? `${commissionRate}%` : '—'}
+            label="نسبة التحصيل"
+            value={
+              collectionRatio !== null
+                ? `${collectionRatio.toFixed(1)}%`
+                : 'غير متاح'
+            }
             sub={
-              commissionRate > 0
-                ? 'من القيمة المؤهلة'
-                : 'لا توجد نسبة عمولة محددة'
+              collectionRatio !== null
+                ? 'من إجمالي المبيعات'
+                : 'لا بيانات تحصيل في الفترة'
             }
           />
         </div>
@@ -367,10 +455,18 @@ export function EmployeeOverviewTab({ employee }: { employee: TeamRow }) {
         </div>
       )}
 
-      {/* Performance + Star rating + Daily sales chart */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-[1fr_1fr_2fr] gap-4">
+      {/* PR-T4.5 — analytics grid: gauge + star rating + category
+          donut + daily sales chart. Layout matches the reference:
+          two narrow panels (gauge + stars), then category donut, then
+          a wider daily-sales chart on the right. */}
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
         <PerformanceGaugePanel performance={performance} />
         <StarRatingPanel performance={performance} />
+        <CategoryDistributionPanel
+          rows={categoryRowsValid}
+          unclassifiedTotal={categoryUnclassified}
+          classifiedTotal={categoryClassifiedTotal}
+        />
         <DailySalesPanel
           isSalesperson={isSalesperson}
           dailySales={dailySales}
@@ -461,14 +557,6 @@ export function EmployeeOverviewTab({ employee }: { employee: TeamRow }) {
         >
           <ul className="px-5 py-3 divide-y divide-slate-100 text-xs text-slate-500">
             <li className="py-2 flex items-center gap-2">
-              <Briefcase size={12} className="text-slate-400" />
-              نسبة التحصيل (paid_amount vs eligible)
-            </li>
-            <li className="py-2 flex items-center gap-2">
-              <Sparkles size={12} className="text-slate-400" />
-              توزيع المبيعات حسب الفئة (donut)
-            </li>
-            <li className="py-2 flex items-center gap-2">
               <Building2 size={12} className="text-slate-400" />
               القسم / الفرع / المدير المباشر
             </li>
@@ -476,7 +564,7 @@ export function EmployeeOverviewTab({ employee }: { employee: TeamRow }) {
         </SmallPanel>
       </div>
 
-      <FooterMeta from={month.from} to={month.to} />
+      <FooterMeta from={period.from} to={period.to} />
     </div>
   );
 }
@@ -485,7 +573,27 @@ export function EmployeeOverviewTab({ employee }: { employee: TeamRow }) {
  * Sub-components
  * ───────────────────────────────────────────────────────────────── */
 
-function PeriodHeader({ from, to }: { from: string; to: string }) {
+function PeriodHeader({
+  from,
+  to,
+  mode,
+  onModeChange,
+  custom,
+  onCustomChange,
+}: {
+  from: string;
+  to: string;
+  mode: PeriodMode;
+  onModeChange: (m: PeriodMode) => void;
+  custom: PeriodBounds;
+  onCustomChange: (b: PeriodBounds) => void;
+}) {
+  const modeOptions: { value: PeriodMode; label: string }[] = [
+    { value: 'daily', label: 'يومي' },
+    { value: 'weekly', label: 'أسبوعي' },
+    { value: 'monthly', label: 'شهري' },
+    { value: 'custom', label: 'مخصص' },
+  ];
   return (
     <div className="flex items-center justify-between gap-3 flex-wrap">
       <div>
@@ -494,11 +602,187 @@ function PeriodHeader({ from, to }: { from: string; to: string }) {
           أداء، مبيعات، حضور، وحركات حسابية ضمن الفترة المحددة.
         </p>
       </div>
-      <div className="inline-flex items-center gap-2 bg-white border border-slate-200 rounded-xl px-4 py-2 text-sm font-bold text-slate-700">
-        <Calendar size={14} className="text-slate-400" />
-        الفترة {fmtDate(from)} — {fmtDate(to)}
+      <div className="flex items-center gap-2 flex-wrap">
+        <div className="inline-flex items-center gap-2 bg-white border border-slate-200 rounded-xl px-4 py-2 text-sm font-bold text-slate-700">
+          <Calendar size={14} className="text-slate-400" />
+          {fmtDate(from)} — {fmtDate(to)}
+        </div>
+        <div className="inline-flex bg-white border border-slate-200 rounded-xl p-1 text-xs font-bold">
+          {modeOptions.map((o) => (
+            <button
+              key={o.value}
+              type="button"
+              onClick={() => onModeChange(o.value)}
+              className={`px-3 py-1.5 rounded-lg transition ${
+                mode === o.value
+                  ? 'bg-violet-600 text-white'
+                  : 'text-slate-600 hover:bg-slate-50'
+              }`}
+            >
+              {o.label}
+            </button>
+          ))}
+        </div>
+        {mode === 'custom' && (
+          <div className="inline-flex items-center gap-2 bg-white border border-slate-200 rounded-xl px-3 py-1.5 text-xs font-bold text-slate-700">
+            <input
+              type="date"
+              value={custom.from}
+              max={custom.to}
+              onChange={(e) =>
+                onCustomChange({ from: e.target.value, to: custom.to })
+              }
+              className="bg-transparent outline-none cursor-pointer"
+            />
+            <span className="text-slate-400">إلى</span>
+            <input
+              type="date"
+              value={custom.to}
+              min={custom.from}
+              onChange={(e) =>
+                onCustomChange({ from: custom.from, to: e.target.value })
+              }
+              className="bg-transparent outline-none cursor-pointer"
+            />
+          </div>
+        )}
       </div>
     </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────────
+ * CategoryDistributionPanel — donut + legend.
+ *
+ * Real categories assigned to invoice-item products via
+ * /commissions/:id/category-breakdown. When no products in the
+ * window have category_id set, the panel renders an honest empty
+ * state ("توزيع المبيعات حسب الفئة غير متاح — يحتاج تصنيف
+ * المنتجات") and surfaces the unclassified total so the operator
+ * sees how much volume is awaiting classification. No fake
+ * categories.
+ * ───────────────────────────────────────────────────────────────── */
+function CategoryDistributionPanel({
+  rows,
+  unclassifiedTotal,
+  classifiedTotal,
+}: {
+  rows: CommissionCategoryBreakdownRow[];
+  unclassifiedTotal: number;
+  classifiedTotal: number;
+}) {
+  const palette = [
+    '#7c3aed', // violet-600
+    '#3b82f6', // blue-500
+    '#10b981', // emerald-500
+    '#f59e0b', // amber-500
+    '#ef4444', // red-500
+    '#ec4899', // pink-500
+    '#06b6d4', // cyan-500
+    '#84cc16', // lime-500
+  ];
+  const segments = useMemo(() => {
+    if (classifiedTotal <= 0) return [];
+    let acc = 0;
+    return rows.map((r, i) => {
+      const value = Number(r.total || 0);
+      const pct = value / classifiedTotal;
+      const seg = {
+        color: palette[i % palette.length],
+        label: r.category_name,
+        value,
+        pct,
+        start: acc,
+        end: acc + pct,
+      };
+      acc += pct;
+      return seg;
+    });
+  }, [rows, classifiedTotal]);
+
+  // Build a conic-gradient string from segments. Each segment occupies
+  // (pct * 360deg) of the donut.
+  const gradient =
+    segments.length > 0
+      ? `conic-gradient(${segments
+          .map(
+            (s) =>
+              `${s.color} ${(s.start * 360).toFixed(2)}deg ${(s.end * 360).toFixed(2)}deg`,
+          )
+          .join(', ')})`
+      : 'conic-gradient(#e2e8f0 0deg 360deg)';
+
+  return (
+    <Panel
+      title="توزيع المبيعات حسب الفئة"
+      subtitle={
+        classifiedTotal > 0
+          ? `${rows.length} فئة نشطة`
+          : 'غير متاح — يحتاج تصنيف المنتجات'
+      }
+    >
+      {classifiedTotal === 0 ? (
+        <div className="px-5 pb-5 pt-2">
+          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-center">
+            <PieChart size={32} className="text-slate-300 mx-auto" />
+            <div className="text-sm font-black text-slate-600 mt-2">
+              توزيع المبيعات حسب الفئة غير متاح
+            </div>
+            <div className="text-xs text-slate-500 mt-2 leading-relaxed">
+              منتجات الفواتير في هذه الفترة ليس لها تصنيف
+              (<code>products.category_id IS NULL</code>). بمجرد تحديد
+              تصنيف لكل منتج من إعدادات المخزون، ستظهر النسب هنا تلقائيًا.
+            </div>
+            {unclassifiedTotal > 0 && (
+              <div className="text-xs font-bold text-slate-700 mt-3">
+                إجمالي مبيعات بدون تصنيف:{' '}
+                <span className="text-slate-900">{EGP(unclassifiedTotal)}</span>
+              </div>
+            )}
+          </div>
+        </div>
+      ) : (
+        <div className="px-5 pb-5 pt-2 flex items-center gap-4">
+          <div className="relative w-[140px] h-[140px] shrink-0">
+            <div
+              className="w-full h-full rounded-full"
+              style={{ background: gradient }}
+            />
+            <div className="absolute inset-[18%] bg-white rounded-full flex flex-col items-center justify-center text-center">
+              <div className="text-[10px] text-slate-400">إجمالي</div>
+              <div className="text-[14px] font-black text-slate-800 tabular-nums leading-tight mt-0.5">
+                {EGP(classifiedTotal)}
+              </div>
+            </div>
+          </div>
+          <ul className="flex-1 min-w-0 space-y-2 text-xs">
+            {segments.map((s) => (
+              <li
+                key={s.label}
+                className="flex items-center gap-2 text-slate-700"
+              >
+                <span
+                  className="w-2.5 h-2.5 rounded-full shrink-0"
+                  style={{ background: s.color }}
+                />
+                <span className="font-bold flex-1 truncate">{s.label}</span>
+                <span className="text-slate-500 tabular-nums">
+                  {(s.pct * 100).toFixed(0)}%
+                </span>
+                <span className="font-bold text-slate-800 tabular-nums">
+                  {EGP(s.value)}
+                </span>
+              </li>
+            ))}
+            {unclassifiedTotal > 0 && (
+              <li className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1 mt-2">
+                + {EGP(unclassifiedTotal)} مبيعات بدون تصنيف منتج
+              </li>
+            )}
+          </ul>
+        </div>
+      )}
+    </Panel>
   );
 }
 

@@ -69,6 +69,8 @@ export class CommissionsService {
           inv.completed_at,
           c.full_name AS customer_name,
           SUM(ii.line_total) AS eligible_total,
+          inv.grand_total,
+          inv.paid_total,
           u.commission_rate,
           ROUND(SUM(ii.line_total) * u.commission_rate / 100.0, 2) AS commission
         FROM invoices inv
@@ -79,9 +81,54 @@ export class CommissionsService {
         LEFT JOIN customers c ON c.id = inv.customer_id
        WHERE inv.status::text IN ('completed', 'paid', 'partially_paid')
          AND inv.completed_at::date BETWEEN $2::date AND $3::date
-       GROUP BY inv.id, inv.invoice_no, inv.completed_at, c.full_name, u.commission_rate
+       GROUP BY inv.id, inv.invoice_no, inv.completed_at, c.full_name, inv.grand_total, inv.paid_total, u.commission_rate
        ORDER BY inv.completed_at DESC
        LIMIT 500
+      `,
+      [userId, params.from, params.to],
+    );
+  }
+
+  /**
+   * Sales-by-category roll-up per salesperson for a date window.
+   *
+   * Joins `invoice_items` → `product_variants` → `products` → `categories`,
+   * groups by category, returns one row per category that contributed to
+   * the salesperson's eligible sales in the window. Items whose product
+   * has `category_id IS NULL` are bucketed under category_id = NULL with
+   * label "غير مصنّف" so the operator can still see the volume of
+   * unclassified sales.
+   *
+   * Read-only. No accounting writes. Used by the Overview tab's
+   * "توزيع المبيعات حسب الفئة" donut panel. Returns an empty array
+   * when the salesperson had no items in the window — the frontend
+   * renders an honest empty state.
+   */
+  async categoryBreakdown(
+    userId: string,
+    params: { from: string; to: string },
+  ) {
+    if (!params.from || !params.to) {
+      throw new BadRequestException('from and to are required');
+    }
+    return this.ds.query(
+      `
+      SELECT
+          c.id                              AS category_id,
+          COALESCE(c.name_ar, 'غير مصنّف') AS category_name,
+          COUNT(DISTINCT inv.id)            AS invoices_count,
+          SUM(ii.line_total)::numeric(18,2) AS total
+        FROM invoices inv
+        JOIN invoice_items ii
+          ON ii.invoice_id = inv.id
+         AND COALESCE(ii.salesperson_id, inv.salesperson_id) = $1
+        LEFT JOIN product_variants pv ON pv.id = ii.variant_id
+        LEFT JOIN products         p  ON p.id  = pv.product_id
+        LEFT JOIN categories       c  ON c.id  = p.category_id
+       WHERE inv.status::text IN ('completed', 'paid', 'partially_paid')
+         AND inv.completed_at::date BETWEEN $2::date AND $3::date
+       GROUP BY c.id, c.name_ar
+       ORDER BY total DESC
       `,
       [userId, params.from, params.to],
     );

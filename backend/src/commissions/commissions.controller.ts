@@ -48,6 +48,16 @@ export class CommissionsController {
     return this.svc.detail(userId, { from, to });
   }
 
+  @Get(':userId/category-breakdown')
+  @Roles('admin', 'manager', 'accountant')
+  categoryBreakdown(
+    @Param('userId', ParseUUIDPipe) userId: string,
+    @Query('from') from: string,
+    @Query('to') to: string,
+  ) {
+    return this.svc.categoryBreakdown(userId, { from, to });
+  }
+
   @Patch(':userId/rate')
   @Roles('admin', 'manager')
   updateRate(
