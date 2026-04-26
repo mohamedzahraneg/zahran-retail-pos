@@ -51,8 +51,19 @@ export class PaymentsService {
     return this.ds.query(sql, args);
   }
 
-  async getById(id: string) {
-    const [row] = await this.ds.query(
+  // PR-PAY-2 hotfix — `getById` accepts an optional EntityManager so
+  // callers running inside a transaction (create / setDefault) can
+  // read their own uncommitted writes. Without it the reader runs on
+  // a different pooled connection that doesn't see the in-flight
+  // INSERT/UPDATE → returns null → NotFoundException → transaction
+  // rolls back → the operator sees "payment_account not found" AND
+  // the row never persists.
+  async getById(
+    id: string,
+    em?: { query(sql: string, p?: any[]): Promise<any[]> },
+  ) {
+    const runner = em ?? this.ds;
+    const [row] = await runner.query(
       `SELECT id, method::text AS method, provider_key, display_name, identifier,
               gl_account_code, is_default, active, sort_order, metadata,
               created_at, updated_at, created_by, updated_by
@@ -90,7 +101,10 @@ export class PaymentsService {
             userId,
           ],
         );
-        return this.getById(row.id);
+        // Read through the same EntityManager so we see the row we
+        // just inserted (read-committed isolation hides uncommitted
+        // writes from other connections).
+        return this.getById(row.id, em);
       } catch (err: any) {
         if (
           /ux_payment_accounts_default_per_method/.test(err?.detail || '') ||
@@ -180,7 +194,9 @@ export class PaymentsService {
           WHERE id = $1`,
         [id, userId],
       );
-      return this.getById(id);
+      // Same hotfix as create(): read inside the same transaction so
+      // the just-flipped is_default is visible.
+      return this.getById(id, em);
     });
   }
 
