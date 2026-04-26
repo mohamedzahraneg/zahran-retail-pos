@@ -27,6 +27,11 @@ import {
   PaymentBreakdown,
   PaymentBreakdownMethod,
 } from '@/api/shifts.api';
+import {
+  paymentsApi,
+  PaymentAccount,
+  PaymentMethodCode,
+} from '@/api/payments.api';
 import { cashDeskApi } from '@/api/cash-desk.api';
 import { usersApi } from '@/api/users.api';
 import { exportMultiSheet, printReport } from '@/lib/exportExcel';
@@ -2448,8 +2453,8 @@ function PaymentBreakdownPanel({
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-2 p-2 text-xs">
-        {/* Cash card — physical drawer */}
+      {/* Top summary — cash drawer / non-cash collections / grand */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-2 p-2 text-xs">
         <div className="rounded-md border border-emerald-200 bg-emerald-50 p-3">
           <div className="flex items-center justify-between">
             <div className="font-bold text-emerald-700">💵 كاش في الدرج</div>
@@ -2467,7 +2472,6 @@ function PaymentBreakdownPanel({
           )}
         </div>
 
-        {/* Non-cash collections summary card */}
         <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
           <div className="flex items-center justify-between">
             <div className="font-bold text-slate-700">
@@ -2480,18 +2484,250 @@ function PaymentBreakdownPanel({
           <div className="text-[11px] text-slate-500 mt-1">
             تظهر للمتابعة ولا تُضاف لرصيد الدرج النقدي.
           </div>
-          <div className="text-[11px] text-slate-500 mt-0.5">
-            {nonCashBuckets.length} وسيلة دفع
+        </div>
+
+        <div className="rounded-md border border-indigo-200 bg-indigo-50 p-3">
+          <div className="flex items-center justify-between">
+            <div className="font-bold text-indigo-700">📊 إجمالي التحصيلات</div>
+            <div className="font-black text-indigo-800">{EGP(grand)}</div>
+          </div>
+          <div className="text-[11px] text-indigo-700/70 mt-1">
+            كاش + تحصيلات غير نقدية
           </div>
         </div>
       </div>
 
-      {/* Per-method + per-account expand */}
+      {/* PR-PAY-4.1 — per-method/account cards grid (always renders
+          configured channels even at 0 so the cashier sees the full
+          menu, not just methods that had transactions). */}
+      <PaymentMethodCardsGrid
+        breakdown={breakdown}
+        cashAmount={cashAmount}
+        cashBucket={cashBucket}
+      />
+
+      {/* Detail expandable rows — kept for the per-account roll-up. */}
       {nonCashBuckets.length > 0 && (
         <div className="border-t border-slate-100 px-2 py-2 space-y-1">
           {nonCashBuckets.map((m) => (
             <PaymentBreakdownMethodRow key={m.method} method={m} />
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// PR-PAY-4.1 — Method/account cards grid.
+//
+// User regression: PR-PAY-4 collapsed every non-cash method into a
+// single "تحصيلات غير نقدية" summary card, so cashiers couldn't see
+// per-channel totals at a glance. This component restores separate
+// cards per method/account, always rendering active configured
+// channels (even with 0) so the operator sees the full available
+// menu — exactly like the legacy 4-chip strip but parameterized by
+// the new payment_accounts schema.
+//
+// Card sources merged:
+//   • cash (always — physical drawer)
+//   • every active payment_account (zero card if no shift activity)
+//   • every (method, account_id) pair that DID transact in the shift
+//     even if the account was later deactivated (so historical numbers
+//     never disappear mid-shift)
+//
+// Card group label is the method-family ("بطاقة" for any card_*,
+// "محفظة إلكترونية" for any wallet variant); the account display_name
+// renders underneath as the subtitle.
+const METHOD_GROUP_LABEL_AR: Record<string, string> = {
+  cash: 'كاش',
+  instapay: 'إنستاباي',
+  vodafone_cash: 'محفظة إلكترونية',
+  orange_cash: 'محفظة إلكترونية',
+  wallet: 'محفظة إلكترونية',
+  card_visa: 'بطاقة',
+  card_mastercard: 'بطاقة',
+  card_meeza: 'بطاقة',
+  bank_transfer: 'تحويل بنكي',
+  credit: 'آجل',
+  other: 'أخرى',
+};
+
+const METHOD_GROUP_ICON: Record<string, string> = {
+  cash: '💵',
+  instapay: '📱',
+  vodafone_cash: '👛',
+  orange_cash: '👛',
+  wallet: '👛',
+  card_visa: '💳',
+  card_mastercard: '💳',
+  card_meeza: '💳',
+  bank_transfer: '🏦',
+  credit: '🧾',
+  other: '✳️',
+};
+
+const METHOD_GROUP_TONE: Record<string, string> = {
+  cash: 'border-emerald-200 bg-emerald-50 text-emerald-800',
+  instapay: 'border-purple-200 bg-purple-50 text-purple-800',
+  vodafone_cash: 'border-rose-200 bg-rose-50 text-rose-800',
+  orange_cash: 'border-orange-200 bg-orange-50 text-orange-800',
+  wallet: 'border-pink-200 bg-pink-50 text-pink-800',
+  card_visa: 'border-indigo-200 bg-indigo-50 text-indigo-800',
+  card_mastercard: 'border-indigo-200 bg-indigo-50 text-indigo-800',
+  card_meeza: 'border-indigo-200 bg-indigo-50 text-indigo-800',
+  bank_transfer: 'border-slate-200 bg-slate-50 text-slate-800',
+  credit: 'border-amber-200 bg-amber-50 text-amber-800',
+  other: 'border-slate-200 bg-slate-50 text-slate-800',
+};
+
+interface MethodAccountCard {
+  /** Stable key for React + dedup. */
+  key: string;
+  method: string;
+  group_label_ar: string;
+  icon: string;
+  tone: string;
+  account_id: string | null;
+  account_display_name: string | null;
+  amount: number;
+  invoice_count: number;
+  payment_count: number;
+  is_inactive_historical: boolean;
+}
+
+function PaymentMethodCardsGrid({
+  breakdown,
+  cashAmount,
+  cashBucket,
+}: {
+  breakdown: PaymentBreakdownMethod[];
+  cashAmount: number;
+  cashBucket: PaymentBreakdownMethod | undefined;
+}) {
+  const accountsQuery = useQuery({
+    queryKey: ['payment-accounts', 'active'],
+    queryFn: () => paymentsApi.listAccounts({ active: true }),
+    refetchInterval: 60_000,
+  });
+
+  const cards = useMemo<MethodAccountCard[]>(() => {
+    const map = new Map<string, MethodAccountCard>();
+
+    // 1) Cash always — even when zero the cashier needs to see the drawer card.
+    map.set('cash::__no_account__', {
+      key: 'cash::__no_account__',
+      method: 'cash',
+      group_label_ar: METHOD_GROUP_LABEL_AR.cash,
+      icon: METHOD_GROUP_ICON.cash,
+      tone: METHOD_GROUP_TONE.cash,
+      account_id: null,
+      account_display_name: null,
+      amount: cashAmount,
+      invoice_count: cashBucket?.invoice_count ?? 0,
+      payment_count: cashBucket?.payment_count ?? 0,
+      is_inactive_historical: false,
+    });
+
+    // 2) Every active configured payment_account → seed a zero card.
+    const activeAccounts: PaymentAccount[] = accountsQuery.data ?? [];
+    for (const a of activeAccounts) {
+      const key = `${a.method}::${a.id}`;
+      map.set(key, {
+        key,
+        method: a.method,
+        group_label_ar:
+          METHOD_GROUP_LABEL_AR[a.method] ?? METHOD_GROUP_LABEL_AR.other,
+        icon: METHOD_GROUP_ICON[a.method] ?? METHOD_GROUP_ICON.other,
+        tone: METHOD_GROUP_TONE[a.method] ?? METHOD_GROUP_TONE.other,
+        account_id: a.id,
+        account_display_name: a.display_name,
+        amount: 0,
+        invoice_count: 0,
+        payment_count: 0,
+        is_inactive_historical: false,
+      });
+    }
+
+    // 3) Overlay actuals from the shift breakdown. Keys not yet in
+    //    the map come from accounts that were ACTIVE at sale time but
+    //    later deactivated — surface them with a hint so historical
+    //    numbers don't disappear.
+    for (const m of breakdown) {
+      if (m.method === 'cash') continue; // handled above
+      // a) accounts on this method
+      for (const a of m.accounts) {
+        const acctKey = a.payment_account_id
+          ? `${m.method}::${a.payment_account_id}`
+          : `${m.method}::__no_account__`;
+        const existing = map.get(acctKey);
+        const isHistoricalOnly =
+          !!a.payment_account_id &&
+          !activeAccounts.some((x) => x.id === a.payment_account_id);
+        map.set(acctKey, {
+          key: acctKey,
+          method: m.method,
+          group_label_ar:
+            METHOD_GROUP_LABEL_AR[m.method] ?? METHOD_GROUP_LABEL_AR.other,
+          icon: METHOD_GROUP_ICON[m.method] ?? METHOD_GROUP_ICON.other,
+          tone: METHOD_GROUP_TONE[m.method] ?? METHOD_GROUP_TONE.other,
+          account_id: a.payment_account_id,
+          account_display_name:
+            a.display_name ?? existing?.account_display_name ?? null,
+          amount: a.total_amount,
+          invoice_count: a.invoice_count,
+          payment_count: a.payment_count,
+          is_inactive_historical: isHistoricalOnly,
+        });
+      }
+      // b) catch totals that don't break out by account (e.g. legacy
+      //    rows with payment_account_id = NULL that didn't appear in
+      //    m.accounts because the inner loop already covers all rows).
+      //    Nothing extra needed — m.accounts covers every row.
+    }
+
+    return Array.from(map.values()).sort((a, b) => {
+      // Cash first, then by amount desc, then by group label.
+      if (a.method === 'cash') return -1;
+      if (b.method === 'cash') return 1;
+      if (b.amount !== a.amount) return b.amount - a.amount;
+      return a.group_label_ar.localeCompare(b.group_label_ar, 'ar');
+    });
+  }, [breakdown, cashAmount, cashBucket, accountsQuery.data]);
+
+  if (cards.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="grid grid-cols-2 md:grid-cols-4 gap-2 p-2 text-xs">
+      {cards.map((c) => (
+        <PaymentMethodCard key={c.key} card={c} />
+      ))}
+    </div>
+  );
+}
+
+function PaymentMethodCard({ card }: { card: MethodAccountCard }) {
+  return (
+    <div className={`rounded-md border p-3 ${card.tone}`}>
+      <div className="flex items-center justify-between">
+        <div className="font-bold flex items-center gap-1">
+          <span>{card.icon}</span>
+          <span>{card.group_label_ar}</span>
+        </div>
+        {card.is_inactive_historical && (
+          <span className="text-[9px] font-bold bg-white/60 text-slate-700 px-1.5 py-0.5 rounded">
+            تاريخي / غير مفعل
+          </span>
+        )}
+      </div>
+      <div className="text-lg font-black mt-1.5">{EGP(card.amount)}</div>
+      <div className="text-[11px] opacity-70 mt-0.5">
+        {card.invoice_count} فاتورة · {card.payment_count} دفعة
+      </div>
+      {card.account_display_name && (
+        <div className="text-[11px] opacity-80 mt-1 truncate" title={card.account_display_name}>
+          {card.account_display_name}
         </div>
       )}
     </div>
