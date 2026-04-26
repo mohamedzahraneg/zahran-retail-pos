@@ -18,6 +18,11 @@ import {
   History,
 } from 'lucide-react';
 import { posApi } from '@/api/pos.api';
+import {
+  paymentsApi,
+  PaymentMethodCode,
+  METHOD_LABEL_AR,
+} from '@/api/payments.api';
 import { usersApi } from '@/api/users.api';
 import { productsApi, Product, Variant } from '@/api/products.api';
 import { Receipt, ReceiptData } from '@/components/Receipt';
@@ -1242,9 +1247,11 @@ function InvoiceEditModal({
   const qc = useQueryClient();
   const [reason, setReason] = useState('');
   const [lines, setLines] = useState<EditLine[]>([]);
-  const [paymentMethod, setPaymentMethod] = useState<
-    'cash' | 'card' | 'instapay' | 'bank_transfer'
-  >('cash');
+  // PR-PAY-3 — Edit modal now mirrors the DB enum and persists the
+  // chosen payment_account_id so reposts via postInvoiceEdit land on
+  // the right GL bucket.
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethodCode>('cash');
+  const [paymentAccountId, setPaymentAccountId] = useState<string | null>(null);
   const [discountTotal, setDiscountTotal] = useState(0);
   const [notes, setNotes] = useState('');
 
@@ -1271,6 +1278,12 @@ function InvoiceEditModal({
     setNotes(data.notes || '');
     const firstPay = (data.payments || [])[0];
     if (firstPay?.payment_method) setPaymentMethod(firstPay.payment_method);
+    // PR-PAY-3: preselect the payment account that paired with the
+    // original payment row. If the account was later deactivated the
+    // operator must re-pick (the active-only accounts list won't
+    // contain it) — but the historical row + its snapshot remain
+    // intact on the invoice.
+    setPaymentAccountId(firstPay?.payment_account_id ?? null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data?.id]);
 
@@ -1315,6 +1328,10 @@ function InvoiceEditModal({
           {
             payment_method: paymentMethod,
             amount: grand,
+            // PR-PAY-3: thread the chosen account through the edit
+            // payload. postInvoiceEdit voids the prior JE and reposts
+            // on this account's GL code (cash leaves it null).
+            payment_account_id: paymentAccountId ?? undefined,
           },
         ],
       };
@@ -1534,21 +1551,16 @@ function InvoiceEditModal({
                     }
                   />
                 </div>
-                <div>
-                  <label className="text-xs text-slate-600 block mb-1">
-                    طريقة الدفع
-                  </label>
-                  <select
-                    className="input"
-                    value={paymentMethod}
-                    onChange={(e) => setPaymentMethod(e.target.value as any)}
-                  >
-                    <option value="cash">كاش</option>
-                    <option value="card">بطاقة</option>
-                    <option value="instapay">إنستا باي</option>
-                    <option value="bank_transfer">تحويل بنكي</option>
-                  </select>
-                </div>
+                <EditPaymentPicker
+                  method={paymentMethod}
+                  setMethod={(m) => {
+                    setPaymentMethod(m);
+                    setPaymentAccountId(null); // method change resets account
+                  }}
+                  accountId={paymentAccountId}
+                  setAccountId={setPaymentAccountId}
+                />
+                <div className="hidden">{/* spacer to keep grid alignment with previous row */}</div>
                 <div>
                   <label className="text-xs text-slate-600 block mb-1">
                     ملاحظات
@@ -1868,4 +1880,85 @@ function AppliedChanges({ history }: { history: any }) {
     : (current as any)?.items || (current as any)?.lines || [];
   const changes = diffLines(beforeItems, afterItems);
   return <ChangeList changes={changes} />;
+}
+
+// PR-PAY-3 — Compact method+account picker for the invoice edit modal.
+// Mirrors the POS PaymentModal but inlined as a 2-column row inside
+// the existing edit form so the surface area stays tight.
+const EDIT_METHODS: PaymentMethodCode[] = [
+  'cash',
+  'instapay',
+  'vodafone_cash',
+  'orange_cash',
+  'card_visa',
+  'card_mastercard',
+  'card_meeza',
+  'bank_transfer',
+];
+
+function EditPaymentPicker({
+  method,
+  setMethod,
+  accountId,
+  setAccountId,
+}: {
+  method: PaymentMethodCode;
+  setMethod: (m: PaymentMethodCode) => void;
+  accountId: string | null;
+  setAccountId: (id: string | null) => void;
+}) {
+  const accountsQuery = useQuery({
+    queryKey: ['payment-accounts', 'active'],
+    queryFn: () => paymentsApi.listAccounts({ active: true }),
+  });
+  const accountsForMethod = (accountsQuery.data ?? []).filter(
+    (a) => a.method === method,
+  );
+  const isCash = method === 'cash';
+  const blocked = !isCash && accountsForMethod.length === 0;
+
+  return (
+    <>
+      <div>
+        <label className="text-xs text-slate-600 block mb-1">طريقة الدفع</label>
+        <select
+          className="input"
+          value={method}
+          onChange={(e) => setMethod(e.target.value as PaymentMethodCode)}
+        >
+          {EDIT_METHODS.map((m) => (
+            <option key={m} value={m}>
+              {METHOD_LABEL_AR[m]}
+            </option>
+          ))}
+        </select>
+      </div>
+      {!isCash && (
+        <div>
+          <label className="text-xs text-slate-600 block mb-1">
+            حساب التحصيل
+          </label>
+          {blocked ? (
+            <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1.5">
+              لا يوجد حساب مفعل لهذه الطريقة. أضفه من إعدادات وسائل الدفع.
+            </div>
+          ) : (
+            <select
+              className="input"
+              value={accountId ?? ''}
+              onChange={(e) => setAccountId(e.target.value || null)}
+            >
+              <option value="">— اختر حساب —</option>
+              {accountsForMethod.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.display_name}
+                  {a.identifier ? ` · ${a.identifier}` : ''}
+                </option>
+              ))}
+            </select>
+          )}
+        </div>
+      )}
+    </>
+  );
 }

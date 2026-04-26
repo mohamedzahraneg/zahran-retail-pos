@@ -63,10 +63,17 @@ export interface ReceiptData {
     salesperson_name?: string | null;
   }>;
   payments: Array<{
-    payment_method: 'cash' | 'card' | 'instapay' | 'bank_transfer';
+    payment_method: string;
     amount: number;
     reference?: string | null;
     reference_number?: string | null;
+    /** PR-PAY-3: rendered next to method when present so the receipt
+     *  shows the channel that took the money (e.g. "InstaPay الأهلي"). */
+    payment_account_snapshot?: {
+      display_name?: string;
+      provider_key?: string;
+      identifier?: string;
+    } | null;
   }>;
   shop: {
     name?: string;
@@ -100,11 +107,21 @@ export interface ReceiptData {
   }>;
 }
 
+// PR-PAY-3 — Cover the full payment_method_code enum so receipts no
+// longer fall back to printing the raw enum value (e.g. "card_visa")
+// for non-cash payments.
 const METHOD_LABELS: Record<string, string> = {
   cash: 'كاش',
   card: 'كارت',
+  card_visa: 'فيزا',
+  card_mastercard: 'ماستركارد',
+  card_meeza: 'ميزة',
   instapay: 'إنستاباي',
+  vodafone_cash: 'فودافون كاش',
+  orange_cash: 'أورانج كاش',
   bank_transfer: 'تحويل بنكي',
+  credit: 'آجل',
+  other: 'أخرى',
 };
 
 const EGP = (n: number) => `${Number(n).toFixed(2)}`;
@@ -413,12 +430,19 @@ export function Receipt({ data, autoPrint = false, onAfterPrint, template }: Pro
 
         {/* Payments */}
         <div className="receipt-payments">
-          {payments.map((p, i) => (
-            <div key={i} className="receipt-row">
-              <span>{METHOD_LABELS[p.payment_method] || p.payment_method}:</span>
-              <span>{EGP(Number(p.amount))} ج.م</span>
-            </div>
-          ))}
+          {payments.map((p, i) => {
+            const acctName = p.payment_account_snapshot?.display_name;
+            const label = METHOD_LABELS[p.payment_method] || p.payment_method;
+            return (
+              <div key={i} className="receipt-row">
+                <span>
+                  {label}
+                  {acctName ? ` — ${acctName}` : ''}
+                </span>
+                <span>{EGP(Number(p.amount))} ج.م</span>
+              </div>
+            );
+          })}
           {paidTotal > 0 && (
             <div className="receipt-row">
               <span>إجمالي المدفوع:</span>
