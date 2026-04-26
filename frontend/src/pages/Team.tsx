@@ -38,6 +38,12 @@ import { useAuthStore } from '@/stores/auth.store';
 // AdminAttendancePanel is left untouched for the legacy ?tab=
 // fallback paths (deletion deferred to PR-T6).
 import { AttendanceWageTab } from '@/components/team/AttendanceWageTab';
+// PR-T3 — redesigned per-employee accounts tab. The no-employee
+// fallback (?section=accounts without ?employee) keeps rendering the
+// legacy team-wide <Payroll /> embedded in the SectionHeader wrapper
+// for compatibility — that's the team-wide balances view until the
+// final PR-T6 cleanup.
+import { AccountsMovementsTab } from '@/components/team/AccountsMovementsTab';
 // Payroll / حسابات الموظفين is now a tab inside /team (consolidation).
 // The component is rendered verbatim — no design change. Its own
 // useQuery hooks share the global TanStack cache, so mutations
@@ -749,18 +755,20 @@ function EmployeeProfilePanel({
           <AttendanceWageTab employee={row} />
         )}
         {tab === 'accounts' && (
-          <div>
-            <div className="mb-3 text-xs text-slate-500 leading-relaxed">
-              يعرض هذا التبويب لوحة الحسابات الحالية للفريق كله. سيتم تخصيصها للموظف المختار وإضافة فلاتر متقدمة + إبراز القيود الملغاة في PR-T3.
-            </div>
-            <Payroll />
-          </div>
+          // PR-T3 — redesigned per-employee accounts/movements tab.
+          // Replaces the embedded team-wide <Payroll /> with the
+          // unified ledger (gl_entries) + summary cards + filters +
+          // focused modals for payout/advance/bonus/deduction. Voided
+          // rows visible with zero effect (PR-25 contract).
+          <AccountsMovementsTab employee={row} />
         )}
         {tab === 'advances' && (
-          <PlaceholderPanel
-            title="السلف والخصومات"
-            message="سيتم نقل السلف والخصومات والمكافآت — مع اختيار مصدر الصرف (وردية مفتوحة / خزنة مباشرة) — في PR-T3/T4."
-          />
+          // PR-T3 — actions for السلف / الخصومات / المكافآت now live
+          // on the الحسابات والحركات tab as focused modals (with the
+          // CashSourceSelector enforced for السلفة per spec). This tab
+          // shows a filtered view of just those movement types from
+          // the same canonical ledger so the user has a focused list.
+          <AccountsMovementsTab employee={row} />
         )}
         {tab === 'approvals' && (
           <PlaceholderPanel
