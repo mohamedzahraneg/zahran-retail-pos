@@ -145,6 +145,146 @@ export class CommissionsService {
     return { user_id: userId, commission_rate: rate };
   }
 
+  /**
+   * PR-T4.6 — read the full seller settings row for the EditProfile
+   * modal. Returns all 8 commission/target fields in one round-trip
+   * so the form can pre-fill without sequencing multiple queries.
+   * Defaults applied for null values:
+   *   commission_mode       NULL → 'general' (back-compat)
+   *   sales_target_period   NULL → 'none'
+   *   is_salesperson        NULL → null (UI infers from sales linkage)
+   */
+  async getSellerSettings(userId: string) {
+    const [row] = await this.ds.query(
+      `SELECT id AS user_id,
+              COALESCE(is_salesperson, NULL)              AS is_salesperson,
+              COALESCE(commission_rate, 0)::numeric       AS commission_rate,
+              COALESCE(commission_mode, 'general')        AS commission_mode,
+              COALESCE(sales_target_period, 'none')       AS sales_target_period,
+              commission_target_amount                    AS sales_target_amount,
+              commission_after_target_rate                AS commission_after_target_rate,
+              over_target_commission_rate                 AS over_target_commission_rate,
+              commission_settings_effective_from          AS effective_from
+         FROM users
+        WHERE id = $1`,
+      [userId],
+    );
+    if (!row) throw new BadRequestException('user not found');
+    return row;
+  }
+
+  /**
+   * PR-T4.6 — atomic update of all seller settings. Each field
+   * independently optional (undefined = leave unchanged, null =
+   * clear). Validation:
+   *   commission_rate                  ∈ [0, 100]
+   *   commission_mode                  ∈ {general,after_target,
+   *                                       over_target,general_plus_over_target}
+   *   sales_target_period              ∈ {none,daily,weekly,monthly}
+   *   sales_target_amount              ≥ 0  or null
+   *   commission_after_target_rate     ∈ [0, 100]  or null
+   *   over_target_commission_rate      ∈ [0, 100]  or null
+   *   effective_from                   ISO date string  or null
+   *
+   * Cross-field guard: when sales_target_period == 'none' OR null,
+   * sales_target_amount is forced to null (target system off).
+   */
+  async updateSellerSettings(
+    userId: string,
+    patch: {
+      is_salesperson?: boolean | null;
+      commission_rate?: number;
+      commission_mode?: string;
+      sales_target_period?: string;
+      sales_target_amount?: number | null;
+      commission_after_target_rate?: number | null;
+      over_target_commission_rate?: number | null;
+      effective_from?: string | null;
+    },
+  ) {
+    const validModes = new Set([
+      'general', 'after_target', 'over_target', 'general_plus_over_target',
+    ]);
+    const validPeriods = new Set(['none', 'daily', 'weekly', 'monthly']);
+
+    if (
+      patch.commission_rate !== undefined &&
+      (patch.commission_rate < 0 || patch.commission_rate > 100)
+    ) {
+      throw new BadRequestException('commission_rate must be between 0 and 100');
+    }
+    if (
+      patch.commission_mode !== undefined &&
+      !validModes.has(patch.commission_mode)
+    ) {
+      throw new BadRequestException(
+        `commission_mode must be one of ${[...validModes].join(', ')}`,
+      );
+    }
+    if (
+      patch.sales_target_period !== undefined &&
+      !validPeriods.has(patch.sales_target_period)
+    ) {
+      throw new BadRequestException(
+        `sales_target_period must be one of ${[...validPeriods].join(', ')}`,
+      );
+    }
+    if (
+      patch.sales_target_amount !== undefined &&
+      patch.sales_target_amount !== null &&
+      patch.sales_target_amount < 0
+    ) {
+      throw new BadRequestException('sales_target_amount must be >= 0 or null');
+    }
+    for (const k of [
+      'commission_after_target_rate',
+      'over_target_commission_rate',
+    ] as const) {
+      const v = patch[k];
+      if (v !== undefined && v !== null && (v < 0 || v > 100)) {
+        throw new BadRequestException(`${k} must be between 0 and 100 or null`);
+      }
+    }
+
+    // Cross-field: target_period 'none' implies target_amount = null.
+    let effectiveTargetAmount = patch.sales_target_amount;
+    if (
+      patch.sales_target_period === 'none' &&
+      effectiveTargetAmount === undefined
+    ) {
+      effectiveTargetAmount = null;
+    }
+
+    const sets: string[] = [];
+    const params: any[] = [userId];
+    const push = (col: string, val: any) => {
+      params.push(val);
+      sets.push(`${col} = $${params.length}`);
+    };
+
+    if (patch.is_salesperson !== undefined) push('is_salesperson', patch.is_salesperson);
+    if (patch.commission_rate !== undefined) push('commission_rate', patch.commission_rate);
+    if (patch.commission_mode !== undefined) push('commission_mode', patch.commission_mode);
+    if (patch.sales_target_period !== undefined) push('sales_target_period', patch.sales_target_period);
+    if (effectiveTargetAmount !== undefined) push('commission_target_amount', effectiveTargetAmount);
+    if (patch.commission_after_target_rate !== undefined)
+      push('commission_after_target_rate', patch.commission_after_target_rate);
+    if (patch.over_target_commission_rate !== undefined)
+      push('over_target_commission_rate', patch.over_target_commission_rate);
+    if (patch.effective_from !== undefined)
+      push('commission_settings_effective_from', patch.effective_from);
+
+    if (sets.length === 0) {
+      return this.getSellerSettings(userId);
+    }
+    sets.push(`updated_at = NOW()`);
+    await this.ds.query(
+      `UPDATE users SET ${sets.join(', ')} WHERE id = $1`,
+      params,
+    );
+    return this.getSellerSettings(userId);
+  }
+
   async listSalespeople() {
     return this.ds.query(
       `

@@ -72,4 +72,54 @@ export const commissionsApi = {
     unwrap<{ user_id: string; commission_rate: number }>(
       api.patch(`/commissions/${userId}/rate`, { commission_rate }),
     ),
+
+  getSellerSettings: (userId: string) =>
+    unwrap<SellerSettings>(api.get(`/commissions/${userId}/seller-settings`)),
+
+  updateSellerSettings: (
+    userId: string,
+    patch: SellerSettingsPatch,
+  ) =>
+    unwrap<SellerSettings>(
+      api.patch(`/commissions/${userId}/seller-settings`, patch),
+    ),
 };
+
+/**
+ * PR-T4.6 — full seller settings row used by the EditProfile modal
+ * + the Overview's target widgets.
+ *   sales_target_period = 'none' (or null on legacy users) means the
+ *   operator hasn't enabled the target system yet.
+ *   commission_mode = 'general' is the default for legacy users (NULL
+ *   in DB is coerced to 'general' by the backend's COALESCE).
+ */
+export type CommissionMode =
+  | 'general'
+  | 'after_target'
+  | 'over_target'
+  | 'general_plus_over_target';
+
+export type SalesTargetPeriod = 'none' | 'daily' | 'weekly' | 'monthly';
+
+export interface SellerSettings {
+  user_id: string;
+  is_salesperson: boolean | null;
+  commission_rate: string;
+  commission_mode: CommissionMode;
+  sales_target_period: SalesTargetPeriod;
+  sales_target_amount: string | null;
+  commission_after_target_rate: string | null;
+  over_target_commission_rate: string | null;
+  effective_from: string | null;
+}
+
+export interface SellerSettingsPatch {
+  is_salesperson?: boolean | null;
+  commission_rate?: number;
+  commission_mode?: CommissionMode;
+  sales_target_period?: SalesTargetPeriod;
+  sales_target_amount?: number | null;
+  commission_after_target_rate?: number | null;
+  over_target_commission_rate?: number | null;
+  effective_from?: string | null;
+}
