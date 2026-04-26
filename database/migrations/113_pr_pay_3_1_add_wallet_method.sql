@@ -1,0 +1,28 @@
+-- Migration 113 — PR-PAY-3.1 part 1: enum-value bootstrap.
+-- ═══════════════════════════════════════════════════════════════════════════
+--
+-- Adds 'wallet' to the `payment_method_code` enum so the cashier-side
+-- POS can show a generic wallet button (محفظة إلكترونية) for
+-- providers that don't fit a specific telco wallet (vodafone_cash,
+-- orange_cash, etisalat — handled separately) but aren't a back-office
+-- `other` either. Used by WE Pay, Bank Wallet, and any future
+-- non-telco wallet provider.
+--
+-- Why this is its own file
+--
+--   Postgres rule (still enforced in 17.x): ALTER TYPE … ADD VALUE
+--   cannot be USED in the same transaction in which it's added. The
+--   actual `payment_accounts` retag (WE Pay other → wallet) ships in
+--   migration 113b. Same split pattern as PR-DRIFT-3D migration 107
+--   + 107b.
+--
+-- Strict scope
+--
+--   · DDL only — adds a new enum label.
+--   · NO INSERT, NO UPDATE, NO DELETE on any row.
+--   · NO journal_entries / journal_lines / cashbox_transactions writes.
+--   · NO accounting effect.
+--   · Idempotent via IF NOT EXISTS.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+ALTER TYPE payment_method_code ADD VALUE IF NOT EXISTS 'wallet';

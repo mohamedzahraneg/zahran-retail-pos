@@ -28,6 +28,7 @@ export type PaymentMethodCode =
   | 'instapay'
   | 'vodafone_cash'
   | 'orange_cash'
+  | 'wallet'         // PR-PAY-3.1: generic wallet umbrella (WE Pay, Bank Wallet, …)
   | 'bank_transfer'
   | 'credit'
   | 'other';
@@ -94,9 +95,15 @@ export const PAYMENT_PROVIDERS: PaymentProvider[] = [
     group: 'wallet',
     requires_reference: true,
   },
+  // PR-PAY-3.1 — Non-telco wallets now route to the generic `wallet`
+  // enum value (added by migration 113). Vodafone Cash and Orange
+  // Cash keep their dedicated enum values for backward compat with
+  // historical invoice_payments rows. New cashier sales for any of
+  // the three wallets below land on payment_method='wallet' and
+  // GL 1114.
   {
     provider_key: 'etisalat_cash',
-    method: 'other',
+    method: 'wallet',
     name_ar: 'اتصالات كاش',
     name_en: 'Etisalat Cash',
     icon_name: 'Wallet',
@@ -106,7 +113,7 @@ export const PAYMENT_PROVIDERS: PaymentProvider[] = [
   },
   {
     provider_key: 'we_pay',
-    method: 'other',
+    method: 'wallet',
     name_ar: 'WE Pay',
     name_en: 'WE Pay',
     icon_name: 'Wallet',
@@ -116,7 +123,7 @@ export const PAYMENT_PROVIDERS: PaymentProvider[] = [
   },
   {
     provider_key: 'bank_wallet',
-    method: 'other',
+    method: 'wallet',
     name_ar: 'محفظة بنكية',
     name_en: 'Bank Wallet',
     icon_name: 'Wallet',
@@ -271,6 +278,7 @@ export const METHOD_DEFAULT_GL_CODE: Record<
   instapay: '1114',
   vodafone_cash: '1114',
   orange_cash: '1114',
+  wallet: '1114',         // PR-PAY-3.1: generic wallet umbrella
   bank_transfer: '1113',
   credit: '1121',
 };

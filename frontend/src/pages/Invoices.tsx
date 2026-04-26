@@ -1890,6 +1890,7 @@ const EDIT_METHODS: PaymentMethodCode[] = [
   'instapay',
   'vodafone_cash',
   'orange_cash',
+  'wallet',         // PR-PAY-3.1
   'card_visa',
   'card_mastercard',
   'card_meeza',

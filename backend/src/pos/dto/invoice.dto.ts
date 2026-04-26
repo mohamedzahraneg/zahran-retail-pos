@@ -34,6 +34,7 @@ export const PAYMENT_METHOD_VALUES = [
   'instapay',
   'vodafone_cash',
   'orange_cash',
+  'wallet',         // PR-PAY-3.1: generic wallet umbrella
   'bank_transfer',
   'credit',
   'other',
