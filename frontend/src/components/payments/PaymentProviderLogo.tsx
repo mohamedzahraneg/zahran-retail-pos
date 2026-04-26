@@ -67,6 +67,32 @@ function initials(name?: string | null): string {
   return parts.map((p) => Array.from(p)[0] ?? '').join('') || '•';
 }
 
+/**
+ * Sink-side allow-list for the `<img src>` value.
+ *
+ * The `src` flows in from props that originate at DOM-text sources
+ * (FileReader result for drag-dropped files, `<input>` value for
+ * URL paste). The LogoPicker already validates at the source — this
+ * is defense-in-depth at the sink, also makes the dataflow explicit
+ * for CodeQL's `js/xss-through-dom` analysis.
+ *
+ * Allowed:
+ *   • Vite-bundled relative URLs (`/assets/...`, `/payment-logos/...`)
+ *   • absolute http(s) URLs the operator pasted
+ *   • base64 data URLs ONLY for raster image formats (no SVG, no
+ *     `data:text/html`, no `javascript:`)
+ *
+ * Anything else returns `null` — the component falls through to the
+ * initials avatar instead of binding the unsafe value to img.src.
+ */
+const SAFE_IMG_SRC =
+  /^(\/|https?:\/\/|data:image\/(png|jpe?g|webp|gif);base64,[A-Za-z0-9+/=]+$)/i;
+
+function sanitizeImgSrc(candidate: string | null | undefined): string | null {
+  if (!candidate) return null;
+  return SAFE_IMG_SRC.test(candidate) ? candidate : null;
+}
+
 export function PaymentProviderLogo({
   logoDataUrl,
   logoUrl,
@@ -78,10 +104,14 @@ export function PaymentProviderLogo({
   decorative,
 }: PaymentProviderLogoProps) {
   // Resolution order — dataUrl > url > catalog > group fallback.
-  const src =
+  // Pass through `sanitizeImgSrc` so an attacker-influenced value
+  // (e.g. `javascript:` or SVG-with-script data URL) can never reach
+  // <img src>. Vite-bundled assets (relative URLs) always pass.
+  const candidate =
     (logoDataUrl && logoDataUrl.trim()) ||
     (logoUrl && logoUrl.trim()) ||
     getPaymentLogo(logoKey, method);
+  const src = sanitizeImgSrc(candidate);
 
   const px = SIZE_PX[size];
   const wrapperStyle: React.CSSProperties = {
