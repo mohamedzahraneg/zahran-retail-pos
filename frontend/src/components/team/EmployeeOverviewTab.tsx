@@ -246,38 +246,84 @@ export function EmployeeOverviewTab({ employee }: { employee: TeamRow }) {
     [prevDetailRows],
   );
 
-  // PR-T4.6 — target system. When `commission_target_amount` is set on
-  // the user, the Overview surfaces a 5-cell target panel: target /
-  // achieved / achievement % / remaining / over. The estimated
-  // commission combines the base rate up to the target with the
-  // optional after-target rate above it. Honest "no target" state
-  // when the operator hasn't enabled the system in EditProfile yet.
-  const targetAmount = sellerSettings?.commission_target_amount
-    ? Number(sellerSettings.commission_target_amount)
+  // PR-T4.6 — target system. The settings now carry an explicit
+  // `sales_target_period` (none/daily/weekly/monthly) + `commission_mode`
+  // (general / after_target / over_target / general_plus_over_target).
+  // When the period the user selected on the Overview matches the target
+  // period, the comparison is exact. When they don't match (e.g. user
+  // configured a monthly target but is viewing daily), the panel still
+  // shows the configured target but labels the comparison as "تقديري"
+  // since proportional scaling would be misleading.
+  const targetAmount = sellerSettings?.sales_target_amount
+    ? Number(sellerSettings.sales_target_amount)
     : null;
+  const targetPeriod = sellerSettings?.sales_target_period ?? 'none';
   const afterTargetRate =
     sellerSettings?.commission_after_target_rate != null
       ? Number(sellerSettings.commission_after_target_rate)
       : null;
-  const targetEnabled = targetAmount !== null && targetAmount > 0;
+  const overTargetRate =
+    sellerSettings?.over_target_commission_rate != null
+      ? Number(sellerSettings.over_target_commission_rate)
+      : null;
+  const commissionMode = sellerSettings?.commission_mode ?? 'general';
+  const targetEnabled =
+    targetPeriod !== 'none' && targetAmount !== null && targetAmount > 0;
+
+  // Period match: 'monthly' filter aligns with monthly target, etc.
+  // 'custom' never matches — flagged as تقديري.
+  const periodMatch =
+    !targetEnabled
+      ? null
+      : periodMode === 'custom'
+        ? 'custom'
+        : periodMode === targetPeriod
+          ? 'exact'
+          : 'mismatch';
+
   const achievementPct =
     targetEnabled && targetAmount! > 0
       ? Math.min((eligibleSales / targetAmount!) * 100, 999)
       : null;
   const remainingToTarget =
     targetEnabled ? Math.max(targetAmount! - eligibleSales, 0) : 0;
-  const overTarget =
+  const overTargetSales =
     targetEnabled ? Math.max(eligibleSales - targetAmount!, 0) : 0;
+
+  // Commission estimate by mode. All four modes operate on
+  // (eligibleSales, targetAmount, baseRate, afterRate, overRate).
   const estimatedCommission = useMemo(() => {
-    if (!targetEnabled) {
-      return commissionRate > 0 ? eligibleSales * commissionRate / 100 : 0;
+    if (commissionRate <= 0) return 0;
+    const t = targetAmount ?? 0;
+    const reached = targetEnabled && eligibleSales >= t;
+    const above = Math.max(eligibleSales - t, 0);
+    switch (commissionMode) {
+      case 'after_target':
+        if (!reached) return 0;
+        return (eligibleSales * (afterTargetRate ?? commissionRate)) / 100;
+      case 'over_target':
+        if (!targetEnabled || above === 0) return 0;
+        return (above * (overTargetRate ?? 0)) / 100;
+      case 'general_plus_over_target': {
+        let c = (eligibleSales * commissionRate) / 100;
+        if (targetEnabled && above > 0) {
+          c += (above * (overTargetRate ?? 0)) / 100;
+        }
+        return c;
+      }
+      case 'general':
+      default:
+        return (eligibleSales * commissionRate) / 100;
     }
-    const upToTarget = Math.min(eligibleSales, targetAmount!);
-    const above = Math.max(eligibleSales - targetAmount!, 0);
-    const baseRate = commissionRate;
-    const boostRate = afterTargetRate ?? baseRate;
-    return (upToTarget * baseRate) / 100 + (above * boostRate) / 100;
-  }, [targetEnabled, eligibleSales, targetAmount, afterTargetRate, commissionRate]);
+  }, [
+    commissionMode,
+    commissionRate,
+    targetEnabled,
+    targetAmount,
+    eligibleSales,
+    afterTargetRate,
+    overTargetRate,
+  ]);
 
   const categoryRows = categoryBreakdown as CommissionCategoryBreakdownRow[];
   const categoryRowsValid = categoryRows.filter(
@@ -503,13 +549,17 @@ export function EmployeeOverviewTab({ employee }: { employee: TeamRow }) {
       {isSalesperson && (
         <TargetPanel
           enabled={targetEnabled}
+          period={targetPeriod}
+          mode={commissionMode}
+          periodMatch={periodMatch}
           target={targetAmount ?? 0}
           achieved={eligibleSales}
           achievementPct={achievementPct}
           remaining={remainingToTarget}
-          overTarget={overTarget}
+          overTarget={overTargetSales}
           baseRate={commissionRate}
           afterTargetRate={afterTargetRate}
+          overTargetRate={overTargetRate}
           estimatedCommission={estimatedCommission}
         />
       )}
@@ -964,16 +1014,41 @@ function BigKpi({
 }
 
 /* ─────────────────────────────────────────────────────────────────
- * TargetPanel — sales target tracking (PR-T4.6)
+ * TargetPanel — sales target tracking (PR-T4.6, full spec)
  *
  * Renders 6 cells when the operator has enabled a target system on
  * the user's seller settings: التارجت / المحقق / نسبة التحقيق /
- * المتبقي / أوفر تارجت / العمولة التقديرية. When no target is set,
- * shows an honest empty state pointing the operator at the EditProfile
- * modal — never invents a default target.
+ * المتبقي / أوفر تارجت / العمولة التقديرية. Period-aware:
+ *   periodMatch === 'exact'    — target window matches Overview filter
+ *   periodMatch === 'mismatch' — different windows; figures shown as
+ *                                configured, with a "تقديري" hint
+ *   periodMatch === 'custom'   — user picked custom range; same hint
+ * Honest empty state when no target system enabled.
  * ───────────────────────────────────────────────────────────────── */
+type TargetPeriod = 'none' | 'daily' | 'weekly' | 'monthly';
+type CommissionMode =
+  | 'general'
+  | 'after_target'
+  | 'over_target'
+  | 'general_plus_over_target';
+const periodLabel: Record<TargetPeriod, string> = {
+  none: 'بدون تارجت',
+  daily: 'يومي',
+  weekly: 'أسبوعي',
+  monthly: 'شهري',
+};
+const modeLabel: Record<CommissionMode, string> = {
+  general: 'نسبة عامة من كل المبيعات',
+  after_target: 'نسبة بعد تحقيق التارجت',
+  over_target: 'نسبة على الأوفر تارجت',
+  general_plus_over_target: 'نسبة عامة + إضافية على الأوفر',
+};
+
 function TargetPanel({
   enabled,
+  period,
+  mode,
+  periodMatch,
   target,
   achieved,
   achievementPct,
@@ -981,9 +1056,13 @@ function TargetPanel({
   overTarget,
   baseRate,
   afterTargetRate,
+  overTargetRate,
   estimatedCommission,
 }: {
   enabled: boolean;
+  period: TargetPeriod;
+  mode: CommissionMode;
+  periodMatch: 'exact' | 'mismatch' | 'custom' | null;
   target: number;
   achieved: number;
   achievementPct: number | null;
@@ -991,6 +1070,7 @@ function TargetPanel({
   overTarget: number;
   baseRate: number;
   afterTargetRate: number | null;
+  overTargetRate: number | null;
   estimatedCommission: number;
 }) {
   if (!enabled) {
@@ -1002,13 +1082,13 @@ function TargetPanel({
         <div className="px-5 pb-5 pt-2">
           <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-center">
             <div className="text-sm font-black text-slate-600">
-              لم يتم تفعيل نظام التارجت لهذا الموظف
+              بدون تارجت
             </div>
             <div className="text-xs text-slate-500 mt-2 leading-relaxed">
               من رأس صفحة الموظف → تعديل الملف → إعدادات البائع، يمكن
-              تفعيل التارجت وتحديد قيمته ونسبة العمولة بعد التارجت.
-              عند التفعيل، ستظهر هنا نسبة التحقيق والمتبقي وأوفر التارجت
-              والعمولة التقديرية.
+              تفعيل التارجت (يومي / أسبوعي / شهري) وتحديد نوع العمولة
+              ونسبتها. عند التفعيل، ستظهر هنا نسبة التحقيق والمتبقي
+              وأوفر التارجت والعمولة التقديرية.
             </div>
           </div>
         </div>
@@ -1026,19 +1106,46 @@ function TargetPanel({
           : 'rose';
   const barWidth =
     achievementPct === null ? 0 : Math.min(achievementPct, 100);
+  const targetReached = (achievementPct ?? 0) >= 100;
+  const isApprox = periodMatch === 'mismatch' || periodMatch === 'custom';
+
+  // Commission subtitle reflects the formula picked.
+  const commissionFormulaText =
+    baseRate <= 0
+      ? 'يلزم تحديد نسبة عمولة'
+      : mode === 'general'
+        ? `${baseRate}% × المبيعات`
+        : mode === 'after_target'
+          ? `${(afterTargetRate ?? baseRate)}% × المبيعات (إذا تحقق التارجت)`
+          : mode === 'over_target'
+            ? `${(overTargetRate ?? 0)}% × (المبيعات − التارجت)`
+            : `${baseRate}% × المبيعات + ${(overTargetRate ?? 0)}% × أوفر`;
 
   return (
     <Panel
-      title="تارجت المبيعات"
+      title={`تارجت المبيعات (${periodLabel[period]})`}
       subtitle={
-        achievementPct !== null && achievementPct >= 100
+        targetReached
           ? `تم تحقيق التارجت — أوفر ${EGP(overTarget)}`
-          : `${(achievementPct ?? 0).toFixed(0)}% من التارجت`
+          : `${(achievementPct ?? 0).toFixed(0)}% من التارجت · ${modeLabel[mode]}`
       }
     >
       <div className="p-5 space-y-4">
+        {isApprox && (
+          <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] font-bold text-amber-900">
+            تنويه تقديري: التارجت مضبوط على نظام {periodLabel[period]}،
+            لكن الفترة المختارة في النظرة العامة{' '}
+            {periodMatch === 'custom' ? 'مخصصة' : 'مختلفة'}. النسبة
+            والمتبقي يقارَنان بالتارجت كما هو، وقد لا يعكسان الإطار
+            الزمني الفعلي للتارجت.
+          </div>
+        )}
         <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
-          <TargetCell label="التارجت" value={EGP(target)} tone="slate" />
+          <TargetCell
+            label={`التارجت (${periodLabel[period]})`}
+            value={EGP(target)}
+            tone="slate"
+          />
           <TargetCell label="المحقق" value={EGP(achieved)} tone="blue" />
           <TargetCell
             label="نسبة التحقيق"
@@ -1046,28 +1153,31 @@ function TargetPanel({
               achievementPct !== null ? `${achievementPct.toFixed(1)}%` : '—'
             }
             tone={onTrackTone}
+            sub={
+              targetReached
+                ? 'تم تحقيق التارجت'
+                : isApprox
+                  ? 'تقديري'
+                  : undefined
+            }
           />
           <TargetCell
             label="المتبقي للتارجت"
             value={remaining > 0 ? EGP(remaining) : '—'}
             tone={remaining > 0 ? 'amber' : 'slate'}
+            sub={remaining === 0 ? 'تم تحقيق التارجت' : undefined}
           />
           <TargetCell
             label="أوفر التارجت"
             value={overTarget > 0 ? EGP(overTarget) : '—'}
             tone={overTarget > 0 ? 'green' : 'slate'}
+            sub={overTarget > 0 ? 'فوق التارجت' : undefined}
           />
           <TargetCell
             label="العمولة التقديرية"
             value={baseRate > 0 ? EGP(estimatedCommission) : '—'}
             tone="purple"
-            sub={
-              baseRate <= 0
-                ? 'يلزم تحديد نسبة عمولة'
-                : afterTargetRate != null
-                  ? `${baseRate}% حتى التارجت · ${afterTargetRate}% بعده`
-                  : `${baseRate}% (نفس النسبة قبل وبعد التارجت)`
-            }
+            sub={commissionFormulaText}
           />
         </div>
         <div className="space-y-1">

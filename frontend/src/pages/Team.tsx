@@ -1160,42 +1160,66 @@ function SellerSettingsForm({ userId }: { userId: string }) {
     queryFn: () => commissionsApi.getSellerSettings(userId),
   });
 
+  // Form state — strings for inputs, then narrowed at save time.
+  const [isSeller, setIsSeller] = useState<boolean>(false);
   const [rate, setRate] = useState('');
-  const [targetEnabled, setTargetEnabled] = useState(false);
+  const [mode, setMode] = useState<
+    'general' | 'after_target' | 'over_target' | 'general_plus_over_target'
+  >('general');
+  const [period, setPeriod] = useState<'none' | 'daily' | 'weekly' | 'monthly'>(
+    'none',
+  );
   const [targetAmount, setTargetAmount] = useState('');
   const [afterRate, setAfterRate] = useState('');
+  const [overRate, setOverRate] = useState('');
+  const [effectiveFrom, setEffectiveFrom] = useState('');
 
-  // Hydrate when the API returns.
   useEffect(() => {
     if (!settings) return;
+    setIsSeller(settings.is_salesperson === true);
     setRate(String(Number(settings.commission_rate || 0)));
-    const hasTarget =
-      settings.commission_target_amount !== null &&
-      settings.commission_target_amount !== undefined;
-    setTargetEnabled(hasTarget);
-    setTargetAmount(hasTarget ? String(settings.commission_target_amount) : '');
+    setMode((settings.commission_mode as any) || 'general');
+    setPeriod((settings.sales_target_period as any) || 'none');
+    setTargetAmount(
+      settings.sales_target_amount != null ? String(settings.sales_target_amount) : '',
+    );
     setAfterRate(
-      settings.commission_after_target_rate !== null &&
-        settings.commission_after_target_rate !== undefined
+      settings.commission_after_target_rate != null
         ? String(settings.commission_after_target_rate)
         : '',
     );
+    setOverRate(
+      settings.over_target_commission_rate != null
+        ? String(settings.over_target_commission_rate)
+        : '',
+    );
+    setEffectiveFrom(
+      settings.effective_from ? settings.effective_from.slice(0, 10) : '',
+    );
   }, [settings]);
+
+  const targetEnabled = period !== 'none';
+  const showAfterRate = mode === 'after_target';
+  const showOverRate =
+    mode === 'over_target' || mode === 'general_plus_over_target';
 
   const save = useMutation({
     mutationFn: () =>
       commissionsApi.updateSellerSettings(userId, {
+        is_salesperson: isSeller,
         commission_rate: rate === '' ? undefined : Number(rate),
-        commission_target_amount: targetEnabled
+        commission_mode: mode,
+        sales_target_period: period,
+        sales_target_amount: targetEnabled
           ? targetAmount === ''
             ? null
             : Number(targetAmount)
           : null,
-        commission_after_target_rate: targetEnabled
-          ? afterRate === ''
-            ? null
-            : Number(afterRate)
-          : null,
+        commission_after_target_rate:
+          showAfterRate && afterRate !== '' ? Number(afterRate) : null,
+        over_target_commission_rate:
+          showOverRate && overRate !== '' ? Number(overRate) : null,
+        effective_from: effectiveFrom === '' ? null : effectiveFrom,
       }),
     onSuccess: () => {
       toast.success('تم حفظ إعدادات البائع');
@@ -1210,6 +1234,20 @@ function SellerSettingsForm({ userId }: { userId: string }) {
   return (
     <div className="card p-4 space-y-4 text-sm">
       <div className="grid grid-cols-2 gap-3">
+        <Field label="هل الموظف بائع؟">
+          <label className="inline-flex items-center gap-2 mt-1.5">
+            <input
+              type="checkbox"
+              checked={isSeller}
+              onChange={(e) => setIsSeller(e.target.checked)}
+            />
+            <span className="text-xs font-bold text-slate-600">
+              {isSeller
+                ? 'نعم — يطبق نظام عمولة وتارجت'
+                : 'لا — تخفي إعدادات البائع'}
+            </span>
+          </label>
+        </Field>
         <Field label="نسبة العمولة الأساسية (%)">
           <input
             type="number"
@@ -1220,52 +1258,110 @@ function SellerSettingsForm({ userId }: { userId: string }) {
             value={rate}
             onChange={(e) => setRate(e.target.value)}
             placeholder="0"
+            disabled={!isSeller}
           />
         </Field>
-        <Field label="نظام التارجت">
-          <label className="inline-flex items-center gap-2 mt-1.5">
-            <input
-              type="checkbox"
-              checked={targetEnabled}
-              onChange={(e) => setTargetEnabled(e.target.checked)}
-            />
-            <span className="text-xs font-bold text-slate-600">
-              {targetEnabled ? 'مفعّل — تارجت محدد' : 'بدون تارجت (عمولة ثابتة فقط)'}
-            </span>
-          </label>
-        </Field>
       </div>
-      {targetEnabled && (
-        <div className="grid grid-cols-2 gap-3 rounded-xl border border-emerald-100 bg-emerald-50/40 p-3">
-          <Field label="قيمة التارجت (ج.م)">
-            <input
-              type="number"
-              step="0.01"
-              min="0"
-              className="input w-full"
-              value={targetAmount}
-              onChange={(e) => setTargetAmount(e.target.value)}
-              placeholder="0"
-            />
-          </Field>
-          <Field label="نسبة العمولة بعد التارجت (%) — اختياري">
-            <input
-              type="number"
-              step="0.01"
-              min="0"
-              max="100"
-              className="input w-full"
-              value={afterRate}
-              onChange={(e) => setAfterRate(e.target.value)}
-              placeholder={rate || '0'}
-            />
-          </Field>
-          <div className="col-span-2 text-[11px] text-emerald-900/70 leading-relaxed">
-            المبيعات حتى التارجت تُحسب بالنسبة الأساسية. ما يزيد عن التارجت
-            (أوفر تارجت) يُحسب بالنسبة الجديدة. لو تركت "نسبة العمولة بعد
-            التارجت" فاضية، النسبة الأساسية تُطبَّق على كامل المبيعات.
+      {isSeller && (
+        <>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="نوع العمولة">
+              <select
+                className="input w-full"
+                value={mode}
+                onChange={(e) => setMode(e.target.value as any)}
+              >
+                <option value="general">نسبة عامة من كل المبيعات</option>
+                <option value="after_target">
+                  نسبة بعد تحقيق التارجت فقط
+                </option>
+                <option value="over_target">نسبة على الأوفر تارجت فقط</option>
+                <option value="general_plus_over_target">
+                  نسبة عامة + نسبة إضافية على الأوفر تارجت
+                </option>
+              </select>
+            </Field>
+            <Field label="نظام التارجت">
+              <select
+                className="input w-full"
+                value={period}
+                onChange={(e) => setPeriod(e.target.value as any)}
+              >
+                <option value="none">بدون تارجت</option>
+                <option value="daily">تارجت يومي</option>
+                <option value="weekly">تارجت أسبوعي</option>
+                <option value="monthly">تارجت شهري</option>
+              </select>
+            </Field>
           </div>
-        </div>
+          {targetEnabled && (
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 rounded-xl border border-emerald-100 bg-emerald-50/40 p-3">
+              <Field label={`قيمة التارجت (ج.م) — ${
+                period === 'daily' ? 'يومي'
+                  : period === 'weekly' ? 'أسبوعي'
+                  : 'شهري'
+              }`}>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  className="input w-full"
+                  value={targetAmount}
+                  onChange={(e) => setTargetAmount(e.target.value)}
+                  placeholder="0"
+                />
+              </Field>
+              {showAfterRate && (
+                <Field label="نسبة العمولة بعد التارجت (%)">
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    max="100"
+                    className="input w-full"
+                    value={afterRate}
+                    onChange={(e) => setAfterRate(e.target.value)}
+                    placeholder={rate || '0'}
+                  />
+                </Field>
+              )}
+              {showOverRate && (
+                <Field label="نسبة الأوفر تارجت (%)">
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    max="100"
+                    className="input w-full"
+                    value={overRate}
+                    onChange={(e) => setOverRate(e.target.value)}
+                    placeholder="0"
+                  />
+                </Field>
+              )}
+              <div className="md:col-span-3 text-[11px] text-emerald-900/70 leading-relaxed">
+                {mode === 'general' &&
+                  'العمولة = إجمالي المبيعات × النسبة الأساسية. التارجت يستخدم لإظهار نسبة التحقيق فقط.'}
+                {mode === 'after_target' &&
+                  'العمولة = إجمالي المبيعات × النسبة بعد التارجت — فقط إذا تم تحقيق التارجت.'}
+                {mode === 'over_target' &&
+                  'العمولة = (المبيعات − التارجت) × نسبة الأوفر تارجت. صفر إذا لم يُحقق التارجت.'}
+                {mode === 'general_plus_over_target' &&
+                  'العمولة = (المبيعات × النسبة الأساسية) + (المبيعات − التارجت) × نسبة الأوفر تارجت.'}
+              </div>
+            </div>
+          )}
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="تاريخ بداية تطبيق الإعداد (اختياري)">
+              <input
+                type="date"
+                className="input w-full"
+                value={effectiveFrom}
+                onChange={(e) => setEffectiveFrom(e.target.value)}
+              />
+            </Field>
+          </div>
+        </>
       )}
       <div className="flex justify-end">
         <button
