@@ -4,20 +4,21 @@ import {
   FinancialEngineService,
   TransactionKind,
 } from './financial-engine.service';
+import { PaymentsService } from '../payments/payments.service';
+import {
+  METHOD_DEFAULT_GL_CODE,
+  isCashMethod,
+} from '../payments/providers.catalog';
 
-// PR-DRIFT-3E — Payment-method → GL account map. Cash is handled
-// specially (resolves through the shift's cashbox); every other
-// method debits its dedicated bucket account so the cashbox never
-// gets a stale leg for a non-cash sale.
-const PAYMENT_METHOD_ACCOUNT_CODE: Record<string, string> = {
-  cash: '1111',          // الخزينة الرئيسية / Main Cash (overridden via cashbox link)
-  instapay: '1114',      // المحافظ الإلكترونية / E-Wallets
-  wallet: '1114',
-  bank_transfer: '1113', // البنك / Bank
-  bank: '1113',
-  card: '1113',
-  check: '1115',
-};
+// PR-PAY-1 — Method → default GL account. The map is exhaustive over
+// the existing `payment_method_code` enum (cash, card_visa,
+// card_mastercard, card_meeza, instapay, vodafone_cash, orange_cash,
+// bank_transfer, credit) so postInvoice never falls back to a wrong
+// bucket. `other` is intentionally not mapped — posting will throw
+// for `other` unless an explicit payment_account.gl_account_code is
+// supplied. This kills the previous `|| '1114'` silent fallback that
+// quietly routed unknown methods to the e-wallets account.
+const PAYMENT_METHOD_ACCOUNT_CODE: Record<string, string> = METHOD_DEFAULT_GL_CODE;
 
 /**
  * Centralized journal posting for every financial event in the system.
@@ -46,6 +47,7 @@ export class AccountingPostingService {
   constructor(
     private readonly ds: DataSource,
     @Optional() private readonly engine?: FinancialEngineService,
+    @Optional() private readonly payments?: PaymentsService,
   ) {}
 
   // ═══════════════════════════════════════════════════════════════════
@@ -117,15 +119,20 @@ export class AccountingPostingService {
     const cogs = Number(costRow?.cogs || 0);
     const entryDate = this.dateOnly(inv.completed_at || inv.created_at);
 
-    // PR-DRIFT-3E — Per-payment GL routing. The legacy path treated
-    // `paid` as a single cash debit; this missed non-cash methods
-    // entirely (instapay/bank/card all silently posted to the cashbox
-    // account). We now read invoice_payments and emit one DR line per
-    // payment on the right account. Cash still flows through the
-    // shift's cashbox account; non-cash flows to its bucket account
-    // (instapay → 1114 wallet, bank_transfer/card → 1113 bank).
+    // PR-PAY-1 — Per-payment GL routing with payment_account
+    // resolution. Order of resolution for the DR account:
+    //   1) payment_account_snapshot.gl_account_code (frozen at payment
+    //      time — preferred so historical reposts use the same account
+    //      even if the underlying payment_account row was renamed/
+    //      deactivated later);
+    //   2) payment_account.gl_account_code (live lookup if no snapshot
+    //      yet — back-compat for invoices created before snapshotting);
+    //   3) METHOD_DEFAULT_GL_CODE[method] (legacy back-compat — used by
+    //      the current 4-button POS until PR-PAY-3 ships the picker);
+    //   4) THROW (no silent fallback to 1114 for `other`/unknown).
     const payments = await runner.query(
-      `SELECT payment_method::text AS payment_method, amount
+      `SELECT payment_method::text AS payment_method, amount,
+              payment_account_id, payment_account_snapshot
          FROM invoice_payments
         WHERE invoice_id = $1
           AND COALESCE(amount, 0) > 0`,
@@ -134,7 +141,7 @@ export class AccountingPostingService {
     const lines: any[] = [];
     for (const p of payments) {
       const amt = Number(p.amount);
-      if (p.payment_method === 'cash') {
+      if (isCashMethod(p.payment_method)) {
         lines.push(
           inv.cashbox_id
             ? {
@@ -150,13 +157,52 @@ export class AccountingPostingService {
                 description: `كاش - فاتورة ${inv.invoice_no}`,
               },
         );
-      } else {
-        lines.push({
-          account_code: PAYMENT_METHOD_ACCOUNT_CODE[p.payment_method] || '1114',
-          debit: amt,
-          description: `${p.payment_method} - فاتورة ${inv.invoice_no}`,
-        });
+        continue;
       }
+
+      // Non-cash: resolve account snapshot → live account → method default.
+      let glCode: string | undefined =
+        p.payment_account_snapshot?.gl_account_code ?? undefined;
+      let displayName: string | undefined =
+        p.payment_account_snapshot?.display_name ?? undefined;
+
+      if (!glCode && p.payment_account_id && this.payments) {
+        const live = await this.payments.resolveForPosting(
+          p.payment_account_id,
+          runner,
+        );
+        if (live) {
+          glCode = live.gl_account_code;
+          displayName = live.display_name;
+        }
+      }
+
+      if (!glCode) {
+        glCode = PAYMENT_METHOD_ACCOUNT_CODE[p.payment_method];
+      }
+
+      if (!glCode) {
+        // PR-PAY-1: no silent fallback. The previous `|| '1114'` would
+        // route `other` (and any future enum value we forget to map)
+        // to المحافظ الإلكترونية, silently corrupting the GL. Throw
+        // instead so the operation aborts atomically and the error
+        // surfaces in logs + the caller sees `.error`.
+        const msg =
+          `postInvoice: no GL account for payment_method='${p.payment_method}' ` +
+          `(invoice ${inv.invoice_no}). Either map the method in ` +
+          `METHOD_DEFAULT_GL_CODE or attach a payment_account_id whose ` +
+          `gl_account_code is set.`;
+        this.logger.error(msg);
+        throw new Error(msg);
+      }
+
+      lines.push({
+        account_code: glCode,
+        debit: amt,
+        description: displayName
+          ? `${displayName} - فاتورة ${inv.invoice_no}`
+          : `${p.payment_method} - فاتورة ${inv.invoice_no}`,
+      });
     }
     if (unpaid > 0) {
       lines.push({
@@ -208,7 +254,7 @@ export class AccountingPostingService {
     }> = [];
     if (inv.cashbox_id) {
       for (const p of payments) {
-        if (p.payment_method !== 'cash') continue;
+        if (!isCashMethod(p.payment_method)) continue;
         cashMoves.push({
           cashbox_id: inv.cashbox_id,
           direction: 'in',

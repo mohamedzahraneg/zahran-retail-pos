@@ -21,14 +21,39 @@ export class InvoiceLineDto {
   @ApiPropertyOptional() @IsOptional() @IsUUID() salesperson_id?: string;
 }
 
+// PR-PAY-1 — Aligned with the existing `payment_method_code` enum.
+// The legacy 4-value union (cash | card | instapay | bank_transfer)
+// silently dropped non-cash because `card` was un-insertable. The DTO
+// now mirrors the DB enum exactly so unknown methods fail validation
+// at the boundary instead of converting to cash inside the engine.
+export const PAYMENT_METHOD_VALUES = [
+  'cash',
+  'card_visa',
+  'card_mastercard',
+  'card_meeza',
+  'instapay',
+  'vodafone_cash',
+  'orange_cash',
+  'bank_transfer',
+  'credit',
+  'other',
+] as const;
+
+export type InvoicePaymentMethod = (typeof PAYMENT_METHOD_VALUES)[number];
+
 export class InvoicePaymentDto {
-  @ApiProperty({ enum: ['cash', 'card', 'instapay', 'bank_transfer'] })
-  @IsEnum(['cash', 'card', 'instapay', 'bank_transfer'])
-  payment_method: 'cash' | 'card' | 'instapay' | 'bank_transfer';
+  @ApiProperty({ enum: PAYMENT_METHOD_VALUES })
+  @IsEnum(PAYMENT_METHOD_VALUES)
+  payment_method: InvoicePaymentMethod;
 
   @ApiProperty() @IsNumber() @Min(0) amount: number;
 
   @ApiPropertyOptional() @IsOptional() @IsString() reference?: string;
+
+  /** PR-PAY-1: optional FK to payment_accounts. Cash leaves it null;
+   *  non-cash will be required by the POS UI in PR-PAY-3 once admin
+   *  has configured at least one active account for the method. */
+  @ApiPropertyOptional() @IsOptional() @IsUUID() payment_account_id?: string;
 }
 
 export class CreateInvoiceDto {

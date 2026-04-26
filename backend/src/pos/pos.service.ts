@@ -13,6 +13,7 @@ import { LoyaltyService } from '../loyalty/loyalty.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { AccountingPostingService } from '../chart-of-accounts/posting.service';
 import { FinancialEngineService } from '../chart-of-accounts/financial-engine.service';
+import { PaymentsService } from '../payments/payments.service';
 
 @Injectable()
 export class PosService {
@@ -25,6 +26,7 @@ export class PosService {
     @Optional() private readonly notifications?: NotificationsService,
     @Optional() private readonly posting?: AccountingPostingService,
     @Optional() private readonly engine?: FinancialEngineService,
+    @Optional() private readonly payments?: PaymentsService,
   ) {}
 
   /**
@@ -260,11 +262,31 @@ export class PosService {
       }
 
       for (const pay of dto.payments) {
+        // PR-PAY-1 — When a payment_account_id is supplied, freeze the
+        // account into payment_account_snapshot. Receipts and reposts
+        // (postInvoiceEdit) will then render/use this snapshot even if
+        // admin later renames or deactivates the account.
+        let snapshot: string | null = null;
+        const acctId = (pay as any).payment_account_id ?? null;
+        if (acctId && this.payments) {
+          const acct = await this.payments.resolveForPosting(acctId, em);
+          if (acct) {
+            snapshot = JSON.stringify({
+              id: acct.id,
+              method: acct.method,
+              display_name: acct.display_name,
+              provider_key: acct.provider_key,
+              identifier: acct.identifier,
+              gl_account_code: acct.gl_account_code,
+            });
+          }
+        }
         await em.query(
           `
           INSERT INTO invoice_payments
-            (invoice_id, payment_method, amount, reference_number, received_by)
-          VALUES ($1,$2,$3,$4,$5)
+            (invoice_id, payment_method, amount, reference_number,
+             received_by, payment_account_id, payment_account_snapshot)
+          VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)
           `,
           [
             invoice.id,
@@ -272,15 +294,13 @@ export class PosService {
             pay.amount,
             pay.reference ?? null,
             userId,
+            acctId,
+            snapshot,
           ],
         );
 
-        // Phase 2.2 migration: the cashbox leg for cash payments is no
-        // longer written here. `postInvoice()` (below) now reads the
-        // invoice_payments rows we just inserted and hands them to
-        // FinancialEngineService as `cash_movements`, so the GL post
-        // and the cashbox ledger row land atomically under the engine's
-        // canonical context (no bypass alert, no split ownership).
+        // Phase 2.2: cashbox leg lands atomically under postInvoice via
+        // FinancialEngineService.cash_movements; no inline write here.
       }
 
       // Deduct loyalty points (if any) inside the same transaction
@@ -741,10 +761,12 @@ export class PosService {
         unit_price: number;
         discount?: number;
       }>;
+      // PR-PAY-1: align with the DB enum + accept payment_account_id.
       const payments = (dto.payments || []) as Array<{
-        payment_method: 'cash' | 'card' | 'instapay' | 'bank_transfer';
+        payment_method: string;
         amount: number;
         reference?: string;
+        payment_account_id?: string;
       }>;
 
       const subtotal = lines.reduce(
@@ -832,11 +854,37 @@ export class PosService {
 
       // ── 7) Insert new payments + cashbox in ───────────────────────
       for (const p of payments) {
+        // PR-PAY-1: snapshot the chosen payment account at edit-time
+        // so postInvoiceEdit reposts to the correct GL even if admin
+        // later renames/deactivates the account.
+        let snapshot: string | null = null;
+        const acctId = p.payment_account_id ?? null;
+        if (acctId && this.payments) {
+          const acct = await this.payments.resolveForPosting(acctId, em);
+          if (acct) {
+            snapshot = JSON.stringify({
+              id: acct.id,
+              method: acct.method,
+              display_name: acct.display_name,
+              provider_key: acct.provider_key,
+              identifier: acct.identifier,
+              gl_account_code: acct.gl_account_code,
+            });
+          }
+        }
         await em.query(
           `INSERT INTO invoice_payments
-             (invoice_id, payment_method, amount, reference)
-           VALUES ($1,$2,$3,$4)`,
-          [id, p.payment_method, p.amount, p.reference ?? null],
+             (invoice_id, payment_method, amount, reference,
+              payment_account_id, payment_account_snapshot)
+           VALUES ($1,$2,$3,$4,$5,$6::jsonb)`,
+          [
+            id,
+            p.payment_method,
+            p.amount,
+            p.reference ?? null,
+            acctId,
+            snapshot,
+          ],
         );
         if (
           p.payment_method === 'cash' &&
