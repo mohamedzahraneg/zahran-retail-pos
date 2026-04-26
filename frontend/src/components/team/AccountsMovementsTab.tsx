@@ -63,6 +63,7 @@ import {
 import { accountingApi } from '@/api/accounting.api';
 import { useAuthStore } from '@/stores/auth.store';
 import { TeamRow } from '@/api/employees.api';
+import { EmployeeCashClassifierGuard } from './EmployeeCashClassifierGuard';
 import {
   CashSourceSelector,
   CashSource,
@@ -596,6 +597,12 @@ export function AdvanceModal({
     shift_id: null,
     cashbox_id: null,
   });
+  // PR-T6.1 — guard dialog state. When the operator clicks "تسجيل
+  // السلفة" we open the EmployeeCashClassifierGuard first; only after
+  // an explicit "تسجيل كسلفة" or "صرف مستحقات" decision do we run
+  // the actual mutation. Prevents the silent "wage payout posted as
+  // advance" pattern that confused Mohamed El-Zebaty's ledger.
+  const [guardOpen, setGuardOpen] = useState(false);
 
   // Resolve the canonical "employee_advance" expense category id.
   // Migration 086 created it; the modal must reuse the same category
@@ -612,7 +619,7 @@ export function AdvanceModal({
     [categories],
   );
 
-  const mut = useMutation({
+  const advanceMut = useMutation({
     mutationFn: () =>
       accountingApi.createDailyExpense({
         warehouse_id: '', // resolved server-side from the user's default warehouse
@@ -636,6 +643,41 @@ export function AdvanceModal({
     onError: (e: any) =>
       toast.error(e?.response?.data?.message || 'فشل تسجيل السلفة'),
   });
+
+  // PR-T6.1 — settlement path triggered when the operator picks
+  // "صرف مستحقات" inside the guard dialog. Routes to the existing
+  // /employees/:id/settlements endpoint instead of the advance path.
+  const settlementMut = useMutation({
+    mutationFn: () =>
+      employeesApi.addSettlement(employee.id, {
+        amount: Number(amount),
+        method: 'cash',
+        cashbox_id:
+          source.mode === 'open_shift' || source.mode === 'direct_cashbox'
+            ? source.cashbox_id ?? undefined
+            : undefined,
+        notes: reason.trim() || `صرف مستحقات — ${employee.full_name || employee.username}`,
+      } as any),
+    onSuccess: () => {
+      toast.success('تم تسجيل صرف المستحقات (DR 213 / CR الخزنة).');
+      invalidateAccounts(qc, employee.id);
+      onClose();
+    },
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.message || 'فشل تسجيل صرف المستحقات'),
+  });
+
+  const mut = advanceMut; // ready-state below uses the advance mut for pending check
+
+  const todayCairo = useMemo(() => {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Africa/Cairo',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(new Date());
+    return `${parts.find((p) => p.type === 'year')!.value}-${parts.find((p) => p.type === 'month')!.value}-${parts.find((p) => p.type === 'day')!.value}`;
+  }, []);
 
   const amtNum = Number(amount || 0);
   const ready =
@@ -707,11 +749,40 @@ export function AdvanceModal({
 
       <ModalFooter
         onCancel={onClose}
-        disabled={!ready || mut.isPending}
-        primaryLabel={mut.isPending ? 'جارٍ التسجيل…' : 'تسجيل السلفة'}
-        onPrimary={() => mut.mutate()}
+        disabled={!ready || advanceMut.isPending || settlementMut.isPending}
+        primaryLabel={
+          advanceMut.isPending || settlementMut.isPending
+            ? 'جارٍ التسجيل…'
+            : 'متابعة'
+        }
+        onPrimary={() => setGuardOpen(true)}
         primaryIcon={<Receipt size={15} />}
       />
+
+      {guardOpen && (
+        <EmployeeCashClassifierGuard
+          employeeId={employee.id}
+          employeeName={employee.full_name || employee.username}
+          amount={Number(amount || 0)}
+          workDate={todayCairo}
+          defaultChoice="advance"
+          onCancel={() => setGuardOpen(false)}
+          onConfirm={(decision) => {
+            setGuardOpen(false);
+            if (decision === 'advance') {
+              advanceMut.mutate();
+            } else if (decision === 'settlement') {
+              settlementMut.mutate();
+            }
+            // 'approve_wage_first' navigates inside the guard;
+            // we just close this modal so the operator lands on
+            // the attendance tab cleanly.
+            else if (decision === 'approve_wage_first') {
+              onClose();
+            }
+          }}
+        />
+      )}
     </ModalShell>
   );
 }
