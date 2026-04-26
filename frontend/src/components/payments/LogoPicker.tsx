@@ -26,7 +26,16 @@ import { PaymentProviderLogo } from './PaymentProviderLogo';
  * provider catalog default kicks in automatically.
  */
 
-const ACCEPTED = 'image/png,image/jpeg,image/jpg,image/webp,image/svg+xml,image/gif';
+// Drag-drop accepts ONLY raster formats. SVG is intentionally
+// excluded from runtime upload because an operator-uploaded SVG could
+// embed `<script>` or event handlers; while `<img src>` does sandbox
+// SVG (no script execution), CodeQL flags the dataflow as
+// js/xss-through-dom and we'd rather not expose the surface. SVG
+// brand assets live in the bundled catalog
+// (frontend/src/assets/payment-logos/) where they are vetted.
+const ACCEPTED = 'image/png,image/jpeg,image/jpg,image/webp,image/gif';
+const ACCEPTED_DATA_URL_PREFIX =
+  /^data:image\/(png|jpe?g|webp|gif);base64,[A-Za-z0-9+/=]+$/;
 // Encoded size cap. 80 KB base64 ≈ 60 KB raw — comfortable for clean
 // brand badges without inflating the DB row.
 const MAX_DATA_URL_BYTES = 80 * 1024;
@@ -59,8 +68,12 @@ export function LogoPicker({
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleFile = (file: File) => {
-    if (!file.type.startsWith('image/')) {
-      toast.error('الملف لازم يكون صورة (PNG / JPG / WebP / SVG)');
+    // Strict MIME allow-list. SVG is intentionally rejected at upload
+    // (see ACCEPTED_DATA_URL_PREFIX comment).
+    if (
+      !/^image\/(png|jpe?g|webp|gif)$/i.test(file.type)
+    ) {
+      toast.error('الملف لازم يكون صورة PNG / JPG / WebP / GIF (الـ SVG محجوز للكتالوج)');
       return;
     }
     const reader = new FileReader();
@@ -74,8 +87,14 @@ export function LogoPicker({
       if (result.length > MAX_DATA_URL_BYTES) {
         toast.error(
           `حجم الصورة كبير. الحد الأقصى ${(MAX_DATA_URL_BYTES / 1024).toFixed(0)} KB ` +
-            `بعد الترميز (${(result.length / 1024).toFixed(1)} KB حالياً). جرّب صورة أصغر أو SVG.`,
+            `بعد الترميز (${(result.length / 1024).toFixed(1)} KB حالياً). جرّب صورة أصغر.`,
         );
+        return;
+      }
+      // Defense in depth — reject any data URL that doesn't match the
+      // raster-image pattern, even if the file picker was bypassed.
+      if (!ACCEPTED_DATA_URL_PREFIX.test(result)) {
+        toast.error('صيغة الصورة غير مدعومة. ارفع PNG / JPG / WebP / GIF.');
         return;
       }
       onChange({ dataUrl: result, url: value.url ?? null });
@@ -186,7 +205,7 @@ export function LogoPicker({
           اسحب صورة هنا أو اضغط للاختيار
         </div>
         <div className="text-[10px] text-slate-500 mt-0.5">
-          PNG / JPG / WebP / SVG · الحد الأقصى {Math.floor(MAX_DATA_URL_BYTES / 1024)} KB
+          PNG / JPG / WebP / GIF · الحد الأقصى {Math.floor(MAX_DATA_URL_BYTES / 1024)} KB
         </div>
         <input
           ref={fileInputRef}
