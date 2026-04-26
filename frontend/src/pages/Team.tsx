@@ -33,6 +33,11 @@ import {
 } from '@/api/employees.api';
 import { attendanceApi } from '@/api/attendance.api';
 import { useAuthStore } from '@/stores/auth.store';
+// PR-T2 — redesigned attendance / wage approval tab. Lives in its own
+// file to keep Team.tsx focused on the workspace shell. The legacy
+// AdminAttendancePanel is left untouched for the legacy ?tab=
+// fallback paths (deletion deferred to PR-T6).
+import { AttendanceWageTab } from '@/components/team/AttendanceWageTab';
 // Payroll / حسابات الموظفين is now a tab inside /team (consolidation).
 // The component is rendered verbatim — no design change. Its own
 // useQuery hooks share the global TanStack cache, so mutations
@@ -735,19 +740,13 @@ function EmployeeProfilePanel({
             scoped filtering, redesigned tables, source selector) lands
             in PR-T2/T3/T4. */}
         {tab === 'attendance' && (
-          hasPermission('employee.attendance.manage') ? (
-            <AdminAttendancePanel
-              userId={row.id}
-              fullName={row.full_name || row.username}
-              dailyAmount={Number(row.salary_amount || 0)}
-              liveGlBalance={Number(row.gl_balance || 0)}
-            />
-          ) : (
-            <PlaceholderPanel
-              title="الحضور واليوميات"
-              message="ليست لديك صلاحية إدارة الحضور (employee.attendance.manage)."
-            />
-          )
+          // PR-T2 — redesigned tab. The legacy AdminAttendancePanel was
+          // replaced with AttendanceWageTab which separates attendance
+          // log + daily wage approvals + a focused approval modal
+          // (no inline form sharing space with payout). Read-only users
+          // (without employee.attendance.manage) still see the tables
+          // and summary cards — only the action buttons are hidden.
+          <AttendanceWageTab employee={row} />
         )}
         {tab === 'accounts' && (
           <div>
