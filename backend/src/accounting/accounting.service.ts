@@ -1409,65 +1409,31 @@ export class AccountingService {
         );
 
         if (oldJe) {
-          const oldAmount = Number(
-            (oldV as any).amount ?? expense.amount,
+          // PR-DRIFT-2 (2026-04-26): void the old JE only — do NOT post
+          // a separate reversal JE. The previous implementation called
+          // engine.recordTransaction with BOTH reversal_of (which voids
+          // the original) AND a reversal JE body (which posted +oldAmount
+          // on cash 1111). The two corrections double-corrected the cash
+          // account and inflated 1111 by oldAmount per edit. Direct void
+          // here, then recordExpense below posts the new state cleanly.
+          // Engine context = 'engine:expense_edit_void' (24 chars) so the
+          // migration-068 trigger allows the write silently.
+          await em.query(
+            `SELECT set_config('app.engine_context', 'engine:expense_edit_void', true)`,
           );
-          const oldPm = (oldV as any).payment_method ?? expense.payment_method;
-          const oldCashbox = (oldV as any).cashbox_id ?? expense.cashbox_id;
-          const oldCategoryAccountId = await this.resolveCategoryAccountId(
-            em,
-            (oldV as any).category_id ?? expense.category_id,
+          await em.query(
+            `UPDATE journal_entries
+                SET is_void     = TRUE,
+                    void_reason = $1,
+                    voided_by   = $2,
+                    voided_at   = NOW()
+              WHERE id = $3 AND is_void = FALSE`,
+            [
+              `طلب تعديل #${r.id} — ${r.reason}`,
+              approverId,
+              oldJe.id,
+            ],
           );
-
-          // Build the reversal: flip DR ↔ CR + flip cash direction.
-          // Original posting was DR <category-or-529> / CR <cash-or-AP>;
-          // reversal is DR <cash-or-AP> / CR <category-or-529>.
-          const isCash = oldPm === 'cash' && !!oldCashbox;
-          const reversalDr: any = isCash
-            ? {
-                resolve_from_cashbox_id: oldCashbox,
-                debit: oldAmount,
-                cashbox_id: oldCashbox,
-              }
-            : { account_code: '210', debit: oldAmount };
-          const reversalCr: any = oldCategoryAccountId
-            ? { account_id: oldCategoryAccountId, credit: oldAmount }
-            : { account_code: '529', credit: oldAmount };
-
-          if (!this.engine) {
-            throw new BadRequestException(
-              'محرّك الترحيل غير مهيأ — لا يمكن تعديل المصروف',
-            );
-          }
-          const revRes = await this.engine.recordTransaction({
-            kind: 'expense',
-            reference_type: 'expense_edit_reversal',
-            reference_id: r.id,
-            entry_date:
-              (oldV as any).expense_date ?? expense.expense_date,
-            description: `إلغاء مصروف ${expense.expense_no} — طلب تعديل`,
-            gl_lines: [reversalDr, reversalCr],
-            cash_movements: isCash
-              ? [
-                  {
-                    cashbox_id: oldCashbox,
-                    direction: 'in', // flipped from the original 'out'
-                    amount: oldAmount,
-                    category: 'expense_edit_reversal',
-                    notes: `عكس مصروف ${expense.expense_no}`,
-                  },
-                ]
-              : [],
-            user_id: approverId,
-            em,
-            reversal_of: oldJe.id,
-            reversal_reason: `طلب تعديل #${r.id} — ${r.reason}`,
-          });
-          if (!revRes.ok) {
-            throw new BadRequestException(
-              `فشل عكس القيد الأصلي: ${(revRes as any).error}`,
-            );
-          }
           voidedJeId = oldJe.id;
         }
       }
