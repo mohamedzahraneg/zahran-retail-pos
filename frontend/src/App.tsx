@@ -43,7 +43,6 @@ import Users from '@/pages/Users';
 import Loyalty from '@/pages/Loyalty';
 import EmployeeProfile from '@/pages/EmployeeProfile';
 import Team from '@/pages/Team';
-import Payroll from '@/pages/Payroll';
 import SetupWizard from '@/pages/SetupWizard';
 import NotFound from '@/pages/NotFound';
 
@@ -240,12 +239,9 @@ export default function App() {
             </ProtectedRoute>
           }
         />
-        {/* /attendance — legacy route. PR-T1.1: redirect to the new
-            unified workspace's attendance section. The legacy standalone
-            page is no longer rendered as a full-page replacement —
-            instead the new design shell (KPI strip + employee list)
-            stays visible, and AttendanceBody is wrapped inside the
-            workspace's attendance section. */}
+        {/* /attendance — permanent redirect to the unified workspace's
+            attendance section. PR-T6 cleanup deleted the legacy
+            standalone Attendance page itself. */}
         <Route
           path="attendance"
           element={<Navigate to="/team?section=attendance" replace />}
@@ -266,11 +262,9 @@ export default function App() {
             </ProtectedRoute>
           }
         />
-        {/* /payroll — legacy route. PR-T1.1: redirect to the new
-            unified workspace's accounts section. The legacy standalone
-            page is no longer rendered as a full-page replacement —
-            it now lives wrapped inside the workspace's accounts
-            section. */}
+        {/* /payroll — permanent redirect to the unified workspace's
+            accounts section. PR-T6 cleanup deleted the legacy
+            standalone Payroll page itself. */}
         <Route
           path="payroll"
           element={<Navigate to="/team?section=accounts" replace />}
