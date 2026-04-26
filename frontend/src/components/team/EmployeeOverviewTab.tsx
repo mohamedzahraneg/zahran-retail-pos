@@ -40,9 +40,7 @@ import {
   Percent,
   TrendingDown,
   Calculator,
-  Users,
   Building2,
-  Hash,
   Calendar,
   PieChart,
   Award,
@@ -412,11 +410,11 @@ export function EmployeeOverviewTab({ employee }: { employee: TeamRow }) {
 
   return (
     <div className="space-y-6">
-      {/* PR-T4.4 — the duplicated <ProfileHeroCard> was removed.
-          The single source of identity info (avatar / name / role /
-          balance / actions) lives on the parent EmployeeProfilePanel
-          header in Team.tsx. The Overview tab now starts directly
-          with the period chip + KPI cards. */}
+      {/* Identity info (avatar / name / role / balance / actions)
+          lives on the parent EmployeeProfilePanel header in Team.tsx.
+          The Overview tab starts directly with the period chip + KPI
+          cards. The duplicate ProfileHeroCard was removed in PR-T4.4
+          and its definition deleted in PR-T6 cleanup. */}
       <PeriodHeader
         from={period.from}
         to={period.to}
@@ -895,87 +893,6 @@ function CategoryDistributionPanel({
   );
 }
 
-function ProfileHeroCard({
-  employee,
-  dash,
-  liveGl,
-}: {
-  employee: TeamRow;
-  dash: any;
-  liveGl: number;
-}) {
-  const isPayable = liveGl < -0.01;
-  const isDebt = liveGl > 0.01;
-  return (
-    <div className="rounded-3xl border border-slate-200 bg-white shadow-sm p-6">
-      <div className="grid grid-cols-1 md:grid-cols-[150px_1fr_280px] gap-6 items-center">
-        <div className="w-32 h-32 mx-auto md:mx-0 rounded-full bg-gradient-to-br from-slate-200 to-slate-50 border border-slate-200 flex items-center justify-center text-5xl">
-          👤
-        </div>
-        <div>
-          <h3 className="text-3xl font-black text-slate-800 flex items-center gap-3 flex-wrap">
-            {employee.full_name || employee.username}
-            <span className="text-xs font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-full px-3 py-1">
-              نشط
-            </span>
-          </h3>
-          <div className="text-base text-slate-500 mt-1 font-bold">
-            {employee.role_name || employee.job_title || '—'}
-          </div>
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 mt-5 text-xs">
-            <MetaItem icon={<Hash size={12} />} label="رقم الموظف" value={employee.employee_no || '—'} />
-            <MetaItem icon={<Calendar size={12} />} label="تاريخ التعيين" value={dash?.profile?.hire_date || 'غير متاح'} />
-            <MetaItem icon={<Building2 size={12} />} label="القسم / الفرع" value="غير متاح" hint="لم يُكشف عنه API بعد" />
-            <MetaItem icon={<Users size={12} />} label="حالة اليوم" value={dash?.attendance?.today ? 'حاضر' : 'لم يُسجَّل'} />
-          </div>
-        </div>
-        <div
-          className={`rounded-2xl border p-5 text-center ${
-            isPayable
-              ? 'border-emerald-200 bg-emerald-50/40'
-              : isDebt
-                ? 'border-rose-200 bg-rose-50/40'
-                : 'border-slate-200 bg-slate-50'
-          }`}
-        >
-          <div className="text-xs text-slate-500">الرصيد النهائي للموظف</div>
-          <div
-            className={`text-3xl font-black mt-2 tabular-nums ${
-              isPayable ? 'text-emerald-700' : isDebt ? 'text-rose-700' : 'text-slate-700'
-            }`}
-          >
-            {EGP(Math.abs(liveGl))}
-          </div>
-          <div className="text-sm font-bold mt-1 text-slate-600">
-            {isPayable ? 'مستحق له' : isDebt ? 'مدين للشركة' : 'متوازن'}
-          </div>
-          <div className="text-[11px] text-slate-500 mt-2 leading-snug">
-            من v_employee_gl_balance
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function MetaItem({
-  icon, label, value, hint,
-}: {
-  icon: React.ReactNode;
-  label: string;
-  value: string;
-  hint?: string;
-}) {
-  return (
-    <div className="text-slate-500" title={hint}>
-      <div className="flex items-center gap-1 text-[11px] mb-1">
-        <span className="text-slate-400">{icon}</span>
-        {label}
-      </div>
-      <div className="font-bold text-slate-700 text-[13px]">{value}</div>
-    </div>
-  );
-}
 
 function BigKpi({
   tone, icon, label, value, sub,
