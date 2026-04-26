@@ -191,6 +191,12 @@ export const accountingApi = {
     shift_id?: string;
     /** PR-15 — explicit advance flag (was previously read via dto-as-any). */
     is_advance?: boolean;
+    /** Migration 113 — link this disbursement back to the approved
+     *  employee_requests row that prompted it. Only meaningful when
+     *  is_advance=true. The backend validates: status=approved,
+     *  user_id matches employee_user_id, and no active live link
+     *  exists. */
+    source_employee_request_id?: number;
   }) => unwrap<Expense>(api.post('/accounting/expenses/daily', body)),
   updateExpense: (id: string, body: Partial<Expense>) =>
     unwrap<Expense>(api.patch(`/accounting/expenses/${id}`, body)),

@@ -47,11 +47,14 @@ import {
   Inbox,
   Edit3,
   Ban,
+  Wallet,
 } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import {
   employeesApi,
   EmployeeRequest,
   TeamRow,
+  AwaitingAdvanceDisbursementRow,
 } from '@/api/employees.api';
 import {
   attendanceApi,
@@ -89,7 +92,10 @@ const fmtDateTime = (iso?: string | null) => {
 };
 
 const KIND_LABEL: Record<EmployeeRequest['kind'], string> = {
-  advance: 'سلفة',
+  // 'advance' is the legacy kind retained for historical rows; new
+  // self-service asks use 'advance_request' (migration 113).
+  advance: 'سلفة (قديم)',
+  advance_request: 'طلب سلفة',
   leave: 'إجازة',
   overtime_extension: 'تمديد ساعات إضافية',
   other: 'أخرى',
@@ -111,6 +117,25 @@ export function ApprovalsAuditTab({ employee }: { employee?: TeamRow }) {
     enabled: canApprove,
     refetchInterval: 30_000,
   });
+
+  // Migration 113 — approved advance_request rows still waiting for HR
+  // to actually disburse via POST /accounting/expenses (is_advance=true,
+  // source_employee_request_id=N). The disbursement is the only money-
+  // moving step; approval was deliberately separated so finance keeps
+  // a single GL/cashbox writer (FinancialEngineService).
+  const { data: awaiting = [] } = useQuery({
+    queryKey: ['advance-requests-awaiting'],
+    queryFn: () => employeesApi.awaitingAdvanceDisbursement(),
+    enabled: canApprove,
+    refetchInterval: 30_000,
+  });
+
+  const awaitingForEmployee = useMemo(() => {
+    if (!employee) return awaiting as AwaitingAdvanceDisbursementRow[];
+    return (awaiting as AwaitingAdvanceDisbursementRow[]).filter(
+      (r) => r.user_id === employee.id,
+    );
+  }, [awaiting, employee]);
 
   // Per-employee history — only queried when an employee is selected.
   // Uses the same window AccountsMovementsTab uses (current Cairo
@@ -165,6 +190,10 @@ export function ApprovalsAuditTab({ employee }: { employee?: TeamRow }) {
       <PendingRequestsCard
         rows={pendingForEmployee}
         canApprove={canApprove}
+        scope={employee ? 'employee' : 'team'}
+      />
+      <AwaitingDisbursementCard
+        rows={awaitingForEmployee}
         scope={employee ? 'employee' : 'team'}
       />
       {employee ? (
@@ -390,6 +419,86 @@ function PendingRequestsCard({
           }
           submitting={decide.isPending}
         />
+      )}
+    </SectionCard>
+  );
+}
+
+/**
+ * Approved advance_request rows that haven't been disbursed yet.
+ * Each row deep-links to /daily-expenses with prefill query params so
+ * HR lands on the existing expense form already filled with the
+ * employee + amount + source_employee_request_id, then posts the
+ * actual cash movement through the canonical FinancialEngine path.
+ *
+ * No money moves from this card — only navigation to the form.
+ */
+function AwaitingDisbursementCard({
+  rows,
+  scope,
+}: {
+  rows: AwaitingAdvanceDisbursementRow[];
+  scope: 'team' | 'employee';
+}) {
+  return (
+    <SectionCard
+      title="طلبات سلف بانتظار الصرف"
+      subtitle={
+        scope === 'employee'
+          ? 'سلف معتمدة لهذا الموظف لم تُصرف بعد'
+          : 'سلف معتمدة عبر فريق العمل لم تُصرف بعد — اضغط للصرف من المصروفات اليومية'
+      }
+    >
+      {rows.length === 0 ? (
+        <EmptyRow message="لا توجد سلف معتمدة بانتظار الصرف." />
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="min-w-full text-xs">
+            <thead className="bg-slate-50">
+              <tr>
+                <Th>تاريخ الاعتماد</Th>
+                <Th>الموظف</Th>
+                <Th>المبلغ المطلوب</Th>
+                <Th>السبب</Th>
+                <Th>إجراء</Th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.id} className="border-t border-slate-100">
+                  <Td className="font-mono tabular-nums whitespace-nowrap">
+                    {fmtDateTime(r.decided_at)}
+                  </Td>
+                  <Td>
+                    <div className="font-bold text-slate-700">
+                      {r.user_name || r.username || '—'}
+                    </div>
+                    {r.employee_no && (
+                      <div className="text-[10px] text-slate-400 font-mono">
+                        {r.employee_no}
+                      </div>
+                    )}
+                  </Td>
+                  <Td className="font-mono tabular-nums text-center">
+                    {EGP(r.amount)}
+                  </Td>
+                  <Td className="text-slate-600 max-w-[280px] truncate" title={r.reason || ''}>
+                    {r.reason || '—'}
+                  </Td>
+                  <Td>
+                    <Link
+                      to={`/daily-expenses?advance_request_id=${r.id}`}
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-indigo-50 text-indigo-700 border border-indigo-200 text-[11px] font-bold hover:bg-indigo-100"
+                    >
+                      <Wallet size={12} />
+                      صرف السلفة
+                    </Link>
+                  </Td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </SectionCard>
   );

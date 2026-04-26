@@ -27,19 +27,26 @@ import {
 } from '../common/decorators/current-user.decorator';
 
 class RequestDto {
-  // 'advance' removed (audit #4 — triple-path dual-write risk).
-  // Approved advance requests used to chain through a DB mirror
-  // trigger → employee_transactions → fn_post_employee_txn, which
-  // writes journal_lines only (no cashbox_transactions) and can
-  // duplicate an expenses.is_advance=TRUE entry for the same money.
-  // Canonical advance path is POST /accounting/expenses{,/daily}
-  // with is_advance=TRUE, which routes through FinancialEngine and
-  // correctly writes both GL + cashbox. Historical advance requests
-  // still read correctly; only new submissions are refused here.
-  @IsIn(['leave', 'overtime_extension', 'other']) kind:
+  // Audit #4 history — the legacy 'advance' kind is *still* fenced off
+  // here. Approving a kind='advance' row fires the existing
+  // fn_mirror_advance_to_txn trigger (migration 040), which posts to
+  // GL via employee_transactions; combined with the canonical
+  // POST /accounting/expenses (is_advance=true) flow that money
+  // double-posts. So only employees may submit:
+  //
+  //   · 'leave' / 'overtime_extension' / 'other'  — informational only
+  //   · 'advance_request'                         — informational ONLY,
+  //     introduced in migration 113. The trigger guards on
+  //     kind='advance' (string-equal), so 'advance_request' never fires
+  //     it. Approval just flips status; HR later disburses the cash by
+  //     calling POST /accounting/expenses with is_advance=true and
+  //     source_employee_request_id pointing back here. That keeps
+  //     FinancialEngineService as the single GL/cashbox writer.
+  @IsIn(['leave', 'overtime_extension', 'other', 'advance_request']) kind:
     | 'leave'
     | 'overtime_extension'
-    | 'other';
+    | 'other'
+    | 'advance_request';
   @IsOptional() @IsNumber() amount?: number;
   @IsOptional() @IsDateString() starts_at?: string;
   @IsOptional() @IsDateString() ends_at?: string;
@@ -157,10 +164,17 @@ export class EmployeesController {
     return this.svc.myRequests(user.userId);
   }
 
+  // Controller-level gate is the broad self-service permission. The
+  // PermissionsGuard requires ALL listed permissions, so listing both
+  // would lock out anyone missing either; instead the per-kind check
+  // for 'advance_request' (needs 'employee.advance.request', seeded in
+  // migration 113) lives in the service where we know the kind. This
+  // lets orgs grant/revoke advance-request asks independently without
+  // affecting plain leave/overtime asks.
   @Post('me/requests')
   @Permissions('employee.requests.submit')
   submitRequest(@Body() dto: RequestDto, @CurrentUser() user: JwtUser) {
-    return this.svc.submitRequest(user.userId, dto);
+    return this.svc.submitRequest(user.userId, dto, user.permissions ?? []);
   }
 
   // ── Admin / HR ─────────────────────────────────────────────────────
@@ -174,6 +188,17 @@ export class EmployeesController {
   @Permissions('employee.requests.approve')
   pending() {
     return this.svc.listPendingRequests();
+  }
+
+  // Approved advance_request rows still waiting for HR to post the
+  // actual disbursement via POST /accounting/expenses (is_advance=true,
+  // source_employee_request_id=N). Drives the "outstanding advance
+  // asks" worklist on the HR side and the deep-link from the
+  // employee's request inbox.
+  @Get('advance-requests/awaiting-disbursement')
+  @Permissions('employee.requests.approve')
+  awaitingDisbursement() {
+    return this.svc.listApprovedAdvanceRequestsAwaitingDisbursement();
   }
 
   @Post('requests/:id/decide')

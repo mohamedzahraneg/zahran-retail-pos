@@ -13,16 +13,22 @@ export interface EmployeeTask {
   status: 'pending' | 'acknowledged' | 'completed' | 'cancelled';
 }
 
-// Display union for historical rows — keeps 'advance' so pre-existing
-// approved/pending advance requests still render. Write-side uses the
-// narrower SubmitRequestKind below (audit #4 — direct advance creation
-// disabled; canonical path is expenses.is_advance=TRUE).
-export type SubmitRequestKind = 'leave' | 'overtime_extension' | 'other';
+// Display union — covers the legacy 'advance' kind so pre-existing
+// approved/pending rows still render, plus the new 'advance_request'
+// kind (migration 113) used for new self-service salary asks. The
+// write-side union below allows the new kind but never the legacy
+// one (audit #4 — direct 'advance' creation would re-introduce the
+// dual-write hazard).
+export type SubmitRequestKind =
+  | 'leave'
+  | 'overtime_extension'
+  | 'other'
+  | 'advance_request';
 
 export interface EmployeeRequest {
   id: string;
   user_id: string;
-  kind: 'advance' | 'leave' | 'overtime_extension' | 'other';
+  kind: 'advance' | 'advance_request' | 'leave' | 'overtime_extension' | 'other';
   amount?: number | string;
   starts_at?: string;
   ends_at?: string;
@@ -35,6 +41,25 @@ export interface EmployeeRequest {
   user_name?: string;
   username?: string;
   employee_no?: string;
+  /**
+   * Migration 113 — for kind='advance_request' rows the `myRequests`
+   * service joins through to the disbursing expense (if any) so the
+   * UI can show "processed → expense_no". Both fields are NULL for
+   * other kinds and for unprocessed advance_request rows.
+   */
+  expense_id?: string | null;
+  expense_no?: string | null;
+}
+
+export interface AwaitingAdvanceDisbursementRow {
+  id: number;
+  user_id: string;
+  amount: number | string;
+  reason: string | null;
+  decided_at: string;
+  user_name: string;
+  username: string;
+  employee_no: string;
 }
 
 export interface EmployeeDashboard {
@@ -193,6 +218,13 @@ export const employeesApi = {
   team: () => unwrap<TeamRow[]>(api.get('/employees/team')),
   pendingRequests: () =>
     unwrap<EmployeeRequest[]>(api.get('/employees/requests/pending')),
+  // Approved advance_request rows still waiting for HR to post the
+  // actual disbursement via POST /accounting/expenses (is_advance=true,
+  // source_employee_request_id=N). Empty array when nothing's pending.
+  awaitingAdvanceDisbursement: () =>
+    unwrap<AwaitingAdvanceDisbursementRow[]>(
+      api.get('/employees/advance-requests/awaiting-disbursement'),
+    ),
   decideRequest: (
     id: string | number,
     body: { decision: 'approved' | 'rejected'; reason?: string },

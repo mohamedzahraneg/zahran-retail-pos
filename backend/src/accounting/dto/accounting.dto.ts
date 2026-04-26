@@ -114,6 +114,18 @@ export class CreateExpenseDto {
   @IsOptional()
   @IsUUID()
   shift_id?: string;
+
+  /**
+   * Migration 113 — link this expense back to the approved
+   * employee_requests row (kind='advance_request') it disburses. Lets
+   * the request inbox show "processed → expense #N" without any
+   * trigger-based dual-write. Only meaningful when is_advance=true.
+   * The DB enforces FK existence; the service additionally guards
+   * that the referenced request is approved + same employee.
+   */
+  @IsOptional()
+  @IsNumber()
+  source_employee_request_id?: number;
 }
 
 export class UpdateExpenseDto extends PartialType(CreateExpenseDto) {}
@@ -187,6 +199,15 @@ export class CreateDailyExpenseDto {
    *  the API contract explicit. */
   @IsOptional()
   is_advance?: boolean;
+
+  /**
+   * Migration 113 — link this disbursement back to the approved
+   * employee_requests row that prompted it. See CreateExpenseDto for
+   * the full contract. Only meaningful when is_advance=true.
+   */
+  @IsOptional()
+  @IsNumber()
+  source_employee_request_id?: number;
 }
 
 export class ListExpensesDto {

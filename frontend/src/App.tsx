@@ -1,9 +1,10 @@
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { AppLayout } from '@/components/layout/AppLayout';
 import { ProtectedRoute } from '@/components/common/ProtectedRoute';
+import IndexRoute from '@/components/common/IndexRoute';
 
 import Login from '@/pages/Login';
-import Dashboard from '@/pages/Dashboard';
+// Dashboard is rendered via IndexRoute, not directly mounted on '/'.
 import POS from '@/pages/POS';
 import Products from '@/pages/Products';
 import Customers from '@/pages/Customers';
@@ -59,7 +60,7 @@ export default function App() {
           </ProtectedRoute>
         }
       >
-        <Route index element={<Dashboard />} />
+        <Route index element={<IndexRoute />} />
         <Route path="pos" element={<POS />} />
         <Route path="products" element={<Products />} />
         <Route path="customers" element={<Customers />} />
