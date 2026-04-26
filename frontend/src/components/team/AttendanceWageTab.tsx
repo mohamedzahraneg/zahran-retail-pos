@@ -43,7 +43,6 @@ import {
   ShieldCheck,
   Banknote,
   AlertTriangle,
-  Wallet,
   X,
   CheckCircle2,
   XCircle,
@@ -57,10 +56,10 @@ import {
 } from '@/api/attendance.api';
 import { useAuthStore } from '@/stores/auth.store';
 import { TeamRow } from '@/api/employees.api';
-// PR-T2 — payout intentionally stays in its current modal (PR-15 design).
-// Redesign + source-selector polish for payout lands in PR-T3. We import
-// PayWageModal so the "صرف يومية" button keeps working from the new tab.
-import { PayWageModal } from '@/pages/EmployeeProfile';
+// PR-T3.1 — PayWageModal import removed: payout action now lives ONLY
+// on the الحسابات والحركات tab (AccountsMovementsTab). Removing the
+// duplicate button here matched the user's "one home for each action"
+// spec.
 
 const EGP = (n: number | string | null | undefined) =>
   `${Number(n || 0).toLocaleString('en-US', {
@@ -102,15 +101,12 @@ const fmtMin = (m: number | null | undefined) => {
 export function AttendanceWageTab({ employee }: { employee: TeamRow }) {
   const hasPermission = useAuthStore((s) => s.hasPermission);
   const canManage = hasPermission('employee.attendance.manage');
-  const canPayWage = hasPermission('employee.ledger.view');
 
   const userId = employee.id;
   const dailyAmount = Number(employee.salary_amount || 0);
-  const liveGl = Number(employee.gl_balance || 0);
 
   const [approveOpen, setApproveOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<PayableDayRow | null>(null);
-  const [payoutOpen, setPayoutOpen] = useState(false);
 
   // Window: current month (Cairo) by default. Same window the dashboard
   // headlines use, so totals here line up with what's shown on the
@@ -121,9 +117,12 @@ export function AttendanceWageTab({ employee }: { employee: TeamRow }) {
     <div className="space-y-5">
       <HeaderCard />
 
-      {/* Action bar — approval is left-aligned (primary action), payout
-          sits with a distinct visual treatment so it's not confused with
-          approval. Both gated on the existing per-action permissions. */}
+      {/* PR-T3.1 — action ownership boundaries:
+          · This tab owns: اعتماد يومية + admin clock-in/out
+          · Payout (صرف مستحقات) lives ONLY on الحسابات والحركات. The
+            duplicate payout button that briefly lived here in PR-T2
+            was removed to match the spec ("صرف مستحقات appears in
+            الحسابات والحركات only"). */}
       <div className="flex items-center justify-between flex-wrap gap-2 bg-white rounded-2xl border border-slate-200 shadow-sm p-3">
         <div className="flex items-center gap-2 flex-wrap">
           {canManage && (
@@ -138,17 +137,13 @@ export function AttendanceWageTab({ employee }: { employee: TeamRow }) {
           )}
           {canManage && <AdminClockInOutButtons userId={userId} />}
         </div>
-        {canPayWage && (
-          <button
-            type="button"
-            onClick={() => setPayoutOpen(true)}
-            className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-amber-50 text-amber-800 border border-amber-200 text-sm font-bold hover:bg-amber-100"
-            title="صرف نقدي فعلي — يفتح الواجهة الحالية للصرف (سيتم تحديثها في PR-T3)"
-          >
-            <Wallet size={15} />
-            صرف يومية / مستحقات
-          </button>
-        )}
+        <div className="text-[11px] text-slate-500 leading-snug max-w-xs">
+          الصرف النقدي يتم من تبويب{' '}
+          <span className="font-bold text-amber-700">
+            الحسابات والحركات
+          </span>
+          {' '}— هذا التبويب للاعتماد فقط.
+        </div>
       </div>
 
       <SummaryCards userId={userId} from={range.from} to={range.to} />
@@ -177,15 +172,6 @@ export function AttendanceWageTab({ employee }: { employee: TeamRow }) {
           dailyAmount={dailyAmount}
           existing={editTarget}
           onClose={() => setEditTarget(null)}
-        />
-      )}
-      {payoutOpen && (
-        <PayWageModal
-          userId={userId}
-          fullName={employee.full_name || employee.username}
-          liveGlBalance={liveGl}
-          onClose={() => setPayoutOpen(false)}
-          onSuccess={() => setPayoutOpen(false)}
         />
       )}
     </div>

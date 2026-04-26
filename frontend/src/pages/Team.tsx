@@ -541,26 +541,28 @@ function EmployeeProfilePanel({
   // never see the old standalone page layout. The header + KPI strip +
   // employee list (rendered by the parent) stay visible above/beside.
   if (!row) {
+    // PR-T3.1 — no-employee + section deep-links no longer render the
+    // legacy team-wide <Payroll /> or <AttendanceBody embedded /> as a
+    // raw embed. Both components were standalone old-page layouts that
+    // showed up wrapped in the new shell, but the wrapping was thin
+    // and users still perceived the old UX. The new behaviour matches
+    // the spec: a clean placeholder that prompts the user to pick an
+    // employee. Team-wide views move into PR-T4 (approvals) / PR-T5
+    // (reports) where they get a proper redesign.
     if (initialSection === 'attendance') {
       return (
-        <section className="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden">
-          <SectionHeader
-            title="الحضور (الفريق كله)"
-            hint="اختر موظفًا من القائمة لعرض حضوره ويومياته بشكل مفصّل."
-          />
-          <div className="p-5"><AttendanceBody embedded /></div>
-        </section>
+        <NoEmployeePlaceholder
+          title="الحضور واليوميات"
+          message="اختر موظفًا من القائمة لعرض حضوره واعتماد يومياته. عرض الفريق الكامل سيتم نقله بتصميم موحّد في PR-T4 / PR-T5."
+        />
       );
     }
     if (initialSection === 'accounts') {
       return (
-        <section className="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden">
-          <SectionHeader
-            title="الحسابات (الفريق كله)"
-            hint="اختر موظفًا من القائمة لعرض كشف حسابه."
-          />
-          <div className="p-5"><Payroll /></div>
-        </section>
+        <NoEmployeePlaceholder
+          title="الحسابات والحركات"
+          message="اختر موظفًا من القائمة لعرض كشف حسابه ومستحقاته. تقرير الفريق الموحّد سيتم نقله في PR-T5."
+        />
       );
     }
     return (
@@ -864,6 +866,24 @@ function MiniStat({
         <div className="text-[10px] text-slate-400 mt-0.5">{hint}</div>
       )}
     </div>
+  );
+}
+
+function NoEmployeePlaceholder({
+  title,
+  message,
+}: {
+  title: string;
+  message: string;
+}) {
+  return (
+    <section className="rounded-2xl border border-slate-200 bg-white shadow-sm flex flex-col items-center justify-center text-center p-12 min-h-[420px]">
+      <Users2 size={42} className="text-slate-300 mb-3" />
+      <h3 className="text-lg font-black text-slate-700">{title}</h3>
+      <p className="text-sm text-slate-500 mt-2 max-w-md leading-relaxed">
+        {message}
+      </p>
+    </section>
   );
 }
 
