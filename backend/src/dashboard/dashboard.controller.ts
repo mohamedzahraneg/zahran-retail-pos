@@ -48,4 +48,15 @@ export class DashboardController {
   analytics(@Query('from') from?: string, @Query('to') to?: string) {
     return this.dashboard.analytics(from, to);
   }
+
+  /**
+   * PR-PAY-5 — Owner dashboard payment channel totals across the
+   * picked period. Read-only; defaults to today.
+   */
+  @Get('payment-channels')
+  @ApiQuery({ name: 'from', required: false, type: String })
+  @ApiQuery({ name: 'to', required: false, type: String })
+  paymentChannels(@Query('from') from?: string, @Query('to') to?: string) {
+    return this.dashboard.paymentChannels(from, to);
+  }
 }
