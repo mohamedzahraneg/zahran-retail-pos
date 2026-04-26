@@ -334,6 +334,154 @@ export class DashboardService {
     };
   }
 
+  /**
+   * PR-PAY-5 — Owner-dashboard payment channel totals.
+   *
+   * Read-only roll-up across `invoice_payments` for any [from, to]
+   * date range (inclusive, Africa/Cairo). Mirrors the per-(method,
+   * payment_account_id) aggregation that PR-PAY-4 ships in shift
+   * close, but spans every shift/cashier in the window.
+   *
+   * Display name preference is snapshot → live `payment_accounts` →
+   * null. The frontend falls back to the method label for null rows.
+   *
+   * Strict: zero writes. No accounting mutations. Backed entirely by
+   * SELECTs against existing tables.
+   */
+  async paymentChannels(from?: string, to?: string) {
+    const fromDate = from || this.today_iso();
+    const toDate = to || this.today_iso();
+
+    const rows = await this.ds.query(
+      `
+      SELECT ip.payment_method::text                AS method,
+             ip.payment_account_id,
+             pa.display_name                        AS live_display_name,
+             pa.identifier                          AS live_identifier,
+             pa.provider_key                        AS live_provider_key,
+             ip.payment_account_snapshot            AS snap,
+             COALESCE(SUM(ip.amount),0)::numeric(18,2) AS amount,
+             COUNT(*)::int                              AS payment_count,
+             COUNT(DISTINCT ip.invoice_id)::int         AS invoice_count
+        FROM invoice_payments ip
+        JOIN invoices i        ON i.id = ip.invoice_id
+   LEFT JOIN payment_accounts pa ON pa.id = ip.payment_account_id
+       WHERE i.status IN ('paid','completed','partially_paid')
+         AND (COALESCE(i.completed_at, i.created_at) AT TIME ZONE 'Africa/Cairo')::date
+             BETWEEN $1::date AND $2::date
+       GROUP BY ip.payment_method, ip.payment_account_id, pa.display_name,
+                pa.identifier, pa.provider_key, ip.payment_account_snapshot
+      `,
+      [fromDate, toDate],
+    );
+
+    const METHOD_LABEL_AR: Record<string, string> = {
+      cash: 'كاش',
+      card_visa: 'فيزا',
+      card_mastercard: 'ماستركارد',
+      card_meeza: 'ميزة',
+      instapay: 'إنستا باي',
+      vodafone_cash: 'فودافون كاش',
+      orange_cash: 'أورانج كاش',
+      wallet: 'محفظة إلكترونية',
+      bank_transfer: 'تحويل بنكي',
+      credit: 'آجل',
+      other: 'أخرى',
+    };
+
+    type AccountRow = {
+      payment_account_id: string | null;
+      display_name: string | null;
+      identifier: string | null;
+      provider_key: string | null;
+      total_amount: number;
+      invoice_count: number;
+      payment_count: number;
+    };
+    type MethodRow = {
+      method: string;
+      method_label_ar: string;
+      total_amount: number;
+      invoice_count: number;
+      payment_count: number;
+      accounts: AccountRow[];
+    };
+
+    const methodMap = new Map<string, MethodRow>();
+    for (const r of rows) {
+      const method = r.method as string;
+      let bucket = methodMap.get(method);
+      if (!bucket) {
+        bucket = {
+          method,
+          method_label_ar: METHOD_LABEL_AR[method] || method,
+          total_amount: 0,
+          invoice_count: 0,
+          payment_count: 0,
+          accounts: [],
+        };
+        methodMap.set(method, bucket);
+      }
+      const amt = Number(r.amount);
+      const invs = Number(r.invoice_count);
+      const pays = Number(r.payment_count);
+      bucket.total_amount += amt;
+      bucket.invoice_count += invs;
+      bucket.payment_count += pays;
+
+      const snap = r.snap || null;
+      const display = r.live_display_name ?? snap?.display_name ?? null;
+      const identifier = r.live_identifier ?? snap?.identifier ?? null;
+      const provider = r.live_provider_key ?? snap?.provider_key ?? null;
+      bucket.accounts.push({
+        payment_account_id: r.payment_account_id ?? null,
+        display_name: display,
+        identifier,
+        provider_key: provider,
+        total_amount: amt,
+        invoice_count: invs,
+        payment_count: pays,
+      });
+    }
+    for (const m of methodMap.values()) {
+      m.accounts.sort((a, b) => b.total_amount - a.total_amount);
+    }
+    const channels: MethodRow[] = Array.from(methodMap.values()).sort(
+      (a, b) => b.total_amount - a.total_amount,
+    );
+
+    const cashTotal = channels
+      .filter((m) => m.method === 'cash')
+      .reduce((s, m) => s + m.total_amount, 0);
+    const nonCashTotal = channels
+      .filter((m) => m.method !== 'cash')
+      .reduce((s, m) => s + m.total_amount, 0);
+    const grandTotal = cashTotal + nonCashTotal;
+
+    // Pre-compute share-of-grand on each method + account row so the
+    // frontend doesn't have to re-derive percentages.
+    const pct = (n: number) =>
+      grandTotal > 0
+        ? Math.round((n / grandTotal) * 10000) / 100
+        : 0;
+    const channelsWithShare = channels.map((m) => ({
+      ...m,
+      share_pct: pct(m.total_amount),
+      accounts: m.accounts.map((a) => ({
+        ...a,
+        share_pct: pct(a.total_amount),
+      })),
+    }));
+
+    return {
+      range: { from: fromDate, to: toDate },
+      cash_total: cashTotal,
+      non_cash_total: nonCashTotal,
+      grand_total: grandTotal,
+      channels: channelsWithShare,
+    };
+  }
+
   private today_iso() {
     const d = new Date();
     const cairo = new Date(d.toLocaleString('en-US', { timeZone: 'Africa/Cairo' }));

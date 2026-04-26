@@ -30,7 +30,11 @@ import {
   ArrowDownRight,
   Lightbulb,
 } from 'lucide-react';
-import { dashboardApi } from '@/api/dashboard.api';
+import {
+  dashboardApi,
+  PaymentChannelsResponse,
+  PaymentChannelMethod,
+} from '@/api/dashboard.api';
 import { accountingApi } from '@/api/accounting.api';
 import { useAuthStore } from '@/stores/auth.store';
 import { ReturnsWidget } from '@/components/dashboard/ReturnsWidget';
@@ -227,6 +231,15 @@ export default function Dashboard() {
     queryKey: ['dashboard-analytics', period.from, period.to],
     queryFn: () => dashboardApi.analytics(period.from, period.to),
     refetchInterval: 20_000,
+    refetchOnWindowFocus: true,
+    refetchOnReconnect: true,
+  });
+
+  // PR-PAY-5 — Payment channel totals across the picked period.
+  const { data: paymentChannels } = useQuery({
+    queryKey: ['dashboard-payment-channels', period.from, period.to],
+    queryFn: () => dashboardApi.paymentChannels(period.from, period.to),
+    refetchInterval: 30_000,
     refetchOnWindowFocus: true,
     refetchOnReconnect: true,
   });
@@ -536,6 +549,11 @@ export default function Dashboard() {
           )}
         </div>
       </div>
+
+      {/* PR-PAY-5 — Owner-dashboard payment channel totals */}
+      {paymentChannels && (
+        <PaymentChannelsSection data={paymentChannels} periodNoun={periodNoun} />
+      )}
 
       {/* ═════ Smart analysis panel + Cashier performance ═════ */}
       <div className="grid lg:grid-cols-2 gap-6">
@@ -1034,5 +1052,215 @@ function SmartAnalysisPanel({
         </div>
       )}
     </div>
+  );
+}
+
+/* ────────────────────────────────────────────────────────────────────
+ * PR-PAY-5 — Owner-dashboard payment channel totals.
+ *
+ * Renders a compact card row (cash + non-cash + per-method) backed by
+ * GET /dashboard/payment-channels for the picked period. A detail
+ * table underneath breaks every method into its admin-defined
+ * accounts (InstaPay الأهلي vs CIB, WE Pay, POS Visa, …).
+ *
+ * Strict labelling:
+ *   • Cash → "كاش في الدرج" (drawer-physical only).
+ *   • Non-cash → "تحصيلات غير نقدية" — never claimed as bank-cleared
+ *     balance. Settlement/clearing isn't modeled yet.
+ * ──────────────────────────────────────────────────────────────────── */
+function PaymentChannelsSection({
+  data,
+  periodNoun,
+}: {
+  data: PaymentChannelsResponse;
+  periodNoun: string;
+}) {
+  const fmt = (n: number) =>
+    `${Number(n || 0).toLocaleString('en-US', {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    })} ج.م`;
+
+  const cashChannel = data.channels.find((c) => c.method === 'cash');
+  const nonCashChannels = data.channels.filter((c) => c.method !== 'cash');
+  const grand = data.grand_total;
+
+  return (
+    <div className="card p-5 space-y-4">
+      <div className="flex items-center justify-between gap-4 flex-wrap">
+        <h3 className="font-black text-slate-800 flex items-center gap-2">
+          💳 تحصيلات حسب وسيلة الدفع — {periodNoun}
+        </h3>
+        <div className="text-xs text-slate-500">
+          إجمالي التحصيل: <span className="font-bold">{fmt(grand)}</span>
+          <span className="mx-2 text-slate-300">·</span>
+          من <span className="font-bold">{data.range.from}</span> إلى{' '}
+          <span className="font-bold">{data.range.to}</span>
+        </div>
+      </div>
+
+      {/* Cash + non-cash summary cards */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div className="rounded-xl border border-emerald-200 bg-emerald-50/60 p-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="text-xs text-emerald-700 font-bold">
+                💵 كاش في الدرج
+              </div>
+              <div className="text-2xl font-black text-emerald-800 mt-1">
+                {fmt(data.cash_total)}
+              </div>
+            </div>
+            {cashChannel && (
+              <div className="text-right text-[11px] text-emerald-700/70 leading-tight">
+                {cashChannel.invoice_count} فاتورة<br />
+                {cashChannel.payment_count} دفعة
+              </div>
+            )}
+          </div>
+          <div className="text-[11px] text-emerald-700/70 mt-2">
+            النقد المتوقع في الدرج = الكاش فقط
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="text-xs text-slate-700 font-bold">
+                💳 تحصيلات غير نقدية
+              </div>
+              <div className="text-2xl font-black text-slate-800 mt-1">
+                {fmt(data.non_cash_total)}
+              </div>
+            </div>
+            <div className="text-right text-[11px] text-slate-500 leading-tight">
+              {nonCashChannels.length} وسيلة<br />
+              {nonCashChannels.reduce((s, c) => s + c.payment_count, 0)} دفعة
+            </div>
+          </div>
+          <div className="text-[11px] text-slate-500 mt-2">
+            رصيد تحصيلي — لا يُضاف لرصيد الدرج النقدي.
+          </div>
+        </div>
+      </div>
+
+      {/* Per-method chips */}
+      {nonCashChannels.length > 0 && (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+          {nonCashChannels.map((c) => (
+            <PaymentChannelChip key={c.method} method={c} />
+          ))}
+        </div>
+      )}
+
+      {/* Detail table — one row per (method, account) */}
+      {data.channels.length > 0 && (
+        <div className="overflow-x-auto -mx-1">
+          <table className="min-w-full text-sm">
+            <thead>
+              <tr className="text-right text-xs text-slate-500 border-b border-slate-200">
+                <th className="px-2 py-2 font-bold">الوسيلة</th>
+                <th className="px-2 py-2 font-bold">الحساب</th>
+                <th className="px-2 py-2 font-bold text-left">المبلغ</th>
+                <th className="px-2 py-2 font-bold text-center">الفواتير</th>
+                <th className="px-2 py-2 font-bold text-center">الدفعات</th>
+                <th className="px-2 py-2 font-bold text-left">النسبة</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.channels.flatMap((m) =>
+                m.accounts.length === 0
+                  ? [
+                      <PaymentChannelTableRow
+                        key={`${m.method}-no-account`}
+                        methodLabel={m.method_label_ar}
+                        accountLabel={m.method === 'cash' ? '—' : '(بدون حساب)'}
+                        amount={m.total_amount}
+                        invoiceCount={m.invoice_count}
+                        paymentCount={m.payment_count}
+                        sharePct={m.share_pct}
+                      />,
+                    ]
+                  : m.accounts.map((a, i) => (
+                      <PaymentChannelTableRow
+                        key={`${m.method}-${a.payment_account_id ?? `i${i}`}`}
+                        methodLabel={i === 0 ? m.method_label_ar : ''}
+                        accountLabel={
+                          a.display_name
+                            ? a.display_name +
+                              (a.identifier ? ` · ${a.identifier}` : '')
+                            : '(بدون حساب)'
+                        }
+                        amount={a.total_amount}
+                        invoiceCount={a.invoice_count}
+                        paymentCount={a.payment_count}
+                        sharePct={a.share_pct}
+                      />
+                    )),
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PaymentChannelChip({ method }: { method: PaymentChannelMethod }) {
+  const fmt = (n: number) =>
+    `${Number(n || 0).toLocaleString('en-US', {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 0,
+    })}`;
+  const top = method.accounts[0];
+  return (
+    <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">
+      <div className="flex items-center justify-between text-xs">
+        <span className="font-bold text-slate-700">{method.method_label_ar}</span>
+        <span className="text-[10px] text-slate-400">{method.share_pct}%</span>
+      </div>
+      <div className="text-base font-black text-slate-900 mt-0.5">
+        {fmt(method.total_amount)} ج.م
+      </div>
+      {top?.display_name && (
+        <div className="text-[10px] text-slate-500 truncate mt-0.5">
+          أكبر حساب: {top.display_name}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PaymentChannelTableRow({
+  methodLabel,
+  accountLabel,
+  amount,
+  invoiceCount,
+  paymentCount,
+  sharePct,
+}: {
+  methodLabel: string;
+  accountLabel: string;
+  amount: number;
+  invoiceCount: number;
+  paymentCount: number;
+  sharePct: number;
+}) {
+  const fmt = (n: number) =>
+    `${Number(n || 0).toLocaleString('en-US', {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    })} ج.م`;
+  return (
+    <tr className="border-b border-slate-100 last:border-0">
+      <td className="px-2 py-2 font-bold text-slate-700">{methodLabel}</td>
+      <td className="px-2 py-2 text-slate-600">{accountLabel}</td>
+      <td className="px-2 py-2 text-left font-mono text-slate-900">
+        {fmt(amount)}
+      </td>
+      <td className="px-2 py-2 text-center text-slate-600">{invoiceCount}</td>
+      <td className="px-2 py-2 text-center text-slate-600">{paymentCount}</td>
+      <td className="px-2 py-2 text-left text-slate-500">{sharePct}%</td>
+    </tr>
   );
 }
