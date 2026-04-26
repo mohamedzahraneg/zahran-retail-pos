@@ -240,14 +240,15 @@ export default function App() {
             </ProtectedRoute>
           }
         />
-        {/* /attendance — legacy route kept as a permanent redirect so
-            external links (sidebar bookmarks, deep-links) don't 404.
-            The Attendance UI now lives as the "الحضور" tab inside
-            /team — same permission gates, same component (AttendanceBody),
-            same design. */}
+        {/* /attendance — legacy route. PR-T1.1: redirect to the new
+            unified workspace's attendance section. The legacy standalone
+            page is no longer rendered as a full-page replacement —
+            instead the new design shell (KPI strip + employee list)
+            stays visible, and AttendanceBody is wrapped inside the
+            workspace's attendance section. */}
         <Route
           path="attendance"
-          element={<Navigate to="/team?tab=attendance" replace />}
+          element={<Navigate to="/team?section=attendance" replace />}
         />
         <Route
           path="me"
@@ -265,14 +266,14 @@ export default function App() {
             </ProtectedRoute>
           }
         />
-        {/* /payroll — legacy route kept as a permanent redirect so
-            external links (emails, bookmarks) don't 404. The Payroll
-            UI now lives as the "الحسابات" tab inside /team — same
-            permission gate (employee.team.view), same component, same
-            design. */}
+        {/* /payroll — legacy route. PR-T1.1: redirect to the new
+            unified workspace's accounts section. The legacy standalone
+            page is no longer rendered as a full-page replacement —
+            it now lives wrapped inside the workspace's accounts
+            section. */}
         <Route
           path="payroll"
-          element={<Navigate to="/team?tab=accounts" replace />}
+          element={<Navigate to="/team?section=accounts" replace />}
         />
         <Route path="settings" element={<Settings />} />
         <Route
