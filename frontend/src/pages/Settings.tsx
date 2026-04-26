@@ -12,6 +12,11 @@ import {
   Check,
   X,
   Printer,
+  Banknote,
+  Smartphone,
+  Landmark,
+  Star,
+  Power,
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import {
@@ -22,9 +27,29 @@ import {
   PaymentMethod,
   Role,
 } from '@/api/settings.api';
+import {
+  paymentsApi,
+  PaymentAccount,
+  PaymentProvider,
+  PaymentMethodCode,
+  ProviderGroup,
+  CreatePaymentAccountInput,
+  METHOD_LABEL_AR,
+  GROUP_LABEL_AR,
+  groupAccountsByProviderGroup,
+} from '@/api/payments.api';
+import { useAuthStore } from '@/stores/auth.store';
 import { ReceiptTemplatesTab } from './ReceiptTemplatesTab';
 
-type TabKey = 'company' | 'receipt' | 'templates' | 'warehouses' | 'cashboxes' | 'payments' | 'roles';
+type TabKey =
+  | 'company'
+  | 'receipt'
+  | 'templates'
+  | 'warehouses'
+  | 'cashboxes'
+  | 'payments'
+  | 'payment-accounts'
+  | 'roles';
 
 const TABS: { key: TabKey; label: string; icon: any }[] = [
   { key: 'company', label: 'بيانات المحل', icon: Building2 },
@@ -33,6 +58,7 @@ const TABS: { key: TabKey; label: string; icon: any }[] = [
   { key: 'warehouses', label: 'المخازن', icon: WarehouseIcon },
   { key: 'cashboxes', label: 'الخزائن', icon: Wallet },
   { key: 'payments', label: 'طرق الدفع', icon: CreditCard },
+  { key: 'payment-accounts', label: 'حسابات التحصيل', icon: Banknote },
   { key: 'roles', label: 'الأدوار', icon: UsersIcon },
 ];
 
@@ -69,6 +95,7 @@ export default function Settings() {
           {tab === 'warehouses' && <WarehousesTab />}
           {tab === 'cashboxes' && <CashboxesTab />}
           {tab === 'payments' && <PaymentsTab />}
+          {tab === 'payment-accounts' && <PaymentAccountsTab />}
           {tab === 'roles' && <RolesTab />}
         </div>
       </div>
@@ -1193,5 +1220,526 @@ function Textarea({
       />
       {hint && <div className="text-xs text-slate-500 mt-1">{hint}</div>}
     </label>
+  );
+}
+
+/* ────────────────────────────────────────────────────────────────────
+ * PR-PAY-2 — Payment accounts admin tab.
+ *
+ * UI for the schema/API shipped by PR-PAY-1. Admin/manager can create,
+ * edit, deactivate, and set-default per-method. Other authenticated
+ * users can read the list (mutations are hidden by the permission gate
+ * AND enforced server-side by RolesGuard).
+ *
+ * No POS, posting, or shift-close changes — those land in PR-PAY-3 / 4.
+ * No data is created here automatically; the operator decides what
+ * channels exist.
+ * ──────────────────────────────────────────────────────────────────── */
+const PROVIDER_GROUP_ICON: Record<ProviderGroup, any> = {
+  cash: Banknote,
+  instapay: Smartphone,
+  wallet: Wallet,
+  card: CreditCard,
+  bank: Landmark,
+};
+
+const PROVIDER_GROUP_ORDER: ProviderGroup[] = [
+  'instapay',
+  'wallet',
+  'card',
+  'bank',
+  'cash',
+];
+
+function PaymentAccountsTab() {
+  const qc = useQueryClient();
+  const canManage = useAuthStore((s) => s.hasRole('admin', 'manager'));
+
+  const providersQuery = useQuery({
+    queryKey: ['payment-providers'],
+    queryFn: () => paymentsApi.listProviders(),
+  });
+  const accountsQuery = useQuery({
+    queryKey: ['payment-accounts'],
+    queryFn: () => paymentsApi.listAccounts(),
+  });
+
+  const [editing, setEditing] = useState<PaymentAccount | null>(null);
+  const [creating, setCreating] = useState(false);
+
+  const refresh = () => {
+    qc.invalidateQueries({ queryKey: ['payment-accounts'] });
+  };
+
+  const deactivateMut = useMutation({
+    mutationFn: (id: string) => paymentsApi.deactivate(id),
+    onSuccess: () => {
+      toast.success('تم تعطيل الحساب');
+      refresh();
+    },
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.message || 'تعذر التعطيل'),
+  });
+
+  const setDefaultMut = useMutation({
+    mutationFn: (id: string) => paymentsApi.setDefault(id),
+    onSuccess: () => {
+      toast.success('تم تعيين الحساب الافتراضي');
+      refresh();
+    },
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.message || 'تعذر تعيين الافتراضي'),
+  });
+
+  const reactivateMut = useMutation({
+    mutationFn: (id: string) =>
+      paymentsApi.updateAccount(id, { active: true } as any),
+    onSuccess: () => {
+      toast.success('تم تفعيل الحساب');
+      refresh();
+    },
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.message || 'تعذر التفعيل'),
+  });
+
+  if (providersQuery.isLoading || accountsQuery.isLoading) {
+    return <div className="text-slate-500">جارٍ التحميل…</div>;
+  }
+
+  const providers = providersQuery.data ?? [];
+  const accounts = accountsQuery.data ?? [];
+  const grouped = groupAccountsByProviderGroup(accounts, providers);
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h2 className="text-lg font-bold text-slate-900">
+            وسائل الدفع وحسابات التحصيل
+          </h2>
+          <p className="text-sm text-slate-600 mt-1">
+            إدارة حسابات InstaPay والمحافظ والفيزا والتحويلات البنكية التي
+            تظهر لاحقًا في نقطة البيع.
+          </p>
+        </div>
+        {canManage && (
+          <button
+            onClick={() => setCreating(true)}
+            className="bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold px-4 py-2 rounded-lg flex items-center gap-2"
+          >
+            <Plus className="w-4 h-4" /> إضافة حساب
+          </button>
+        )}
+      </div>
+
+      {accounts.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-10 text-center">
+          <div className="text-4xl mb-3">💳</div>
+          <div className="font-bold text-slate-900 mb-2">
+            لا توجد حسابات مفعلة بعد
+          </div>
+          <div className="text-sm text-slate-600 max-w-md mx-auto">
+            أضف حساب InstaPay أو محفظة أو فيزا ليظهر لاحقًا في نقطة البيع.
+            الحسابات هنا تظهر للكاشير عند اختيار طريقة الدفع غير النقدية.
+          </div>
+        </div>
+      ) : (
+        PROVIDER_GROUP_ORDER.filter((g) => grouped[g]?.length).map((group) => (
+          <PaymentAccountGroup
+            key={group}
+            group={group}
+            accounts={grouped[group]}
+            providers={providers}
+            canManage={canManage}
+            onEdit={setEditing}
+            onDeactivate={(id) => deactivateMut.mutate(id)}
+            onReactivate={(id) => reactivateMut.mutate(id)}
+            onSetDefault={(id) => setDefaultMut.mutate(id)}
+            mutating={
+              deactivateMut.isPending ||
+              setDefaultMut.isPending ||
+              reactivateMut.isPending
+            }
+          />
+        ))
+      )}
+
+      {(creating || editing) && canManage && (
+        <PaymentAccountModal
+          account={editing}
+          providers={providers}
+          onClose={() => {
+            setCreating(false);
+            setEditing(null);
+          }}
+          onSaved={() => {
+            setCreating(false);
+            setEditing(null);
+            refresh();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function PaymentAccountGroup({
+  group,
+  accounts,
+  providers,
+  canManage,
+  onEdit,
+  onDeactivate,
+  onReactivate,
+  onSetDefault,
+  mutating,
+}: {
+  group: ProviderGroup;
+  accounts: PaymentAccount[];
+  providers: PaymentProvider[];
+  canManage: boolean;
+  onEdit: (a: PaymentAccount) => void;
+  onDeactivate: (id: string) => void;
+  onReactivate: (id: string) => void;
+  onSetDefault: (id: string) => void;
+  mutating: boolean;
+}) {
+  const Icon = PROVIDER_GROUP_ICON[group];
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white">
+      <div className="flex items-center gap-2 px-5 py-3 border-b border-slate-200 bg-slate-50">
+        <Icon className="w-5 h-5 text-indigo-600" />
+        <div className="font-bold text-slate-900">{GROUP_LABEL_AR[group]}</div>
+        <div className="text-xs text-slate-500">({accounts.length})</div>
+      </div>
+      <div className="divide-y divide-slate-100">
+        {accounts.map((a) => (
+          <PaymentAccountRow
+            key={a.id}
+            account={a}
+            provider={
+              providers.find((p) => p.provider_key === a.provider_key) ?? null
+            }
+            canManage={canManage}
+            onEdit={() => onEdit(a)}
+            onDeactivate={() => onDeactivate(a.id)}
+            onReactivate={() => onReactivate(a.id)}
+            onSetDefault={() => onSetDefault(a.id)}
+            mutating={mutating}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function PaymentAccountRow({
+  account,
+  provider,
+  canManage,
+  onEdit,
+  onDeactivate,
+  onReactivate,
+  onSetDefault,
+  mutating,
+}: {
+  account: PaymentAccount;
+  provider: PaymentProvider | null;
+  canManage: boolean;
+  onEdit: () => void;
+  onDeactivate: () => void;
+  onReactivate: () => void;
+  onSetDefault: () => void;
+  mutating: boolean;
+}) {
+  return (
+    <div className="flex items-start justify-between gap-4 px-5 py-4">
+      <div className="flex items-start gap-3">
+        <div className="w-10 h-10 rounded-lg bg-slate-100 text-slate-600 flex items-center justify-center font-bold">
+          {account.display_name.slice(0, 2)}
+        </div>
+        <div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="font-bold text-slate-900">{account.display_name}</div>
+            {account.is_default && (
+              <span className="inline-flex items-center gap-1 text-[11px] font-bold bg-amber-100 text-amber-700 px-2 py-0.5 rounded">
+                <Star className="w-3 h-3" /> افتراضي
+              </span>
+            )}
+            {!account.active && (
+              <span className="text-[11px] font-bold bg-slate-200 text-slate-600 px-2 py-0.5 rounded">
+                غير مفعل
+              </span>
+            )}
+          </div>
+          <div className="text-xs text-slate-600 mt-1 flex flex-wrap gap-x-3 gap-y-0.5">
+            <span>{METHOD_LABEL_AR[account.method]}</span>
+            {provider?.name_ar && <span>· {provider.name_ar}</span>}
+            {account.identifier && <span>· {account.identifier}</span>}
+            <span className="font-mono text-slate-500">
+              · GL {account.gl_account_code}
+            </span>
+          </div>
+        </div>
+      </div>
+      {canManage && (
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            onClick={onEdit}
+            disabled={mutating}
+            className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-slate-100 text-slate-700 hover:bg-slate-200 flex items-center gap-1"
+          >
+            <Edit3 className="w-3 h-3" /> تعديل
+          </button>
+          {account.active && !account.is_default && (
+            <button
+              onClick={onSetDefault}
+              disabled={mutating}
+              className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-amber-100 text-amber-700 hover:bg-amber-200 flex items-center gap-1"
+            >
+              <Star className="w-3 h-3" /> تعيين افتراضي
+            </button>
+          )}
+          {account.active ? (
+            <button
+              onClick={onDeactivate}
+              disabled={mutating}
+              className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-rose-100 text-rose-700 hover:bg-rose-200 flex items-center gap-1"
+            >
+              <Power className="w-3 h-3" /> تعطيل
+            </button>
+          ) : (
+            <button
+              onClick={onReactivate}
+              disabled={mutating}
+              className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-emerald-100 text-emerald-700 hover:bg-emerald-200 flex items-center gap-1"
+            >
+              <Power className="w-3 h-3" /> تفعيل
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const METHODS_FOR_FORM: PaymentMethodCode[] = [
+  'instapay',
+  'vodafone_cash',
+  'orange_cash',
+  'card_visa',
+  'card_mastercard',
+  'card_meeza',
+  'bank_transfer',
+  'cash',
+  'credit',
+  'other',
+];
+
+const GL_HINTS: Record<string, string> = {
+  '1111': '1111 — الخزينة الرئيسية (نقدي)',
+  '1113': '1113 — البنك / كروت',
+  '1114': '1114 — المحافظ الإلكترونية',
+  '1115': '1115 — شيكات',
+  '1121': '1121 — ذمم العملاء (آجل)',
+};
+
+function PaymentAccountModal({
+  account,
+  providers,
+  onClose,
+  onSaved,
+}: {
+  account: PaymentAccount | null;
+  providers: PaymentProvider[];
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const isEdit = !!account;
+  const [form, setForm] = useState<CreatePaymentAccountInput>({
+    method: account?.method ?? 'instapay',
+    provider_key: account?.provider_key ?? '',
+    display_name: account?.display_name ?? '',
+    identifier: account?.identifier ?? '',
+    gl_account_code: account?.gl_account_code ?? '1114',
+    is_default: account?.is_default ?? false,
+    active: account?.active ?? true,
+    sort_order: account?.sort_order ?? 0,
+  });
+
+  const providersForMethod = providers.filter((p) => p.method === form.method);
+
+  // When method changes, reset provider + GL default unless editing.
+  useEffect(() => {
+    if (isEdit) return;
+    const first = providers.find((p) => p.method === form.method);
+    setForm((f) => ({
+      ...f,
+      provider_key: first?.provider_key ?? '',
+      gl_account_code: first?.default_gl_account_code ?? f.gl_account_code,
+    }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.method]);
+
+  const save = useMutation({
+    mutationFn: () =>
+      isEdit
+        ? paymentsApi.updateAccount(account!.id, {
+            display_name: form.display_name,
+            identifier: form.identifier || undefined,
+            gl_account_code: form.gl_account_code,
+            provider_key: form.provider_key || undefined,
+            sort_order: form.sort_order,
+          })
+        : paymentsApi.createAccount(form),
+    onSuccess: () => {
+      toast.success(isEdit ? 'تم تحديث الحساب' : 'تم إنشاء الحساب');
+      onSaved();
+    },
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.message || 'تعذر الحفظ'),
+  });
+
+  const submit = () => {
+    if (!form.display_name.trim()) {
+      toast.error('اكتب اسم الحساب');
+      return;
+    }
+    if (!form.gl_account_code.trim()) {
+      toast.error('اختر الحساب المحاسبي');
+      return;
+    }
+    save.mutate();
+  };
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4"
+      onClick={onClose}
+    >
+      <div
+        className="bg-white rounded-2xl w-full max-w-lg shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-5 py-3 border-b border-slate-200">
+          <div className="font-bold text-slate-900">
+            {isEdit ? 'تعديل حساب التحصيل' : 'إضافة حساب التحصيل'}
+          </div>
+          <button onClick={onClose} className="text-slate-500 hover:text-slate-800">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <div className="p-5 space-y-4">
+          <div>
+            <label className="block text-sm text-slate-600 mb-1">
+              الطريقة
+            </label>
+            <select
+              value={form.method}
+              disabled={isEdit}
+              onChange={(e) =>
+                setForm({ ...form, method: e.target.value as PaymentMethodCode })
+              }
+              className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm disabled:bg-slate-100"
+            >
+              {METHODS_FOR_FORM.map((m) => (
+                <option key={m} value={m}>
+                  {METHOD_LABEL_AR[m]} ({m})
+                </option>
+              ))}
+            </select>
+            {isEdit && (
+              <div className="text-xs text-slate-500 mt-1">
+                لا يمكن تغيير الطريقة بعد الإنشاء — أنشئ حسابًا جديدًا بدلاً من ذلك.
+              </div>
+            )}
+          </div>
+
+          <div>
+            <label className="block text-sm text-slate-600 mb-1">المزوّد</label>
+            <select
+              value={form.provider_key ?? ''}
+              onChange={(e) =>
+                setForm({ ...form, provider_key: e.target.value })
+              }
+              className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
+            >
+              <option value="">— بدون مزوّد —</option>
+              {providersForMethod.map((p) => (
+                <option key={p.provider_key} value={p.provider_key}>
+                  {p.name_ar}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <Input
+            label="اسم العرض"
+            value={form.display_name}
+            onChange={(v) => setForm({ ...form, display_name: v })}
+          />
+
+          <Input
+            label="معرّف الحساب (رقم محفظة / IBAN / Terminal ID)"
+            value={form.identifier ?? ''}
+            onChange={(v) => setForm({ ...form, identifier: v })}
+          />
+
+          <div>
+            <label className="block text-sm text-slate-600 mb-1">
+              الحساب المحاسبي
+            </label>
+            <select
+              value={form.gl_account_code}
+              onChange={(e) =>
+                setForm({ ...form, gl_account_code: e.target.value })
+              }
+              className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-mono"
+            >
+              {Object.keys(GL_HINTS).map((code) => (
+                <option key={code} value={code}>
+                  {GL_HINTS[code]}
+                </option>
+              ))}
+            </select>
+            <div className="text-xs text-slate-500 mt-1">
+              يجب أن يوجد الكود في شجرة الحسابات. القيود المحاسبية للحساب
+              تذهب إلى هذا الكود عند البيع.
+            </div>
+          </div>
+
+          <div className="flex items-center gap-6">
+            <Toggle
+              label="مفعل"
+              value={!!form.active}
+              onChange={(v) => setForm({ ...form, active: v })}
+            />
+            <Toggle
+              label="افتراضي لطريقة الدفع"
+              value={!!form.is_default}
+              onChange={(v) => setForm({ ...form, is_default: v })}
+            />
+          </div>
+        </div>
+
+        <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-slate-200 bg-slate-50 rounded-b-2xl">
+          <button
+            onClick={onClose}
+            className="px-3 py-2 rounded-lg text-sm bg-white border border-slate-300 text-slate-700 hover:bg-slate-100"
+          >
+            إلغاء
+          </button>
+          <button
+            onClick={submit}
+            disabled={save.isPending}
+            className="px-3 py-2 rounded-lg text-sm font-semibold bg-indigo-600 text-white hover:bg-indigo-700 flex items-center gap-1 disabled:opacity-60"
+          >
+            <Save className="w-4 h-4" />
+            {save.isPending ? 'جارٍ الحفظ…' : 'حفظ'}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
