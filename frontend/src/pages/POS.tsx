@@ -1868,6 +1868,16 @@ function PaymentModal({
   const providers = providersQuery.data ?? [];
   const accounts = accountsQuery.data ?? [];
 
+  // PR-PAY-3 fix — when accounts load (or admin creates/deactivates
+  // an account while the modal is open), the currently-selected
+  // method might no longer be visible. Snap back to cash so the UI
+  // stays in sync with what the cashier can actually use.
+  useEffect(() => {
+    const visible = visibleMethodsFor(accounts);
+    if (!visible.includes(method)) setMethod('cash');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accountsQuery.dataUpdatedAt]);
+
   const accountsForMethod = accounts.filter((a) => a.method === method);
   const isCash = method === 'cash';
 
@@ -1982,6 +1992,20 @@ function PaymentModal({
   );
 }
 
+// PR-PAY-3 fix — Compute the methods the cashier can actually USE.
+// Cash is always shown; non-cash methods only appear if at least one
+// active payment_account exists for them. Hidden methods can become
+// visible automatically when admin creates an active account, and
+// disappear automatically on deactivation — no rebuild required.
+export function visibleMethodsFor(
+  accounts: Pick<PaymentAccount, 'method' | 'active'>[],
+): PaymentMethodCode[] {
+  const activeMethods = new Set(
+    accounts.filter((a) => a.active).map((a) => a.method),
+  );
+  return POS_METHODS.filter((m) => m === 'cash' || activeMethods.has(m));
+}
+
 function PaymentMethodGrid({
   providers,
   accounts,
@@ -1993,15 +2017,11 @@ function PaymentMethodGrid({
   selected: PaymentMethodCode;
   onSelect: (m: PaymentMethodCode) => void;
 }) {
-  // Show ALL POS methods so the cashier sees the full menu; methods
-  // with no active account get a dim "setup required" subtitle and
-  // (when picked) the picker block exposes the explicit warning.
+  const visible = visibleMethodsFor(accounts);
   return (
     <div className="grid grid-cols-2 gap-2">
-      {POS_METHODS.map((m) => {
+      {visible.map((m) => {
         const provider = providers.find((p) => p.method === m);
-        const hasActive =
-          m === 'cash' || accounts.some((a) => a.method === m && a.active);
         const isSelected = selected === m;
         return (
           <button
@@ -2021,11 +2041,6 @@ function PaymentMethodGrid({
                 </span>
               )}
             </div>
-            {!hasActive && (
-              <div className="text-[10px] text-amber-400 mt-1 font-normal">
-                لا يوجد حساب مفعل
-              </div>
-            )}
           </button>
         );
       })}
