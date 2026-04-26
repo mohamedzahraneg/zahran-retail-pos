@@ -5,6 +5,20 @@ import {
   TransactionKind,
 } from './financial-engine.service';
 
+// PR-DRIFT-3E — Payment-method → GL account map. Cash is handled
+// specially (resolves through the shift's cashbox); every other
+// method debits its dedicated bucket account so the cashbox never
+// gets a stale leg for a non-cash sale.
+const PAYMENT_METHOD_ACCOUNT_CODE: Record<string, string> = {
+  cash: '1111',          // الخزينة الرئيسية / Main Cash (overridden via cashbox link)
+  instapay: '1114',      // المحافظ الإلكترونية / E-Wallets
+  wallet: '1114',
+  bank_transfer: '1113', // البنك / Bank
+  bank: '1113',
+  card: '1113',
+  check: '1115',
+};
+
 /**
  * Centralized journal posting for every financial event in the system.
  *
@@ -103,38 +117,46 @@ export class AccountingPostingService {
     const cogs = Number(costRow?.cogs || 0);
     const entryDate = this.dateOnly(inv.completed_at || inv.created_at);
 
-    // Build gl_lines — IDENTICAL account codes, amounts, and line
-    // ordering as the legacy createEntry path. The engine resolves
-    // account_code → id internally; we don't pre-resolve so the
-    // mapping stays declarative.
+    // PR-DRIFT-3E — Per-payment GL routing. The legacy path treated
+    // `paid` as a single cash debit; this missed non-cash methods
+    // entirely (instapay/bank/card all silently posted to the cashbox
+    // account). We now read invoice_payments and emit one DR line per
+    // payment on the right account. Cash still flows through the
+    // shift's cashbox account; non-cash flows to its bucket account
+    // (instapay → 1114 wallet, bank_transfer/card → 1113 bank).
+    const payments = await runner.query(
+      `SELECT payment_method::text AS payment_method, amount
+         FROM invoice_payments
+        WHERE invoice_id = $1
+          AND COALESCE(amount, 0) > 0`,
+      [invoiceId],
+    );
     const lines: any[] = [];
-    // Cash side. Legacy parity: cashboxAccountId(null) defaulted to
-    // 1111, so when the shift has no cashbox_id we fall back to the
-    // 1111 account code (same as legacy postInvoice behaviour).
-    if (paid > 0) {
-      // PR-DRIFT-3F — Both branches now thread cashbox_id through to
-      // the journal_line. The truthy branch already did. The fallback
-      // branch (no cashbox attribution available) keeps cashbox_id
-      // undefined, which is the correct behavior — the engine writes
-      // NULL, and v_cashbox_drift_per_ref correctly classifies it as
-      // "no source available" rather than a missing tag. The explicit
-      // `cashbox_id: undefined` makes the contract symmetrical and
-      // makes the audit's intent obvious to future readers.
-      lines.push(
-        inv.cashbox_id
-          ? {
-              resolve_from_cashbox_id: inv.cashbox_id,
-              debit: paid,
-              cashbox_id: inv.cashbox_id,
-              description: `فاتورة ${inv.invoice_no}`,
-            }
-          : {
-              account_code: '1111',
-              debit: paid,
-              cashbox_id: undefined,
-              description: `فاتورة ${inv.invoice_no}`,
-            },
-      );
+    for (const p of payments) {
+      const amt = Number(p.amount);
+      if (p.payment_method === 'cash') {
+        lines.push(
+          inv.cashbox_id
+            ? {
+                resolve_from_cashbox_id: inv.cashbox_id,
+                debit: amt,
+                cashbox_id: inv.cashbox_id,
+                description: `كاش - فاتورة ${inv.invoice_no}`,
+              }
+            : {
+                account_code: '1111',
+                debit: amt,
+                cashbox_id: undefined,
+                description: `كاش - فاتورة ${inv.invoice_no}`,
+              },
+        );
+      } else {
+        lines.push({
+          account_code: PAYMENT_METHOD_ACCOUNT_CODE[p.payment_method] || '1114',
+          debit: amt,
+          description: `${p.payment_method} - فاتورة ${inv.invoice_no}`,
+        });
+      }
     }
     if (unpaid > 0) {
       lines.push({
@@ -174,11 +196,9 @@ export class AccountingPostingService {
     }
     if (lines.length < 2) return null;
 
-    // Phase 2.2: gather cash payments → engine cash_movements. The
-    // engine writes cashbox_transactions via fn_record_cashbox_txn
-    // (atomic with the GL post, under engine:recordTransaction context,
-    // no bypass alert). We preserve one cashbox row per individual cash
-    // payment to match the legacy per-payment audit shape.
+    // Phase 2.2: gather cash payments → engine cash_movements. Only
+    // cash payments produce a cashbox_transactions row; non-cash GL
+    // legs go to their bucket account above with no cashbox effect.
     const cashMoves: Array<{
       cashbox_id: string;
       direction: 'in' | 'out';
@@ -187,15 +207,8 @@ export class AccountingPostingService {
       notes?: string;
     }> = [];
     if (inv.cashbox_id) {
-      const cashPayments = await runner.query(
-        `SELECT amount
-           FROM invoice_payments
-          WHERE invoice_id = $1
-            AND payment_method = 'cash'
-            AND COALESCE(amount, 0) > 0`,
-        [invoiceId],
-      );
-      for (const p of cashPayments) {
+      for (const p of payments) {
+        if (p.payment_method !== 'cash') continue;
         cashMoves.push({
           cashbox_id: inv.cashbox_id,
           direction: 'in',
@@ -222,6 +235,49 @@ export class AccountingPostingService {
     // (pos.service:336 reads `.error`) continue to work unchanged.
     if (!res.ok) return { error: res.error };
     return { entry_id: (res as any).entry_id };
+  }
+
+  /**
+   * PR-DRIFT-3E — GL-side companion to pos.service.editInvoice.
+   *
+   * Background: editInvoice used to reverse/replay the cashbox CT but
+   * never touched the journal entry, leaving 5 invoices on
+   * الخزينة الرئيسية with -1,435 EGP of cashbox-bucket drift.
+   *
+   * This method voids any active JE for the invoice and reposts a
+   * fresh one based on the current invoice/payments state. The
+   * void+repost strategy is symmetric with the CT layer (which already
+   * does reverse+replay), keeps the audit trail explicit, and works
+   * across all edit shapes (item, price, payment-method, mixed).
+   *
+   * Idempotent: if no active JE exists yet, this is a plain
+   * `postInvoice`. If multiple actives somehow exist (shouldn't), all
+   * are voided and one fresh JE is posted. Callers pass the same
+   * EntityManager as editInvoice so the void+repost lives in the same
+   * atomic transaction as the invoice mutation.
+   */
+  async postInvoiceEdit(invoiceId: string, userId: string, em?: EntityManager) {
+    if (!this.engine) return null;
+    const runner = em ?? this.ds.manager;
+    const ctx = `engine:postInvoiceEdit`;
+    await runner.query(`SELECT set_config('app.engine_context', $1, true)`, [ctx]);
+    await runner.query(
+      `UPDATE journal_entries
+          SET is_void = TRUE,
+              voided_by = $2,
+              voided_at = NOW(),
+              void_reason = COALESCE(void_reason, '')
+                         || CASE WHEN void_reason IS NULL THEN ''
+                                 ELSE E'\n' END
+                         || 'PR-DRIFT-3E — superseded by postInvoiceEdit '
+                         || 'after invoice edit. The fresh JE on the same '
+                         || 'reference_id holds the corrected GL state.'
+        WHERE reference_type = 'invoice'
+          AND reference_id   = $1
+          AND is_void = FALSE`,
+      [invoiceId, userId],
+    );
+    return this.postInvoice(invoiceId, userId, em);
   }
 
   /**
