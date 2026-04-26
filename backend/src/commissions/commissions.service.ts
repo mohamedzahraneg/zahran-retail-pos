@@ -9,7 +9,11 @@ import { DataSource } from 'typeorm';
  * commission earned per salesperson over a time window.
  *
  * commission = sum(line_total) * rate / 100
- *   restricted to invoices with status = 'completed' (non-cancelled/refunded).
+ *   restricted to invoices with sales-eligible status —
+ *   ('completed', 'paid', 'partially_paid'). Excludes draft / cancelled
+ *   / refunded. The earlier filter `status = 'completed'` returned ZERO
+ *   rows in production because POS finalises invoices straight to
+ *   'paid' (Overview dashboard regression — fixed 2026-04-26).
  */
 @Injectable()
 export class CommissionsService {
@@ -29,7 +33,7 @@ export class CommissionsService {
           inv.completed_at
           FROM invoice_items ii
           JOIN invoices inv ON inv.id = ii.invoice_id
-         WHERE inv.status = 'completed'
+         WHERE inv.status::text IN ('completed', 'paid', 'partially_paid')
            AND inv.completed_at::date BETWEEN $1::date AND $2::date
            AND COALESCE(ii.salesperson_id, inv.salesperson_id) IS NOT NULL
       )
@@ -73,7 +77,7 @@ export class CommissionsService {
          AND COALESCE(ii.salesperson_id, inv.salesperson_id) = $1
         JOIN users u ON u.id = $1
         LEFT JOIN customers c ON c.id = inv.customer_id
-       WHERE inv.status = 'completed'
+       WHERE inv.status::text IN ('completed', 'paid', 'partially_paid')
          AND inv.completed_at::date BETWEEN $2::date AND $3::date
        GROUP BY inv.id, inv.invoice_no, inv.completed_at, c.full_name, u.commission_rate
        ORDER BY inv.completed_at DESC
