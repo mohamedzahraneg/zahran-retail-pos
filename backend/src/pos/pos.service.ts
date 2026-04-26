@@ -666,12 +666,29 @@ export class PosService {
         [id],
       );
       const cashboxId = cbRef?.cashbox_id ?? null;
-      if (cashboxId) {
+
+      // PR-DRIFT-3E — Skip CT reverse/replay when the cash effect is
+      // unchanged. Item/category/product-only edits with the same cash
+      // total used to emit a wasted IN+OUT pair (PR-DRIFT-3E case
+      // INV-016) — the cash never physically moved, but the engine
+      // touched the cashbox anyway. We compare the old and new cash
+      // payment totals up-front and short-circuit when they match.
+      const newPaymentsArg = (dto.payments || []) as Array<{
+        payment_method: 'cash' | 'card' | 'instapay' | 'bank_transfer';
+        amount: number;
+      }>;
+      const oldCashTotal = origPayments
+        .filter((p: any) => p.payment_method === 'cash')
+        .reduce((s: number, p: any) => s + Number(p.amount || 0), 0);
+      const newCashTotal = newPaymentsArg
+        .filter((p) => p.payment_method === 'cash')
+        .reduce((s, p) => s + Number(p.amount || 0), 0);
+      const cashUnchanged = Math.abs(oldCashTotal - newCashTotal) < 0.005;
+
+      if (cashboxId && !cashUnchanged) {
         // Phase 2.5: cash-side reversal now routes through the engine's
         // sanctioned cash-only primitive. No direct fn_record_cashbox_txn
-        // call; no engine_bypass_alerts row. The GL-side reversal for an
-        // edit is a separate correctness gap tracked in the report —
-        // this turn strictly moves the cashbox leg into engine ownership.
+        // call; no engine_bypass_alerts row.
         if (!this.engine) {
           throw new BadRequestException(
             'FinancialEngineService غير متاح — لا يمكن تعديل الفاتورة',
@@ -821,9 +838,17 @@ export class PosService {
            VALUES ($1,$2,$3,$4)`,
           [id, p.payment_method, p.amount, p.reference ?? null],
         );
-        if (p.payment_method === 'cash' && cashboxId && Number(p.amount) > 0) {
-          // Phase 2.5: cash-in leg of the new payment also routes
-          // through the engine's cash-only primitive (engine:* context).
+        if (
+          p.payment_method === 'cash' &&
+          cashboxId &&
+          Number(p.amount) > 0 &&
+          !cashUnchanged
+        ) {
+          // PR-DRIFT-3E — Symmetric short-circuit with step 2: if the
+          // cash effect didn't change we already skipped the OUT leg,
+          // so we must skip the matching IN leg too. The CTs from the
+          // pre-edit invoice stay as-is; the GL side is refreshed by
+          // postInvoiceEdit below.
           if (!this.engine) {
             throw new BadRequestException(
               'FinancialEngineService غير متاح — لا يمكن تعديل الفاتورة',
@@ -917,6 +942,28 @@ export class PosService {
           }),
         ],
       );
+
+      // ── 9) PR-DRIFT-3E — refresh the GL after the edit ────────────
+      // editInvoice used to leave the original invoice JE untouched,
+      // so any change to amount or payment method silently desynced
+      // the cashbox bucket from reality. postInvoiceEdit voids the
+      // old JE and reposts a fresh one based on the post-edit
+      // invoice/payments state. Runs in the same transaction so a
+      // failure rolls the whole edit back — we will not ship an edit
+      // that breaks the GL. (`posting` is @Optional only for stubbed
+      // unit tests; in any real boot it's wired by AccountingModule.)
+      if (this.posting) {
+        const postRes = (await this.posting.postInvoiceEdit(
+          id,
+          userId,
+          em,
+        )) as any;
+        if (postRes?.error) {
+          throw new BadRequestException(
+            `فشل ترحيل القيد بعد تعديل الفاتورة: ${postRes.error}`,
+          );
+        }
+      }
 
       this.realtime?.emitPosEvent({
         type: 'invoice.created', // same channel — the UI refetches
