@@ -1435,6 +1435,63 @@ export class AccountingService {
             ],
           );
           voidedJeId = oldJe.id;
+
+          // PR-DRIFT-2.1 (2026-04-26): also void any active cashbox
+          // transaction(s) for this expense and rebase
+          // cashboxes.current_balance, otherwise recordExpense below
+          // would insert a fresh CT on top of the original — leaving
+          // the CT side stacked at -oldAmount + -newAmount per edit.
+          // Same R2 stacking pattern PR-DRIFT-2's data fix cleaned up
+          // for past edits; this prevents future ones.
+          //
+          // Look at the OLD cashbox (pre-edit). If the operator moved
+          // the expense to a different cashbox, the new CT will land
+          // on the new cashbox via recordExpense; the old cashbox's
+          // CT must still be voided so the prior outflow doesn't
+          // linger there.
+          const oldCashboxId =
+            (oldV as any).cashbox_id ?? expense.cashbox_id;
+          if (oldCashboxId) {
+            const voided: { amount: string; direction: string }[] =
+              await em.query(
+                `UPDATE cashbox_transactions
+                    SET is_void     = TRUE,
+                        void_reason = $1,
+                        voided_by   = $2,
+                        voided_at   = NOW()
+                  WHERE reference_type = 'expense'
+                    AND reference_id   = $3
+                    AND cashbox_id     = $4
+                    AND COALESCE(is_void, FALSE) = FALSE
+                  RETURNING amount, direction`,
+                [
+                  `طلب تعديل #${r.id} — ${r.reason}`,
+                  approverId,
+                  r.expense_id,
+                  oldCashboxId,
+                ],
+              );
+
+            // Each voided 'out' adds back its amount; each voided 'in'
+            // subtracts. Matches the sign convention the canonical
+            // helper fn_record_cashbox_txn uses on insert.
+            let voidedSignedSum = 0;
+            for (const row of voided) {
+              voidedSignedSum +=
+                row.direction === 'in'
+                  ? Number(row.amount)
+                  : -Number(row.amount);
+            }
+            if (voidedSignedSum !== 0) {
+              await em.query(
+                `UPDATE cashboxes
+                    SET current_balance = current_balance - $1,
+                        updated_at      = NOW()
+                  WHERE id = $2`,
+                [voidedSignedSum, oldCashboxId],
+              );
+            }
+          }
         }
       }
 
