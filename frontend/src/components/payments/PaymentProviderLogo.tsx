@@ -68,29 +68,77 @@ function initials(name?: string | null): string {
 }
 
 /**
- * Sink-side allow-list for the `<img src>` value.
+ * Sink-side sanitizer for the `<img src>` value.
  *
  * The `src` flows in from props that originate at DOM-text sources
  * (FileReader result for drag-dropped files, `<input>` value for
- * URL paste). The LogoPicker already validates at the source — this
- * is defense-in-depth at the sink, also makes the dataflow explicit
- * for CodeQL's `js/xss-through-dom` analysis.
+ * URL paste). LogoPicker validates at the source; this is the
+ * authoritative sink-side check that CodeQL's
+ * `js/xss-through-dom` analysis terminates on.
  *
- * Allowed:
- *   • Vite-bundled relative URLs (`/assets/...`, `/payment-logos/...`)
- *   • absolute http(s) URLs the operator pasted
- *   • base64 data URLs ONLY for raster image formats (no SVG, no
- *     `data:text/html`, no `javascript:`)
+ * Why URL constructor + protocol allow-list (not just regex):
+ *   CodeQL recognises `new URL(...)` + protocol comparison as a
+ *   trustworthy URL sanitizer pattern; a hand-rolled regex did not
+ *   register as a sanitizer in `js/xss-through-dom` analysis.
  *
- * Anything else returns `null` — the component falls through to the
- * initials avatar instead of binding the unsafe value to img.src.
+ * Allowed shapes:
+ *   • Vite-bundled relative URLs (`/assets/...`) — same-origin only,
+ *     never protocol-relative (`//evil.com`).
+ *   • Absolute http(s) URLs (`http://...`, `https://...`) — operator-
+ *     pasted brand asset host.
+ *   • Base64 data URLs ONLY for raster MIME types
+ *     (image/png, image/jpeg, image/webp). Explicitly NOT
+ *     `image/svg+xml`, `text/html`, or anything else.
+ *
+ * Explicitly rejected:
+ *   • javascript:, vbscript:, file:, ftp:, mailto:, tel:, …
+ *   • data:image/svg+xml, data:text/html, data:application/*
+ *   • protocol-relative URLs (`//host/...`)
+ *   • blob: (we don't use it; rejecting keeps the surface minimal)
+ *
+ * Returns `null` for invalid inputs — the consumer must fall through
+ * to a safe alternative (initials avatar) instead of binding the
+ * unsafe value to `<img src>`.
  */
-const SAFE_IMG_SRC =
-  /^(\/|https?:\/\/|data:image\/(png|jpe?g|webp|gif);base64,[A-Za-z0-9+/=]+$)/i;
+const SAFE_DATA_URL =
+  /^data:image\/(png|jpe?g|webp);base64,[A-Za-z0-9+/=]+$/i;
 
-function sanitizeImgSrc(candidate: string | null | undefined): string | null {
-  if (!candidate) return null;
-  return SAFE_IMG_SRC.test(candidate) ? candidate : null;
+export function sanitizeImgSrc(
+  candidate: string | null | undefined,
+): string | null {
+  if (typeof candidate !== 'string') return null;
+  const trimmed = candidate.trim();
+  if (!trimmed) return null;
+
+  // Same-origin relative URL (Vite-bundled assets). Reject protocol-
+  // relative `//host/...` which would resolve to an attacker domain.
+  if (trimmed.startsWith('/') && !trimmed.startsWith('//')) {
+    return trimmed;
+  }
+
+  // Try the URL constructor — CodeQL recognises this as a URL
+  // sanitizer entry point. Anything that fails to parse is rejected.
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return null;
+  }
+
+  // Absolute http(s) URL — protocol allow-list. CodeQL trusts this
+  // pattern.
+  if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+    return trimmed;
+  }
+
+  // Data URL — only raster images. The URL constructor accepts
+  // arbitrary `data:` payloads, so we additionally check the MIME
+  // prefix here. Anything else (svg+xml, text/html, …) is rejected.
+  if (parsed.protocol === 'data:' && SAFE_DATA_URL.test(trimmed)) {
+    return trimmed;
+  }
+
+  return null;
 }
 
 export function PaymentProviderLogo({
