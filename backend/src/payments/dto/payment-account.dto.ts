@@ -17,6 +17,7 @@ const PAYMENT_METHODS = [
   'instapay',
   'vodafone_cash',
   'orange_cash',
+  'wallet',         // PR-PAY-3.1
   'bank_transfer',
   'credit',
   'other',

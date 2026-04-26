@@ -29,6 +29,7 @@ describe('PR-PAY-1 payment method routing contract', () => {
     'instapay',
     'vodafone_cash',
     'orange_cash',
+    'wallet',         // PR-PAY-3.1
     'bank_transfer',
     'credit',
     'other',
@@ -58,10 +59,12 @@ describe('PR-PAY-1 payment method routing contract', () => {
     expect(METHOD_DEFAULT_GL_CODE.bank_transfer).toBe('1113');
   });
 
-  it('routes instapay/vodafone_cash/orange_cash → 1114 (e-wallets)', () => {
+  it('routes instapay/vodafone_cash/orange_cash/wallet → 1114 (e-wallets)', () => {
     expect(METHOD_DEFAULT_GL_CODE.instapay).toBe('1114');
     expect(METHOD_DEFAULT_GL_CODE.vodafone_cash).toBe('1114');
     expect(METHOD_DEFAULT_GL_CODE.orange_cash).toBe('1114');
+    // PR-PAY-3.1: generic wallet umbrella also lands on 1114.
+    expect(METHOD_DEFAULT_GL_CODE.wallet).toBe('1114');
   });
 
   it('routes credit → 1121 receivables (matches existing unpaid-portion logic)', () => {

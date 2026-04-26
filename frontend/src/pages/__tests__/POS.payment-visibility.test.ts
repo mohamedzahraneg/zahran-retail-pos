@@ -70,4 +70,27 @@ describe('visibleMethodsFor', () => {
       ]),
     ).toEqual(['cash', 'instapay']);
   });
+
+  // PR-PAY-3.1 — generic wallet umbrella
+  it('shows the generic wallet method when an active wallet account exists', () => {
+    expect(
+      visibleMethodsFor([{ method: 'wallet', active: true }]),
+    ).toEqual(['cash', 'wallet']);
+  });
+
+  it('hides the generic wallet method when its only account is inactive', () => {
+    expect(
+      visibleMethodsFor([{ method: 'wallet', active: false }]),
+    ).toEqual(['cash']);
+  });
+
+  it('renders wallet between orange_cash and card_visa per POS_METHODS order', () => {
+    expect(
+      visibleMethodsFor([
+        { method: 'card_visa', active: true },
+        { method: 'wallet', active: true },
+        { method: 'orange_cash', active: true },
+      ]),
+    ).toEqual(['cash', 'orange_cash', 'wallet', 'card_visa']);
+  });
 });

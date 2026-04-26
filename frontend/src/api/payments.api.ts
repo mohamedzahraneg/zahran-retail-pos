@@ -11,6 +11,7 @@ export type PaymentMethodCode =
   | 'instapay'
   | 'vodafone_cash'
   | 'orange_cash'
+  | 'wallet'         // PR-PAY-3.1: generic wallet umbrella (WE Pay, Bank Wallet, …)
   | 'bank_transfer'
   | 'credit'
   | 'other';
@@ -112,6 +113,7 @@ export const METHOD_LABEL_AR: Record<PaymentMethodCode, string> = {
   instapay: 'إنستا باي',
   vodafone_cash: 'فودافون كاش',
   orange_cash: 'أورانج كاش',
+  wallet: 'محفظة إلكترونية',  // PR-PAY-3.1
   bank_transfer: 'تحويل بنكي',
   credit: 'آجل',
   other: 'أخرى',

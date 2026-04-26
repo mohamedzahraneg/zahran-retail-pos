@@ -1832,6 +1832,7 @@ const POS_METHODS: PaymentMethodCode[] = [
   'instapay',
   'vodafone_cash',
   'orange_cash',
+  'wallet',         // PR-PAY-3.1: generic wallet umbrella (WE Pay, Bank Wallet, …)
   'card_visa',
   'card_mastercard',
   'card_meeza',
