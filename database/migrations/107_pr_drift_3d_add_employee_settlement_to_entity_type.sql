@@ -1,0 +1,24 @@
+-- Migration 107 — PR-DRIFT-3D part 1: enum-value bootstrap.
+-- ═══════════════════════════════════════════════════════════════════════════
+--
+-- Adds 'employee_settlement' to the `entity_type` enum so
+-- cashbox_transactions.reference_type can hold the same value the
+-- journal_entries side already uses (free-text varchar — see
+-- migration 002 / earlier). Idempotent via IF NOT EXISTS.
+--
+-- Why this is its own file
+--
+--   Postgres rule (still enforced in 17.x): ALTER TYPE … ADD VALUE
+--   cannot be USED in the same transaction in which it's added. The
+--   actual UPDATE on the 2 mistyped rows ships in migration 107b
+--   (107b_pr_drift_3d_retag_settlement_cts.sql).
+--
+-- Strict scope
+--
+--   · DDL only — adds a new enum label.
+--   · NO INSERT, NO UPDATE, NO DELETE on any row.
+--   · NO journal_entries / journal_lines / cashbox_transactions writes.
+--   · NO accounting effect.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+ALTER TYPE entity_type ADD VALUE IF NOT EXISTS 'employee_settlement';
