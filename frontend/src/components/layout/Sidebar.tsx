@@ -26,7 +26,6 @@ import {
   History,
   Clock,
   Gift,
-  UserCheck,
   BadgeCheck,
   Calculator,
   BookOpen,
@@ -142,21 +141,16 @@ const groups: NavGroup[] = [
     title: 'الإدارة',
     items: [
       { to: '/users', label: 'المستخدمون', icon: UserCog, roles: ['admin', 'manager'], permission: 'users.view' },
-      // Personal attendance + everything-about-you lives on /me. The
-      // admin-only team attendance board is now the "الحضور" tab on
-      // /team (PR-2 consolidation) — the legacy /attendance route is
-      // a permanent redirect for bookmarks. Sidebar entry points
-      // directly at the tab so the URL is honest about where the
-      // user lands.
+      // Personal self-service profile stays separate (employee view of
+      // their own data — distinct UX from the admin team workspace).
       { to: '/me', label: 'ملفي الشخصي', icon: BadgeCheck, roles: ['admin', 'manager', 'cashier', 'accountant', 'salesperson', 'inventory'], permission: 'employee.dashboard.view' },
-      { to: '/team?tab=attendance', label: 'حضور الفريق', icon: UserCheck, roles: ['admin', 'manager', 'accountant'], permission: 'attendance.view_team' },
-      // حسابات الموظفين is now a tab inside /team (consolidation).
-      // /payroll still redirects to /team?tab=accounts for backward-
-      // compat (bookmarks, legacy links), but the sidebar shows a
-      // single entry. Permission stays the same — `employee.team.view`
-      // — and now spans both the admin role set of /team and the
-      // accountant set that previously had its own /payroll entry.
-      { to: '/team', label: 'إدارة الفريق', icon: Users2, roles: ['admin', 'manager', 'accountant'], permission: 'employee.team.view' },
+      // PR-T1.1 consolidation — the admin-facing team / attendance /
+      // payroll surface is now ONE entry. The legacy /attendance and
+      // /payroll routes still redirect to /team?section=* for
+      // bookmarks but no longer have their own sidebar entries. The
+      // old "حضور الفريق" link was dropped; users open the unified
+      // workspace and pick a section from inside it.
+      { to: '/team', label: 'إدارة فريق العمل', icon: Users2, roles: ['admin', 'manager', 'accountant'], permission: 'employee.team.view' },
       { to: '/settings', label: 'الإعدادات', icon: Settings, roles: ['admin'], permission: 'settings.view' },
       { to: '/import', label: 'استيراد Excel', icon: FileUp, roles: ['admin', 'manager'], permission: 'import.run' },
       { to: '/notifications', label: 'الإشعارات (واتساب)', icon: MessageCircle, roles: ['admin', 'manager'], permission: 'notifications.manage' },
