@@ -96,12 +96,6 @@ type ModalKind = 'payout' | 'advance' | 'bonus' | 'deduction' | null;
 export function AccountsMovementsTab({ employee }: { employee: TeamRow }) {
   const hasPermission = useAuthStore((s) => s.hasPermission);
   const canPayWage = hasPermission('employee.ledger.view');
-  const canBonus = hasPermission('employee.bonuses.manage');
-  const canDeduct = hasPermission('employee.deductions.manage');
-  // Advances post via /accounting/expenses/daily; the deductions perm
-  // is the existing closest match per Payroll.tsx convention. Backend
-  // is the source of truth.
-  const canAdvance = hasPermission('employee.deductions.manage');
 
   const userId = employee.id;
   const liveGl = Number(employee.gl_balance || 0);
@@ -129,11 +123,15 @@ export function AccountsMovementsTab({ employee }: { employee: TeamRow }) {
     <div className="space-y-5">
       <HeaderCard />
 
-      {/* Action bar — payout/advance/bonus/deduction. Permission-aware:
-          buttons are hidden when the user lacks the matching backend
-          permission. Backend remains source of truth. */}
-      <div className="flex items-center justify-end gap-2 flex-wrap bg-white rounded-2xl border border-slate-200 shadow-sm p-3">
-        {canPayWage && (
+      {/* PR-T4.2 — action ownership boundaries:
+          · This tab owns ONLY: صرف مستحقات / صرف يومية (payout)
+          · تسجيل سلفة / خصم / مكافأة moved to السلف والخصومات tab
+            exclusively. The full ledger below still SHOWS those
+            movement types (filterable via the type dropdown), but
+            the create-buttons live in their owning tab to remove
+            duplicate UX. */}
+      <div className="flex items-center justify-between flex-wrap gap-2 bg-white rounded-2xl border border-slate-200 shadow-sm p-3">
+        {canPayWage ? (
           <ActionButton
             tone="amber"
             icon={<Banknote size={15} />}
@@ -141,34 +139,13 @@ export function AccountsMovementsTab({ employee }: { employee: TeamRow }) {
           >
             صرف مستحقات / صرف يومية
           </ActionButton>
+        ) : (
+          <span />
         )}
-        {canAdvance && (
-          <ActionButton
-            tone="indigo"
-            icon={<TrendingDown size={15} />}
-            onClick={() => setModal('advance')}
-          >
-            تسجيل سلفة
-          </ActionButton>
-        )}
-        {canDeduct && (
-          <ActionButton
-            tone="rose"
-            icon={<Minus size={15} />}
-            onClick={() => setModal('deduction')}
-          >
-            تسجيل خصم
-          </ActionButton>
-        )}
-        {canBonus && (
-          <ActionButton
-            tone="emerald"
-            icon={<Gift size={15} />}
-            onClick={() => setModal('bonus')}
-          >
-            تسجيل مكافأة
-          </ActionButton>
-        )}
+        <div className="text-[11px] text-slate-500 leading-snug max-w-xs">
+          تسجيل السلف / الخصومات / المكافآت يتم من تبويب{' '}
+          <span className="font-bold text-violet-700">السلف والخصومات</span>.
+        </div>
       </div>
 
       <SummaryCards ledger={ledger} dash={dash} liveGl={liveGl} />
@@ -183,7 +160,10 @@ export function AccountsMovementsTab({ employee }: { employee: TeamRow }) {
         onChangeTo={setTo}
       />
 
-      {/* Modals */}
+      {/* Modals — only payout is reachable from this tab now (PR-T4.2).
+          AdvanceModal / BonusModal / DeductionModal are still EXPORTED
+          from this file (re-used by AdjustmentsTab) but no longer
+          opened from here. */}
       {modal === 'payout' && (
         <PayWageModal
           userId={userId}
@@ -191,24 +171,6 @@ export function AccountsMovementsTab({ employee }: { employee: TeamRow }) {
           liveGlBalance={liveGl}
           onClose={() => setModal(null)}
           onSuccess={() => setModal(null)}
-        />
-      )}
-      {modal === 'advance' && (
-        <AdvanceModal
-          employee={employee}
-          onClose={() => setModal(null)}
-        />
-      )}
-      {modal === 'bonus' && (
-        <BonusModal
-          employee={employee}
-          onClose={() => setModal(null)}
-        />
-      )}
-      {modal === 'deduction' && (
-        <DeductionModal
-          employee={employee}
-          onClose={() => setModal(null)}
         />
       )}
     </div>
