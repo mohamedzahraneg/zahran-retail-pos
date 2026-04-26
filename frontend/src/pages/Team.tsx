@@ -54,6 +54,7 @@ import { ApprovalsAuditTab } from '@/components/team/ApprovalsAuditTab';
 // employee_overview_sales_performance_design.html, focused
 // adjustments tab, and the Actions dropdown (task assignment etc.).
 import { EmployeeOverviewTab } from '@/components/team/EmployeeOverviewTab';
+import { EmployeeReportsTab } from '@/components/team/EmployeeReportsTab';
 import { AdjustmentsTab } from '@/components/team/AdjustmentsTab';
 // Payroll / حسابات الموظفين is now a tab inside /team (consolidation).
 // The component is rendered verbatim — no design change. Its own
@@ -876,12 +877,7 @@ function EmployeeProfilePanel({
             the full ledger from accounts in PR-T3 — now distinct. */}
         {tab === 'advances' && <AdjustmentsTab employee={row} />}
         {tab === 'approvals' && <ApprovalsAuditTab employee={row} />}
-        {tab === 'reports' && (
-          <PlaceholderPanel
-            title="التقارير"
-            message="سيتم نقل تقارير الموظف (طباعة / PDF / Excel) في PR-T5."
-          />
-        )}
+        {tab === 'reports' && <EmployeeReportsTab employee={row} />}
       </div>
     </section>
   );
@@ -965,10 +961,12 @@ function MiniStat({
 
 function ProfileActions({ row, dash }: { row: TeamRow; dash?: EmployeeDashboard }) {
   // PR-T4.6 — restored "تعديل الملف" alongside إسناد مهمة + إجراءات
-  // in one clean strip. تقرير الموظف stays in the dropdown as a PR-T5
-  // placeholder. Modal-based UX so we don't navigate away from the
-  // workspace.
+  // in one clean strip.
+  // PR-T5 — تقرير الموظف now opens the new reports tab via URL
+  // navigation (react-router's setSearchParams keeps the
+  // EmployeeProfilePanel's initialSection in sync).
   const hasPermission = useAuthStore((s) => s.hasPermission);
+  const [, setSearchParams] = useSearchParams();
   const canEditProfile = hasPermission('employee.profile.manage');
   const canAssignTask = hasPermission('employee.tasks.assign');
   const [openMenu, setOpenMenu] = useState(false);
@@ -1011,14 +1009,26 @@ function ProfileActions({ row, dash }: { row: TeamRow; dash?: EmployeeDashboard 
           className="absolute top-12 left-0 z-30 bg-white border border-slate-200 rounded-xl shadow-lg w-56 p-1.5 text-sm"
           onMouseLeave={() => setOpenMenu(false)}
         >
+          {/* PR-T5 — تقرير الموظف is now active. Clicking it navigates
+              to the reports tab; the EmployeeProfilePanel re-syncs the
+              tab from the URL section param. The reports tab opens at
+              the comprehensive report card by default. */}
           <button
             type="button"
-            disabled
-            title="سيتم تفعيلها في PR-T5 — تقرير الموظف الموحّد (طباعة/PDF/Excel)"
-            className="w-full text-right px-3 py-2 rounded-lg text-slate-400 cursor-not-allowed flex items-center justify-between"
+            onClick={() => {
+              setOpenMenu(false);
+              setSearchParams((prev) => {
+                const next = new URLSearchParams(prev);
+                next.set('employee', row.id);
+                next.set('section', 'reports');
+                return next;
+              });
+            }}
+            className="w-full text-right px-3 py-2 rounded-lg text-slate-700 hover:bg-slate-50 flex items-center justify-between"
+            title="فتح تبويب التقارير — شامل / حضور / حسابات / سلف / مبيعات / موافقات"
           >
             <span>تقرير الموظف</span>
-            <span className="text-[10px] text-slate-400">PR-T5</span>
+            <span className="text-[10px] text-slate-400">شامل</span>
           </button>
           {!canAssignTask && (
             <div className="px-3 py-2 text-[11px] text-slate-400">
