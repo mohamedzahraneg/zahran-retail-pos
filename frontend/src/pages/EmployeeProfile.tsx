@@ -1018,7 +1018,10 @@ export function AdminAttendancePanel({
    Backend: POST /attendance/admin/pay-wage. Server enforces the same
    rules — no silent fallback.
 */
-function PayWageModal({
+// PR-T2 — exported so the new AttendanceWageTab can reuse the
+// existing payout modal verbatim. Payout redesign (separate
+// CashSourceSelector polish) lands in PR-T3.
+export function PayWageModal({
   userId,
   fullName,
   liveGlBalance,
