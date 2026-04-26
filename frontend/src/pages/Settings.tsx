@@ -39,6 +39,7 @@ import {
   groupAccountsByProviderGroup,
 } from '@/api/payments.api';
 import { PaymentProviderLogo } from '@/components/payments/PaymentProviderLogo';
+import { LogoPicker } from '@/components/payments/LogoPicker';
 import { useAuthStore } from '@/stores/auth.store';
 import { ReceiptTemplatesTab } from './ReceiptTemplatesTab';
 
@@ -1457,6 +1458,8 @@ function PaymentAccountRow({
     <div className="flex items-start justify-between gap-4 px-5 py-4">
       <div className="flex items-start gap-3">
         <PaymentProviderLogo
+          logoDataUrl={(account.metadata as any)?.logo_data_url}
+          logoUrl={(account.metadata as any)?.logo_url}
           logoKey={provider?.logo_key}
           method={account.method}
           name={provider?.name_ar ?? account.display_name}
@@ -1561,6 +1564,11 @@ function PaymentAccountModal({
   onSaved: () => void;
 }) {
   const isEdit = !!account;
+  // PR-PAY-7 — pull custom logo overrides out of the existing
+  // `metadata` jsonb so we can edit them via LogoPicker. The form is
+  // parameterized by metadata; on save we merge back into a flat
+  // metadata jsonb the backend stores as-is.
+  const initialMetadata = (account?.metadata ?? {}) as Record<string, any>;
   const [form, setForm] = useState<CreatePaymentAccountInput>({
     method: account?.method ?? 'instapay',
     provider_key: account?.provider_key ?? '',
@@ -1570,7 +1578,14 @@ function PaymentAccountModal({
     is_default: account?.is_default ?? false,
     active: account?.active ?? true,
     sort_order: account?.sort_order ?? 0,
+    metadata: initialMetadata,
   });
+  const [logoDataUrl, setLogoDataUrl] = useState<string | null>(
+    initialMetadata.logo_data_url ?? null,
+  );
+  const [logoUrl, setLogoUrl] = useState<string | null>(
+    initialMetadata.logo_url ?? null,
+  );
 
   const providersForMethod = providers.filter((p) => p.method === form.method);
 
@@ -1586,6 +1601,19 @@ function PaymentAccountModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.method]);
 
+  // PR-PAY-7 — merge custom-logo overrides into metadata before save.
+  // Existing keys on metadata (anything else admin/integrations might
+  // store) are preserved; only `logo_data_url` and `logo_url` are
+  // touched. Empty values are dropped so we don't pollute the row.
+  const mergedMetadata = (): Record<string, unknown> => {
+    const base = { ...((form.metadata as Record<string, unknown>) ?? {}) };
+    if (logoDataUrl) base.logo_data_url = logoDataUrl;
+    else delete base.logo_data_url;
+    if (logoUrl) base.logo_url = logoUrl;
+    else delete base.logo_url;
+    return base;
+  };
+
   const save = useMutation({
     mutationFn: () =>
       isEdit
@@ -1595,8 +1623,9 @@ function PaymentAccountModal({
             gl_account_code: form.gl_account_code,
             provider_key: form.provider_key || undefined,
             sort_order: form.sort_order,
+            metadata: mergedMetadata(),
           })
-        : paymentsApi.createAccount(form),
+        : paymentsApi.createAccount({ ...form, metadata: mergedMetadata() }),
     onSuccess: () => {
       toast.success(isEdit ? 'تم تحديث الحساب' : 'تم إنشاء الحساب');
       onSaved();
@@ -1726,6 +1755,22 @@ function PaymentAccountModal({
               onChange={(v) => setForm({ ...form, is_default: v })}
             />
           </div>
+
+          {/* PR-PAY-7 — per-account custom logo (drag-drop or URL).
+              Resolution at render: data URL > URL > catalog default. */}
+          <LogoPicker
+            value={{ dataUrl: logoDataUrl, url: logoUrl }}
+            onChange={(v) => {
+              setLogoDataUrl(v.dataUrl ?? null);
+              setLogoUrl(v.url ?? null);
+            }}
+            fallbackLogoKey={
+              providers.find((p) => p.provider_key === form.provider_key)
+                ?.logo_key ?? null
+            }
+            fallbackMethod={form.method}
+            fallbackName={form.display_name || providers.find((p) => p.provider_key === form.provider_key)?.name_ar}
+          />
         </div>
 
         <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-slate-200 bg-slate-50 rounded-b-2xl">

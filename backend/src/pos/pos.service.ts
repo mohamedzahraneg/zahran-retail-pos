@@ -272,6 +272,21 @@ export class PosService {
         if (acctId && this.payments) {
           const acct = await this.payments.resolveForPosting(acctId, em);
           if (acct) {
+            // PR-PAY-7 — also freeze the operator's per-account
+            // custom logo (drag-dropped data URL or pasted external
+            // URL) when present. Receipts read these BEFORE falling
+            // back to the catalog logo_key, so a cashier who saw the
+            // operator's custom InstaPay الأهلي logo at sale time
+            // still sees it on the printed receipt months later.
+            const meta = (acct.metadata ?? {}) as Record<string, unknown>;
+            const logoDataUrl =
+              typeof meta.logo_data_url === 'string'
+                ? (meta.logo_data_url as string)
+                : null;
+            const logoUrl =
+              typeof meta.logo_url === 'string'
+                ? (meta.logo_url as string)
+                : null;
             snapshot = JSON.stringify({
               id: acct.id,
               method: acct.method,
@@ -284,6 +299,9 @@ export class PosService {
               // catalog mapping changes later. Falls back to the
               // method group when provider_key is unknown.
               logo_key: resolveLogoKey(acct.provider_key, acct.method),
+              // PR-PAY-7 — custom overrides (null if not set).
+              logo_data_url: logoDataUrl,
+              logo_url: logoUrl,
             });
           }
         }
@@ -868,6 +886,21 @@ export class PosService {
         if (acctId && this.payments) {
           const acct = await this.payments.resolveForPosting(acctId, em);
           if (acct) {
+            // PR-PAY-7 — also freeze the operator's per-account
+            // custom logo (drag-dropped data URL or pasted external
+            // URL) when present. Receipts read these BEFORE falling
+            // back to the catalog logo_key, so a cashier who saw the
+            // operator's custom InstaPay الأهلي logo at sale time
+            // still sees it on the printed receipt months later.
+            const meta = (acct.metadata ?? {}) as Record<string, unknown>;
+            const logoDataUrl =
+              typeof meta.logo_data_url === 'string'
+                ? (meta.logo_data_url as string)
+                : null;
+            const logoUrl =
+              typeof meta.logo_url === 'string'
+                ? (meta.logo_url as string)
+                : null;
             snapshot = JSON.stringify({
               id: acct.id,
               method: acct.method,
@@ -880,6 +913,9 @@ export class PosService {
               // catalog mapping changes later. Falls back to the
               // method group when provider_key is unknown.
               logo_key: resolveLogoKey(acct.provider_key, acct.method),
+              // PR-PAY-7 — custom overrides (null if not set).
+              logo_data_url: logoDataUrl,
+              logo_url: logoUrl,
             });
           }
         }

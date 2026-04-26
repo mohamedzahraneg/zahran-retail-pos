@@ -1,11 +1,30 @@
 import { getPaymentLogo } from '@/lib/paymentLogos';
 
 /**
- * PR-PAY-6 — Renders a payment provider's brand logo, falling back to
- * Arabic-friendly initials inside a coloured circle when the logo
- * isn't bundled. Used everywhere a payment method/account is shown
- * (Settings → حسابات التحصيل, POS payment grid + account picker,
- * Shift-close cards, Dashboard channel chips, Receipt).
+ * PR-PAY-6 + PR-PAY-7 — Renders a payment provider's brand logo.
+ *
+ * Resolution order (first hit wins):
+ *   1. `logoDataUrl` — operator dragged-and-dropped a custom file in
+ *      Settings; stored as base64 data URL in
+ *      payment_accounts.metadata.logo_data_url. Wins so receipts can
+ *      render offline.
+ *   2. `logoUrl` — operator pasted a remote URL in Settings; stored
+ *      in payment_accounts.metadata.logo_url. Subject to network
+ *      reachability.
+ *   3. `logoKey` — bundled asset under
+ *      `frontend/src/assets/payment-logos/{logoKey}.{svg|png|...}`
+ *      resolved by `getPaymentLogo`.
+ *   4. Method group fallback — `wallet-other` / `card-other` /
+ *      `bank-other` based on `method`.
+ *   5. Coloured initials avatar — when nothing else is available.
+ *
+ * Rendering style:
+ *   • When a real image is available (any of 1-3), the component
+ *     renders the image NAKED — no border, no background, just
+ *     `object-contain` inside the requested box. This matches the
+ *     operator's spec: "تتكيف على مساحة واضحة بدون إطار ولا خلفية".
+ *   • Initials fallback (5) keeps the coloured rounded chrome so the
+ *     row stays scannable when no logo is available.
  *
  * Sizes:
  *   sm = 24px  (table rows, dropdown options)
@@ -13,13 +32,15 @@ import { getPaymentLogo } from '@/lib/paymentLogos';
  *   lg = 56px  (hero summary cards)
  */
 export interface PaymentProviderLogoProps {
-  /** Stable key into `frontend/src/assets/payment-logos/`. Optional —
-   *  when missing, the resolver falls back to the method group default
-   *  (wallet-other / card-other / bank-other). */
+  /** PR-PAY-7 — operator-uploaded base64 data URL (highest priority). */
+  logoDataUrl?: string | null;
+  /** PR-PAY-7 — operator-pasted remote URL (second priority). */
+  logoUrl?: string | null;
+  /** Stable key into `frontend/src/assets/payment-logos/`. */
   logoKey?: string | null;
-  /** Used for the group-fallback when logoKey is missing. */
+  /** Used for the group-fallback when other sources are missing. */
   method?: string | null;
-  /** Display name — used as the alt text and for initials fallback. */
+  /** Display name — alt text + initials fallback. */
   name?: string | null;
   size?: 'sm' | 'md' | 'lg';
   /** Optional className for additional styling on the wrapper. */
@@ -42,12 +63,13 @@ const FONT_SIZE: Record<'sm' | 'md' | 'lg', string> = {
 
 function initials(name?: string | null): string {
   if (!name) return '•';
-  // Take the first 2 graphemes of the first 1-2 words.
   const parts = name.trim().split(/\s+/).slice(0, 2);
   return parts.map((p) => Array.from(p)[0] ?? '').join('') || '•';
 }
 
 export function PaymentProviderLogo({
+  logoDataUrl,
+  logoUrl,
   logoKey,
   method,
   name,
@@ -55,7 +77,12 @@ export function PaymentProviderLogo({
   className,
   decorative,
 }: PaymentProviderLogoProps) {
-  const url = getPaymentLogo(logoKey, method);
+  // Resolution order — dataUrl > url > catalog > group fallback.
+  const src =
+    (logoDataUrl && logoDataUrl.trim()) ||
+    (logoUrl && logoUrl.trim()) ||
+    getPaymentLogo(logoKey, method);
+
   const px = SIZE_PX[size];
   const wrapperStyle: React.CSSProperties = {
     width: px,
@@ -64,17 +91,19 @@ export function PaymentProviderLogo({
     minHeight: px,
   };
 
-  if (url) {
+  if (src) {
+    // Naked render — no border, no background. The image fills the
+    // box via object-contain, blends into whatever surrounds it.
     return (
       <span
-        className={`inline-flex items-center justify-center rounded-md bg-white border border-slate-200 overflow-hidden shrink-0 ${className ?? ''}`}
+        className={`inline-flex items-center justify-center shrink-0 ${className ?? ''}`}
         style={wrapperStyle}
       >
         <img
-          src={url}
+          src={src}
           alt={decorative ? '' : (name ?? '')}
           aria-hidden={decorative || undefined}
-          className="block w-full h-full object-contain p-0.5"
+          className="block w-full h-full object-contain"
           loading="lazy"
           draggable={false}
         />
@@ -82,8 +111,7 @@ export function PaymentProviderLogo({
     );
   }
 
-  // Fallback: coloured initials avatar so the row is still scannable
-  // when no logo is bundled for the requested key.
+  // Initials fallback keeps the chrome so the row remains scannable.
   return (
     <span
       className={`inline-flex items-center justify-center rounded-md bg-slate-100 text-slate-700 border border-slate-200 font-bold shrink-0 ${className ?? ''}`}

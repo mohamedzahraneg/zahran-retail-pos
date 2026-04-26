@@ -2593,6 +2593,9 @@ interface MethodAccountCard {
   /** PR-PAY-6 — provider_key + resolved logo_key. */
   provider_key: string | null;
   logo_key: string | null;
+  /** PR-PAY-7 — operator custom overrides (drag-drop / URL). */
+  logo_data_url: string | null;
+  logo_url: string | null;
   amount: number;
   invoice_count: number;
   payment_count: number;
@@ -2639,6 +2642,8 @@ function PaymentMethodCardsGrid({
       account_display_name: null,
       provider_key: 'cash',
       logo_key: providerLogoMap['cash'] ?? 'cash',
+      logo_data_url: null,
+      logo_url: null,
       amount: cashAmount,
       invoice_count: cashBucket?.invoice_count ?? 0,
       payment_count: cashBucket?.payment_count ?? 0,
@@ -2660,6 +2665,9 @@ function PaymentMethodCardsGrid({
         account_display_name: a.display_name,
         provider_key: a.provider_key,
         logo_key: (a.provider_key && providerLogoMap[a.provider_key]) ?? null,
+        // PR-PAY-7 — operator custom override from account metadata.
+        logo_data_url: ((a.metadata as any)?.logo_data_url as string) ?? null,
+        logo_url: ((a.metadata as any)?.logo_url as string) ?? null,
         amount: 0,
         invoice_count: 0,
         payment_count: 0,
@@ -2696,6 +2704,11 @@ function PaymentMethodCardsGrid({
           provider_key: provKey,
           logo_key:
             (provKey && providerLogoMap[provKey]) ?? existing?.logo_key ?? null,
+          // PR-PAY-7 — historical breakdown rows don't carry the custom
+          // overrides (they live on the account, not the snapshot loop
+          // here); inherit them from the seeded card if present.
+          logo_data_url: existing?.logo_data_url ?? null,
+          logo_url: existing?.logo_url ?? null,
           amount: a.total_amount,
           invoice_count: a.invoice_count,
           payment_count: a.payment_count,
@@ -2736,6 +2749,8 @@ function PaymentMethodCard({ card }: { card: MethodAccountCard }) {
       <div className="flex items-center justify-between">
         <div className="font-bold flex items-center gap-2">
           <PaymentProviderLogo
+            logoDataUrl={card.logo_data_url}
+            logoUrl={card.logo_url}
             logoKey={card.logo_key}
             method={card.method}
             name={card.account_display_name ?? card.group_label_ar}

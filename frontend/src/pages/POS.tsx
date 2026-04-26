@@ -2100,6 +2100,8 @@ function PaymentAccountPicker({
               }`}
             >
               <PaymentProviderLogo
+                logoDataUrl={(a.metadata as any)?.logo_data_url}
+                logoUrl={(a.metadata as any)?.logo_url}
                 logoKey={provider?.logo_key}
                 method={a.method}
                 name={a.display_name}

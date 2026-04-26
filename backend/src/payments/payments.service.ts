@@ -215,12 +215,15 @@ export class PaymentsService {
     provider_key: string | null;
     identifier: string | null;
     gl_account_code: string;
+    /** PR-PAY-7 — operator-uploaded data URL or pasted URL, frozen
+     *  into the snapshot so receipts render the right brand offline. */
+    metadata: Record<string, unknown> | null;
   } | null> {
     if (!accountId) return null;
     const runner = em ?? this.ds;
     const [row] = await runner.query(
       `SELECT id, method::text AS method, provider_key, display_name,
-              identifier, gl_account_code
+              identifier, gl_account_code, metadata
          FROM payment_accounts WHERE id = $1`,
       [accountId],
     );
