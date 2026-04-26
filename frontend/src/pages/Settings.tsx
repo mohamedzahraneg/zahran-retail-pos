@@ -38,6 +38,7 @@ import {
   GROUP_LABEL_AR,
   groupAccountsByProviderGroup,
 } from '@/api/payments.api';
+import { PaymentProviderLogo } from '@/components/payments/PaymentProviderLogo';
 import { useAuthStore } from '@/stores/auth.store';
 import { ReceiptTemplatesTab } from './ReceiptTemplatesTab';
 
@@ -1455,9 +1456,12 @@ function PaymentAccountRow({
   return (
     <div className="flex items-start justify-between gap-4 px-5 py-4">
       <div className="flex items-start gap-3">
-        <div className="w-10 h-10 rounded-lg bg-slate-100 text-slate-600 flex items-center justify-center font-bold">
-          {account.display_name.slice(0, 2)}
-        </div>
+        <PaymentProviderLogo
+          logoKey={provider?.logo_key}
+          method={account.method}
+          name={provider?.name_ar ?? account.display_name}
+          size="md"
+        />
         <div>
           <div className="flex items-center gap-2 flex-wrap">
             <div className="font-bold text-slate-900">{account.display_name}</div>

@@ -29,6 +29,9 @@ export interface PaymentProvider {
   name_ar: string;
   name_en: string;
   icon_name: string;
+  /** PR-PAY-6 — frontend asset filename (without extension) under
+   *  `frontend/src/assets/payment-logos/`. */
+  logo_key: string;
   default_gl_account_code: '1111' | '1113' | '1114' | '1115' | '1121';
   group: ProviderGroup;
   requires_reference: boolean;

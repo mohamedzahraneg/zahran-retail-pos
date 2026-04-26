@@ -14,6 +14,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { AccountingPostingService } from '../chart-of-accounts/posting.service';
 import { FinancialEngineService } from '../chart-of-accounts/financial-engine.service';
 import { PaymentsService } from '../payments/payments.service';
+import { resolveLogoKey } from '../payments/providers.catalog';
 
 @Injectable()
 export class PosService {
@@ -278,6 +279,11 @@ export class PosService {
               provider_key: acct.provider_key,
               identifier: acct.identifier,
               gl_account_code: acct.gl_account_code,
+              // PR-PAY-6 — frozen logo_key so receipts render the same
+              // brand badge the cashier saw at sale time, even if the
+              // catalog mapping changes later. Falls back to the
+              // method group when provider_key is unknown.
+              logo_key: resolveLogoKey(acct.provider_key, acct.method),
             });
           }
         }
@@ -869,6 +875,11 @@ export class PosService {
               provider_key: acct.provider_key,
               identifier: acct.identifier,
               gl_account_code: acct.gl_account_code,
+              // PR-PAY-6 — frozen logo_key so receipts render the same
+              // brand badge the cashier saw at sale time, even if the
+              // catalog mapping changes later. Falls back to the
+              // method group when provider_key is unknown.
+              logo_key: resolveLogoKey(acct.provider_key, acct.method),
             });
           }
         }
