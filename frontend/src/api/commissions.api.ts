@@ -72,4 +72,31 @@ export const commissionsApi = {
     unwrap<{ user_id: string; commission_rate: number }>(
       api.patch(`/commissions/${userId}/rate`, { commission_rate }),
     ),
+
+  getSellerSettings: (userId: string) =>
+    unwrap<SellerSettings>(api.get(`/commissions/${userId}/seller-settings`)),
+
+  updateSellerSettings: (
+    userId: string,
+    patch: {
+      commission_rate?: number;
+      commission_target_amount?: number | null;
+      commission_after_target_rate?: number | null;
+    },
+  ) =>
+    unwrap<SellerSettings>(
+      api.patch(`/commissions/${userId}/seller-settings`, patch),
+    ),
 };
+
+/**
+ * PR-T4.6 — full seller settings row used by the EditProfile modal
+ * + the Overview's target widgets. `commission_target_amount = null`
+ * means the operator hasn't enabled the target system yet.
+ */
+export interface SellerSettings {
+  user_id: string;
+  commission_rate: string;
+  commission_target_amount: string | null;
+  commission_after_target_rate: string | null;
+}

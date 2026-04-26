@@ -183,6 +183,14 @@ export function EmployeeOverviewTab({ employee }: { employee: TeamRow }) {
     queryFn: () =>
       commissionsApi.categoryBreakdown(userId, period.from, period.to),
   });
+  // PR-T4.6 — seller settings drive the target widgets. Independent of
+  // the period filter (target is a per-user config, not a per-period
+  // metric); only the achievement KPI re-derives when the period
+  // changes.
+  const { data: sellerSettings } = useQuery({
+    queryKey: ['commissions-seller-settings', userId],
+    queryFn: () => commissionsApi.getSellerSettings(userId),
+  });
 
   const detailRows = detail as CommissionDetailRow[];
   const prevDetailRows = prevDetail as CommissionDetailRow[];
@@ -237,6 +245,39 @@ export function EmployeeOverviewTab({ employee }: { employee: TeamRow }) {
     () => prevDetailRows.reduce((s, r) => s + Number(r.paid_total || 0), 0),
     [prevDetailRows],
   );
+
+  // PR-T4.6 — target system. When `commission_target_amount` is set on
+  // the user, the Overview surfaces a 5-cell target panel: target /
+  // achieved / achievement % / remaining / over. The estimated
+  // commission combines the base rate up to the target with the
+  // optional after-target rate above it. Honest "no target" state
+  // when the operator hasn't enabled the system in EditProfile yet.
+  const targetAmount = sellerSettings?.commission_target_amount
+    ? Number(sellerSettings.commission_target_amount)
+    : null;
+  const afterTargetRate =
+    sellerSettings?.commission_after_target_rate != null
+      ? Number(sellerSettings.commission_after_target_rate)
+      : null;
+  const targetEnabled = targetAmount !== null && targetAmount > 0;
+  const achievementPct =
+    targetEnabled && targetAmount! > 0
+      ? Math.min((eligibleSales / targetAmount!) * 100, 999)
+      : null;
+  const remainingToTarget =
+    targetEnabled ? Math.max(targetAmount! - eligibleSales, 0) : 0;
+  const overTarget =
+    targetEnabled ? Math.max(eligibleSales - targetAmount!, 0) : 0;
+  const estimatedCommission = useMemo(() => {
+    if (!targetEnabled) {
+      return commissionRate > 0 ? eligibleSales * commissionRate / 100 : 0;
+    }
+    const upToTarget = Math.min(eligibleSales, targetAmount!);
+    const above = Math.max(eligibleSales - targetAmount!, 0);
+    const baseRate = commissionRate;
+    const boostRate = afterTargetRate ?? baseRate;
+    return (upToTarget * baseRate) / 100 + (above * boostRate) / 100;
+  }, [targetEnabled, eligibleSales, targetAmount, afterTargetRate, commissionRate]);
 
   const categoryRows = categoryBreakdown as CommissionCategoryBreakdownRow[];
   const categoryRowsValid = categoryRows.filter(
@@ -453,6 +494,24 @@ export function EmployeeOverviewTab({ employee }: { employee: TeamRow }) {
             }
           />
         </div>
+      )}
+
+      {/* PR-T4.6 — Target panel (only when the operator enabled the
+          target system in EditProfile). Sits between the KPI row and
+          the analytics grid for prominent placement; cells follow the
+          same soft-card rhythm as the KPI row above. */}
+      {isSalesperson && (
+        <TargetPanel
+          enabled={targetEnabled}
+          target={targetAmount ?? 0}
+          achieved={eligibleSales}
+          achievementPct={achievementPct}
+          remaining={remainingToTarget}
+          overTarget={overTarget}
+          baseRate={commissionRate}
+          afterTargetRate={afterTargetRate}
+          estimatedCommission={estimatedCommission}
+        />
       )}
 
       {/* PR-T4.5 — analytics grid: gauge + star rating + category
@@ -900,6 +959,169 @@ function BigKpi({
       <div className={`shrink-0 w-14 h-14 rounded-2xl ${t.tile} ${t.fg} flex items-center justify-center`}>
         {icon}
       </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────────
+ * TargetPanel — sales target tracking (PR-T4.6)
+ *
+ * Renders 6 cells when the operator has enabled a target system on
+ * the user's seller settings: التارجت / المحقق / نسبة التحقيق /
+ * المتبقي / أوفر تارجت / العمولة التقديرية. When no target is set,
+ * shows an honest empty state pointing the operator at the EditProfile
+ * modal — never invents a default target.
+ * ───────────────────────────────────────────────────────────────── */
+function TargetPanel({
+  enabled,
+  target,
+  achieved,
+  achievementPct,
+  remaining,
+  overTarget,
+  baseRate,
+  afterTargetRate,
+  estimatedCommission,
+}: {
+  enabled: boolean;
+  target: number;
+  achieved: number;
+  achievementPct: number | null;
+  remaining: number;
+  overTarget: number;
+  baseRate: number;
+  afterTargetRate: number | null;
+  estimatedCommission: number;
+}) {
+  if (!enabled) {
+    return (
+      <Panel
+        title="تارجت المبيعات"
+        subtitle="غير مفعّل — يمكن ضبطه من زر تعديل الملف"
+      >
+        <div className="px-5 pb-5 pt-2">
+          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-center">
+            <div className="text-sm font-black text-slate-600">
+              لم يتم تفعيل نظام التارجت لهذا الموظف
+            </div>
+            <div className="text-xs text-slate-500 mt-2 leading-relaxed">
+              من رأس صفحة الموظف → تعديل الملف → إعدادات البائع، يمكن
+              تفعيل التارجت وتحديد قيمته ونسبة العمولة بعد التارجت.
+              عند التفعيل، ستظهر هنا نسبة التحقيق والمتبقي وأوفر التارجت
+              والعمولة التقديرية.
+            </div>
+          </div>
+        </div>
+      </Panel>
+    );
+  }
+
+  const onTrackTone =
+    achievementPct === null
+      ? 'slate'
+      : achievementPct >= 100
+        ? 'green'
+        : achievementPct >= 70
+          ? 'amber'
+          : 'rose';
+  const barWidth =
+    achievementPct === null ? 0 : Math.min(achievementPct, 100);
+
+  return (
+    <Panel
+      title="تارجت المبيعات"
+      subtitle={
+        achievementPct !== null && achievementPct >= 100
+          ? `تم تحقيق التارجت — أوفر ${EGP(overTarget)}`
+          : `${(achievementPct ?? 0).toFixed(0)}% من التارجت`
+      }
+    >
+      <div className="p-5 space-y-4">
+        <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
+          <TargetCell label="التارجت" value={EGP(target)} tone="slate" />
+          <TargetCell label="المحقق" value={EGP(achieved)} tone="blue" />
+          <TargetCell
+            label="نسبة التحقيق"
+            value={
+              achievementPct !== null ? `${achievementPct.toFixed(1)}%` : '—'
+            }
+            tone={onTrackTone}
+          />
+          <TargetCell
+            label="المتبقي للتارجت"
+            value={remaining > 0 ? EGP(remaining) : '—'}
+            tone={remaining > 0 ? 'amber' : 'slate'}
+          />
+          <TargetCell
+            label="أوفر التارجت"
+            value={overTarget > 0 ? EGP(overTarget) : '—'}
+            tone={overTarget > 0 ? 'green' : 'slate'}
+          />
+          <TargetCell
+            label="العمولة التقديرية"
+            value={baseRate > 0 ? EGP(estimatedCommission) : '—'}
+            tone="purple"
+            sub={
+              baseRate <= 0
+                ? 'يلزم تحديد نسبة عمولة'
+                : afterTargetRate != null
+                  ? `${baseRate}% حتى التارجت · ${afterTargetRate}% بعده`
+                  : `${baseRate}% (نفس النسبة قبل وبعد التارجت)`
+            }
+          />
+        </div>
+        <div className="space-y-1">
+          <div className="flex items-center justify-between text-[11px] font-bold text-slate-500">
+            <span>تقدّم التحقيق</span>
+            <span className="tabular-nums">{barWidth.toFixed(0)} / 100</span>
+          </div>
+          <div className="h-2 rounded-full bg-slate-100 overflow-hidden">
+            <div
+              className={`h-full transition-all ${
+                onTrackTone === 'green'
+                  ? 'bg-emerald-500'
+                  : onTrackTone === 'amber'
+                    ? 'bg-amber-500'
+                    : 'bg-rose-500'
+              }`}
+              style={{ width: `${barWidth}%` }}
+            />
+          </div>
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
+function TargetCell({
+  label,
+  value,
+  tone,
+  sub,
+}: {
+  label: string;
+  value: string;
+  tone: 'green' | 'blue' | 'amber' | 'rose' | 'purple' | 'slate';
+  sub?: string;
+}) {
+  const map: Record<string, { fg: string; tile: string }> = {
+    green:  { fg: 'text-emerald-700', tile: 'bg-emerald-50 border-emerald-200' },
+    blue:   { fg: 'text-blue-700',    tile: 'bg-blue-50 border-blue-200' },
+    amber:  { fg: 'text-amber-700',   tile: 'bg-amber-50 border-amber-200' },
+    rose:   { fg: 'text-rose-700',    tile: 'bg-rose-50 border-rose-200' },
+    purple: { fg: 'text-violet-700',  tile: 'bg-violet-50 border-violet-200' },
+    slate:  { fg: 'text-slate-700',   tile: 'bg-slate-50 border-slate-200' },
+  };
+  const t = map[tone];
+  return (
+    <div className={`rounded-xl border p-3 ${t.tile}`}>
+      <div className="text-[11px] font-bold text-slate-500">{label}</div>
+      <div className={`text-base font-black mt-1 tabular-nums ${t.fg}`}>
+        {value}
+      </div>
+      {sub && (
+        <div className="text-[10px] text-slate-500 mt-1 leading-snug">{sub}</div>
+      )}
     </div>
   );
 }

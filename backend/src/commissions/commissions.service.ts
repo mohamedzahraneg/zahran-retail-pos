@@ -145,6 +145,94 @@ export class CommissionsService {
     return { user_id: userId, commission_rate: rate };
   }
 
+  /**
+   * PR-T4.6 — read the full seller settings row for the EditProfile
+   * modal. Returns the three commission fields together so the form
+   * can pre-fill from one round-trip.
+   */
+  async getSellerSettings(userId: string) {
+    const [row] = await this.ds.query(
+      `SELECT id AS user_id,
+              COALESCE(commission_rate, 0)::numeric AS commission_rate,
+              commission_target_amount,
+              commission_after_target_rate
+         FROM users
+        WHERE id = $1`,
+      [userId],
+    );
+    if (!row) throw new BadRequestException('user not found');
+    return row;
+  }
+
+  /**
+   * PR-T4.6 — update the seller settings (rate + target + after-target
+   * rate) atomically. Each field is independently optional in the
+   * payload — undefined means "leave unchanged"; null means "clear".
+   * Validation:
+   *   commission_rate                ∈ [0, 100]
+   *   commission_target_amount       ≥ 0  (or null)
+   *   commission_after_target_rate   ∈ [0, 100]  (or null)
+   */
+  async updateSellerSettings(
+    userId: string,
+    patch: {
+      commission_rate?: number;
+      commission_target_amount?: number | null;
+      commission_after_target_rate?: number | null;
+    },
+  ) {
+    if (
+      patch.commission_rate !== undefined &&
+      (patch.commission_rate < 0 || patch.commission_rate > 100)
+    ) {
+      throw new BadRequestException('commission_rate must be between 0 and 100');
+    }
+    if (
+      patch.commission_target_amount !== undefined &&
+      patch.commission_target_amount !== null &&
+      patch.commission_target_amount < 0
+    ) {
+      throw new BadRequestException(
+        'commission_target_amount must be >= 0 or null',
+      );
+    }
+    if (
+      patch.commission_after_target_rate !== undefined &&
+      patch.commission_after_target_rate !== null &&
+      (patch.commission_after_target_rate < 0 ||
+        patch.commission_after_target_rate > 100)
+    ) {
+      throw new BadRequestException(
+        'commission_after_target_rate must be between 0 and 100 or null',
+      );
+    }
+
+    const sets: string[] = [];
+    const params: any[] = [userId];
+    if (patch.commission_rate !== undefined) {
+      params.push(patch.commission_rate);
+      sets.push(`commission_rate = $${params.length}`);
+    }
+    if (patch.commission_target_amount !== undefined) {
+      params.push(patch.commission_target_amount);
+      sets.push(`commission_target_amount = $${params.length}`);
+    }
+    if (patch.commission_after_target_rate !== undefined) {
+      params.push(patch.commission_after_target_rate);
+      sets.push(`commission_after_target_rate = $${params.length}`);
+    }
+    if (sets.length === 0) {
+      // No-op patch — return the current state.
+      return this.getSellerSettings(userId);
+    }
+    sets.push(`updated_at = NOW()`);
+    await this.ds.query(
+      `UPDATE users SET ${sets.join(', ')} WHERE id = $1`,
+      params,
+    );
+    return this.getSellerSettings(userId);
+  }
+
   async listSalespeople() {
     return this.ds.query(
       `

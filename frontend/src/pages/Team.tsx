@@ -32,6 +32,7 @@ import {
   EmployeeDashboard,
 } from '@/api/employees.api';
 import { attendanceApi } from '@/api/attendance.api';
+import { commissionsApi } from '@/api/commissions.api';
 import { useAuthStore } from '@/stores/auth.store';
 // PR-T2 — redesigned attendance / wage approval tab. Lives in its own
 // file to keep Team.tsx focused on the workspace shell. The legacy
@@ -807,20 +808,34 @@ function EmployeeProfilePanel({
                     : 'غير متاح'
                 }
               />
-              <InfoItem
-                label="الرصيد النهائي"
-                value={
-                  isPayable
-                    ? `مستحق له ${EGP(-gl)}`
-                    : isDebt
-                      ? `مدين للشركة ${EGP(gl)}`
-                      : 'متوازن'
-                }
-                hint="من v_employee_gl_balance"
-              />
+              {/* PR-T4.6 — color-coded balance pill: green when company
+                  owes employee, red when employee owes company. Replaces
+                  the plain text label that all looked identical regardless
+                  of direction. */}
+              <div>
+                <div>الرصيد النهائي</div>
+                <div className="mt-0.5">
+                  <span
+                    className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-black border ${
+                      isPayable
+                        ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                        : isDebt
+                          ? 'bg-rose-50 text-rose-700 border-rose-200'
+                          : 'bg-slate-50 text-slate-600 border-slate-200'
+                    }`}
+                    title="من v_employee_gl_balance"
+                  >
+                    {isPayable
+                      ? `مستحق له · ${EGP(-gl)}`
+                      : isDebt
+                        ? `مدين للشركة · ${EGP(gl)}`
+                        : 'متوازن'}
+                  </span>
+                </div>
+              </div>
             </div>
           </div>
-          <ProfileActions row={row} />
+          <ProfileActions row={row} dash={dash} />
         </div>
       </div>
 
@@ -948,16 +963,30 @@ function MiniStat({
   );
 }
 
-function ProfileActions({ row }: { row: TeamRow }) {
-  // PR-T4.1 — restored "إسناد مهمة" + added "تقرير موظف" placeholder.
-  // The task assignment uses the existing TaskForm component (defined
-  // below in this file, kept since PR-T1). Report is deferred to T5.
+function ProfileActions({ row, dash }: { row: TeamRow; dash?: EmployeeDashboard }) {
+  // PR-T4.6 — restored "تعديل الملف" alongside إسناد مهمة + إجراءات
+  // in one clean strip. تقرير الموظف stays in the dropdown as a PR-T5
+  // placeholder. Modal-based UX so we don't navigate away from the
+  // workspace.
   const hasPermission = useAuthStore((s) => s.hasPermission);
+  const canEditProfile = hasPermission('employee.profile.manage');
   const canAssignTask = hasPermission('employee.tasks.assign');
   const [openMenu, setOpenMenu] = useState(false);
   const [taskOpen, setTaskOpen] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
   return (
-    <div className="relative flex items-center gap-2">
+    <div className="relative flex items-center gap-2 flex-wrap">
+      {canEditProfile && (
+        <button
+          type="button"
+          onClick={() => setEditOpen(true)}
+          className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-50 text-emerald-700 border border-emerald-200 text-sm font-bold hover:bg-emerald-100"
+          title="تعديل بيانات الموظف وإعدادات العمولة والتارجت"
+        >
+          <Settings size={14} />
+          تعديل الملف
+        </button>
+      )}
       {canAssignTask && (
         <button
           type="button"
@@ -996,7 +1025,19 @@ function ProfileActions({ row }: { row: TeamRow }) {
               ليست لديك صلاحية إسناد المهام (employee.tasks.assign).
             </div>
           )}
+          {!canEditProfile && (
+            <div className="px-3 py-2 text-[11px] text-slate-400">
+              ليست لديك صلاحية تعديل الملفات (employee.profile.manage).
+            </div>
+          )}
         </div>
+      )}
+      {editOpen && (
+        <EditProfileModal
+          row={row}
+          dash={dash}
+          onClose={() => setEditOpen(false)}
+        />
       )}
       {taskOpen && (
         <div
@@ -1030,6 +1071,211 @@ function ProfileActions({ row }: { row: TeamRow }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * PR-T4.6 — full Edit Profile modal. Combines the legacy ProfileForm
+ * (HR fields like job title, hire date, salary, shift hours) with a
+ * new SellerSettingsForm (commission rate, target system, target
+ * amount, after-target rate). Both forms post atomically to their
+ * respective endpoints; modal closes once both succeed.
+ *
+ * Permission gate at the caller level (employee.profile.manage), so
+ * if the modal is rendered the operator can edit everything inside.
+ */
+function EditProfileModal({
+  row,
+  dash,
+  onClose,
+}: {
+  row: TeamRow;
+  dash?: EmployeeDashboard;
+  onClose: () => void;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-40 bg-black/40 flex items-start justify-center p-4 overflow-y-auto"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-3xl bg-white rounded-2xl shadow-2xl my-6"
+        onClick={(e) => e.stopPropagation()}
+        dir="rtl"
+      >
+        <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white">
+          <div>
+            <h3 className="text-lg font-black text-slate-800">تعديل الملف</h3>
+            <div className="text-xs text-slate-500 mt-0.5">
+              {row.full_name || row.username}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="p-1.5 rounded hover:bg-slate-100 text-slate-500"
+            title="إغلاق"
+          >
+            ✕
+          </button>
+        </div>
+        <div className="p-5 space-y-5">
+          <section>
+            <h4 className="text-sm font-black text-slate-700 mb-2">
+              بيانات الموظف الأساسية
+            </h4>
+            <ProfileForm userId={row.id} dash={dash} />
+          </section>
+          <section>
+            <h4 className="text-sm font-black text-slate-700 mb-2">
+              إعدادات البائع (عمولة وتارجت)
+            </h4>
+            <SellerSettingsForm userId={row.id} />
+          </section>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * PR-T4.6 — seller settings form. Pre-fills from
+ * /commissions/:id/seller-settings, posts back via the same endpoint
+ * (PATCH). Three fields:
+ *   - نسبة العمولة (الأساسية)        commission_rate %
+ *   - نظام تارجت (تفعيل / إيقاف)     toggle
+ *     - قيمة التارجت                   commission_target_amount
+ *     - نسبة بعد التارجت               commission_after_target_rate %
+ *
+ * When the toggle is OFF, both target fields are cleared (sent as
+ * null). When it's ON, target_amount is required (> 0) and
+ * after-target rate is optional (defaults to commission_rate when
+ * not set, surfaced via Overview's estimated-commission widget).
+ */
+function SellerSettingsForm({ userId }: { userId: string }) {
+  const qc = useQueryClient();
+  const { data: settings } = useQuery({
+    queryKey: ['commissions-seller-settings', userId],
+    queryFn: () => commissionsApi.getSellerSettings(userId),
+  });
+
+  const [rate, setRate] = useState('');
+  const [targetEnabled, setTargetEnabled] = useState(false);
+  const [targetAmount, setTargetAmount] = useState('');
+  const [afterRate, setAfterRate] = useState('');
+
+  // Hydrate when the API returns.
+  useEffect(() => {
+    if (!settings) return;
+    setRate(String(Number(settings.commission_rate || 0)));
+    const hasTarget =
+      settings.commission_target_amount !== null &&
+      settings.commission_target_amount !== undefined;
+    setTargetEnabled(hasTarget);
+    setTargetAmount(hasTarget ? String(settings.commission_target_amount) : '');
+    setAfterRate(
+      settings.commission_after_target_rate !== null &&
+        settings.commission_after_target_rate !== undefined
+        ? String(settings.commission_after_target_rate)
+        : '',
+    );
+  }, [settings]);
+
+  const save = useMutation({
+    mutationFn: () =>
+      commissionsApi.updateSellerSettings(userId, {
+        commission_rate: rate === '' ? undefined : Number(rate),
+        commission_target_amount: targetEnabled
+          ? targetAmount === ''
+            ? null
+            : Number(targetAmount)
+          : null,
+        commission_after_target_rate: targetEnabled
+          ? afterRate === ''
+            ? null
+            : Number(afterRate)
+          : null,
+      }),
+    onSuccess: () => {
+      toast.success('تم حفظ إعدادات البائع');
+      qc.invalidateQueries({ queryKey: ['commissions-seller-settings', userId] });
+      qc.invalidateQueries({ queryKey: ['commissions-detail'] });
+      qc.invalidateQueries({ queryKey: ['commissions-summary'] });
+    },
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.message || 'فشل الحفظ'),
+  });
+
+  return (
+    <div className="card p-4 space-y-4 text-sm">
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="نسبة العمولة الأساسية (%)">
+          <input
+            type="number"
+            step="0.01"
+            min="0"
+            max="100"
+            className="input w-full"
+            value={rate}
+            onChange={(e) => setRate(e.target.value)}
+            placeholder="0"
+          />
+        </Field>
+        <Field label="نظام التارجت">
+          <label className="inline-flex items-center gap-2 mt-1.5">
+            <input
+              type="checkbox"
+              checked={targetEnabled}
+              onChange={(e) => setTargetEnabled(e.target.checked)}
+            />
+            <span className="text-xs font-bold text-slate-600">
+              {targetEnabled ? 'مفعّل — تارجت محدد' : 'بدون تارجت (عمولة ثابتة فقط)'}
+            </span>
+          </label>
+        </Field>
+      </div>
+      {targetEnabled && (
+        <div className="grid grid-cols-2 gap-3 rounded-xl border border-emerald-100 bg-emerald-50/40 p-3">
+          <Field label="قيمة التارجت (ج.م)">
+            <input
+              type="number"
+              step="0.01"
+              min="0"
+              className="input w-full"
+              value={targetAmount}
+              onChange={(e) => setTargetAmount(e.target.value)}
+              placeholder="0"
+            />
+          </Field>
+          <Field label="نسبة العمولة بعد التارجت (%) — اختياري">
+            <input
+              type="number"
+              step="0.01"
+              min="0"
+              max="100"
+              className="input w-full"
+              value={afterRate}
+              onChange={(e) => setAfterRate(e.target.value)}
+              placeholder={rate || '0'}
+            />
+          </Field>
+          <div className="col-span-2 text-[11px] text-emerald-900/70 leading-relaxed">
+            المبيعات حتى التارجت تُحسب بالنسبة الأساسية. ما يزيد عن التارجت
+            (أوفر تارجت) يُحسب بالنسبة الجديدة. لو تركت "نسبة العمولة بعد
+            التارجت" فاضية، النسبة الأساسية تُطبَّق على كامل المبيعات.
+          </div>
+        </div>
+      )}
+      <div className="flex justify-end">
+        <button
+          className="btn-primary"
+          disabled={save.isPending}
+          onClick={() => save.mutate()}
+        >
+          <Settings size={14} /> حفظ إعدادات البائع
+        </button>
+      </div>
     </div>
   );
 }
