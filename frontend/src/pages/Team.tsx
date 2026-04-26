@@ -109,11 +109,12 @@ function fmtWhen(s?: string) {
 export default function Team() {
   const hasPermission = useAuthStore((s) => s.hasPermission);
   const [searchParams, setSearchParams] = useSearchParams();
-  const rawTab = searchParams.get('tab');
-
-  // Legacy tab paths — keep working until PR-T6 cleanup.
-  if (rawTab === 'accounts') return <Payroll />;
-  if (rawTab === 'attendance') return <AttendanceBody embedded />;
+  // PR-T1.1 — `?section=` is the new param name (matches user spec).
+  // `?tab=` is read for legacy URL compat (sidebar bookmarks etc.).
+  // Both map onto the same set of profile-internal tabs; the new
+  // shell is ALWAYS rendered (no full-page fallback to old standalone
+  // Payroll/AttendanceBody pages).
+  const rawSection = searchParams.get('section') ?? searchParams.get('tab');
 
   // Pending approvals — rendered inside the profile's موافقات tab.
   const { data: pending = [] } = useQuery({
@@ -192,14 +193,18 @@ export default function Team() {
     setSearchParams(sp, { replace: true });
   };
 
-  // Auto-select the first employee on first load when nothing picked
-  // and the team has rows. Saves a click on the most common path.
+  // Auto-select the first employee ONLY when:
+  //   · the user didn't deep-link to a section (otherwise the section
+  //     was meant as a team-wide view — see EmployeeProfilePanel below
+  //     for the no-employee + section path), AND
+  //   · the team has rows.
+  // Saves a click on the most common landing path (/team default).
   useEffect(() => {
-    if (!selectedId && team.length > 0) {
+    if (!selectedId && !rawSection && team.length > 0) {
       setSelectedId((team as TeamRow[])[0].id);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [team.length, selectedId]);
+  }, [team.length, selectedId, rawSection]);
 
   return (
     <div className="space-y-5">
@@ -291,6 +296,7 @@ export default function Team() {
         <EmployeeProfilePanel
           row={selected}
           pending={pending as EmployeeRequest[]}
+          initialSection={rawSection}
         />
       </div>
     </div>
@@ -477,15 +483,40 @@ type ProfileTab =
   | 'approvals'
   | 'reports';
 
+// Map a `?section=` URL value (incl. legacy `?tab=` aliases) onto a
+// profile-internal tab key. Unknown values fall back to the summary
+// tab so deep-links never land on an empty view.
+function sectionToTab(section: string | null | undefined): ProfileTab {
+  switch (section) {
+    case 'attendance': return 'attendance';
+    case 'accounts':   return 'accounts';
+    case 'advances':   return 'advances';
+    case 'approvals':  return 'approvals';
+    case 'reports':    return 'reports';
+    case 'summary':
+    case 'overview':
+    default:           return 'summary';
+  }
+}
+
 function EmployeeProfilePanel({
   row,
   pending,
+  initialSection,
 }: {
   row: TeamRow | null;
   pending: EmployeeRequest[];
+  initialSection?: string | null;
 }) {
   const hasPermission = useAuthStore((s) => s.hasPermission);
-  const [tab, setTab] = useState<ProfileTab>('summary');
+  const [tab, setTab] = useState<ProfileTab>(() => sectionToTab(initialSection));
+
+  // Re-sync the active tab when the URL section changes (e.g. user
+  // clicks a sidebar link or arrives via /attendance redirect after
+  // already having the workspace open).
+  useEffect(() => {
+    setTab(sectionToTab(initialSection));
+  }, [initialSection]);
 
   const { data: dash } = useQuery({
     queryKey: ['employee-user-dashboard', row?.id],
@@ -493,7 +524,34 @@ function EmployeeProfilePanel({
     enabled: !!row?.id,
   });
 
+  // PR-T1.1 — when no employee is selected AND the URL requested a
+  // section (e.g. /attendance redirect → /team?section=attendance),
+  // render the team-wide legacy view INSIDE the new shell so users
+  // never see the old standalone page layout. The header + KPI strip +
+  // employee list (rendered by the parent) stay visible above/beside.
   if (!row) {
+    if (initialSection === 'attendance') {
+      return (
+        <section className="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden">
+          <SectionHeader
+            title="الحضور (الفريق كله)"
+            hint="اختر موظفًا من القائمة لعرض حضوره ويومياته بشكل مفصّل."
+          />
+          <div className="p-5"><AttendanceBody embedded /></div>
+        </section>
+      );
+    }
+    if (initialSection === 'accounts') {
+      return (
+        <section className="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden">
+          <SectionHeader
+            title="الحسابات (الفريق كله)"
+            hint="اختر موظفًا من القائمة لعرض كشف حسابه."
+          />
+          <div className="p-5"><Payroll /></div>
+        </section>
+      );
+    }
     return (
       <section className="rounded-2xl border border-slate-200 bg-white shadow-sm flex flex-col items-center justify-center text-center p-12 min-h-[420px]">
         <Users2 size={42} className="text-slate-300 mb-3" />
@@ -510,7 +568,7 @@ function EmployeeProfilePanel({
   const isDebt = gl > 0.01;
 
   const profileTabs: Array<{ key: ProfileTab; label: string; icon: React.ReactNode }> = [
-    { key: 'summary',    label: 'ملخص',                 icon: <ClipboardList size={14} /> },
+    { key: 'summary',    label: 'نظرة عامة',            icon: <ClipboardList size={14} /> },
     { key: 'attendance', label: 'الحضور واليوميات',     icon: <CalendarCheck size={14} /> },
     { key: 'accounts',   label: 'الحسابات والحركات',    icon: <Wallet2 size={14} /> },
     { key: 'advances',   label: 'السلف والخصومات',      icon: <Receipt size={14} /> },
@@ -670,19 +728,34 @@ function EmployeeProfilePanel({
 
       <div className="p-5">
         {tab === 'summary' && <OverviewTab dash={dash} />}
+        {/* PR-T1.1 — legacy panels are now embedded INSIDE the new
+            workspace tabs (no full-page replacement). The components
+            themselves remain unchanged; they just render inside the
+            new shell instead of standalone routes. Polish (employee-
+            scoped filtering, redesigned tables, source selector) lands
+            in PR-T2/T3/T4. */}
         {tab === 'attendance' && (
-          <PlaceholderPanel
-            title="الحضور واليوميات"
-            message="سيتم نقل الحضور واعتماد اليومية إلى هذا التبويب في PR-T2."
-            link={{ to: `/team?tab=attendance`, label: 'فتح الواجهة الحالية للحضور' }}
-          />
+          hasPermission('employee.attendance.manage') ? (
+            <AdminAttendancePanel
+              userId={row.id}
+              fullName={row.full_name || row.username}
+              dailyAmount={Number(row.salary_amount || 0)}
+              liveGlBalance={Number(row.gl_balance || 0)}
+            />
+          ) : (
+            <PlaceholderPanel
+              title="الحضور واليوميات"
+              message="ليست لديك صلاحية إدارة الحضور (employee.attendance.manage)."
+            />
+          )
         )}
         {tab === 'accounts' && (
-          <PlaceholderPanel
-            title="الحسابات والحركات"
-            message="سيتم نقل كشف الحساب والحركات (مع إخفاء/إظهار القيود الملغاة) في PR-T3."
-            link={{ to: `/team?tab=accounts`, label: 'فتح الواجهة الحالية للحسابات' }}
-          />
+          <div>
+            <div className="mb-3 text-xs text-slate-500 leading-relaxed">
+              يعرض هذا التبويب لوحة الحسابات الحالية للفريق كله. سيتم تخصيصها للموظف المختار وإضافة فلاتر متقدمة + إبراز القيود الملغاة في PR-T3.
+            </div>
+            <Payroll />
+          </div>
         )}
         {tab === 'advances' && (
           <PlaceholderPanel
@@ -783,6 +856,15 @@ function MiniStat({
       {hint && (
         <div className="text-[10px] text-slate-400 mt-0.5">{hint}</div>
       )}
+    </div>
+  );
+}
+
+function SectionHeader({ title, hint }: { title: string; hint: string }) {
+  return (
+    <div className="px-5 py-4 border-b border-slate-100">
+      <h3 className="text-base font-black text-slate-800">{title}</h3>
+      <p className="text-xs text-slate-500 mt-1">{hint}</p>
     </div>
   );
 }
