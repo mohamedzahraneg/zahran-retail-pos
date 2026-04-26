@@ -2,73 +2,67 @@
  * PR-PAY-6 — Frontend resolver for payment provider logos.
  *
  * Maps a stable `logo_key` (e.g. "vodafone-cash", "we-pay", "visa")
- * to a Vite-imported asset URL. The asset itself lives under
- * `frontend/src/assets/payment-logos/{logo_key}.svg`. Vite hashes the
- * URL at build time, so swapping the file is a frame-perfect
- * replacement — no code change needed.
+ * to a Vite-bundled asset URL.
  *
- * The 22 entries cover every provider in the backend
- * `providers.catalog.ts` plus generic fallbacks (wallet-other,
- * card-other, bank-other) for unknown providers and a `cash` badge.
+ * Drop-in contract (post-iteration with the operator):
+ *   • Drop any file at `frontend/src/assets/payment-logos/{logo_key}.{ext}`
+ *     where `{ext}` ∈ { svg, png, jpg, jpeg, webp }.
+ *   • If both a placeholder SVG and a real PNG exist for the same key,
+ *     the real raster wins (PRIORITY rule below) — so dropping
+ *     `vodafone-cash.png` next to `vodafone-cash.svg` immediately
+ *     replaces the placeholder on the next build with **no code change
+ *     required**.
+ *   • Strategy when the key has no asset at all:
+ *       1) Try the requested key.
+ *       2) Try the group-fallback (`wallet-other`, `card-other`,
+ *          `bank-other`) inferred from the method.
+ *       3) Return null — the consumer renders initials/icon.
  *
- * Strategy when the key is missing or unmapped:
- *   1. Try the requested key.
- *   2. Try the group-fallback (`wallet-other`, `card-other`,
- *      `bank-other`) inferred from the method.
- *   3. Return null — the consumer renders initials/icon instead.
- *
- * NEVER hotlink remote URLs and NEVER bundle third-party copyrighted
- * art. The current set is placeholder badges (brand colour + initials);
- * real licensed assets can replace them by overwriting the file.
+ * Strict rules (held since the original PR):
+ *   • Never hotlink remote URLs.
+ *   • Never bundle third-party copyrighted art.
+ *   • Placeholders are first-party SVGs (brand colour + initials).
  */
 
-import cash from '@/assets/payment-logos/cash.svg';
-import instapay from '@/assets/payment-logos/instapay.svg';
-import vodafoneCash from '@/assets/payment-logos/vodafone-cash.svg';
-import orangeCash from '@/assets/payment-logos/orange-cash.svg';
-import etisalatCash from '@/assets/payment-logos/etisalat-cash.svg';
-import wePay from '@/assets/payment-logos/we-pay.svg';
-import bankWallet from '@/assets/payment-logos/bank-wallet.svg';
-import walletOther from '@/assets/payment-logos/wallet-other.svg';
-import visa from '@/assets/payment-logos/visa.svg';
-import mastercard from '@/assets/payment-logos/mastercard.svg';
-import meeza from '@/assets/payment-logos/meeza.svg';
-import posTerminal from '@/assets/payment-logos/pos-terminal.svg';
-import cardOther from '@/assets/payment-logos/card-other.svg';
-import nbe from '@/assets/payment-logos/nbe.svg';
-import banqueMisr from '@/assets/payment-logos/banque-misr.svg';
-import cib from '@/assets/payment-logos/cib.svg';
-import qnb from '@/assets/payment-logos/qnb.svg';
-import alexbank from '@/assets/payment-logos/alexbank.svg';
-import banqueDuCaire from '@/assets/payment-logos/banque-du-caire.svg';
-import aaib from '@/assets/payment-logos/aaib.svg';
-import adib from '@/assets/payment-logos/adib.svg';
-import bankOther from '@/assets/payment-logos/bank-other.svg';
+// Vite build-time discovery — every file in the directory is captured
+// at build time. New files appear automatically on next build; deletions
+// disappear; replacements get re-hashed URLs.
+const modules = import.meta.glob(
+  '@/assets/payment-logos/*.{svg,png,jpg,jpeg,webp}',
+  { eager: true, query: '?url', import: 'default' },
+);
 
-const PAYMENT_LOGOS: Record<string, string> = {
-  cash,
-  instapay,
-  'vodafone-cash': vodafoneCash,
-  'orange-cash': orangeCash,
-  'etisalat-cash': etisalatCash,
-  'we-pay': wePay,
-  'bank-wallet': bankWallet,
-  'wallet-other': walletOther,
-  visa,
-  mastercard,
-  meeza,
-  'pos-terminal': posTerminal,
-  'card-other': cardOther,
-  nbe,
-  'banque-misr': banqueMisr,
-  cib,
-  qnb,
-  alexbank,
-  'banque-du-caire': banqueDuCaire,
-  aaib,
-  adib,
-  'bank-other': bankOther,
+// Higher rank wins when multiple extensions exist for the same key.
+// The intent: real assets the operator drops in (typically PNG/WEBP)
+// override the bundled placeholder SVGs without removing the SVG.
+const EXT_PRIORITY: Record<string, number> = {
+  png: 5,
+  webp: 4,
+  jpg: 3,
+  jpeg: 3,
+  svg: 1,
 };
+
+function buildLogoMap(): Record<string, string> {
+  const tmp: Record<string, { url: string; rank: number }> = {};
+  for (const [path, asset] of Object.entries(modules)) {
+    const fname = path.split('/').pop();
+    if (!fname) continue;
+    const dot = fname.lastIndexOf('.');
+    if (dot <= 0) continue;
+    const key = fname.slice(0, dot);
+    const ext = fname.slice(dot + 1).toLowerCase();
+    const rank = EXT_PRIORITY[ext] ?? 0;
+    if (!tmp[key] || rank > tmp[key].rank) {
+      tmp[key] = { url: asset as string, rank };
+    }
+  }
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(tmp)) out[k] = v.url;
+  return out;
+}
+
+const PAYMENT_LOGOS: Record<string, string> = buildLogoMap();
 
 /** Method → group fallback `logo_key` when the provider's own key is missing. */
 const METHOD_GROUP_FALLBACK: Record<string, string> = {
@@ -95,5 +89,5 @@ export function getPaymentLogo(
   return null;
 }
 
-/** Lower-cased deduped list of all known logo keys — used by tests + admin UI hints. */
-export const KNOWN_LOGO_KEYS = Object.keys(PAYMENT_LOGOS);
+/** Sorted list of all known logo keys — used by tests + admin UI hints. */
+export const KNOWN_LOGO_KEYS = Object.keys(PAYMENT_LOGOS).sort();

@@ -1,6 +1,6 @@
 # Payment provider logos (PR-PAY-6)
 
-Local SVG assets used by `PaymentProviderLogo` to render the brand badge for each payment method/account across:
+Local assets used by `PaymentProviderLogo` to render the brand badge for each payment method/account across:
 
 - Settings → حسابات التحصيل (admin)
 - POS payment grid + account picker
@@ -10,59 +10,91 @@ Local SVG assets used by `PaymentProviderLogo` to render the brand badge for eac
 
 ## Filename = logo_key
 
-The backend provider catalog (`backend/src/payments/providers.catalog.ts`) and the runtime `payment_account_snapshot` both reference each asset by its **logo_key**, which is the filename without extension:
+The backend provider catalog (`backend/src/payments/providers.catalog.ts`) and the runtime `payment_account_snapshot` both reference each asset by its **`logo_key`**, which is the filename without extension:
 
 ```
 vodafone-cash.svg → logo_key = "vodafone-cash"
-we-pay.svg        → logo_key = "we-pay"
+we-pay.png        → logo_key = "we-pay"
 visa.svg          → logo_key = "visa"
 nbe.svg           → logo_key = "nbe"
 ```
 
-The frontend resolver `frontend/src/lib/paymentLogos.ts` maps each `logo_key` to its bundled asset via `import` so the URL is hashed by Vite at build time.
+The frontend resolver `frontend/src/lib/paymentLogos.ts` discovers every file in this directory at build time via Vite's `import.meta.glob` and maps `logo_key → asset URL`.
 
-## Replacing a placeholder with the real logo
+## Supported extensions
 
-This PR ships **placeholder SVGs** for every provider — solid brand colour + initials. They render cleanly in every UI surface and are visually distinguishable.
+| Extension | Notes |
+|---|---|
+| `svg` | First-party placeholders (current PR ships these) |
+| `png` | Recommended for raster brand assets — has higher priority than `svg` |
+| `jpg` / `jpeg` | Supported but PNG is preferred for transparency |
+| `webp` | Supported, second priority after PNG |
 
-To swap any placeholder for the official asset:
+## Drop-in priority (real asset wins automatically)
 
-1. Drop the official PNG/SVG into this directory **using the exact same filename**.
-2. The frontend picks it up on the next build — **no code change required**.
-3. Optionally `git mv` to a different extension (`vodafone-cash.png` etc.) and update the import in `paymentLogos.ts` (a one-line change per logo).
+When **multiple files share the same `logo_key`** (e.g. both `vodafone-cash.svg` placeholder and `vodafone-cash.png` real asset exist), the resolver picks one based on this priority:
 
-If you want to keep the placeholder until the official asset is licensed, leave the file as-is — the UI stays consistent.
+```
+PNG  > WEBP  > JPG/JPEG  > SVG
+```
 
-## Current placeholder inventory (22 files)
+So the workflow is:
 
-| File | logo_key | Used by | Status |
-|---|---|---|---|
-| `cash.svg` | cash | cash payment method | placeholder |
-| `instapay.svg` | instapay | InstaPay provider | placeholder — operator has the official logo |
-| `vodafone-cash.svg` | vodafone-cash | Vodafone Cash wallet | placeholder — operator has the official logo |
-| `orange-cash.svg` | orange-cash | Orange Cash wallet | placeholder — operator has the official logo |
-| `etisalat-cash.svg` | etisalat-cash | Etisalat Cash wallet | placeholder — operator has the official logo |
-| `we-pay.svg` | we-pay | WE Pay wallet | placeholder |
-| `bank-wallet.svg` | bank-wallet | generic bank wallet | placeholder |
-| `wallet-other.svg` | wallet-other | unknown wallet fallback | placeholder |
-| `visa.svg` | visa | Visa cards | placeholder — operator has the official logo |
-| `mastercard.svg` | mastercard | MasterCard | placeholder |
-| `meeza.svg` | meeza | Meeza national scheme | placeholder |
-| `pos-terminal.svg` | pos-terminal | generic POS terminal | placeholder |
-| `card-other.svg` | card-other | unknown card fallback | placeholder |
-| `nbe.svg` | nbe | National Bank of Egypt | placeholder |
-| `banque-misr.svg` | banque-misr | Banque Misr | placeholder |
-| `cib.svg` | cib | CIB | placeholder |
-| `qnb.svg` | qnb | QNB Al-Ahli | placeholder |
-| `alexbank.svg` | alexbank | AlexBank | placeholder |
-| `banque-du-caire.svg` | banque-du-caire | Banque du Caire | placeholder |
-| `aaib.svg` | aaib | AAIB | placeholder |
-| `adib.svg` | adib | ADIB | placeholder |
-| `bank-other.svg` | bank-other | unknown bank fallback | placeholder |
+1. Drop your real `vodafone-cash.png` (or `.webp`) into this directory.
+2. Leave the placeholder `vodafone-cash.svg` in place if you want — the PNG wins automatically.
+3. Run a build (`npx vite build` or just `npm run dev`).
+4. Done — the real logo renders everywhere.
+
+**No code change required.** Vite re-discovers the directory on every build.
+
+## Where to drop your real logos
+
+Replace any of the following placeholders by adding a file with the same `logo_key` and a higher-priority extension:
+
+| logo_key | placeholder ext | drop-in path |
+|---|---|---|
+| `cash` | svg | `frontend/src/assets/payment-logos/cash.{png,webp,jpg,svg}` |
+| `instapay` | svg | `frontend/src/assets/payment-logos/instapay.{png,webp,jpg,svg}` |
+| `vodafone-cash` | svg | `frontend/src/assets/payment-logos/vodafone-cash.{png,webp,jpg,svg}` |
+| `orange-cash` | svg | `frontend/src/assets/payment-logos/orange-cash.{png,webp,jpg,svg}` |
+| `etisalat-cash` | svg | `frontend/src/assets/payment-logos/etisalat-cash.{png,webp,jpg,svg}` |
+| `we-pay` | svg | `frontend/src/assets/payment-logos/we-pay.{png,webp,jpg,svg}` |
+| `bank-wallet` | svg | `frontend/src/assets/payment-logos/bank-wallet.{png,webp,jpg,svg}` |
+| `wallet-other` | svg | `frontend/src/assets/payment-logos/wallet-other.{png,webp,jpg,svg}` |
+| `visa` | svg | `frontend/src/assets/payment-logos/visa.{png,webp,jpg,svg}` |
+| `mastercard` | svg | `frontend/src/assets/payment-logos/mastercard.{png,webp,jpg,svg}` |
+| `meeza` | svg | `frontend/src/assets/payment-logos/meeza.{png,webp,jpg,svg}` |
+| `pos-terminal` | svg | `frontend/src/assets/payment-logos/pos-terminal.{png,webp,jpg,svg}` |
+| `card-other` | svg | `frontend/src/assets/payment-logos/card-other.{png,webp,jpg,svg}` |
+| `nbe` | svg | `frontend/src/assets/payment-logos/nbe.{png,webp,jpg,svg}` |
+| `banque-misr` | svg | `frontend/src/assets/payment-logos/banque-misr.{png,webp,jpg,svg}` |
+| `cib` | svg | `frontend/src/assets/payment-logos/cib.{png,webp,jpg,svg}` |
+| `qnb` | svg | `frontend/src/assets/payment-logos/qnb.{png,webp,jpg,svg}` |
+| `alexbank` | svg | `frontend/src/assets/payment-logos/alexbank.{png,webp,jpg,svg}` |
+| `banque-du-caire` | svg | `frontend/src/assets/payment-logos/banque-du-caire.{png,webp,jpg,svg}` |
+| `aaib` | svg | `frontend/src/assets/payment-logos/aaib.{png,webp,jpg,svg}` |
+| `adib` | svg | `frontend/src/assets/payment-logos/adib.{png,webp,jpg,svg}` |
+| `bank-other` | svg | `frontend/src/assets/payment-logos/bank-other.{png,webp,jpg,svg}` |
+
+## Current placeholder inventory
+
+**As of this PR every entry below is a first-party SVG placeholder** (solid brand colour + initials). The operator will replace selected ones with the real attached PNGs after this PR merges.
+
+The 5 logos the operator confirmed they have on hand (and plans to drop in next):
+
+| logo_key | source |
+|---|---|
+| `instapay` | operator-provided PNG, will be dropped in |
+| `vodafone-cash` | operator-provided PNG, will be dropped in |
+| `orange-cash` | operator-provided PNG, will be dropped in |
+| `etisalat-cash` | operator-provided PNG, will be dropped in |
+| `visa` | operator-provided PNG, will be dropped in |
+
+Everything else (banks, MasterCard, Meeza, POS terminal, generic wallet/card/bank fallbacks) stays as a placeholder until the operator sources licensed assets.
 
 ## Why placeholders, not hotlinks
 
 - **No external URLs** — every asset is bundled, so the UI works offline (the POS runs offline regularly).
 - **No copyright risk** — placeholders are first-party SVGs with brand colours + initials only. No copied marks.
 - **No drive-by image downloads** — the operator decides which official assets to add and licenses them themselves.
-- **Frame-perfect swap** — same filename = zero code change to upgrade.
+- **Frame-perfect swap** — same `logo_key` + higher-priority extension = zero code change to upgrade.
