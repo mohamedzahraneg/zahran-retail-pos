@@ -16,6 +16,9 @@
 #    8.  engine_bypass_alerts last 7 days == 0
 #    9.  Trial balance = 0.00 (global DR = CR)
 #    10. Cashbox drift = 0.00 (stored current_balance == SUM(cashbox_transactions))
+#    10b. Per-(cashbox,reference) coverage drift between cashbox_transactions
+#         and journal_lines on cash-mirror accounts (PR-DRIFT-1, observability
+#         only — surfaces the number + top buckets, does NOT change pass/fail)
 #    11. Forbidden VPS paths NOT reappearing (backend/src/payroll/*, provisioning/*, orphan frontend payroll files)
 #    12. scripts/deploy.sh still invokes verify-worktree.sh
 #    13. Refund consistency = 0 rows where GL credits cash but the
@@ -203,6 +206,57 @@ if [ -n "$db_url_raw" ]; then
     fi
   fi
 
+  # 10b. Per-(cashbox, reference) coverage drift (PR-DRIFT-1).
+  #     Independent signal from #10. Even when current_balance == Σ CT,
+  #     the GL cash account (chart_of_accounts.code LIKE '111_') tagged
+  #     for a cashbox can still disagree with the CT log per
+  #     (reference_type, reference_id). Audit on 2026-04-26 found
+  #     +7,289.98 of such drift on cashbox 524646d5… that #10 misses
+  #     entirely. Surfaced — but does NOT change pass/fail behavior — to
+  #     match PR-DRIFT-1 scope (observability only). Once PR-DRIFT-2..4
+  #     close the open buckets, this section can be promoted to a hard
+  #     fail.
+  cov_drift_num="0.00"
+  cov_drift_cashbox_id=""
+  cov_drift_cashbox_name=""
+  cov_drift_top_buckets=""
+  cov_drift_max=$(sql_one "
+    SELECT COALESCE(MAX(ABS(t.cashbox_drift)), 0)::text
+      FROM (
+        SELECT cashbox_id, SUM(drift_amount)::numeric AS cashbox_drift
+          FROM v_cashbox_drift_per_ref
+         GROUP BY cashbox_id
+      ) t;")
+  if [ -n "$cov_drift_max" ]; then
+    cov_drift_num=$(printf "%.2f" "$cov_drift_max" 2>/dev/null || echo "$cov_drift_max")
+    if ! echo "$cov_drift_num" | grep -qE '^-?0\.00$'; then
+      cov_drift_cashbox_id=$(sql_one "
+        SELECT cashbox_id::text
+          FROM (
+            SELECT cashbox_id, SUM(drift_amount)::numeric AS d
+              FROM v_cashbox_drift_per_ref
+             GROUP BY cashbox_id
+          ) t
+         ORDER BY ABS(d) DESC
+         LIMIT 1;")
+      cov_drift_cashbox_name=$(sql_one "
+        SELECT name_ar FROM cashboxes
+         WHERE id = '$(echo "$cov_drift_cashbox_id" | sed "s/'/''/g")';")
+      cov_drift_top_buckets=$(sql_one "
+        SELECT string_agg(
+                 reference_type || '/' || coverage || '=' || to_char(gap, 'FM999G999G990D00'),
+                 '; ' ORDER BY ABS(gap) DESC)
+          FROM (
+            SELECT reference_type, coverage, SUM(drift_amount)::numeric AS gap
+              FROM v_cashbox_drift_per_ref
+             WHERE cashbox_id = '$(echo "$cov_drift_cashbox_id" | sed "s/'/''/g")'
+             GROUP BY reference_type, coverage
+             ORDER BY ABS(SUM(drift_amount)) DESC
+             LIMIT 5
+          ) t;")
+    fi
+  fi
+
   # 13. Refund consistency (PR-R0).
   #     Detects refunds/exchanges where the GL credited a cash-mirror
   #     account (chart_of_accounts.code LIKE '111_') but the matching
@@ -297,10 +351,19 @@ fi
 # --------------------------------------------------------------------------
 {
   if [ ${#failures[@]} -eq 0 ]; then
-    echo "[$TS_HUMAN] PASS head=$LOCAL branch=$branch migrations=${migration_count:-?} bypass_7d=${bypass_7d:-?} trial=${trial_num:-?} drift=${drift_num:-?} refund_inconsistent=${refund_inconsistent:-?}"
+    echo "[$TS_HUMAN] PASS head=$LOCAL branch=$branch migrations=${migration_count:-?} bypass_7d=${bypass_7d:-?} trial=${trial_num:-?} drift=${drift_num:-?} cov_drift=${cov_drift_num:-?} refund_inconsistent=${refund_inconsistent:-?}"
   else
     echo "[$TS_HUMAN] FAIL ${#failures[@]} issue(s)"
     for f in "${failures[@]}"; do echo "  - $f"; done
+  fi
+  # PR-DRIFT-1 observability footer. Always emitted when coverage drift is
+  # non-zero, regardless of pass/fail. Does NOT change exit code.
+  if [ -n "${cov_drift_num:-}" ] && ! echo "$cov_drift_num" | grep -qE '^-?0\.00$'; then
+    echo "  [observability] cashbox coverage drift = $cov_drift_num on cashbox ${cov_drift_cashbox_id:-?} (${cov_drift_cashbox_name:-?})"
+    if [ -n "$cov_drift_top_buckets" ]; then
+      echo "  [observability] top buckets: $cov_drift_top_buckets"
+    fi
+    echo "  [observability] run scripts/cashbox-drift-detail.sql for per-row breakdown"
   fi
 } | tee -a "$LOG_FILE"
 
