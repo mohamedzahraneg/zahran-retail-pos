@@ -112,6 +112,14 @@ export class AccountingPostingService {
     // 1111, so when the shift has no cashbox_id we fall back to the
     // 1111 account code (same as legacy postInvoice behaviour).
     if (paid > 0) {
+      // PR-DRIFT-3F — Both branches now thread cashbox_id through to
+      // the journal_line. The truthy branch already did. The fallback
+      // branch (no cashbox attribution available) keeps cashbox_id
+      // undefined, which is the correct behavior — the engine writes
+      // NULL, and v_cashbox_drift_per_ref correctly classifies it as
+      // "no source available" rather than a missing tag. The explicit
+      // `cashbox_id: undefined` makes the contract symmetrical and
+      // makes the audit's intent obvious to future readers.
       lines.push(
         inv.cashbox_id
           ? {
@@ -123,6 +131,7 @@ export class AccountingPostingService {
           : {
               account_code: '1111',
               debit: paid,
+              cashbox_id: undefined,
               description: `فاتورة ${inv.invoice_no}`,
             },
       );
@@ -290,6 +299,12 @@ export class AccountingPostingService {
           account_id: cashAcc,
           debit: 0,
           credit: net,
+          // PR-DRIFT-3F — thread cashbox_id through to the cash leg
+          // so v_cashbox_drift_per_ref can pair this JE with the
+          // matching CT under the strict (cashbox, ref) join. The
+          // SELECT above already resolves r.cashbox_id via the original
+          // invoice's shift, so the attribution is unambiguous when set.
+          cashbox_id: r.cashbox_id ?? undefined,
           description: `رد نقدي ${r.return_no}`,
         });
       }
@@ -767,7 +782,13 @@ export class AccountingPostingService {
         reference_type: 'customer_payment',
         reference_id: paymentId,
         lines: [
-          { account_id: cashAcc, debit: amt, credit: 0 },
+          // PR-DRIFT-3F — thread cashbox_id through to the cash leg.
+          {
+            account_id: cashAcc,
+            debit: amt,
+            credit: 0,
+            cashbox_id: p.cashbox_id ?? undefined,
+          },
           {
             account_id: creditAcc,
             debit: 0,
@@ -813,7 +834,13 @@ export class AccountingPostingService {
             credit: 0,
             supplier_id: p.supplier_id,
           },
-          { account_id: cashAcc, debit: 0, credit: amt },
+          // PR-DRIFT-3F — thread cashbox_id through to the cash leg.
+          {
+            account_id: cashAcc,
+            debit: 0,
+            credit: amt,
+            cashbox_id: p.cashbox_id ?? undefined,
+          },
         ],
         created_by: userId,
       });
@@ -1242,6 +1269,57 @@ export class AccountingPostingService {
       [code],
     );
     return row?.id ?? null;
+  }
+
+  /**
+   * PR-DRIFT-3F — resolve cashbox_id for a journal_line tag using the
+   * priority specified by the audit:
+   *   1) direct cashbox_id on the source row
+   *   2) shifts.cashbox_id via the source row's shift_id
+   *   3) any active cashbox_transactions on the same (reference_type,
+   *      reference_id) — only when unambiguous (single distinct cashbox)
+   *
+   * Returns NULL when no source resolves the cashbox — callers must
+   * accept that some legacy/manual entries will not have an attribution.
+   * The helper NEVER guesses; an ambiguous CT pairing returns NULL.
+   *
+   * Read-only — does NOT write any cashbox_transactions or update
+   * cashboxes.current_balance. Used purely to populate
+   * `journal_lines.cashbox_id` so v_cashbox_drift_per_ref's strict
+   * (cashbox, ref_id) join can pair the JE with its CT.
+   */
+  async resolveCashboxIdForPosting(
+    em: EntityManager | undefined,
+    args: {
+      cashbox_id?: string | null;
+      shift_id?: string | null;
+      reference_type?: string;
+      reference_id?: string;
+    },
+  ): Promise<string | null> {
+    if (args.cashbox_id) return args.cashbox_id;
+    const runner = em ?? this.ds.manager;
+    if (args.shift_id) {
+      const [s] = await runner.query(
+        `SELECT cashbox_id FROM shifts WHERE id = $1`,
+        [args.shift_id],
+      );
+      if (s?.cashbox_id) return s.cashbox_id;
+    }
+    if (args.reference_type && args.reference_id) {
+      const rows: { cashbox_id: string }[] = await runner.query(
+        `SELECT DISTINCT cashbox_id
+           FROM cashbox_transactions
+          WHERE reference_type::text = $1
+            AND reference_id = $2
+            AND COALESCE(is_void, FALSE) = FALSE
+            AND cashbox_id IS NOT NULL`,
+        [args.reference_type, args.reference_id],
+      );
+      if (rows.length === 1) return rows[0].cashbox_id;
+      // 0 or >1 distinct cashboxes: refuse to guess.
+    }
+    return null;
   }
 
   /**
