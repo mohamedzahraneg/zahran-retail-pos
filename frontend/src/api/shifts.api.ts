@@ -21,6 +21,28 @@ export interface PaymentBreakdown {
   bank_transfer: { amount: number; count: number };
 }
 
+// PR-PAY-4 — Per-method + per-account roll-up surfaced alongside the
+// legacy 4-key map. Cashier close-out reads this; the legacy shape is
+// kept for any external integration that might still read it.
+export interface PaymentBreakdownAccount {
+  payment_account_id: string | null;
+  display_name: string | null;
+  identifier: string | null;
+  provider_key: string | null;
+  total_amount: number;
+  invoice_count: number;
+  payment_count: number;
+}
+
+export interface PaymentBreakdownMethod {
+  method: string;
+  method_label_ar: string;
+  total_amount: number;
+  invoice_count: number;
+  payment_count: number;
+  accounts: PaymentBreakdownAccount[];
+}
+
 export interface ShiftExpenseRow {
   id: string;
   expense_no: string | null;
@@ -122,8 +144,16 @@ export interface ShiftSummary {
   total_cancelled: number;
   remaining_receivable: number;
 
-  // Payment method split
+  // Payment method split (legacy 4-key shape — kept for back-compat)
   payment_breakdown: PaymentBreakdown;
+
+  // PR-PAY-4 — Structured per-method + per-account breakdown.
+  // Source of truth for the new close-out section. Optional so older
+  // backend deploys (not yet on PAY-4) keep this contract working.
+  payment_breakdown_v2?: PaymentBreakdownMethod[];
+  cash_total?: number;
+  non_cash_total?: number;
+  grand_payment_total?: number;
 
   // Cashbox flows
   customer_receipts: number;

@@ -115,28 +115,141 @@ export class ShiftsService {
       [shift.id, shift.opened_by, shift.opened_at, upperBound],
     );
 
-    // Payment method breakdown.
+    // PR-PAY-4 — Payment breakdown is now per-method AND per-account.
+    // We pull one row per (method, payment_account_id) pair so the
+    // shift-close UI can show "InstaPay 300 (InstaPay الأهلي 300)" or
+    // "Wallet 500 (WE Pay 200, Vodafone 300)" without a second
+    // round-trip. Account labels prefer the snapshot frozen at sale
+    // time so admin renames/deactivations don't rewrite history.
     const payRows = await this.ds.query(
       `
       SELECT ip.payment_method::text AS method,
-             COALESCE(SUM(ip.amount),0)::numeric AS amount,
-             COUNT(*)::int AS count
+             ip.payment_account_id,
+             pa.display_name             AS live_display_name,
+             pa.identifier               AS live_identifier,
+             pa.provider_key             AS live_provider_key,
+             ip.payment_account_snapshot AS snap,
+             COALESCE(SUM(ip.amount),0)::numeric(18,2) AS amount,
+             COUNT(*)::int                              AS payment_count,
+             COUNT(DISTINCT ip.invoice_id)::int         AS invoice_count
         FROM invoice_payments ip
-        JOIN invoices i ON i.id = ip.invoice_id
+        JOIN invoices i        ON i.id = ip.invoice_id
+   LEFT JOIN payment_accounts pa ON pa.id = ip.payment_account_id
        WHERE ${invMatch}
          AND i.status IN ('paid','completed','partially_paid')
-       GROUP BY ip.payment_method
+       GROUP BY ip.payment_method, ip.payment_account_id, pa.display_name,
+                pa.identifier, pa.provider_key, ip.payment_account_snapshot
       `,
       [shift.id, shift.opened_by, shift.opened_at, upperBound],
     );
-    const byMethod: Record<string, { amount: number; count: number }> = {};
+
+    // Build the structured breakdown:
+    //   payment_breakdown: [{method, method_label_ar, total_amount,
+    //                       invoice_count, payment_count, accounts: [...]}]
+    type AccountRow = {
+      payment_account_id: string | null;
+      display_name: string | null;
+      identifier: string | null;
+      provider_key: string | null;
+      total_amount: number;
+      invoice_count: number;
+      payment_count: number;
+    };
+    type MethodRow = {
+      method: string;
+      method_label_ar: string;
+      total_amount: number;
+      invoice_count: number;
+      payment_count: number;
+      accounts: AccountRow[];
+    };
+    const METHOD_LABEL_AR: Record<string, string> = {
+      cash: 'كاش',
+      card_visa: 'فيزا',
+      card_mastercard: 'ماستركارد',
+      card_meeza: 'ميزة',
+      instapay: 'إنستا باي',
+      vodafone_cash: 'فودافون كاش',
+      orange_cash: 'أورانج كاش',
+      wallet: 'محفظة إلكترونية',
+      bank_transfer: 'تحويل بنكي',
+      credit: 'آجل',
+      other: 'أخرى',
+    };
+    const methodMap = new Map<string, MethodRow>();
     for (const r of payRows) {
-      byMethod[r.method] = { amount: Number(r.amount), count: r.count };
+      const method = r.method as string;
+      let bucket = methodMap.get(method);
+      if (!bucket) {
+        bucket = {
+          method,
+          method_label_ar: METHOD_LABEL_AR[method] || method,
+          total_amount: 0,
+          invoice_count: 0,
+          payment_count: 0,
+          accounts: [],
+        };
+        methodMap.set(method, bucket);
+      }
+      const amt = Number(r.amount);
+      const invs = Number(r.invoice_count);
+      const pays = Number(r.payment_count);
+      bucket.total_amount += amt;
+      bucket.invoice_count += invs;
+      bucket.payment_count += pays;
+      // Resolve display name preference: live account → snapshot → null.
+      // Snapshot wins when the account was deactivated/renamed since
+      // the sale; live wins when both are present and account is still
+      // around (snapshot may be slightly stale for cosmetic fields).
+      const snap = r.snap || null;
+      const display =
+        r.live_display_name ?? snap?.display_name ?? null;
+      const identifier =
+        r.live_identifier ?? snap?.identifier ?? null;
+      const provider =
+        r.live_provider_key ?? snap?.provider_key ?? null;
+      bucket.accounts.push({
+        payment_account_id: r.payment_account_id ?? null,
+        display_name: display,
+        identifier,
+        provider_key: provider,
+        total_amount: amt,
+        invoice_count: invs,
+        payment_count: pays,
+      });
     }
-    const cashFromSales = Number(byMethod.cash?.amount || 0);
-    const cardSales = Number(byMethod.card?.amount || 0);
-    const instapaySales = Number(byMethod.instapay?.amount || 0);
-    const bankSales = Number(byMethod.bank_transfer?.amount || 0);
+    // Sort accounts by amount desc within each method, then sort
+    // methods by amount desc so cash usually shows first when present.
+    for (const m of methodMap.values()) {
+      m.accounts.sort((a, b) => b.total_amount - a.total_amount);
+    }
+    const paymentBreakdown: MethodRow[] = Array.from(methodMap.values()).sort(
+      (a, b) => b.total_amount - a.total_amount,
+    );
+
+    // Roll-up totals — cash is the only thing that hits the physical
+    // drawer. Everything else is a "تحصيلات غير نقدية" collection.
+    const cashFromSales = paymentBreakdown
+      .filter((m) => m.method === 'cash')
+      .reduce((s, m) => s + m.total_amount, 0);
+    const nonCashFromSales = paymentBreakdown
+      .filter((m) => m.method !== 'cash')
+      .reduce((s, m) => s + m.total_amount, 0);
+    const grandPaymentTotal = cashFromSales + nonCashFromSales;
+
+    // Legacy 4-key map kept for backward compat with any UI that still
+    // reads the old `payment_breakdown.{cash,card,instapay,bank_transfer}`
+    // shape. The new array is the source of truth — see below.
+    const legacyBucket = (m: string) => {
+      const b = methodMap.get(m);
+      return { amount: b?.total_amount || 0, count: b?.payment_count || 0 };
+    };
+    const cardSales =
+      legacyBucket('card_visa').amount +
+      legacyBucket('card_mastercard').amount +
+      legacyBucket('card_meeza').amount;
+    const instapaySales = legacyBucket('instapay').amount;
+    const bankSales = legacyBucket('bank_transfer').amount;
 
     // Returns refunded within the shift window against the same invoices.
     const [ret] = await this.ds.query(
@@ -558,19 +671,26 @@ export class ShiftsService {
       total_cancelled: Number(inv.total_cancelled),
       remaining_receivable: Number(inv.remaining_receivable),
 
-      // payment method split
+      // PR-PAY-4 — Structured breakdown by method + per-account.
+      // The cashier-facing close-out screen reads `payment_breakdown_v2`;
+      // any legacy caller that still consumes the old 4-key
+      // `payment_breakdown` keeps working unchanged (back-compat).
       payment_breakdown: {
-        cash: { amount: cashFromSales, count: byMethod.cash?.count || 0 },
-        card: { amount: cardSales, count: byMethod.card?.count || 0 },
+        cash: { amount: cashFromSales, count: methodMap.get('cash')?.payment_count || 0 },
+        card: { amount: cardSales, count: 0 },
         instapay: {
           amount: instapaySales,
-          count: byMethod.instapay?.count || 0,
+          count: methodMap.get('instapay')?.payment_count || 0,
         },
         bank_transfer: {
           amount: bankSales,
-          count: byMethod.bank_transfer?.count || 0,
+          count: methodMap.get('bank_transfer')?.payment_count || 0,
         },
       },
+      payment_breakdown_v2: paymentBreakdown,
+      cash_total: cashFromSales,
+      non_cash_total: nonCashFromSales,
+      grand_payment_total: grandPaymentTotal,
 
       // cashbox flows
       customer_receipts: customerReceipts,
