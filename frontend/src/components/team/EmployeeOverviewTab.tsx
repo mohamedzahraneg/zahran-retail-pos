@@ -1,24 +1,32 @@
 /**
- * EmployeeOverviewTab — PR-T4.1
+ * EmployeeOverviewTab — PR-T4.3 (full dashboard rewrite)
  * ─────────────────────────────────────────────────────────────────────
  *
- * Replaces the legacy OverviewTab (defined inline in Team.tsx) with the
- * employee-overview design from
- * `employee_overview_sales_performance_design.html`. Real data only —
- * commission/sales numbers come from the existing /commissions/summary
- * + /commissions/:id/detail endpoints. Performance-rating + collection-
- * ratio fields aren't exposed by any current API; those slots fall back
- * to "غير متاح" placeholders rather than fabricated numbers.
+ * Replaces the compact PR-T4.1 overview with the full sales/performance
+ * dashboard from `employee_overview_sales_performance_design.html`:
+ * large KPI cards, derived performance gauge, daily-sales chart, top
+ * invoices, period comparison, commission box. All sales numbers come
+ * from /commissions/{summary,detail} (the only canonical employee→
+ * sales linkage in the backend — `invoice_items.salesperson_id`).
  *
- * Backend invariants (all unchanged in this PR):
- *   · /employees/:id/dashboard (existing) — work hours/days,
- *     wage.accrual_in_month, wage.paid_in_month, salary.advances_month,
- *     gl.live_snapshot
- *   · /commissions/summary?from&to (existing, PR-15) — eligible_sales,
- *     invoices_count, commission_rate, commission_amount per user
- *   · /commissions/:id/detail?from&to (existing) — invoice-level rows
- *     for the "أعلى الفواتير" list
- *   · No new endpoints, no migrations, no FinancialEngine changes
+ * Real-data sources (no new endpoints, no migrations):
+ *   · /employees/:id/dashboard → attendance.month, wage, gl, salary
+ *   · /commissions/summary?from&to (current + previous month) →
+ *     eligible_sales, invoices_count, commission_rate, commission_amount
+ *     per user, scoped to the selected employee via .find(user_id == id)
+ *   · /commissions/:id/detail?from&to → per-invoice rows (used for
+ *     top invoices + daily sales chart aggregation)
+ *
+ * Documented missing fields (no API exposes them — never faked):
+ *   · Collection ratio (paid_amount vs eligible_total) — invoice
+ *     payment data isn't on /commissions/detail; would need a
+ *     dedicated /invoices?cashier_id endpoint
+ *   · Sales by category (donut) — same: needs invoice_items roll-up
+ *   · Department / branch / direct manager (header meta) — not on
+ *     /employees/:id/dashboard
+ *   · Performance score formula — no API. We derive a transparent
+ *     score (see PerformanceGauge below) and label it
+ *     "مؤشر أداء تقديري" so users understand it's a heuristic.
  */
 
 import { useMemo } from 'react';
@@ -33,11 +41,20 @@ import {
   TrendingDown,
   Award,
   Star,
+  Calculator,
+  Users,
+  Sparkles,
   Briefcase,
-  Clock,
+  Building2,
+  Hash,
+  Calendar,
 } from 'lucide-react';
 import { TeamRow, employeesApi } from '@/api/employees.api';
-import { commissionsApi, CommissionDetailRow } from '@/api/commissions.api';
+import {
+  commissionsApi,
+  CommissionDetailRow,
+  CommissionSummaryRow,
+} from '@/api/commissions.api';
 
 const EGP = (n: number | string | null | undefined) =>
   `${Number(n || 0).toLocaleString('en-US', {
@@ -81,8 +98,6 @@ function monthBounds(): PeriodBounds {
 }
 
 function previousMonthBounds(): PeriodBounds {
-  // Previous full Cairo month (1st → last day). Used for the
-  // period-comparison column.
   const today = new Date();
   const cairoToday = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Africa/Cairo',
@@ -93,7 +108,7 @@ function previousMonthBounds(): PeriodBounds {
   const m = parseInt(cairoToday.find((p) => p.type === 'month')!.value, 10);
   const prevY = m === 1 ? y - 1 : y;
   const prevM = m === 1 ? 12 : m - 1;
-  const lastDay = new Date(prevY, prevM, 0).getDate(); // day 0 of next month = last day of prev
+  const lastDay = new Date(prevY, prevM, 0).getDate();
   const pad = (n: number) => String(n).padStart(2, '0');
   return {
     from: `${prevY}-${pad(prevM)}-01`,
@@ -102,7 +117,7 @@ function previousMonthBounds(): PeriodBounds {
 }
 
 /* ─────────────────────────────────────────────────────────────────
- * Top-level component
+ * Top-level component — full dashboard layout
  * ───────────────────────────────────────────────────────────────── */
 
 export function EmployeeOverviewTab({ employee }: { employee: TeamRow }) {
@@ -115,45 +130,30 @@ export function EmployeeOverviewTab({ employee }: { employee: TeamRow }) {
     queryFn: () => employeesApi.userDashboard(userId),
   });
 
-  // Commission summary for the current month — gives us
-  // eligible_sales, invoices_count, commission_rate, commission_amount
-  // for THIS employee. The endpoint returns one row per salesperson;
-  // we filter to ours. Non-salespeople get an empty result and the
-  // sales cards fall back to "غير متاح".
   const { data: commissionSummary = [] } = useQuery({
     queryKey: ['commissions-summary', month.from, month.to],
     queryFn: () => commissionsApi.summary(month.from, month.to),
   });
   const myCommission = useMemo(
-    () => commissionSummary.find((c) => c.user_id === userId),
+    () => (commissionSummary as CommissionSummaryRow[]).find((c) => c.user_id === userId),
     [commissionSummary, userId],
   );
 
-  // Same for previous month — drives the "تغير" column in the
-  // period-comparison table.
   const { data: prevCommissionSummary = [] } = useQuery({
     queryKey: ['commissions-summary', prevMonth.from, prevMonth.to],
     queryFn: () => commissionsApi.summary(prevMonth.from, prevMonth.to),
   });
   const prevMyCommission = useMemo(
-    () => prevCommissionSummary.find((c) => c.user_id === userId),
+    () =>
+      (prevCommissionSummary as CommissionSummaryRow[]).find((c) => c.user_id === userId),
     [prevCommissionSummary, userId],
   );
 
-  // Top invoices — only meaningful for salespeople. Skip the query
-  // when the user isn't in the commission summary (no invoices match).
   const { data: detail = [] } = useQuery({
     queryKey: ['commissions-detail', userId, month.from, month.to],
     queryFn: () => commissionsApi.detail(userId, month.from, month.to),
     enabled: !!myCommission,
   });
-  const topInvoices = useMemo(
-    () =>
-      [...(detail as CommissionDetailRow[])]
-        .sort((a, b) => Number(b.eligible_total) - Number(a.eligible_total))
-        .slice(0, 5),
-    [detail],
-  );
 
   const isSalesperson = !!myCommission;
   const eligibleSales = Number(myCommission?.eligible_sales || 0);
@@ -164,8 +164,7 @@ export function EmployeeOverviewTab({ employee }: { employee: TeamRow }) {
   const commissionAmount = Number(myCommission?.commission_amount || 0);
   const prevCommissionAmount = Number(prevMyCommission?.commission_amount || 0);
   const avgInvoice = invoicesCount > 0 ? eligibleSales / invoicesCount : 0;
-  const prevAvgInvoice =
-    prevInvoicesCount > 0 ? prevEligibleSales / prevInvoicesCount : 0;
+  const prevAvgInvoice = prevInvoicesCount > 0 ? prevEligibleSales / prevInvoicesCount : 0;
 
   const monthDays = dash?.attendance?.month?.days ?? 0;
   const monthMinutes = dash?.attendance?.month?.minutes ?? 0;
@@ -174,249 +173,230 @@ export function EmployeeOverviewTab({ employee }: { employee: TeamRow }) {
   const advancesMonth = Number(dash?.salary?.advances_month || 0);
   const liveGl = Number(dash?.gl?.live_snapshot ?? 0);
 
+  // Top 5 invoices by eligible total.
+  const topInvoices = useMemo(
+    () =>
+      [...(detail as CommissionDetailRow[])]
+        .sort((a, b) => Number(b.eligible_total) - Number(a.eligible_total))
+        .slice(0, 5),
+    [detail],
+  );
+
+  // Daily sales aggregation for the chart — group commissionsApi.detail
+  // rows by completed_at date, sum eligible_total per day.
+  const dailySales = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const r of detail as CommissionDetailRow[]) {
+      const d = (r.completed_at || '').slice(0, 10);
+      if (!d) continue;
+      m.set(d, (m.get(d) || 0) + Number(r.eligible_total || 0));
+    }
+    return [...m.entries()]
+      .sort(([a], [b]) => (a < b ? -1 : 1))
+      .map(([date, amount]) => ({ date, amount }));
+  }, [detail]);
+
+  // Derived performance score — transparent heuristic, clearly labeled
+  // "تقديري" so users know it's not authoritative. No DB write.
+  const performance = useMemo(() => {
+    // Targets (rough industry defaults — admin can override later
+    // when a real performance API exists).
+    const targetWorkDays = 22;
+    const targetSales = 50000;
+    const targetInvoices = 30;
+
+    const attendanceRatio = Math.min(monthDays / targetWorkDays, 1);
+    const salesRatio = isSalesperson ? Math.min(eligibleSales / targetSales, 1) : 0;
+    const invoiceRatio = isSalesperson ? Math.min(invoicesCount / targetInvoices, 1) : 0;
+
+    let score: number;
+    let parts: string[] = [];
+    if (isSalesperson) {
+      // Salespeople: 40% attendance + 30% sales + 30% invoice count
+      score = Math.round(
+        (attendanceRatio * 0.4 + salesRatio * 0.3 + invoiceRatio * 0.3) * 100,
+      );
+      parts = [
+        `حضور ${Math.round(attendanceRatio * 100)}%`,
+        `مبيعات ${Math.round(salesRatio * 100)}%`,
+        `فواتير ${Math.round(invoiceRatio * 100)}%`,
+      ];
+    } else {
+      // Non-salespeople: pure attendance.
+      score = Math.round(attendanceRatio * 100);
+      parts = [`حضور ${Math.round(attendanceRatio * 100)}%`];
+    }
+
+    let label: string;
+    let tone: 'green' | 'amber' | 'rose';
+    if (score >= 80) { label = 'ممتاز'; tone = 'green'; }
+    else if (score >= 60) { label = 'جيد'; tone = 'amber'; }
+    else { label = 'يحتاج تحسين'; tone = 'rose'; }
+
+    // Star rating — score / 20 = stars (out of 5)
+    const stars = Math.round((score / 100) * 5);
+
+    return { score, label, tone, stars, formula: parts.join(' · ') };
+  }, [monthDays, eligibleSales, invoicesCount, isSalesperson]);
+
   return (
-    <div className="space-y-5">
-      {/* Top KPI strip — 5 cards mixing payroll + sales (real data). */}
-      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-3">
-        <KpiCard
-          tone="green"
-          icon={<CalendarCheck size={20} />}
-          label="أيام العمل (الشهر)"
-          value={monthDays.toString()}
-          sub={`${fmtHours(monthMinutes)} إجمالي`}
-        />
-        <KpiCard
-          tone="blue"
-          icon={<Banknote size={20} />}
-          label="مستحقات معتمدة"
-          value={EGP(accrualInMonth)}
-          sub="من اعتماد اليوميات"
-        />
-        <KpiCard
-          tone="orange"
-          icon={<Wallet size={20} />}
-          label="مصروف فعليًا"
-          value={EGP(paidInMonth)}
-          sub="مجموع التسويات النقدية"
-        />
-        <KpiCard
-          tone="purple"
-          icon={<TrendingDown size={20} />}
-          label="سلف الشهر"
-          value={EGP(advancesMonth)}
-          sub="ذمم على الموظف"
-        />
-        <KpiCard
-          tone={liveGl < -0.01 ? 'green' : liveGl > 0.01 ? 'red' : 'slate'}
-          icon={<Receipt size={20} />}
-          label="الرصيد النهائي"
-          value={EGP(Math.abs(liveGl))}
-          sub={
-            liveGl < -0.01
-              ? 'مستحق له'
-              : liveGl > 0.01
-                ? 'مدين للشركة'
-                : 'متوازن'
-          }
-        />
-      </div>
+    <div className="space-y-6">
+      <PeriodHeader from={month.from} to={month.to} />
 
-      {/* Sales / commission strip — only meaningful when employee has a
-          commission rate. Otherwise show an explainer card. */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <KpiCard
-          tone="blue"
-          icon={<Receipt size={20} />}
-          label="فواتير المبيعات (الشهر)"
-          value={isSalesperson ? invoicesCount.toLocaleString('en-US') : 'غير متاح'}
-          sub={
-            isSalesperson
-              ? prevInvoicesCount > 0
-                ? changeLabel(invoicesCount - prevInvoicesCount, false)
+      <ProfileHeroCard
+        employee={employee}
+        dash={dash}
+        liveGl={liveGl}
+      />
+
+      {/* MAIN KPI ROW — sales focus when salesperson, else payroll focus */}
+      {isSalesperson ? (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
+          <BigKpi
+            tone="green"
+            icon={<TrendingUp size={26} />}
+            label="إجمالي المبيعات"
+            value={EGP(eligibleSales)}
+            sub={
+              prevEligibleSales > 0
+                ? changeLabel(eligibleSales - prevEligibleSales, true)
                 : undefined
-              : 'غير مرتبط بمبيعات'
-          }
-        />
-        <KpiCard
-          tone="green"
-          icon={<TrendingUp size={20} />}
-          label="إجمالي المبيعات"
-          value={isSalesperson ? EGP(eligibleSales) : 'غير متاح'}
-          sub={
-            isSalesperson && prevEligibleSales > 0
-              ? changeLabel(eligibleSales - prevEligibleSales, true)
-              : undefined
-          }
-        />
-        <KpiCard
-          tone="orange"
-          icon={<Award size={20} />}
-          label="متوسط قيمة الفاتورة"
-          value={isSalesperson ? EGP(avgInvoice) : 'غير متاح'}
-          sub={
-            isSalesperson && prevAvgInvoice > 0
-              ? changeLabel(avgInvoice - prevAvgInvoice, true)
-              : undefined
-          }
-        />
-        <KpiCard
-          tone="purple"
-          icon={<Percent size={20} />}
-          label="عمولة الموظف"
-          value={
-            isSalesperson
-              ? `${EGP(commissionAmount)} (${commissionRate}%)`
-              : 'غير متاح'
-          }
-          sub={
-            isSalesperson && prevCommissionAmount > 0
-              ? changeLabel(commissionAmount - prevCommissionAmount, true)
-              : isSalesperson
-                ? `بمعدل عمولة ${commissionRate}%`
+            }
+          />
+          <BigKpi
+            tone="blue"
+            icon={<Receipt size={26} />}
+            label="عدد فواتير المبيعات"
+            value={invoicesCount.toLocaleString('en-US')}
+            sub={
+              prevInvoicesCount > 0
+                ? `فاتورة · ${changeLabel(invoicesCount - prevInvoicesCount, false)}`
+                : 'فاتورة'
+            }
+          />
+          <BigKpi
+            tone="orange"
+            icon={<Calculator size={26} />}
+            label="متوسط قيمة الفاتورة"
+            value={EGP(avgInvoice)}
+            sub={
+              prevAvgInvoice > 0
+                ? changeLabel(avgInvoice - prevAvgInvoice, true)
                 : undefined
-          }
+            }
+          />
+          <BigKpi
+            tone="purple"
+            icon={<Wallet size={26} />}
+            label="عمولة الموظف (الفترة)"
+            value={EGP(commissionAmount)}
+            sub={
+              prevCommissionAmount > 0
+                ? `بمعدل ${commissionRate}% · ${changeLabel(commissionAmount - prevCommissionAmount, true)}`
+                : `بمعدل عمولة ${commissionRate}%`
+            }
+          />
+          <BigKpi
+            tone="rose"
+            icon={<Percent size={26} />}
+            label="معدل العمولة"
+            value={`${commissionRate}%`}
+            sub="من القيمة المؤهلة"
+          />
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
+          <BigKpi
+            tone="green"
+            icon={<CalendarCheck size={26} />}
+            label="أيام العمل (الشهر)"
+            value={monthDays.toString()}
+            sub="أيام مسجّل بها حضور"
+          />
+          <BigKpi
+            tone="blue"
+            icon={<Banknote size={26} />}
+            label="مستحقات معتمدة"
+            value={EGP(accrualInMonth)}
+            sub="من اعتماد اليوميات"
+          />
+          <BigKpi
+            tone="orange"
+            icon={<Wallet size={26} />}
+            label="مصروف فعليًا"
+            value={EGP(paidInMonth)}
+            sub="مجموع التسويات النقدية"
+          />
+          <BigKpi
+            tone="purple"
+            icon={<TrendingDown size={26} />}
+            label="سلف الشهر"
+            value={EGP(advancesMonth)}
+            sub="ذمم على الموظف"
+          />
+          <BigKpi
+            tone={liveGl < -0.01 ? 'green' : liveGl > 0.01 ? 'rose' : 'slate'}
+            icon={<Receipt size={26} />}
+            label="الرصيد النهائي"
+            value={EGP(Math.abs(liveGl))}
+            sub={
+              liveGl < -0.01
+                ? 'مستحق له'
+                : liveGl > 0.01
+                  ? 'مدين للشركة'
+                  : 'متوازن'
+            }
+          />
+        </div>
+      )}
+
+      {/* Performance + Star rating + Daily sales chart */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-[1fr_1fr_2fr] gap-4">
+        <PerformanceGaugePanel performance={performance} />
+        <StarRatingPanel performance={performance} />
+        <DailySalesPanel
+          isSalesperson={isSalesperson}
+          dailySales={dailySales}
         />
       </div>
 
-      {/* Two-column body: top invoices (left) + period comparison (right) */}
-      <div className="grid grid-cols-1 lg:grid-cols-[1fr_1fr] gap-5">
-        <SectionCard
-          title="أعلى فواتير المبيعات (الشهر)"
-          subtitle={
-            isSalesperson
-              ? 'مرتبة حسب القيمة المؤهلة للعمولة'
-              : 'الموظف غير مرتبط بمبيعات.'
-          }
-        >
-          {!isSalesperson ? (
-            <EmptyRow message="لا توجد فواتير مبيعات لهذا الموظف. هذا القسم يظهر فقط للموظفين المرتبطين بمبيعات (لديهم نسبة عمولة)." />
-          ) : topInvoices.length === 0 ? (
-            <EmptyRow message="لا توجد فواتير في هذا الشهر." />
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="min-w-full text-xs">
-                <thead className="bg-slate-50">
-                  <tr>
-                    <Th>#</Th>
-                    <Th>رقم الفاتورة</Th>
-                    <Th>التاريخ</Th>
-                    <Th>العميل</Th>
-                    <Th>القيمة المؤهلة</Th>
-                    <Th>العمولة</Th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {topInvoices.map((inv, i) => (
-                    <tr key={inv.invoice_id} className="border-t border-slate-100">
-                      <Td className="font-mono">{i + 1}</Td>
-                      <Td className="font-mono text-[11px]">{inv.invoice_no}</Td>
-                      <Td className="font-mono tabular-nums">
-                        {fmtDate(inv.completed_at)}
-                      </Td>
-                      <Td>{inv.customer_name || '—'}</Td>
-                      <Td className="font-mono tabular-nums font-bold">
-                        {EGP(inv.eligible_total)}
-                      </Td>
-                      <Td className="font-mono tabular-nums text-emerald-700">
-                        {EGP(inv.commission)}
-                      </Td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </SectionCard>
-
-        <SectionCard
-          title="ملخص مقارن (الشهر الحالي vs السابق)"
-          subtitle="من نفس مصادر البيانات الحقيقية — لا توجد قيم مزيفة."
-        >
-          <div className="overflow-x-auto">
-            <table className="min-w-full text-xs">
-              <thead className="bg-slate-50">
-                <tr>
-                  <Th>المؤشر</Th>
-                  <Th>الشهر الحالي</Th>
-                  <Th>الشهر السابق</Th>
-                  <Th>التغير</Th>
-                </tr>
-              </thead>
-              <tbody>
-                <ComparisonRow
-                  label="أيام العمل"
-                  current={monthDays}
-                  previous={null}
-                  formatter={(n) => String(n)}
-                />
-                <ComparisonRow
-                  label="ساعات العمل"
-                  current={monthMinutes}
-                  previous={null}
-                  formatter={fmtHours}
-                />
-                <ComparisonRow
-                  label="مستحقات معتمدة"
-                  current={accrualInMonth}
-                  previous={null}
-                  formatter={EGP}
-                />
-                <ComparisonRow
-                  label="مصروف فعليًا"
-                  current={paidInMonth}
-                  previous={null}
-                  formatter={EGP}
-                />
-                {isSalesperson && (
-                  <>
-                    <ComparisonRow
-                      label="إجمالي المبيعات"
-                      current={eligibleSales}
-                      previous={prevEligibleSales || null}
-                      formatter={EGP}
-                    />
-                    <ComparisonRow
-                      label="عدد الفواتير"
-                      current={invoicesCount}
-                      previous={prevInvoicesCount || null}
-                      formatter={(n) => String(n)}
-                    />
-                    <ComparisonRow
-                      label="متوسط الفاتورة"
-                      current={avgInvoice}
-                      previous={prevAvgInvoice || null}
-                      formatter={EGP}
-                    />
-                    <ComparisonRow
-                      label="مبلغ العمولة"
-                      current={commissionAmount}
-                      previous={prevCommissionAmount || null}
-                      formatter={EGP}
-                    />
-                  </>
-                )}
-              </tbody>
-            </table>
-          </div>
-          <div className="px-4 pt-3 pb-4 text-[10px] text-slate-400 border-t border-slate-100 leading-relaxed">
-            * مؤشرات الحضور والمستحقات المقارنة بالشهر السابق ستُضاف عند توفر
-            موسع API للـ dashboard. مؤشرات المبيعات/العمولة تستخدم endpoint
-            <code className="px-1 mx-1 bg-slate-100 rounded">/commissions/summary</code>
-            مع نطاق تاريخ الشهر السابق.
-          </div>
-        </SectionCard>
+      {/* Commission box (focused) + Top invoices + Period comparison */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <CommissionPanel
+          isSalesperson={isSalesperson}
+          commissionRate={commissionRate}
+          commissionAmount={commissionAmount}
+          eligibleSales={eligibleSales}
+        />
+        <TopInvoicesPanel
+          isSalesperson={isSalesperson}
+          rows={topInvoices}
+        />
+        <PeriodComparisonPanel
+          monthDays={monthDays}
+          monthMinutes={monthMinutes}
+          accrualInMonth={accrualInMonth}
+          paidInMonth={paidInMonth}
+          isSalesperson={isSalesperson}
+          eligibleSales={eligibleSales}
+          prevEligibleSales={prevEligibleSales}
+          invoicesCount={invoicesCount}
+          prevInvoicesCount={prevInvoicesCount}
+          avgInvoice={avgInvoice}
+          prevAvgInvoice={prevAvgInvoice}
+          commissionAmount={commissionAmount}
+          prevCommissionAmount={prevCommissionAmount}
+        />
       </div>
 
-      {/* Tasks + requests teaser — kept minimal; full audit is in the
-          الموافقات والتعديلات tab and the tasks system has a separate
-          modal in the Actions dropdown. */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-        <SectionCard
+      {/* Tasks + requests + missing-data note */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <SmallPanel
           title={`مهام مفتوحة (${dash?.tasks?.length ?? 0})`}
           subtitle="من /employees/:id/dashboard"
         >
           {!dash?.tasks?.length ? (
-            <EmptyRow message="لا مهام مفتوحة." />
+            <EmptyText>لا مهام مفتوحة.</EmptyText>
           ) : (
             <ul className="px-5 py-2 divide-y divide-slate-100 text-sm">
               {dash.tasks.map((t) => (
@@ -435,13 +415,13 @@ export function EmployeeOverviewTab({ employee }: { employee: TeamRow }) {
               ))}
             </ul>
           )}
-        </SectionCard>
-        <SectionCard
+        </SmallPanel>
+        <SmallPanel
           title={`طلبات معلّقة (${dash?.requests?.length ?? 0})`}
-          subtitle="القرار يتم من تبويب الموافقات والتعديلات"
+          subtitle="القرار من تبويب الموافقات والتعديلات"
         >
           {!dash?.requests?.length ? (
-            <EmptyRow message="لا توجد طلبات." />
+            <EmptyText>لا توجد طلبات.</EmptyText>
           ) : (
             <ul className="px-5 py-2 divide-y divide-slate-100 text-sm">
               {dash.requests.map((r) => (
@@ -457,43 +437,433 @@ export function EmployeeOverviewTab({ employee }: { employee: TeamRow }) {
               ))}
             </ul>
           )}
-        </SectionCard>
+        </SmallPanel>
+        <SmallPanel
+          title="مؤشرات في الانتظار"
+          subtitle="حقول لم يُكشف عنها API بعد — لم تُختلق."
+        >
+          <ul className="px-5 py-3 divide-y divide-slate-100 text-xs text-slate-500">
+            <li className="py-2 flex items-center gap-2">
+              <Briefcase size={12} className="text-slate-400" />
+              نسبة التحصيل (paid_amount vs eligible)
+            </li>
+            <li className="py-2 flex items-center gap-2">
+              <Sparkles size={12} className="text-slate-400" />
+              توزيع المبيعات حسب الفئة (donut)
+            </li>
+            <li className="py-2 flex items-center gap-2">
+              <Building2 size={12} className="text-slate-400" />
+              القسم / الفرع / المدير المباشر
+            </li>
+          </ul>
+        </SmallPanel>
       </div>
 
-      {/* Performance/rating — currently no API. Honest placeholder per spec. */}
-      <SectionCard
-        title="تقييم الأداء"
-        subtitle="هذه المؤشرات ستُضاف عند توفر API لتقييم الأداء."
-      >
-        <div className="px-5 py-6 grid grid-cols-1 md:grid-cols-3 gap-4 text-center">
-          <PlaceholderStat icon={<Award size={20} />} label="مستوى الأداء" />
-          <PlaceholderStat icon={<Star size={20} />} label="تقييم الأداء (نجوم)" />
-          <PlaceholderStat icon={<Briefcase size={20} />} label="نسبة التحصيل" />
-        </div>
-      </SectionCard>
+      <FooterMeta from={month.from} to={month.to} />
     </div>
   );
 }
 
 /* ─────────────────────────────────────────────────────────────────
- * Helpers
+ * Sub-components
  * ───────────────────────────────────────────────────────────────── */
 
-function changeLabel(delta: number, isMoney: boolean): string {
-  const arrow = delta > 0 ? '↑' : delta < 0 ? '↓' : '·';
-  return `${arrow} ${isMoney ? EGP(Math.abs(delta)) : Math.abs(delta).toLocaleString('en-US')} عن الفترة السابقة`;
+function PeriodHeader({ from, to }: { from: string; to: string }) {
+  return (
+    <div className="flex items-center justify-between gap-3 flex-wrap">
+      <div>
+        <h2 className="text-2xl font-black text-slate-800">نظرة عامة على الموظف</h2>
+        <p className="text-sm text-slate-500 mt-0.5">
+          أداء، مبيعات، حضور، وحركات حسابية ضمن الفترة المحددة.
+        </p>
+      </div>
+      <div className="inline-flex items-center gap-2 bg-white border border-slate-200 rounded-xl px-4 py-2 text-sm font-bold text-slate-700">
+        <Calendar size={14} className="text-slate-400" />
+        الفترة {fmtDate(from)} — {fmtDate(to)}
+      </div>
+    </div>
+  );
 }
 
-function ComparisonRow({
-  label,
-  current,
-  previous,
-  formatter,
+function ProfileHeroCard({
+  employee,
+  dash,
+  liveGl,
+}: {
+  employee: TeamRow;
+  dash: any;
+  liveGl: number;
+}) {
+  const isPayable = liveGl < -0.01;
+  const isDebt = liveGl > 0.01;
+  return (
+    <div className="rounded-3xl border border-slate-200 bg-white shadow-sm p-6">
+      <div className="grid grid-cols-1 md:grid-cols-[150px_1fr_280px] gap-6 items-center">
+        <div className="w-32 h-32 mx-auto md:mx-0 rounded-full bg-gradient-to-br from-slate-200 to-slate-50 border border-slate-200 flex items-center justify-center text-5xl">
+          👤
+        </div>
+        <div>
+          <h3 className="text-3xl font-black text-slate-800 flex items-center gap-3 flex-wrap">
+            {employee.full_name || employee.username}
+            <span className="text-xs font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-full px-3 py-1">
+              نشط
+            </span>
+          </h3>
+          <div className="text-base text-slate-500 mt-1 font-bold">
+            {employee.role_name || employee.job_title || '—'}
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 mt-5 text-xs">
+            <MetaItem icon={<Hash size={12} />} label="رقم الموظف" value={employee.employee_no || '—'} />
+            <MetaItem icon={<Calendar size={12} />} label="تاريخ التعيين" value={dash?.profile?.hire_date || 'غير متاح'} />
+            <MetaItem icon={<Building2 size={12} />} label="القسم / الفرع" value="غير متاح" hint="لم يُكشف عنه API بعد" />
+            <MetaItem icon={<Users size={12} />} label="حالة اليوم" value={dash?.attendance?.today ? 'حاضر' : 'لم يُسجَّل'} />
+          </div>
+        </div>
+        <div
+          className={`rounded-2xl border p-5 text-center ${
+            isPayable
+              ? 'border-emerald-200 bg-emerald-50/40'
+              : isDebt
+                ? 'border-rose-200 bg-rose-50/40'
+                : 'border-slate-200 bg-slate-50'
+          }`}
+        >
+          <div className="text-xs text-slate-500">الرصيد النهائي للموظف</div>
+          <div
+            className={`text-3xl font-black mt-2 tabular-nums ${
+              isPayable ? 'text-emerald-700' : isDebt ? 'text-rose-700' : 'text-slate-700'
+            }`}
+          >
+            {EGP(Math.abs(liveGl))}
+          </div>
+          <div className="text-sm font-bold mt-1 text-slate-600">
+            {isPayable ? 'مستحق له' : isDebt ? 'مدين للشركة' : 'متوازن'}
+          </div>
+          <div className="text-[11px] text-slate-500 mt-2 leading-snug">
+            من v_employee_gl_balance
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MetaItem({
+  icon, label, value, hint,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value: string;
+  hint?: string;
+}) {
+  return (
+    <div className="text-slate-500" title={hint}>
+      <div className="flex items-center gap-1 text-[11px] mb-1">
+        <span className="text-slate-400">{icon}</span>
+        {label}
+      </div>
+      <div className="font-bold text-slate-700 text-[13px]">{value}</div>
+    </div>
+  );
+}
+
+function BigKpi({
+  tone, icon, label, value, sub,
+}: {
+  tone: 'green' | 'blue' | 'orange' | 'purple' | 'rose' | 'slate';
+  icon: React.ReactNode;
+  label: string;
+  value: string;
+  sub?: string;
+}) {
+  const map: Record<string, { fg: string; tile: string }> = {
+    green:  { fg: 'text-emerald-700', tile: 'bg-emerald-100' },
+    blue:   { fg: 'text-blue-700',    tile: 'bg-blue-100' },
+    orange: { fg: 'text-amber-700',   tile: 'bg-amber-100' },
+    purple: { fg: 'text-violet-700',  tile: 'bg-violet-100' },
+    rose:   { fg: 'text-rose-700',    tile: 'bg-rose-100' },
+    slate:  { fg: 'text-slate-600',   tile: 'bg-slate-100' },
+  };
+  const t = map[tone];
+  return (
+    <div className="rounded-3xl border border-slate-200 bg-white shadow-sm p-5 flex items-center justify-between gap-4 min-h-[140px]">
+      <div className="min-w-0 flex-1">
+        <div className="text-sm font-black text-slate-500">{label}</div>
+        <div className={`text-[26px] font-black mt-2 tabular-nums leading-none ${t.fg}`}>
+          {value}
+        </div>
+        {sub && (
+          <div className="text-[12px] text-slate-400 mt-2 leading-snug">{sub}</div>
+        )}
+      </div>
+      <div className={`shrink-0 w-14 h-14 rounded-2xl ${t.tile} ${t.fg} flex items-center justify-center`}>
+        {icon}
+      </div>
+    </div>
+  );
+}
+
+function PerformanceGaugePanel({ performance }: { performance: any }) {
+  // Needle rotation: -90deg = empty (left), 0 = mid, 90deg = full.
+  // Start from -90 + (score / 100) * 180.
+  const angle = -90 + (performance.score / 100) * 180;
+  const toneText: Record<string, string> = {
+    green: 'text-emerald-700',
+    amber: 'text-amber-700',
+    rose:  'text-rose-700',
+  };
+  return (
+    <Panel title="مستوى الأداء" subtitle="مؤشر تقديري — ليس ثابت محاسبيًا">
+      <div className="px-5 pb-5 pt-2 flex flex-col items-center">
+        <div className="relative w-[200px] h-[110px]">
+          <div
+            className="absolute inset-0 rounded-t-full"
+            style={{
+              background:
+                'conic-gradient(from 270deg, #ef4444 0deg, #f59e0b 60deg, #22c55e 130deg, #e2e8f0 180deg, #e2e8f0 360deg)',
+              clipPath: 'polygon(0 0, 100% 0, 100% 100%, 0 100%)',
+            }}
+          />
+          <div className="absolute inset-x-6 bottom-[-2px] h-[78px] bg-white rounded-t-full" />
+          <div
+            className="absolute right-1/2 top-[100px] w-[80px] h-[5px] bg-slate-700 rounded-full origin-right transition-transform"
+            style={{ transform: `rotate(${-angle}deg)` }}
+          />
+          <div className="absolute right-1/2 top-[97px] translate-x-1/2 w-3 h-3 bg-slate-700 rounded-full" />
+        </div>
+        <div className={`mt-2 text-2xl font-black ${toneText[performance.tone]}`}>
+          {performance.label}
+        </div>
+        <div className="text-base font-black text-slate-700 mt-1 tabular-nums">
+          {performance.score}/100
+        </div>
+        <div className="text-[11px] text-slate-400 mt-2 text-center leading-relaxed max-w-[260px]">
+          {performance.formula}
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
+function StarRatingPanel({ performance }: { performance: any }) {
+  return (
+    <Panel title="تقييم الأداء" subtitle="مؤشر تقديري · 5 نجوم = 100%">
+      <div className="p-5 flex flex-col items-center">
+        <div className="text-[42px] tracking-[6px] text-amber-500 select-none">
+          {Array(5).fill(0).map((_, i) =>
+            i < performance.stars ? '★' : '☆',
+          ).join('')}
+        </div>
+        <div className="text-2xl font-black text-slate-800 mt-2 tabular-nums">
+          {(performance.score / 20).toFixed(1)} من 5
+        </div>
+        <div className="text-[11px] text-slate-400 mt-3 leading-relaxed text-center">
+          محسوب من نفس مكونات مستوى الأداء.
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
+function DailySalesPanel({
+  isSalesperson, dailySales,
+}: {
+  isSalesperson: boolean;
+  dailySales: { date: string; amount: number }[];
+}) {
+  const max = Math.max(1, ...dailySales.map((d) => d.amount));
+  return (
+    <Panel
+      title="المبيعات اليومية"
+      subtitle={
+        isSalesperson
+          ? `${dailySales.length} يوم نشط`
+          : 'الموظف غير مرتبط بمبيعات.'
+      }
+    >
+      {!isSalesperson ? (
+        <SalespersonEmptyState />
+      ) : dailySales.length === 0 ? (
+        <EmptyText>لا فواتير في هذا الشهر.</EmptyText>
+      ) : (
+        <div className="px-5 pb-5 pt-2">
+          <div className="h-[180px] flex items-end gap-1 border-b border-slate-200">
+            {dailySales.map((d) => {
+              const h = (d.amount / max) * 100;
+              return (
+                <div
+                  key={d.date}
+                  className="flex-1 min-w-[8px] bg-violet-200 hover:bg-violet-400 rounded-t transition relative group"
+                  style={{ height: `${h}%` }}
+                  title={`${d.date}: ${EGP(d.amount)}`}
+                >
+                  <div className="absolute -top-7 left-1/2 -translate-x-1/2 opacity-0 group-hover:opacity-100 bg-slate-800 text-white text-[10px] px-2 py-1 rounded whitespace-nowrap pointer-events-none transition">
+                    {EGP(d.amount)}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <div className="flex items-center justify-between text-[10px] text-slate-400 mt-2 tabular-nums">
+            <span>{fmtDate(dailySales[0].date)}</span>
+            <span>{fmtDate(dailySales[dailySales.length - 1].date)}</span>
+          </div>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+function CommissionPanel({
+  isSalesperson, commissionRate, commissionAmount, eligibleSales,
+}: {
+  isSalesperson: boolean;
+  commissionRate: number;
+  commissionAmount: number;
+  eligibleSales: number;
+}) {
+  return (
+    <Panel
+      title="نسبة الموظف من المبيعات"
+      subtitle={isSalesperson ? `بمعدل ${commissionRate}%` : 'الموظف غير مرتبط بمبيعات.'}
+    >
+      {!isSalesperson ? (
+        <SalespersonEmptyState />
+      ) : (
+        <div className="px-5 pb-5 pt-2">
+          <div className="text-center text-5xl font-black text-emerald-700 tabular-nums">
+            {commissionRate}%
+          </div>
+          <div className="text-center text-xs text-slate-500 mt-1">
+            نسبة العمولة من القيمة المؤهلة
+          </div>
+          <div className="rounded-2xl bg-gradient-to-b from-white to-emerald-50 border border-emerald-100 p-5 mt-4 text-center">
+            <div className="text-xs text-slate-500">إجمالي العمولة المستحقة</div>
+            <div className="text-3xl font-black text-emerald-700 mt-2 tabular-nums">
+              {EGP(commissionAmount)}
+            </div>
+            <div className="text-[11px] text-slate-500 mt-3">
+              من إجمالي مؤهل {EGP(eligibleSales)}
+            </div>
+          </div>
+          <div className="mt-4 text-[11px] text-slate-400 leading-relaxed text-center">
+            * تتبع مدفوعات العمولة سيُضاف عند توفر API لربط الدفعات
+            بالعمولة المستحقة.
+          </div>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+function TopInvoicesPanel({
+  isSalesperson, rows,
+}: {
+  isSalesperson: boolean;
+  rows: CommissionDetailRow[];
+}) {
+  return (
+    <Panel
+      title="أعلى فواتير المبيعات"
+      subtitle={isSalesperson ? `أعلى ${rows.length} فواتير قيمة` : ''}
+    >
+      {!isSalesperson ? (
+        <SalespersonEmptyState />
+      ) : rows.length === 0 ? (
+        <EmptyText>لا فواتير في هذا الشهر.</EmptyText>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="min-w-full text-xs">
+            <thead className="bg-slate-50">
+              <tr>
+                <Th>#</Th>
+                <Th>رقم الفاتورة</Th>
+                <Th>التاريخ</Th>
+                <Th>العميل</Th>
+                <Th>المبلغ</Th>
+                <Th>عمولة</Th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((inv, i) => (
+                <tr key={inv.invoice_id} className="border-t border-slate-100">
+                  <Td className="font-mono">{i + 1}</Td>
+                  <Td className="font-mono text-[11px]">{inv.invoice_no}</Td>
+                  <Td className="font-mono tabular-nums">{fmtDate(inv.completed_at)}</Td>
+                  <Td>{inv.customer_name || '—'}</Td>
+                  <Td className="font-mono tabular-nums font-bold">
+                    {EGP(inv.eligible_total)}
+                  </Td>
+                  <Td className="font-mono tabular-nums text-emerald-700">
+                    {EGP(inv.commission)}
+                  </Td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+function PeriodComparisonPanel(props: {
+  monthDays: number;
+  monthMinutes: number;
+  accrualInMonth: number;
+  paidInMonth: number;
+  isSalesperson: boolean;
+  eligibleSales: number;
+  prevEligibleSales: number;
+  invoicesCount: number;
+  prevInvoicesCount: number;
+  avgInvoice: number;
+  prevAvgInvoice: number;
+  commissionAmount: number;
+  prevCommissionAmount: number;
+}) {
+  return (
+    <Panel
+      title="ملخص مقارن"
+      subtitle="الشهر الحالي مقابل السابق"
+    >
+      <div className="overflow-x-auto">
+        <table className="min-w-full text-xs">
+          <thead className="bg-slate-50">
+            <tr>
+              <Th>المؤشر</Th>
+              <Th>الحالي</Th>
+              <Th>السابق</Th>
+              <Th>التغير</Th>
+            </tr>
+          </thead>
+          <tbody>
+            <CmpRow label="أيام العمل" current={props.monthDays} previous={null} fmt={(n) => String(n)} />
+            <CmpRow label="ساعات العمل" current={props.monthMinutes} previous={null} fmt={fmtHours} />
+            <CmpRow label="مستحقات معتمدة" current={props.accrualInMonth} previous={null} fmt={EGP} />
+            <CmpRow label="مصروف فعليًا" current={props.paidInMonth} previous={null} fmt={EGP} />
+            {props.isSalesperson && (
+              <>
+                <CmpRow label="إجمالي المبيعات" current={props.eligibleSales} previous={props.prevEligibleSales || null} fmt={EGP} />
+                <CmpRow label="عدد الفواتير" current={props.invoicesCount} previous={props.prevInvoicesCount || null} fmt={(n) => String(n)} />
+                <CmpRow label="متوسط الفاتورة" current={props.avgInvoice} previous={props.prevAvgInvoice || null} fmt={EGP} />
+                <CmpRow label="مبلغ العمولة" current={props.commissionAmount} previous={props.prevCommissionAmount || null} fmt={EGP} />
+              </>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </Panel>
+  );
+}
+
+function CmpRow({
+  label, current, previous, fmt,
 }: {
   label: string;
   current: number;
   previous: number | null;
-  formatter: (n: number) => string;
+  fmt: (n: number) => string;
 }) {
   const hasPrev = previous != null && Number.isFinite(previous);
   const delta = hasPrev ? current - (previous as number) : null;
@@ -504,9 +874,9 @@ function ComparisonRow({
   return (
     <tr className="border-t border-slate-100">
       <Td>{label}</Td>
-      <Td className="font-mono tabular-nums">{formatter(current)}</Td>
+      <Td className="font-mono tabular-nums">{fmt(current)}</Td>
       <Td className="font-mono tabular-nums text-slate-500">
-        {hasPrev ? formatter(previous as number) : 'غير متاح'}
+        {hasPrev ? fmt(previous as number) : 'غير متاح'}
       </Td>
       <Td
         className={`font-mono font-bold ${
@@ -523,90 +893,74 @@ function ComparisonRow({
           ? '—'
           : pct != null
             ? `${pct > 0 ? '↑' : pct < 0 ? '↓' : '·'} ${Math.abs(pct)}%`
-            : `${delta > 0 ? '↑' : '↓'} ${formatter(Math.abs(delta))}`}
+            : `${delta > 0 ? '↑' : '↓'} ${fmt(Math.abs(delta))}`}
       </Td>
     </tr>
   );
 }
 
-/* ─────────────────────────────────────────────────────────────────
- * Small UI primitives
- * ───────────────────────────────────────────────────────────────── */
-
-function KpiCard({
-  tone,
-  icon,
-  label,
-  value,
-  sub,
-}: {
-  tone: 'green' | 'blue' | 'orange' | 'purple' | 'red' | 'slate';
-  icon: React.ReactNode;
-  label: string;
-  value: string;
-  sub?: string;
-}) {
-  const map: Record<string, { fg: string; tile: string }> = {
-    green:  { fg: 'text-emerald-700', tile: 'bg-emerald-100' },
-    blue:   { fg: 'text-blue-700',    tile: 'bg-blue-100' },
-    orange: { fg: 'text-amber-700',   tile: 'bg-amber-100' },
-    purple: { fg: 'text-violet-700',  tile: 'bg-violet-100' },
-    red:    { fg: 'text-rose-700',    tile: 'bg-rose-100' },
-    slate:  { fg: 'text-slate-600',   tile: 'bg-slate-100' },
-  };
-  const t = map[tone];
+function SalespersonEmptyState() {
   return (
-    <div className="rounded-2xl border border-slate-200 bg-white p-4 flex items-center justify-between gap-3 shadow-sm">
-      <div className="min-w-0">
-        <div className="text-[11px] font-bold text-slate-500">{label}</div>
-        <div className={`text-lg font-black mt-1 ${t.fg} truncate tabular-nums`}>
-          {value}
-        </div>
-        {sub && (
-          <div className="text-[10px] text-slate-400 mt-0.5">{sub}</div>
-        )}
+    <div className="px-5 py-8 text-center">
+      <div className="w-14 h-14 mx-auto rounded-2xl bg-slate-100 text-slate-400 flex items-center justify-center mb-3">
+        <Award size={26} />
       </div>
-      <div className={`shrink-0 w-10 h-10 rounded-xl ${t.tile} ${t.fg} flex items-center justify-center`}>
-        {icon}
+      <div className="text-sm font-bold text-slate-700">
+        الموظف غير مرتبط بمبيعات
+      </div>
+      <div className="text-xs text-slate-500 mt-1 leading-relaxed max-w-sm mx-auto">
+        هذه الأقسام تظهر فقط للموظفين المرتبطين بفواتير مبيعات (مرتبطين عبر
+        <code className="px-1 mx-1 bg-slate-100 rounded">invoice_items.salesperson_id</code>
+        أو لديهم نسبة عمولة مفعّلة).
       </div>
     </div>
   );
 }
 
-function SectionCard({
-  title,
-  subtitle,
-  children,
-}: {
-  title: string;
-  subtitle?: string;
-  children: React.ReactNode;
-}) {
+function FooterMeta({ from, to }: { from: string; to: string }) {
   return (
-    <div className="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden">
+    <div className="text-[11px] text-slate-400 flex items-center justify-between">
+      <span>المبيعات والعمولة من /commissions/{`{summary,detail}`}</span>
+      <span>الفترة {fmtDate(from)} — {fmtDate(to)} · جميع المبالغ بالجنيه المصري</span>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────────
+ * Helpers + small primitives
+ * ───────────────────────────────────────────────────────────────── */
+
+function changeLabel(delta: number, isMoney: boolean): string {
+  const arrow = delta > 0 ? '↑' : delta < 0 ? '↓' : '·';
+  return `${arrow} ${
+    isMoney ? EGP(Math.abs(delta)) : Math.abs(delta).toLocaleString('en-US')
+  } عن الفترة السابقة`;
+}
+
+function Panel({
+  title, subtitle, children,
+}: { title: string; subtitle?: string; children: React.ReactNode }) {
+  return (
+    <div className="rounded-3xl border border-slate-200 bg-white shadow-sm overflow-hidden">
       <div className="px-5 py-4 border-b border-slate-100">
-        <h4 className="text-sm font-black text-slate-800">{title}</h4>
-        {subtitle && (
-          <div className="text-xs text-slate-500 mt-0.5">{subtitle}</div>
-        )}
+        <h3 className="text-base font-black text-slate-800">{title}</h3>
+        {subtitle && <div className="text-xs text-slate-500 mt-0.5">{subtitle}</div>}
       </div>
       <div>{children}</div>
     </div>
   );
 }
 
-function PlaceholderStat({
-  icon,
-  label,
-}: {
-  icon: React.ReactNode;
-  label: string;
-}) {
+function SmallPanel({
+  title, subtitle, children,
+}: { title: string; subtitle?: string; children: React.ReactNode }) {
   return (
-    <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-5">
-      <div className="text-slate-400 mb-2 flex justify-center">{icon}</div>
-      <div className="text-xs font-bold text-slate-500">{label}</div>
-      <div className="text-xs text-slate-400 mt-2">غير متاح حاليًا</div>
+    <div className="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden">
+      <div className="px-5 py-4 border-b border-slate-100">
+        <h4 className="text-sm font-black text-slate-800">{title}</h4>
+        {subtitle && <div className="text-xs text-slate-500 mt-0.5">{subtitle}</div>}
+      </div>
+      <div>{children}</div>
     </div>
   );
 }
@@ -620,12 +974,8 @@ function Th({ children }: { children: React.ReactNode }) {
 }
 
 function Td({
-  children,
-  className = '',
-}: {
-  children: React.ReactNode;
-  className?: string;
-}) {
+  children, className = '',
+}: { children: React.ReactNode; className?: string }) {
   return (
     <td className={`px-3 py-2.5 text-xs text-slate-700 ${className}`}>
       {children}
@@ -633,8 +983,12 @@ function Td({
   );
 }
 
-function EmptyRow({ message }: { message: string }) {
-  return <div className="text-center text-xs text-slate-400 py-8 px-4">{message}</div>;
+function EmptyText({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="text-center text-xs text-slate-400 py-8 px-4">
+      {children}
+    </div>
+  );
 }
 
-const _used = [Clock]; void _used;
+const _used = [Star]; void _used;
