@@ -24,6 +24,8 @@ import {
   ShiftCountAdjustment,
   VarianceTreatment,
   ApproveClosePayload,
+  PaymentBreakdown,
+  PaymentBreakdownMethod,
 } from '@/api/shifts.api';
 import { cashDeskApi } from '@/api/cash-desk.api';
 import { usersApi } from '@/api/users.api';
@@ -331,34 +333,15 @@ function CurrentShiftCard({ shift }: { shift: Shift }) {
         />
       </div>
 
-      {/* Row 2: payment methods */}
+      {/* PR-PAY-4 — payment breakdown by method + per-account */}
       {s && (
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
-          <MiniChip
-            label="💵 كاش"
-            amount={s.payment_breakdown.cash.amount}
-            count={s.payment_breakdown.cash.count}
-            tone="emerald"
-          />
-          <MiniChip
-            label="💳 بطاقة"
-            amount={s.payment_breakdown.card.amount}
-            count={s.payment_breakdown.card.count}
-            tone="indigo"
-          />
-          <MiniChip
-            label="📱 إنستاباي"
-            amount={s.payment_breakdown.instapay.amount}
-            count={s.payment_breakdown.instapay.count}
-            tone="purple"
-          />
-          <MiniChip
-            label="🏦 تحويل"
-            amount={s.payment_breakdown.bank_transfer.amount}
-            count={s.payment_breakdown.bank_transfer.count}
-            tone="slate"
-          />
-        </div>
+        <PaymentBreakdownPanel
+          breakdown={s.payment_breakdown_v2}
+          legacy={s.payment_breakdown}
+          cashTotal={s.cash_total}
+          nonCashTotal={s.non_cash_total}
+          grandTotal={s.grand_payment_total}
+        />
       )}
 
       {/* Row 3: cash-flow summary */}
@@ -1047,34 +1030,15 @@ function ShiftDetailModal({ shift, onClose }: { shift: Shift; onClose: () => voi
             />
           </div>
 
-          {/* Payment methods */}
+          {/* PR-PAY-4 — payment breakdown by method + per-account */}
           {s && (
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
-              <MiniChip
-                label="💵 كاش"
-                amount={s.payment_breakdown.cash.amount}
-                count={s.payment_breakdown.cash.count}
-                tone="emerald"
-              />
-              <MiniChip
-                label="💳 بطاقة"
-                amount={s.payment_breakdown.card.amount}
-                count={s.payment_breakdown.card.count}
-                tone="indigo"
-              />
-              <MiniChip
-                label="📱 إنستاباي"
-                amount={s.payment_breakdown.instapay.amount}
-                count={s.payment_breakdown.instapay.count}
-                tone="purple"
-              />
-              <MiniChip
-                label="🏦 تحويل"
-                amount={s.payment_breakdown.bank_transfer.amount}
-                count={s.payment_breakdown.bank_transfer.count}
-                tone="slate"
-              />
-            </div>
+            <PaymentBreakdownPanel
+              breakdown={s.payment_breakdown_v2}
+              legacy={s.payment_breakdown}
+              cashTotal={s.cash_total}
+              nonCashTotal={s.non_cash_total}
+              grandTotal={s.grand_payment_total}
+            />
           )}
 
           {/* Cash flow breakdown */}
@@ -2401,6 +2365,171 @@ function ShiftAdjustmentHistory({
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ────────────────────────────────────────────────────────────────────
+ * PR-PAY-4 — Payment breakdown panel.
+ *
+ * Renders the per-method + per-account roll-up returned by the
+ * shift-close endpoint. Cash sits in its own card so the cashier
+ * sees exactly what should be in the drawer; non-cash methods stack
+ * with expandable per-account rows underneath.
+ *
+ * Falls back to the legacy 4-key shape when the backend hasn't
+ * deployed PAY-4 yet (older environments / mid-rollout) so the page
+ * never breaks.
+ * ──────────────────────────────────────────────────────────────────── */
+function PaymentBreakdownPanel({
+  breakdown,
+  legacy,
+  cashTotal,
+  nonCashTotal,
+  grandTotal,
+}: {
+  breakdown: PaymentBreakdownMethod[] | undefined;
+  legacy: PaymentBreakdown;
+  cashTotal: number | undefined;
+  nonCashTotal: number | undefined;
+  grandTotal: number | undefined;
+}) {
+  // Older backend response (pre-PAY-4) — fall through to the legacy
+  // 4-chip strip so the page keeps working during rollout.
+  if (!breakdown) {
+    return (
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+        <MiniChip
+          label="💵 كاش"
+          amount={legacy.cash.amount}
+          count={legacy.cash.count}
+          tone="emerald"
+        />
+        <MiniChip
+          label="💳 بطاقة"
+          amount={legacy.card.amount}
+          count={legacy.card.count}
+          tone="indigo"
+        />
+        <MiniChip
+          label="📱 إنستاباي"
+          amount={legacy.instapay.amount}
+          count={legacy.instapay.count}
+          tone="purple"
+        />
+        <MiniChip
+          label="🏦 تحويل"
+          amount={legacy.bank_transfer.amount}
+          count={legacy.bank_transfer.count}
+          tone="slate"
+        />
+      </div>
+    );
+  }
+
+  const cashBucket = breakdown.find((m) => m.method === 'cash');
+  const nonCashBuckets = breakdown.filter((m) => m.method !== 'cash');
+  const cashAmount = cashTotal ?? cashBucket?.total_amount ?? 0;
+  const nonCashAmount =
+    nonCashTotal ??
+    nonCashBuckets.reduce((s, m) => s + m.total_amount, 0);
+  const grand = grandTotal ?? cashAmount + nonCashAmount;
+
+  return (
+    <div className="rounded-lg border border-slate-200 bg-white">
+      <div className="px-3 py-2 border-b border-slate-100 flex items-center justify-between">
+        <div className="text-xs font-bold text-slate-700">
+          تفصيل التحصيل حسب وسيلة الدفع
+        </div>
+        <div className="text-[11px] text-slate-500">
+          إجمالي التحصيل: <span className="font-bold">{EGP(grand)}</span>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-2 p-2 text-xs">
+        {/* Cash card — physical drawer */}
+        <div className="rounded-md border border-emerald-200 bg-emerald-50 p-3">
+          <div className="flex items-center justify-between">
+            <div className="font-bold text-emerald-700">💵 كاش في الدرج</div>
+            <div className="font-black text-emerald-800">
+              {EGP(cashAmount)}
+            </div>
+          </div>
+          <div className="text-[11px] text-emerald-700/70 mt-1">
+            النقد المتوقع في الدرج = الكاش فقط
+          </div>
+          {cashBucket && (
+            <div className="text-[11px] text-emerald-700/70 mt-0.5">
+              {cashBucket.invoice_count} فاتورة · {cashBucket.payment_count} دفعة
+            </div>
+          )}
+        </div>
+
+        {/* Non-cash collections summary card */}
+        <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
+          <div className="flex items-center justify-between">
+            <div className="font-bold text-slate-700">
+              💳 تحصيلات غير نقدية
+            </div>
+            <div className="font-black text-slate-800">
+              {EGP(nonCashAmount)}
+            </div>
+          </div>
+          <div className="text-[11px] text-slate-500 mt-1">
+            تظهر للمتابعة ولا تُضاف لرصيد الدرج النقدي.
+          </div>
+          <div className="text-[11px] text-slate-500 mt-0.5">
+            {nonCashBuckets.length} وسيلة دفع
+          </div>
+        </div>
+      </div>
+
+      {/* Per-method + per-account expand */}
+      {nonCashBuckets.length > 0 && (
+        <div className="border-t border-slate-100 px-2 py-2 space-y-1">
+          {nonCashBuckets.map((m) => (
+            <PaymentBreakdownMethodRow key={m.method} method={m} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PaymentBreakdownMethodRow({
+  method,
+}: {
+  method: PaymentBreakdownMethod;
+}) {
+  return (
+    <div className="rounded border border-slate-100 bg-white px-2 py-1.5">
+      <div className="flex items-center justify-between text-xs">
+        <div className="font-bold text-slate-700">{method.method_label_ar}</div>
+        <div className="font-black text-slate-900">
+          {EGP(method.total_amount)}
+        </div>
+      </div>
+      <div className="text-[10px] text-slate-500 mt-0.5">
+        {method.invoice_count} فاتورة · {method.payment_count} دفعة
+      </div>
+      {method.accounts.length > 0 && (
+        <div className="ms-3 mt-1.5 space-y-0.5">
+          {method.accounts.map((a, i) => (
+            <div
+              key={a.payment_account_id ?? `noacct-${i}`}
+              className="flex items-center justify-between text-[11px] text-slate-600"
+            >
+              <span>
+                — {a.display_name ?? '(بدون حساب)'}
+                {a.identifier ? ` · ${a.identifier}` : ''}
+              </span>
+              <span className="font-mono text-slate-800">
+                {EGP(a.total_amount)}
+              </span>
+            </div>
+          ))}
         </div>
       )}
     </div>
