@@ -40,6 +40,13 @@ import { customersApi, Customer } from '@/api/customers.api';
 import { shiftsApi } from '@/api/shifts.api';
 import { reservationsApi } from '@/api/reservations.api';
 import { useCartStore, PaymentDraft, ManualDiscountType } from '@/stores/cart.store';
+import {
+  paymentsApi,
+  PaymentAccount,
+  PaymentMethodCode,
+  PaymentProvider,
+  METHOD_LABEL_AR,
+} from '@/api/payments.api';
 import { useAuthStore } from '@/stores/auth.store';
 import { useLayoutStore } from '@/stores/layout.store';
 import { Receipt, ReceiptData } from '@/components/Receipt';
@@ -276,6 +283,7 @@ export default function POS() {
         payment_method: p.method,
         amount: p.amount,
         reference: p.reference,
+        payment_account_id: p.payment_account_id ?? undefined,
       })),
       discount_total: cart.discountTotal(),
       coupon_code: cart.coupon?.code,
@@ -1595,7 +1603,18 @@ function ReserveModal({
         })),
         payments: [
           {
-            payment_method: method,
+            // PR-PAY-3: reservation flow keeps the legacy 4-method
+            // shape (cash/card/instapay/bank_transfer). The cart's
+            // `method` is now the wider PaymentMethodCode enum, but
+            // this reservation modal's <select> only offers the
+            // legacy 4 — safe to cast at the API boundary. The full
+            // payment-account picker rolls into reservations in a
+            // follow-up if/when the operator asks.
+            payment_method: method as
+              | 'cash'
+              | 'card'
+              | 'instapay'
+              | 'bank_transfer',
             amount: Number(deposit),
             kind: 'deposit',
           },
@@ -1804,6 +1823,21 @@ function ItemNotesModal({
   );
 }
 
+// PR-PAY-3 — Methods the POS picker exposes (cashier-relevant subset of
+// the DB enum). Exhaustive on the active payment_method_code values
+// the POS currently supports. `credit` and `other` are intentionally
+// hidden from the picker — they are admin-only flows.
+const POS_METHODS: PaymentMethodCode[] = [
+  'cash',
+  'instapay',
+  'vodafone_cash',
+  'orange_cash',
+  'card_visa',
+  'card_mastercard',
+  'card_meeza',
+  'bank_transfer',
+];
+
 function PaymentModal({
   onClose,
   onConfirm,
@@ -1814,36 +1848,90 @@ function PaymentModal({
   isPending: boolean;
 }) {
   const cart = useCartStore();
-  const [method, setMethod] = useState<PaymentDraft['method']>('cash');
+  const [method, setMethod] = useState<PaymentMethodCode>('cash');
+  const [accountId, setAccountId] = useState<string | null>(null);
   const [amount, setAmount] = useState(cart.grandTotal());
   const change = Math.max(0, amount - cart.grandTotal());
+
+  // Provider catalog + active accounts. Both load once per modal open;
+  // PR-PAY-2 admin actions are RTK-cached so changes flow in via
+  // invalidate.
+  const providersQuery = useQuery({
+    queryKey: ['payment-providers'],
+    queryFn: () => paymentsApi.listProviders(),
+  });
+  const accountsQuery = useQuery({
+    queryKey: ['payment-accounts', 'active'],
+    queryFn: () => paymentsApi.listAccounts({ active: true }),
+  });
+
+  const providers = providersQuery.data ?? [];
+  const accounts = accountsQuery.data ?? [];
+
+  const accountsForMethod = accounts.filter((a) => a.method === method);
+  const isCash = method === 'cash';
+
+  // Auto-select rules for the account picker (PR-PAY-3 §"Selection rules"):
+  //   1) default-active → use it; 2) exactly one active → use it;
+  //   3) multiple + no default → leave blank (operator must pick).
+  useEffect(() => {
+    if (isCash) {
+      setAccountId(null);
+      return;
+    }
+    const def = accountsForMethod.find((a) => a.is_default);
+    if (def) {
+      setAccountId(def.id);
+    } else if (accountsForMethod.length === 1) {
+      setAccountId(accountsForMethod[0].id);
+    } else {
+      setAccountId(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [method, accountsQuery.dataUpdatedAt]);
+
+  const blockedNoAccount = !isCash && accountsForMethod.length === 0;
+  const needsManualPick =
+    !isCash && accountsForMethod.length > 1 && !accountId;
+
+  const canConfirm =
+    amount > 0 && !blockedNoAccount && !needsManualPick && !isPending;
+
+  const submit = () => {
+    if (!canConfirm) return;
+    const acct = accountId ? accountsForMethod.find((a) => a.id === accountId) : null;
+    cart.setPayments([
+      {
+        method,
+        amount,
+        payment_account_id: acct?.id ?? null,
+        account_display_name: acct?.display_name,
+      },
+    ]);
+    onConfirm();
+  };
 
   return (
     <ModalShell onClose={onClose} title="إتمام الدفع">
       <div className="p-5 space-y-4">
-        <div className="grid grid-cols-2 gap-2">
-          {(['cash', 'card', 'instapay', 'bank_transfer'] as const).map((m) => {
-            const labels: Record<string, string> = {
-              cash: '💵 كاش',
-              card: '💳 كارت',
-              instapay: '📱 إنستاباي',
-              bank_transfer: '🏦 تحويل',
-            };
-            return (
-              <button
-                key={m}
-                onClick={() => setMethod(m)}
-                className={`p-3 rounded-lg font-bold border ${
-                  method === m
-                    ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-300'
-                    : 'bg-white/5 border-white/10 text-slate-300'
-                }`}
-              >
-                {labels[m]}
-              </button>
-            );
-          })}
-        </div>
+        <PaymentMethodGrid
+          providers={providers}
+          accounts={accounts}
+          selected={method}
+          onSelect={setMethod}
+        />
+
+        {!isCash && (
+          <PaymentAccountPicker
+            method={method}
+            providers={providers}
+            accounts={accountsForMethod}
+            selected={accountId}
+            onSelect={setAccountId}
+            blocked={blockedNoAccount}
+            needsManualPick={needsManualPick}
+          />
+        )}
 
         <div>
           <label className="text-xs text-slate-400 block mb-1">
@@ -1856,7 +1944,7 @@ function PaymentModal({
 
         <div>
           <label className="text-xs text-slate-400 block mb-1">
-            المبلغ المستلم
+            {isCash ? 'المبلغ المستلم' : 'المبلغ'}
           </label>
           <input
             autoFocus
@@ -1867,10 +1955,12 @@ function PaymentModal({
           />
         </div>
 
-        <div className="flex justify-between p-3 bg-white/5 rounded-lg">
-          <span className="text-slate-400">الباقي للعميل</span>
-          <span className="font-black text-emerald-400">{EGP(change)}</span>
-        </div>
+        {isCash && (
+          <div className="flex justify-between p-3 bg-white/5 rounded-lg">
+            <span className="text-slate-400">الباقي للعميل</span>
+            <span className="font-black text-emerald-400">{EGP(change)}</span>
+          </div>
+        )}
 
         <div className="flex gap-2">
           <button
@@ -1881,17 +1971,135 @@ function PaymentModal({
           </button>
           <button
             className="flex-1 py-2.5 rounded-lg bg-gradient-to-br from-emerald-500 to-teal-600 text-white font-bold hover:opacity-90 disabled:opacity-40"
-            onClick={() => {
-              cart.setPayments([{ method, amount }]);
-              onConfirm();
-            }}
-            disabled={isPending}
+            onClick={submit}
+            disabled={!canConfirm}
           >
             {isPending ? 'جاري...' : 'تأكيد الدفع'}
           </button>
         </div>
       </div>
     </ModalShell>
+  );
+}
+
+function PaymentMethodGrid({
+  providers,
+  accounts,
+  selected,
+  onSelect,
+}: {
+  providers: PaymentProvider[];
+  accounts: PaymentAccount[];
+  selected: PaymentMethodCode;
+  onSelect: (m: PaymentMethodCode) => void;
+}) {
+  // Show ALL POS methods so the cashier sees the full menu; methods
+  // with no active account get a dim "setup required" subtitle and
+  // (when picked) the picker block exposes the explicit warning.
+  return (
+    <div className="grid grid-cols-2 gap-2">
+      {POS_METHODS.map((m) => {
+        const provider = providers.find((p) => p.method === m);
+        const hasActive =
+          m === 'cash' || accounts.some((a) => a.method === m && a.active);
+        const isSelected = selected === m;
+        return (
+          <button
+            key={m}
+            onClick={() => onSelect(m)}
+            className={`p-3 rounded-lg font-bold border text-right transition ${
+              isSelected
+                ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-300'
+                : 'bg-white/5 border-white/10 text-slate-300 hover:bg-white/10'
+            }`}
+          >
+            <div className="flex items-center gap-2 justify-between">
+              <span className="text-sm">{METHOD_LABEL_AR[m]}</span>
+              {provider?.icon_name && (
+                <span className="text-[10px] opacity-60 font-mono">
+                  {provider.icon_name}
+                </span>
+              )}
+            </div>
+            {!hasActive && (
+              <div className="text-[10px] text-amber-400 mt-1 font-normal">
+                لا يوجد حساب مفعل
+              </div>
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function PaymentAccountPicker({
+  method,
+  providers,
+  accounts,
+  selected,
+  onSelect,
+  blocked,
+  needsManualPick,
+}: {
+  method: PaymentMethodCode;
+  providers: PaymentProvider[];
+  accounts: PaymentAccount[];
+  selected: string | null;
+  onSelect: (id: string) => void;
+  blocked: boolean;
+  needsManualPick: boolean;
+}) {
+  if (blocked) {
+    return (
+      <div className="p-3 rounded-lg bg-amber-900/30 border border-amber-500/40 text-amber-200 text-sm">
+        لا يوجد حساب مفعل لهذه الطريقة. أضفه من إعدادات وسائل الدفع.
+      </div>
+    );
+  }
+  return (
+    <div>
+      <label className="text-xs text-slate-400 block mb-1">
+        حساب التحصيل
+      </label>
+      <div className="space-y-2 max-h-48 overflow-auto">
+        {accounts.map((a) => {
+          const provider = providers.find(
+            (p) => p.provider_key === a.provider_key,
+          );
+          const isSelected = selected === a.id;
+          return (
+            <button
+              key={a.id}
+              onClick={() => onSelect(a.id)}
+              className={`w-full text-right p-2.5 rounded-lg border transition ${
+                isSelected
+                  ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-300'
+                  : 'bg-white/5 border-white/10 text-slate-300 hover:bg-white/10'
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <span className="font-bold text-sm">{a.display_name}</span>
+                {a.is_default && (
+                  <span className="text-[10px] font-bold bg-amber-500/20 text-amber-200 px-2 py-0.5 rounded">
+                    افتراضي
+                  </span>
+                )}
+              </div>
+              <div className="text-[11px] text-slate-400 mt-0.5">
+                {provider?.name_ar ?? METHOD_LABEL_AR[method]}
+                {a.identifier ? ` · ${a.identifier}` : ''}
+              </div>
+            </button>
+          );
+        })}
+      </div>
+      {needsManualPick && (
+        <div className="text-[11px] text-amber-300 mt-1">
+          اختر حساب التحصيل قبل المتابعة.
+        </div>
+      )}
+    </div>
   );
 }
 

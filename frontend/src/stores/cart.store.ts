@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { Product, Variant } from '@/api/products.api';
 import { Customer } from '@/api/customers.api';
+import type { PaymentMethodCode } from '@/api/payments.api';
 
 export interface CartItem {
   variantId: string;
@@ -23,10 +24,17 @@ export interface CartItem {
 
 export type ManualDiscountType = 'percent' | 'value';
 
+// PR-PAY-3 — `method` now mirrors the DB `payment_method_code` enum
+// (10 values). `payment_account_id` is the chosen channel for non-cash
+// payments (e.g. "InstaPay الأهلي"); cash leaves it null. The optional
+// `account_display_name` is a UI cache so the cart chip can show the
+// chosen channel without re-fetching.
 export interface PaymentDraft {
-  method: 'cash' | 'card' | 'instapay' | 'bank_transfer';
+  method: PaymentMethodCode;
   amount: number;
   reference?: string;
+  payment_account_id?: string | null;
+  account_display_name?: string;
 }
 
 export interface AppliedCoupon {

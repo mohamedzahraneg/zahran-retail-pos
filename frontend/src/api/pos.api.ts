@@ -1,4 +1,5 @@
 import { api, unwrap } from './client';
+import type { PaymentMethodCode } from './payments.api';
 
 export interface InvoiceLine {
   variant_id: string;
@@ -9,10 +10,14 @@ export interface InvoiceLine {
   salesperson_id?: string;
 }
 
+// PR-PAY-3 — `payment_method` mirrors the DB `payment_method_code`
+// enum (10 values). `payment_account_id` carries the chosen channel
+// for non-cash payments (cash leaves it null).
 export interface InvoicePayment {
-  payment_method: 'cash' | 'card' | 'instapay' | 'bank_transfer';
+  payment_method: PaymentMethodCode;
   amount: number;
   reference?: string;
+  payment_account_id?: string | null;
 }
 
 export interface CreateInvoicePayload {

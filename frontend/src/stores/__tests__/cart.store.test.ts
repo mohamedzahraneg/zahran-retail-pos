@@ -199,7 +199,9 @@ describe('cart.store', () => {
 
     setPayments([
       { method: 'cash', amount: 150 },
-      { method: 'card', amount: 100 },
+      // PR-PAY-3: `card` was retired from the DTO/enum in favour of
+      // the granular DB enum (card_visa/card_mastercard/card_meeza).
+      { method: 'card_visa', amount: 100 },
     ]);
 
     expect(useCartStore.getState().totalPaid()).toBe(250);
