@@ -130,39 +130,47 @@ export function EmployeeOverviewTab({ employee }: { employee: TeamRow }) {
     queryFn: () => employeesApi.userDashboard(userId),
   });
 
-  const { data: commissionSummary = [] } = useQuery({
-    queryKey: ['commissions-summary', month.from, month.to],
-    queryFn: () => commissionsApi.summary(month.from, month.to),
-  });
-  const myCommission = useMemo(
-    () => (commissionSummary as CommissionSummaryRow[]).find((c) => c.user_id === userId),
-    [commissionSummary, userId],
-  );
-
-  const { data: prevCommissionSummary = [] } = useQuery({
-    queryKey: ['commissions-summary', prevMonth.from, prevMonth.to],
-    queryFn: () => commissionsApi.summary(prevMonth.from, prevMonth.to),
-  });
-  const prevMyCommission = useMemo(
-    () =>
-      (prevCommissionSummary as CommissionSummaryRow[]).find((c) => c.user_id === userId),
-    [prevCommissionSummary, userId],
-  );
-
+  // PR-T4.4 — sales data is now driven by the per-invoice detail
+  // endpoint (which returns rows for ANY salesperson, regardless of
+  // their commission_rate) instead of the summary endpoint (which
+  // backend filters to users with commission_rate > 0 OR past
+  // line_commissions). This way every employee with linked invoices
+  // sees the sales dashboard, even at 0% commission.
   const { data: detail = [] } = useQuery({
     queryKey: ['commissions-detail', userId, month.from, month.to],
     queryFn: () => commissionsApi.detail(userId, month.from, month.to),
-    enabled: !!myCommission,
+  });
+  const { data: prevDetail = [] } = useQuery({
+    queryKey: ['commissions-detail', userId, prevMonth.from, prevMonth.to],
+    queryFn: () => commissionsApi.detail(userId, prevMonth.from, prevMonth.to),
   });
 
-  const isSalesperson = !!myCommission;
-  const eligibleSales = Number(myCommission?.eligible_sales || 0);
-  const prevEligibleSales = Number(prevMyCommission?.eligible_sales || 0);
-  const invoicesCount = Number(myCommission?.invoices_count || 0);
-  const prevInvoicesCount = Number(prevMyCommission?.invoices_count || 0);
-  const commissionRate = Number(myCommission?.commission_rate || 0);
-  const commissionAmount = Number(myCommission?.commission_amount || 0);
-  const prevCommissionAmount = Number(prevMyCommission?.commission_amount || 0);
+  const detailRows = detail as CommissionDetailRow[];
+  const prevDetailRows = prevDetail as CommissionDetailRow[];
+  const isSalesperson = detailRows.length > 0 || prevDetailRows.length > 0;
+
+  const eligibleSales = useMemo(
+    () => detailRows.reduce((s, r) => s + Number(r.eligible_total || 0), 0),
+    [detailRows],
+  );
+  const prevEligibleSales = useMemo(
+    () => prevDetailRows.reduce((s, r) => s + Number(r.eligible_total || 0), 0),
+    [prevDetailRows],
+  );
+  const invoicesCount = detailRows.length;
+  const prevInvoicesCount = prevDetailRows.length;
+  // Per-row commission_rate is duplicated across rows of the same
+  // user; pick the first non-empty value (will be the user's current
+  // rate as of the query). Falls back to 0.
+  const commissionRate = Number(detailRows[0]?.commission_rate ?? 0);
+  const commissionAmount = useMemo(
+    () => detailRows.reduce((s, r) => s + Number(r.commission || 0), 0),
+    [detailRows],
+  );
+  const prevCommissionAmount = useMemo(
+    () => prevDetailRows.reduce((s, r) => s + Number(r.commission || 0), 0),
+    [prevDetailRows],
+  );
   const avgInvoice = invoicesCount > 0 ? eligibleSales / invoicesCount : 0;
   const prevAvgInvoice = prevInvoicesCount > 0 ? prevEligibleSales / prevInvoicesCount : 0;
 
@@ -241,13 +249,12 @@ export function EmployeeOverviewTab({ employee }: { employee: TeamRow }) {
 
   return (
     <div className="space-y-6">
+      {/* PR-T4.4 — the duplicated <ProfileHeroCard> was removed.
+          The single source of identity info (avatar / name / role /
+          balance / actions) lives on the parent EmployeeProfilePanel
+          header in Team.tsx. The Overview tab now starts directly
+          with the period chip + KPI cards. */}
       <PeriodHeader from={month.from} to={month.to} />
-
-      <ProfileHeroCard
-        employee={employee}
-        dash={dash}
-        liveGl={liveGl}
-      />
 
       {/* MAIN KPI ROW — sales focus when salesperson, else payroll focus */}
       {isSalesperson ? (
@@ -289,19 +296,29 @@ export function EmployeeOverviewTab({ employee }: { employee: TeamRow }) {
             tone="purple"
             icon={<Wallet size={26} />}
             label="عمولة الموظف (الفترة)"
-            value={EGP(commissionAmount)}
+            value={
+              commissionRate > 0
+                ? EGP(commissionAmount)
+                : 'لا توجد نسبة عمولة محددة'
+            }
             sub={
-              prevCommissionAmount > 0
-                ? `بمعدل ${commissionRate}% · ${changeLabel(commissionAmount - prevCommissionAmount, true)}`
-                : `بمعدل عمولة ${commissionRate}%`
+              commissionRate > 0
+                ? prevCommissionAmount > 0
+                  ? `بمعدل ${commissionRate}% · ${changeLabel(commissionAmount - prevCommissionAmount, true)}`
+                  : `بمعدل عمولة ${commissionRate}%`
+                : 'يمكن تحديد نسبة من إعدادات العمولات'
             }
           />
           <BigKpi
             tone="rose"
             icon={<Percent size={26} />}
             label="معدل العمولة"
-            value={`${commissionRate}%`}
-            sub="من القيمة المؤهلة"
+            value={commissionRate > 0 ? `${commissionRate}%` : '—'}
+            sub={
+              commissionRate > 0
+                ? 'من القيمة المؤهلة'
+                : 'لا توجد نسبة عمولة محددة'
+            }
           />
         </div>
       ) : (
@@ -722,13 +739,47 @@ function CommissionPanel({
   commissionAmount: number;
   eligibleSales: number;
 }) {
+  const hasRate = commissionRate > 0;
   return (
     <Panel
       title="نسبة الموظف من المبيعات"
-      subtitle={isSalesperson ? `بمعدل ${commissionRate}%` : 'الموظف غير مرتبط بمبيعات.'}
+      subtitle={
+        !isSalesperson
+          ? 'الموظف غير مرتبط بمبيعات.'
+          : hasRate
+            ? `بمعدل ${commissionRate}%`
+            : 'لا توجد نسبة عمولة محددة'
+      }
     >
       {!isSalesperson ? (
         <SalespersonEmptyState />
+      ) : !hasRate ? (
+        <div className="px-5 pb-5 pt-2">
+          <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-center">
+            <div className="text-base font-black text-amber-900">
+              لا توجد نسبة عمولة محددة لهذا الموظف
+            </div>
+            <div className="text-xs text-amber-900/70 mt-2 leading-relaxed">
+              الموظف لديه فواتير مبيعات بقيمة{' '}
+              <span className="font-bold">{EGP(eligibleSales)}</span> ولكن
+              معدل العمولة (commission_rate) = 0%. يمكن تحديد نسبة من شاشة
+              العمولات (PATCH /commissions/:id/rate) ثم سيظهر مبلغ العمولة
+              تلقائيًا هنا.
+            </div>
+          </div>
+          <div className="mt-4 grid grid-cols-2 gap-3">
+            <div className="rounded-xl border border-slate-200 p-3 text-center">
+              <div className="text-[11px] text-slate-500">إجمالي مبيعات الفترة</div>
+              <div className="text-lg font-black text-slate-700 mt-1 tabular-nums">
+                {EGP(eligibleSales)}
+              </div>
+            </div>
+            <div className="rounded-xl border border-slate-200 p-3 text-center">
+              <div className="text-[11px] text-slate-500">عمولة محسوبة</div>
+              <div className="text-lg font-black text-slate-400 mt-1">—</div>
+            </div>
+          </div>
+        </div>
       ) : (
         <div className="px-5 pb-5 pt-2">
           <div className="text-center text-5xl font-black text-emerald-700 tabular-nums">

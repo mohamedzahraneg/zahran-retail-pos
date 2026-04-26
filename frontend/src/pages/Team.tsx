@@ -300,26 +300,32 @@ export default function Team() {
         />
       </div>
 
-      {/* Two-column layout: list + profile */}
-      <div className="grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-5">
-        <EmployeeListPanel
-          team={team as TeamRow[]}
-          selectedId={selectedId}
-          onSelect={setSelectedId}
-          presentTodayIds={
-            new Set(
-              ((todayRows as any[]) || [])
-                .filter((r) => (r?.minutes ?? r?.present_minutes ?? 0) > 0)
-                .map((r) => String(r.user_id)),
-            )
-          }
-        />
-        <EmployeeProfilePanel
-          row={selected}
-          pending={pending as EmployeeRequest[]}
-          initialSection={rawSection}
-        />
-      </div>
+      {/* PR-T4.4 — collapsible employee list:
+          Desktop: 320px panel toggles into a 56px rail (icon-only)
+          via the listOpen state, persisted in localStorage so the
+          user's preference survives reloads.
+          Mobile/tablet: list becomes a drawer (fixed overlay) opened
+          by the "فتح قائمة الموظفين" button rendered above the
+          profile panel. */}
+      <CollapsibleTeamLayout
+        team={team as TeamRow[]}
+        selectedId={selectedId}
+        onSelect={setSelectedId}
+        presentTodayIds={
+          new Set(
+            ((todayRows as any[]) || [])
+              .filter((r) => (r?.minutes ?? r?.present_minutes ?? 0) > 0)
+              .map((r) => String(r.user_id)),
+          )
+        }
+        rightPanel={
+          <EmployeeProfilePanel
+            row={selected}
+            pending={pending as EmployeeRequest[]}
+            initialSection={rawSection}
+          />
+        }
+      />
     </div>
   );
 }
@@ -367,16 +373,161 @@ function KpiCard({
   );
 }
 
-function EmployeeListPanel({
+function CollapsibleTeamLayout({
   team,
   selectedId,
   onSelect,
   presentTodayIds,
+  rightPanel,
 }: {
   team: TeamRow[];
   selectedId: string | null;
   onSelect: (id: string | null) => void;
   presentTodayIds: Set<string>;
+  rightPanel: React.ReactNode;
+}) {
+  // Persist desktop expand/collapse preference. Initial value reads
+  // localStorage synchronously so we don't flicker on first render.
+  const [desktopOpen, setDesktopOpen] = useState<boolean>(() => {
+    try {
+      const v = localStorage.getItem('team:listOpen');
+      return v == null ? true : v === '1';
+    } catch {
+      return true;
+    }
+  });
+  const persistDesktop = (next: boolean) => {
+    setDesktopOpen(next);
+    try { localStorage.setItem('team:listOpen', next ? '1' : '0'); } catch {}
+  };
+
+  // Mobile drawer is independent (always closed by default).
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const closeDrawer = () => setDrawerOpen(false);
+
+  return (
+    <>
+      {/* Desktop layout: 320px panel OR 56px rail. Hidden under lg. */}
+      <div
+        className="hidden lg:grid gap-5"
+        style={{
+          gridTemplateColumns: desktopOpen ? '320px 1fr' : '56px 1fr',
+        }}
+      >
+        {desktopOpen ? (
+          <EmployeeListPanel
+            team={team}
+            selectedId={selectedId}
+            onSelect={onSelect}
+            presentTodayIds={presentTodayIds}
+            onCollapse={() => persistDesktop(false)}
+          />
+        ) : (
+          <CollapsedRail
+            count={team.length}
+            onExpand={() => persistDesktop(true)}
+          />
+        )}
+        {rightPanel}
+      </div>
+
+      {/* Mobile/tablet layout: full-width content + a button that
+          opens the list as an overlay drawer. */}
+      <div className="lg:hidden space-y-3">
+        <button
+          type="button"
+          onClick={() => setDrawerOpen(true)}
+          className="w-full inline-flex items-center justify-between gap-2 px-4 py-3 rounded-xl bg-white border border-slate-200 text-sm font-bold text-slate-700 shadow-sm"
+        >
+          <span className="inline-flex items-center gap-2">
+            <Users size={15} className="text-indigo-600" />
+            فتح قائمة الموظفين
+          </span>
+          <span className="text-[11px] text-slate-400 font-normal">
+            {team.length} موظف
+          </span>
+        </button>
+        {rightPanel}
+      </div>
+
+      {drawerOpen && (
+        <div
+          className="lg:hidden fixed inset-0 z-50 bg-black/40"
+          onClick={closeDrawer}
+        >
+          <aside
+            className="absolute top-0 right-0 bottom-0 w-[88vw] max-w-[340px] bg-slate-50 shadow-2xl overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+            dir="rtl"
+          >
+            <div className="px-3 pt-3 pb-1 flex items-center justify-between">
+              <h3 className="text-base font-black text-slate-800">الموظفون</h3>
+              <button
+                type="button"
+                onClick={closeDrawer}
+                className="p-2 rounded-lg hover:bg-slate-200/60 text-slate-600"
+                title="إغلاق"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="p-3">
+              <EmployeeListPanel
+                team={team}
+                selectedId={selectedId}
+                onSelect={(id) => {
+                  onSelect(id);
+                  closeDrawer();
+                }}
+                presentTodayIds={presentTodayIds}
+                /* No collapse button on mobile — the X handles it. */
+              />
+            </div>
+          </aside>
+        </div>
+      )}
+    </>
+  );
+}
+
+function CollapsedRail({
+  count,
+  onExpand,
+}: {
+  count: number;
+  onExpand: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onExpand}
+      className="rounded-2xl border border-slate-200 bg-white shadow-sm p-3 flex flex-col items-center gap-3 h-fit hover:bg-slate-50 transition"
+      title="إظهار قائمة الموظفين"
+    >
+      <Users size={18} className="text-indigo-600" />
+      <span
+        className="text-[11px] font-black text-slate-700 leading-tight"
+        style={{ writingMode: 'vertical-rl' }}
+      >
+        الموظفون
+      </span>
+      <span className="text-[10px] text-slate-400 tabular-nums">{count}</span>
+    </button>
+  );
+}
+
+function EmployeeListPanel({
+  team,
+  selectedId,
+  onSelect,
+  presentTodayIds,
+  onCollapse,
+}: {
+  team: TeamRow[];
+  selectedId: string | null;
+  onSelect: (id: string | null) => void;
+  presentTodayIds: Set<string>;
+  onCollapse?: () => void;
 }) {
   const [q, setQ] = useState('');
   const filtered = useMemo(() => {
@@ -394,7 +545,19 @@ function EmployeeListPanel({
     <aside className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm h-fit max-h-[calc(100vh-220px)] overflow-y-auto">
       <div className="flex items-center justify-between mb-3 px-1">
         <h3 className="text-base font-black text-slate-800">الموظفون</h3>
-        <span className="text-[11px] text-slate-400">{team.length}</span>
+        <div className="flex items-center gap-2">
+          <span className="text-[11px] text-slate-400">{team.length}</span>
+          {onCollapse && (
+            <button
+              type="button"
+              onClick={onCollapse}
+              className="p-1 rounded hover:bg-slate-100 text-slate-500"
+              title="طي القائمة"
+            >
+              ←
+            </button>
+          )}
+        </div>
       </div>
       <div className="flex items-center gap-2 px-2 py-2 mb-3 rounded-xl border border-slate-200 bg-slate-50">
         <Search size={14} className="text-slate-400" />
