@@ -486,7 +486,8 @@ export class SettingsService {
       ],
       'ملفات الموظفين (HR)': [
         { code: 'employee.dashboard.view',  label: 'عرض الملف الشخصي للموظف' },
-        { code: 'employee.requests.submit', label: 'تقديم طلب (سلفة/إجازة/تمديد)' },
+        { code: 'employee.requests.submit', label: 'تقديم طلب (إجازة/تمديد/أخرى)' },
+        { code: 'employee.advance.request', label: 'تقديم طلب سلفة' },
         { code: 'employee.team.view',       label: 'عرض ملفات فريق العمل' },
         { code: 'employee.requests.approve',label: 'اعتماد/رفض طلبات الموظفين' },
         { code: 'employee.profile.manage',  label: 'تعديل الراتب وساعات العمل' },

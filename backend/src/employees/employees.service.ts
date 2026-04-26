@@ -568,10 +568,30 @@ export class EmployeesService {
 
   // ── Requests (advance / leave / overtime) ──────────────────────────
   myRequests(userId: string) {
+    // Migration 113 — for kind='advance_request' rows, surface the
+    // disbursing expense (if any) so the UI can show
+    // "processed → EXP-2026-NNNNN". The LATERAL join picks the most
+    // recent live link; voided expenses fall away because the JE is
+    // marked is_void on void.
     return this.ds.query(
-      `SELECT * FROM employee_requests
-        WHERE user_id = $1
-        ORDER BY created_at DESC`,
+      `SELECT r.*,
+              fx.expense_id,
+              fx.expense_no
+         FROM employee_requests r
+         LEFT JOIN LATERAL (
+           SELECT e.id   AS expense_id,
+                  e.expense_no
+             FROM expenses e
+             LEFT JOIN journal_entries je
+               ON je.reference_type = 'expense'
+              AND je.reference_id   = e.id
+            WHERE e.source_employee_request_id = r.id
+              AND COALESCE(je.is_void, FALSE) = FALSE
+            ORDER BY e.created_at DESC
+            LIMIT 1
+         ) fx ON TRUE
+        WHERE r.user_id = $1
+        ORDER BY r.created_at DESC`,
       [userId],
     );
   }
@@ -579,16 +599,49 @@ export class EmployeesService {
   async submitRequest(
     userId: string,
     dto: {
-      kind: 'advance' | 'leave' | 'overtime_extension' | 'other';
+      kind:
+        | 'advance'
+        | 'advance_request'
+        | 'leave'
+        | 'overtime_extension'
+        | 'other';
       amount?: number;
       starts_at?: string;
       ends_at?: string;
       reason?: string;
     },
+    callerPerms: string[] = [],
   ) {
-    if (dto.kind === 'advance' && (!dto.amount || dto.amount <= 0)) {
-      throw new BadRequestException('يجب تحديد قيمة السلفة');
+    // Hard block: the legacy 'advance' kind is reserved for historical
+    // rows. The fn_mirror_advance_to_txn trigger (migration 040) auto-
+    // posts to employee_transactions when this kind is approved, which
+    // double-posts against the canonical FinancialEngine path. Self-
+    // service callers must use 'advance_request' (migration 113) — a
+    // pure informational request with NO GL/cashbox side effects.
+    if (dto.kind === 'advance') {
+      throw new BadRequestException(
+        'استخدم نوع advance_request — السلف القديمة محجوزة للسجلات السابقة فقط',
+      );
     }
+
+    if (dto.kind === 'advance_request') {
+      // Per-kind permission check (controller-level guard is intentionally
+      // permissive so leave/overtime asks aren't blocked when an org
+      // disables advance asks).
+      const has = (code: string) =>
+        callerPerms.includes('*') ||
+        callerPerms.includes('employee.*') ||
+        callerPerms.includes(code);
+      if (!has('employee.advance.request')) {
+        throw new ForbiddenException(
+          'صلاحيات ناقصة: employee.advance.request',
+        );
+      }
+      if (!dto.amount || dto.amount <= 0) {
+        throw new BadRequestException('يجب تحديد قيمة السلفة المطلوبة');
+      }
+    }
+
     const [row] = await this.ds.query(
       `INSERT INTO employee_requests
          (user_id, kind, amount, starts_at, ends_at, reason)
@@ -607,6 +660,10 @@ export class EmployeesService {
   }
 
   listPendingRequests() {
+    // Pending list is for approvers — same shape as before; advance_request
+    // rows come through with kind='advance_request' so the UI can render
+    // them with the right approve-vs-pay flow. No expense_id surfaced
+    // here because pending rows by definition have no disbursement yet.
     return this.ds.query(
       `SELECT r.*,
               u.full_name AS user_name, u.username, u.employee_no
@@ -614,6 +671,30 @@ export class EmployeesService {
          JOIN users u ON u.id = r.user_id
         WHERE r.status = 'pending'
         ORDER BY r.created_at DESC`,
+    );
+  }
+
+  // Approved advance_request rows that haven't been disbursed yet —
+  // feeds the HR "outstanding advance asks" worklist. Once the linked
+  // expense exists with a live (non-void) JE, the row drops off.
+  listApprovedAdvanceRequestsAwaitingDisbursement() {
+    return this.ds.query(
+      `SELECT r.id, r.user_id, r.amount, r.reason, r.decided_at,
+              u.full_name AS user_name, u.username, u.employee_no
+         FROM employee_requests r
+         JOIN users u ON u.id = r.user_id
+        WHERE r.kind = 'advance_request'
+          AND r.status = 'approved'
+          AND NOT EXISTS (
+            SELECT 1
+              FROM expenses e
+              LEFT JOIN journal_entries je
+                ON je.reference_type = 'expense'
+               AND je.reference_id   = e.id
+             WHERE e.source_employee_request_id = r.id
+               AND COALESCE(je.is_void, FALSE) = FALSE
+          )
+        ORDER BY r.decided_at DESC`,
     );
   }
 
@@ -626,6 +707,13 @@ export class EmployeesService {
     if (decision === 'rejected' && !reason?.trim()) {
       throw new BadRequestException('يجب كتابة سبب الرفض');
     }
+    // Audit #4 invariant — this method MUST NOT post to GL or move
+    // cashbox. For kind='advance_request' the trigger
+    // fn_mirror_advance_to_txn does not fire (it guards on
+    // kind='advance'); the actual disbursement happens later via
+    // POST /accounting/expenses (is_advance=true,
+    // source_employee_request_id=N), which is the single money-moving
+    // path and goes through FinancialEngineService.
     const [row] = await this.ds.query(
       `UPDATE employee_requests
           SET status          = $2,

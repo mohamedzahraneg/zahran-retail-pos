@@ -53,6 +53,10 @@ import { accountsApi } from '@/api/accounts.api';
 import { usersApi } from '@/api/users.api';
 import { cashDeskApi } from '@/api/cash-desk.api';
 import { shiftsApi } from '@/api/shifts.api';
+import {
+  employeesApi,
+  AwaitingAdvanceDisbursementRow,
+} from '@/api/employees.api';
 import { useAuthStore } from '@/stores/auth.store';
 import { exportToExcel, printReport } from '@/lib/exportExcel';
 import ExpensesAnalyticsPremiumTab from './ExpensesAnalyticsPremiumTab';
@@ -276,6 +280,43 @@ export default function DailyExpenses() {
 
   const [showAddExpense, setShowAddExpense] = useState(false);
   const [showAddCategory, setShowAddCategory] = useState(false);
+
+  // Migration 113 — when ApprovalsAuditTab deep-links here with
+  // ?advance_request_id=N, fetch the approved request, force-open the
+  // Add Expense modal with the employee + amount prefilled and the
+  // source_employee_request_id locked in. The form still posts via
+  // the canonical POST /accounting/expenses path, so cash + GL move
+  // through FinancialEngineService — the prefill only saves typing.
+  const advanceRequestIdParam = searchParams.get('advance_request_id');
+  const advanceRequestId = advanceRequestIdParam
+    ? Number(advanceRequestIdParam)
+    : null;
+  const { data: prefillRequests = [] } = useQuery({
+    queryKey: ['advance-requests-awaiting-prefill'],
+    queryFn: () => employeesApi.awaitingAdvanceDisbursement(),
+    enabled: advanceRequestId != null,
+    staleTime: 30_000,
+  });
+  const advancePrefill = useMemo(() => {
+    if (advanceRequestId == null) return null;
+    const r = (prefillRequests as AwaitingAdvanceDisbursementRow[]).find(
+      (x) => x.id === advanceRequestId,
+    );
+    if (!r) return null;
+    return {
+      source_employee_request_id: r.id,
+      employee_user_id: r.user_id,
+      amount: Number(r.amount),
+      description: r.reason
+        ? `صرف سلفة بناءً على طلب #${r.id} — ${r.reason}`
+        : `صرف سلفة بناءً على طلب #${r.id}`,
+    };
+  }, [advanceRequestId, prefillRequests]);
+
+  // Auto-open the modal when a deep-link prefill resolves.
+  useEffect(() => {
+    if (advancePrefill && !showAddExpense) setShowAddExpense(true);
+  }, [advancePrefill]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Filter state — default = TODAY (per PR-5). State lives here at the
   // page shell so register and analytics tabs stay in lock-step.
@@ -580,9 +621,26 @@ export default function DailyExpenses() {
       {/* ─── Modals (page-level so they overlay any tab) ─── */}
       {showAddExpense && (
         <AddExpenseModal
-          onClose={() => setShowAddExpense(false)}
-          onSaved={() => setShowAddExpense(false)}
+          onClose={() => {
+            setShowAddExpense(false);
+            // Drop the deep-link param so re-opening the modal manually
+            // doesn't keep auto-prefilling. Cancel = abandon disbursement.
+            if (advanceRequestIdParam) {
+              const sp = new URLSearchParams(searchParams);
+              sp.delete('advance_request_id');
+              setSearchParams(sp, { replace: true });
+            }
+          }}
+          onSaved={() => {
+            setShowAddExpense(false);
+            if (advanceRequestIdParam) {
+              const sp = new URLSearchParams(searchParams);
+              sp.delete('advance_request_id');
+              setSearchParams(sp, { replace: true });
+            }
+          }}
           onAddCategory={() => setShowAddCategory(true)}
+          prefill={advancePrefill}
         />
       )}
       {showAddCategory && (
@@ -1043,10 +1101,22 @@ function AddExpenseModal({
   onClose,
   onSaved,
   onAddCategory,
+  prefill,
 }: {
   onClose: () => void;
   onSaved: () => void;
   onAddCategory: () => void;
+  /** Migration 113 — when set, the modal opens locked to disbursing
+   *  the referenced approved advance_request: amount + employee are
+   *  fixed, the source_employee_request_id flows through to the back
+   *  end (which writes the FK + is_advance=true via the same
+   *  FinancialEngine path). */
+  prefill?: {
+    source_employee_request_id: number;
+    employee_user_id: string;
+    amount: number;
+    description?: string;
+  } | null;
 }) {
   const qc = useQueryClient();
   const authUser = useAuthStore((s) => s.user);
@@ -1057,7 +1127,9 @@ function AddExpenseModal({
     hasPermission('*');
 
   const today = new Date().toISOString().slice(0, 10);
-  const [amount, setAmount] = useState('');
+  const [amount, setAmount] = useState(
+    prefill ? String(prefill.amount) : '',
+  );
   const [categoryId, setCategoryId] = useState('');
   const [paymentMethod, setPaymentMethod] = useState<
     'cash' | 'card' | 'transfer' | 'wallet' | 'mixed'
@@ -1069,9 +1141,12 @@ function AddExpenseModal({
     mode: 'unset', shift_id: null, cashbox_id: null,
   });
   const cashboxId = cashSource.cashbox_id || '';
-  const [description, setDescription] = useState('');
-  const [employeeId, setEmployeeId] = useState<string>(authUser?.id || '');
+  const [description, setDescription] = useState(prefill?.description ?? '');
+  const [employeeId, setEmployeeId] = useState<string>(
+    prefill?.employee_user_id || authUser?.id || '',
+  );
   const [expenseDate, setExpenseDate] = useState<string>(today);
+  const isAdvanceDisbursement = !!prefill;
 
   const { data: categories = [] } = useQuery({
     queryKey: ['expense-categories'],
@@ -1122,13 +1197,33 @@ function AddExpenseModal({
         expense_date: expenseDate,
         description: description || undefined,
         employee_user_id: employeeId,
+        // Migration 113 — when this modal opened with a prefill we are
+        // disbursing an approved advance_request. Set is_advance=true
+        // (so the engine debits 1123 instead of an op-ex account) and
+        // pass the FK so the backend dup-check + audit trail wire up.
+        // The actual money still moves through the SAME
+        // POST /accounting/expenses → FinancialEngineService path —
+        // these two fields just classify the row, no parallel writer.
+        is_advance: isAdvanceDisbursement || undefined,
+        source_employee_request_id:
+          prefill?.source_employee_request_id ?? undefined,
         // vendor_name + receipt_url removed from form per PR-3 directive;
         // backend DTO still accepts them so legacy callers stay valid.
       }),
     onSuccess: () => {
-      toast.success('تم تسجيل المصروف + ترحيل القيد');
+      toast.success(
+        isAdvanceDisbursement
+          ? 'تم صرف السلفة وترحيل القيد بنجاح'
+          : 'تم تسجيل المصروف + ترحيل القيد',
+      );
       qc.invalidateQueries({ queryKey: ['daily-expenses-list'] });
       qc.invalidateQueries({ queryKey: ['employee-ledger'] });
+      // Migration 113 — refresh the HR awaiting list + the originating
+      // employee's request inbox so the row's "بانتظار الصرف" badge
+      // flips to "تم الصرف — مصروف #N".
+      qc.invalidateQueries({ queryKey: ['advance-requests-awaiting'] });
+      qc.invalidateQueries({ queryKey: ['advance-requests-awaiting-prefill'] });
+      qc.invalidateQueries({ queryKey: ['employee-requests-mine'] });
       onSaved();
     },
     onError: (e: any) =>
@@ -1156,12 +1251,21 @@ function AddExpenseModal({
         <div className="flex items-center justify-between sticky top-0 bg-white z-10 -mx-1 px-1 pb-2 border-b border-slate-100">
           <h3 className="text-lg font-bold flex items-center gap-2">
             <Receipt size={18} className="text-amber-600" />
-            تسجيل مصروف جديد
+            {isAdvanceDisbursement ? 'صرف سلفة معتمدة' : 'تسجيل مصروف جديد'}
           </h3>
           <button onClick={onClose} className="icon-btn" disabled={create.isPending}>
             <X className="w-5 h-5" />
           </button>
         </div>
+
+        {isAdvanceDisbursement && prefill && (
+          <div className="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-[11px] leading-relaxed text-indigo-900">
+            صرف سلفة بناءً على طلب الموظف رقم{' '}
+            <span className="font-bold font-mono">#{prefill.source_employee_request_id}</span>.
+            المبلغ والموظف مقفلان من الطلب — اختر الخزنة وفئة المصروف فقط.
+            القيد يمر عبر FinancialEngineService مرة واحدة (DR 1123 / CR الخزنة).
+          </div>
+        )}
 
         {/* Open-shift status banner (PR-2 behaviour). */}
         <div
@@ -1226,7 +1330,11 @@ function AddExpenseModal({
               className="input w-full tabular-nums"
               value={amount}
               onChange={(e) => setAmount(e.target.value)}
-              disabled={create.isPending}
+              // Locked when disbursing an approved advance — the
+              // amount must equal what the manager approved on the
+              // employee_requests row.
+              disabled={create.isPending || isAdvanceDisbursement}
+              readOnly={isAdvanceDisbursement}
             />
           </FieldLabel>
 
@@ -1290,7 +1398,9 @@ function AddExpenseModal({
                 className="input w-full"
                 value={employeeId}
                 onChange={(e) => setEmployeeId(e.target.value)}
-                disabled={create.isPending}
+                // Locked when disbursing an approved advance — must
+                // equal the request's user_id (back end re-validates).
+                disabled={create.isPending || isAdvanceDisbursement}
               >
                 <option value="">اختر…</option>
                 {users.map((u: any) => (

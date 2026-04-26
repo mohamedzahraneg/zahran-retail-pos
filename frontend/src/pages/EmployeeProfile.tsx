@@ -1856,7 +1856,10 @@ function TasksCard({ tasks }: { tasks: EmployeeTask[] }) {
 /* ───────── Requests card ───────── */
 
 const KIND_LABEL: Record<string, string> = {
-  advance: 'طلب سلفة',
+  // 'advance' = legacy historical kind (audit #4). 'advance_request'
+  // = the new safe self-service ask added in migration 113.
+  advance: 'سلفة (قديم)',
+  advance_request: 'طلب سلفة',
   leave: 'طلب إجازة',
   overtime_extension: 'تمديد ساعات إضافية',
   other: 'طلب آخر',
@@ -1945,6 +1948,17 @@ function RequestsCard({ requests }: { requests: any[] }) {
                   قرار: {r.decision_reason}
                 </div>
               )}
+              {r.kind === 'advance_request' && r.status === 'approved' && (
+                r.expense_no ? (
+                  <div className="text-emerald-700">
+                    تم الصرف — مصروف #{r.expense_no}
+                  </div>
+                ) : (
+                  <div className="text-amber-700">
+                    بانتظار الصرف من شؤون الموظفين
+                  </div>
+                )
+              )}
             </li>
           ))}
         </ul>
@@ -1971,21 +1985,34 @@ function RequestModal({
   onClose: () => void;
   onSuccess: () => void;
 }) {
-  // 'advance' removed from the self-service request form (audit #4).
-  // Advances must go through the canonical expenses.is_advance=TRUE
-  // path via the accounting side, not a DB-triggered mirror that
-  // would silently duplicate the GL entry and drift the cashbox.
+  // The legacy 'advance' kind is still gated off — its DB trigger
+  // double-posts when combined with the canonical
+  // POST /accounting/expenses (is_advance=true) flow (audit #4).
+  // 'advance_request' (migration 113) is the new safe route: it's a
+  // pure ask, no GL/cashbox movement on approval. HR later disburses
+  // through the same expenses path, linking back via
+  // expenses.source_employee_request_id.
+  const hasPermission = useAuthStore((s) => s.hasPermission);
+  const canRequestAdvance = hasPermission('employee.advance.request');
+
   const [kind, setKind] = useState<SubmitRequestKind>('leave');
   const [startsAt, setStartsAt] = useState('');
   const [endsAt, setEndsAt] = useState('');
   const [reason, setReason] = useState('');
+  const [amount, setAmount] = useState('');
+
+  const isAdvance = kind === 'advance_request';
 
   const submit = useMutation({
     mutationFn: () =>
       employeesApi.submitRequest({
         kind,
-        starts_at: startsAt || undefined,
-        ends_at: endsAt || undefined,
+        // amount only applies to advance asks; backend ignores for others
+        amount: isAdvance ? Number(amount) : undefined,
+        // starts_at/ends_at are leave/overtime only — keep them off
+        // the wire for advance asks so the back end stores clean rows.
+        starts_at: !isAdvance && startsAt ? startsAt : undefined,
+        ends_at: !isAdvance && endsAt ? endsAt : undefined,
         reason: reason || undefined,
       }),
     onSuccess: () => {
@@ -1995,6 +2022,16 @@ function RequestModal({
     onError: (e: any) =>
       toast.error(e?.response?.data?.message || 'فشل إرسال الطلب'),
   });
+
+  // Available kinds — 'advance_request' shows only when the user
+  // holds the dedicated permission. Backend re-checks too.
+  const kindOptions: SubmitRequestKind[] = canRequestAdvance
+    ? ['leave', 'advance_request', 'overtime_extension', 'other']
+    : ['leave', 'overtime_extension', 'other'];
+
+  const canSubmit =
+    !submit.isPending &&
+    (!isAdvance || (Number(amount) > 0));
 
   return (
     <div
@@ -2018,8 +2055,12 @@ function RequestModal({
             <label className="text-xs font-bold text-slate-600 block mb-1">
               نوع الطلب
             </label>
-            <div className="grid grid-cols-3 gap-2">
-              {(['leave', 'overtime_extension', 'other'] as const).map((k) => (
+            <div
+              className={`grid gap-2 ${
+                kindOptions.length === 4 ? 'grid-cols-2' : 'grid-cols-3'
+              }`}
+            >
+              {kindOptions.map((k) => (
                 <button
                   type="button"
                   key={k}
@@ -2030,36 +2071,59 @@ function RequestModal({
                   }`}
                   onClick={() => setKind(k)}
                 >
-                  {KIND_LABEL[k]}
+                  {KIND_LABEL[k] || k}
                 </button>
               ))}
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-2">
-            <label className="block">
-              <span className="text-xs font-bold text-slate-600 mb-1 block">
-                من
-              </span>
-              <input
-                type="datetime-local"
-                className="input w-full"
-                value={startsAt}
-                onChange={(e) => setStartsAt(e.target.value)}
-              />
-            </label>
-            <label className="block">
-              <span className="text-xs font-bold text-slate-600 mb-1 block">
-                إلى
-              </span>
-              <input
-                type="datetime-local"
-                className="input w-full"
-                value={endsAt}
-                onChange={(e) => setEndsAt(e.target.value)}
-              />
-            </label>
-          </div>
+          {isAdvance ? (
+            <>
+              <label className="block">
+                <span className="text-xs font-bold text-slate-600 mb-1 block">
+                  قيمة السلفة المطلوبة (جنيه)
+                </span>
+                <input
+                  type="number"
+                  min={1}
+                  step="any"
+                  className="input w-full"
+                  value={amount}
+                  onChange={(e) => setAmount(e.target.value)}
+                  placeholder="مثال: 500"
+                />
+              </label>
+              <div className="text-[11px] text-slate-500 leading-relaxed bg-amber-50 border border-amber-200 rounded-lg p-2">
+                طلب السلفة لا يحرّك أي مبالغ — تظهر النقدية فقط بعد
+                موافقة الإدارة وصرف الحوالة من شاشة المصروفات اليومية.
+              </div>
+            </>
+          ) : (
+            <div className="grid grid-cols-2 gap-2">
+              <label className="block">
+                <span className="text-xs font-bold text-slate-600 mb-1 block">
+                  من
+                </span>
+                <input
+                  type="datetime-local"
+                  className="input w-full"
+                  value={startsAt}
+                  onChange={(e) => setStartsAt(e.target.value)}
+                />
+              </label>
+              <label className="block">
+                <span className="text-xs font-bold text-slate-600 mb-1 block">
+                  إلى
+                </span>
+                <input
+                  type="datetime-local"
+                  className="input w-full"
+                  value={endsAt}
+                  onChange={(e) => setEndsAt(e.target.value)}
+                />
+              </label>
+            </div>
+          )}
 
           <label className="block">
             <span className="text-xs font-bold text-slate-600 mb-1 block">
@@ -2084,7 +2148,7 @@ function RequestModal({
             </button>
             <button
               className="btn-primary"
-              disabled={submit.isPending}
+              disabled={!canSubmit}
               onClick={() => {
                 submit.mutate();
               }}
