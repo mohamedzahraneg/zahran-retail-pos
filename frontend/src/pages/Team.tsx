@@ -49,6 +49,11 @@ import { AccountsMovementsTab } from '@/components/team/AccountsMovementsTab';
 // (PendingInbox function still exists in this file but is no longer
 // rendered — PR-T6 cleanup will remove it).
 import { ApprovalsAuditTab } from '@/components/team/ApprovalsAuditTab';
+// PR-T4.1 — overview redesign per
+// employee_overview_sales_performance_design.html, focused
+// adjustments tab, and the Actions dropdown (task assignment etc.).
+import { EmployeeOverviewTab } from '@/components/team/EmployeeOverviewTab';
+import { AdjustmentsTab } from '@/components/team/AdjustmentsTab';
 // Payroll / حسابات الموظفين is now a tab inside /team (consolidation).
 // The component is rendered verbatim — no design change. Its own
 // useQuery hooks share the global TanStack cache, so mutations
@@ -602,34 +607,13 @@ function EmployeeProfilePanel({
 
   return (
     <section className="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden">
-      {/* Top: actions + person card + mini-stats */}
-      <div className="p-5 border-b border-slate-100 space-y-4">
-        <div className="flex items-center justify-end gap-2 flex-wrap">
-          <ActionButton
-            label="اعتماد يومية"
-            tone="green"
-            allowed={hasPermission('employee.attendance.manage')}
-            disabledReason="سيتم تفعيلها في PR-T2"
-          />
-          <ActionButton
-            label="صرف مستحقات"
-            tone="white"
-            allowed={hasPermission('employee.ledger.view')}
-            disabledReason="سيتم تفعيلها في PR-T2"
-          />
-          <ActionButton
-            label="تسجيل حركة"
-            tone="white"
-            allowed={
-              hasPermission('employee.bonuses.manage') ||
-              hasPermission('employee.deductions.manage')
-            }
-            disabledReason="سيتم تفعيلها في PR-T3/T4"
-          />
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-[110px_1fr_240px] gap-4 items-start border border-slate-200 rounded-2xl p-4">
-          {/* Avatar placeholder */}
+      {/* PR-T4.1 — Employee header (compact). The 3 dead action
+          buttons that lived here in PR-T1 (اعتماد يومية / صرف
+          مستحقات / تسجيل حركة) were removed: each action now lives
+          inside its owning tab. Right side has the focused Actions
+          dropdown (إسناد مهمة + تقرير موظف). */}
+      <div className="p-5 border-b border-slate-100">
+        <div className="grid grid-cols-1 md:grid-cols-[110px_1fr_auto] gap-4 items-start border border-slate-200 rounded-2xl p-4">
           <div className="w-24 h-24 rounded-full bg-gradient-to-br from-slate-200 to-slate-50 border border-slate-200" />
           <div>
             <h3 className="text-2xl font-black text-slate-800 flex items-center gap-2 flex-wrap">
@@ -651,11 +635,6 @@ function EmployeeProfilePanel({
                 value={row.employee_no || '—'}
               />
               <InfoItem
-                label="رقم الهاتف"
-                value="غير متاح"
-                hint="سيُضاف في PR-T2"
-              />
-              <InfoItem
                 label="حالة اليوم"
                 value={
                   hasPermission('attendance.view_team')
@@ -665,74 +644,33 @@ function EmployeeProfilePanel({
                     : 'غير متاح'
                 }
               />
+              <InfoItem
+                label="الرصيد النهائي"
+                value={
+                  isPayable
+                    ? `مستحق له ${EGP(-gl)}`
+                    : isDebt
+                      ? `مدين للشركة ${EGP(gl)}`
+                      : 'متوازن'
+                }
+                hint="من v_employee_gl_balance"
+              />
             </div>
           </div>
-          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-center">
-            <div className="text-xs text-slate-500">الرصيد النهائي</div>
-            <div
-              className={`text-2xl font-black mt-1 tabular-nums ${
-                isPayable
-                  ? 'text-emerald-700'
-                  : isDebt
-                    ? 'text-rose-700'
-                    : 'text-slate-700'
-              }`}
-            >
-              {isPayable ? EGP(-gl) : isDebt ? EGP(gl) : EGP(0)}
-            </div>
-            <div className="text-xs font-bold mt-1 text-slate-600">
-              {isPayable ? 'مستحق له' : isDebt ? 'مدين للشركة' : 'متوازن'}
-            </div>
-            <div className="text-[10px] text-slate-400 mt-2 leading-snug">
-              المستحقات + المكافآت − الخصومات − السلف − المصروف فعليًا
-            </div>
-          </div>
-        </div>
-
-        {/* Mini-stats from /employees/:id/dashboard (real data) */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          <MiniStat
-            label="مستحقات معتمدة"
-            value={dash ? EGP(dash.wage?.accrual_in_month) : '—'}
-            tone="blue"
-          />
-          <MiniStat
-            label="مصروف فعليًا"
-            value={dash ? EGP(dash.wage?.paid_in_month) : '—'}
-            tone="orange"
-          />
-          <MiniStat
-            label="سلف الشهر"
-            value={dash ? EGP(dash.salary?.advances_month) : '—'}
-            tone="purple"
-          />
-          <MiniStat
-            label="الرصيد الحي"
-            value={
-              dash
-                ? EGP(Math.abs(dash.gl?.live_snapshot ?? 0))
-                : '—'
-            }
-            tone={
-              dash && dash.gl?.live_snapshot > 0.01
-                ? 'red'
-                : dash && dash.gl?.live_snapshot < -0.01
-                  ? 'green'
-                  : 'blue'
-            }
-            hint={
-              dash && dash.gl?.live_snapshot > 0.01
-                ? 'مدين للشركة'
-                : dash && dash.gl?.live_snapshot < -0.01
-                  ? 'مستحق له'
-                  : 'متوازن'
-            }
-          />
+          <ProfileActions row={row} />
         </div>
       </div>
 
-      {/* Tabs */}
-      <nav className="flex items-center gap-1 border-b border-slate-200 px-5 overflow-x-auto">
+      {/* PR-T4.1 — Tab bar moved UP, directly under the employee
+          header. Was previously below the mini-stats cards (which
+          made the page feel scrollable for no reason). Pills on
+          desktop, soft horizontal scroll on small screens with
+          scrollbar hidden via the .no-scrollbar utility (added to
+          tailwind in this PR for parity). */}
+      <nav
+        className="flex items-center gap-1 border-b border-slate-200 px-5 overflow-x-auto"
+        style={{ scrollbarWidth: 'none' }}
+      >
         {profileTabs.map((t) => (
           <button
             key={t.key}
@@ -751,46 +689,15 @@ function EmployeeProfilePanel({
       </nav>
 
       <div className="p-5">
-        {tab === 'summary' && <OverviewTab dash={dash} />}
-        {/* PR-T1.1 — legacy panels are now embedded INSIDE the new
-            workspace tabs (no full-page replacement). The components
-            themselves remain unchanged; they just render inside the
-            new shell instead of standalone routes. Polish (employee-
-            scoped filtering, redesigned tables, source selector) lands
-            in PR-T2/T3/T4. */}
-        {tab === 'attendance' && (
-          // PR-T2 — redesigned tab. The legacy AdminAttendancePanel was
-          // replaced with AttendanceWageTab which separates attendance
-          // log + daily wage approvals + a focused approval modal
-          // (no inline form sharing space with payout). Read-only users
-          // (without employee.attendance.manage) still see the tables
-          // and summary cards — only the action buttons are hidden.
-          <AttendanceWageTab employee={row} />
-        )}
-        {tab === 'accounts' && (
-          // PR-T3 — redesigned per-employee accounts/movements tab.
-          // Replaces the embedded team-wide <Payroll /> with the
-          // unified ledger (gl_entries) + summary cards + filters +
-          // focused modals for payout/advance/bonus/deduction. Voided
-          // rows visible with zero effect (PR-25 contract).
-          <AccountsMovementsTab employee={row} />
-        )}
-        {tab === 'advances' && (
-          // PR-T3 — actions for السلف / الخصومات / المكافآت now live
-          // on the الحسابات والحركات tab as focused modals (with the
-          // CashSourceSelector enforced for السلفة per spec). This tab
-          // shows a filtered view of just those movement types from
-          // the same canonical ledger so the user has a focused list.
-          <AccountsMovementsTab employee={row} />
-        )}
-        {tab === 'approvals' && (
-          // PR-T4 — Approvals + Audit tab. Pending requests + wage
-          // approval edit/void history + GL movement void history. The
-          // employee-scoped variant is rendered here; the no-employee
-          // variant lands on /team?section=approvals (handled in the
-          // EmployeeProfilePanel no-employee branch above).
-          <ApprovalsAuditTab employee={row} />
-        )}
+        {tab === 'summary' && <EmployeeOverviewTab employee={row} />}
+        {tab === 'attendance' && <AttendanceWageTab employee={row} />}
+        {tab === 'accounts' && <AccountsMovementsTab employee={row} />}
+        {/* PR-T4.1 — السلف والخصومات is now a FOCUSED tab (3 separate
+            tables for advances / deductions / bonuses + 4 focused
+            summary cards + 3 focused action buttons). Was duplicating
+            the full ledger from accounts in PR-T3 — now distinct. */}
+        {tab === 'advances' && <AdjustmentsTab employee={row} />}
+        {tab === 'approvals' && <ApprovalsAuditTab employee={row} />}
         {tab === 'reports' && (
           <PlaceholderPanel
             title="التقارير"
@@ -873,6 +780,92 @@ function MiniStat({
       </div>
       {hint && (
         <div className="text-[10px] text-slate-400 mt-0.5">{hint}</div>
+      )}
+    </div>
+  );
+}
+
+function ProfileActions({ row }: { row: TeamRow }) {
+  // PR-T4.1 — restored "إسناد مهمة" + added "تقرير موظف" placeholder.
+  // The task assignment uses the existing TaskForm component (defined
+  // below in this file, kept since PR-T1). Report is deferred to T5.
+  const hasPermission = useAuthStore((s) => s.hasPermission);
+  const canAssignTask = hasPermission('employee.tasks.assign');
+  const [openMenu, setOpenMenu] = useState(false);
+  const [taskOpen, setTaskOpen] = useState(false);
+  return (
+    <div className="relative flex items-center gap-2">
+      {canAssignTask && (
+        <button
+          type="button"
+          onClick={() => setTaskOpen(true)}
+          className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-50 text-indigo-700 border border-indigo-200 text-sm font-bold hover:bg-indigo-100"
+          title="إنشاء مهمة جديدة لهذا الموظف"
+        >
+          <ClipboardList size={14} />
+          إسناد مهمة
+        </button>
+      )}
+      <button
+        type="button"
+        onClick={() => setOpenMenu((v) => !v)}
+        className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white border border-slate-200 text-slate-700 text-sm font-bold hover:bg-slate-50"
+      >
+        إجراءات
+        <span className="text-[10px]">▾</span>
+      </button>
+      {openMenu && (
+        <div
+          className="absolute top-12 left-0 z-30 bg-white border border-slate-200 rounded-xl shadow-lg w-56 p-1.5 text-sm"
+          onMouseLeave={() => setOpenMenu(false)}
+        >
+          <button
+            type="button"
+            disabled
+            title="سيتم تفعيلها في PR-T5 — تقرير الموظف الموحّد (طباعة/PDF/Excel)"
+            className="w-full text-right px-3 py-2 rounded-lg text-slate-400 cursor-not-allowed flex items-center justify-between"
+          >
+            <span>تقرير الموظف</span>
+            <span className="text-[10px] text-slate-400">PR-T5</span>
+          </button>
+          {!canAssignTask && (
+            <div className="px-3 py-2 text-[11px] text-slate-400">
+              ليست لديك صلاحية إسناد المهام (employee.tasks.assign).
+            </div>
+          )}
+        </div>
+      )}
+      {taskOpen && (
+        <div
+          className="fixed inset-0 z-40 bg-black/40 flex items-start justify-center p-4 overflow-y-auto"
+          onClick={() => setTaskOpen(false)}
+        >
+          <div
+            className="w-full max-w-lg bg-white rounded-2xl shadow-2xl my-6"
+            onClick={(e) => e.stopPropagation()}
+            dir="rtl"
+          >
+            <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
+              <div>
+                <h3 className="text-lg font-black text-slate-800">إسناد مهمة</h3>
+                <div className="text-xs text-slate-500 mt-0.5">
+                  {row.full_name || row.username}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setTaskOpen(false)}
+                className="p-1.5 rounded hover:bg-slate-100 text-slate-500"
+                title="إغلاق"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="p-5">
+              <TaskForm userId={row.id} />
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

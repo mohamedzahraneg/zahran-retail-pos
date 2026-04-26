@@ -619,7 +619,7 @@ function LedgerCard({
  * (Payout reuses PR-15/PR-25 PayWageModal verbatim.)
  * ───────────────────────────────────────────────────────────────── */
 
-function AdvanceModal({
+export function AdvanceModal({
   employee,
   onClose,
 }: {
@@ -754,7 +754,7 @@ function AdvanceModal({
   );
 }
 
-function BonusModal({
+export function BonusModal({
   employee,
   onClose,
 }: {
@@ -851,7 +851,7 @@ function BonusModal({
   );
 }
 
-function DeductionModal({
+export function DeductionModal({
   employee,
   onClose,
 }: {
