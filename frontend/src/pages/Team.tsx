@@ -44,6 +44,11 @@ import { AttendanceWageTab } from '@/components/team/AttendanceWageTab';
 // for compatibility — that's the team-wide balances view until the
 // final PR-T6 cleanup.
 import { AccountsMovementsTab } from '@/components/team/AccountsMovementsTab';
+// PR-T4 — Approvals + audit history tab. Handles both team-wide and
+// per-employee modes. Replaces the legacy PendingInbox visual layout
+// (PendingInbox function still exists in this file but is no longer
+// rendered — PR-T6 cleanup will remove it).
+import { ApprovalsAuditTab } from '@/components/team/ApprovalsAuditTab';
 // Payroll / حسابات الموظفين is now a tab inside /team (consolidation).
 // The component is rendered verbatim — no design change. Its own
 // useQuery hooks share the global TanStack cache, so mutations
@@ -565,6 +570,12 @@ function EmployeeProfilePanel({
         />
       );
     }
+    if (initialSection === 'approvals') {
+      // PR-T4 — team-wide approvals view: shows the cross-team pending
+      // requests inbox in the new design (no employee-scoped audit
+      // history because that requires a user_id).
+      return <ApprovalsAuditTab />;
+    }
     return (
       <section className="rounded-2xl border border-slate-200 bg-white shadow-sm flex flex-col items-center justify-center text-center p-12 min-h-[420px]">
         <Users2 size={42} className="text-slate-300 mb-3" />
@@ -773,14 +784,12 @@ function EmployeeProfilePanel({
           <AccountsMovementsTab employee={row} />
         )}
         {tab === 'approvals' && (
-          <PlaceholderPanel
-            title="الموافقات والتعديلات"
-            message={
-              hasPermission('employee.requests.approve')
-                ? `هناك ${pending.filter((p: any) => String(p.user_id) === row.id).length} طلب معلّق لهذا الموظف. ستُعرض هنا في PR-T4.`
-                : 'سيتم نقل الموافقات وسجل التعديلات في PR-T4.'
-            }
-          />
+          // PR-T4 — Approvals + Audit tab. Pending requests + wage
+          // approval edit/void history + GL movement void history. The
+          // employee-scoped variant is rendered here; the no-employee
+          // variant lands on /team?section=approvals (handled in the
+          // EmployeeProfilePanel no-employee branch above).
+          <ApprovalsAuditTab employee={row} />
         )}
         {tab === 'reports' && (
           <PlaceholderPanel
