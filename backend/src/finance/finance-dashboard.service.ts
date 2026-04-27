@@ -22,6 +22,16 @@
  *     route exists today is `available=true`, the rest are
  *     placeholders.
  *
+ * PR-FIN-2-HOTFIX-3 — employee balances column-name fix:
+ *   The original PR-FIN-2 read employee balances from
+ *   `v_employee_gl_balance` using `net_balance`, but the view
+ *   exposes the column under the name `balance`. The query threw
+ *   `42703: column "net_balance" does not exist` on every request;
+ *   the defensive `.catch` returned zeros so the bug surfaced as
+ *   the employees card silently rendering 0/0/0 instead of a 500.
+ *   Fix: use `balance` throughout. A regression test in the spec
+ *   asserts the SQL never references `net_balance` again.
+ *
  * PR-FIN-2-HOTFIX-2 — connection-pool exhaustion fix:
  *   The original PR-FIN-2 fired 18 aggregators through a top-level
  *   `Promise.all`, plus an inner `Promise.all` of 3 inside `balances()`,
@@ -336,11 +346,21 @@ export class FinanceDashboardService {
         (SELECT bal  FROM active ORDER BY bal DESC, name ASC LIMIT 1) AS top_amount
       FROM active
     `);
+    // PR-FIN-2-HOTFIX-3 — `v_employee_gl_balance` exposes the column
+    // `balance`, NOT `net_balance`. The original PR-FIN-2 query used
+    // `net_balance` (anticipated naming) which threw at runtime; the
+    // surrounding `.catch` silently returned zeros, so the dashboard
+    // rendered 0/0/0 for the employees card and the bug went
+    // unnoticed at the controller layer. The column rename is fixed
+    // here. The defensive `.catch` is preserved for genuine view
+    // unavailability, but tests now assert the SQL never compares
+    // against `net_balance` again — see the regression block in
+    // finance-dashboard.service.spec.ts (PR-FIN-2-HOTFIX-3).
     const employees = await this.ds.query(`
       SELECT
-        COALESCE(SUM(CASE WHEN net_balance > 0 THEN net_balance ELSE 0 END), 0) AS owed_to,
-        COALESCE(SUM(CASE WHEN net_balance < 0 THEN -net_balance ELSE 0 END), 0) AS owed_by,
-        COALESCE(SUM(net_balance), 0) AS net
+        COALESCE(SUM(CASE WHEN balance > 0 THEN  balance ELSE 0 END), 0) AS owed_to,
+        COALESCE(SUM(CASE WHEN balance < 0 THEN -balance ELSE 0 END), 0) AS owed_by,
+        COALESCE(SUM(balance), 0) AS net
       FROM v_employee_gl_balance
     `).catch(() => [{ owed_to: 0, owed_by: 0, net: 0 }]);
 

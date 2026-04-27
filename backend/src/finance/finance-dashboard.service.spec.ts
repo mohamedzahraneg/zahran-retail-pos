@@ -378,6 +378,52 @@ describe('FinanceDashboardService — PR-FIN-2', () => {
   });
 
   /**
+   * PR-FIN-2-HOTFIX-3 — employee balances column guard.
+   *
+   * The original PR-FIN-2 SQL used `net_balance` from
+   * `v_employee_gl_balance`, but the actual exposed column is
+   * `balance`. Postgres threw `42703: column "net_balance" does not
+   * exist` on every dashboard request; the surrounding `.catch`
+   * swallowed the error and returned zeros. Fixed in HOTFIX-3 by
+   * switching to the canonical `balance` column.
+   *
+   * These tests pin both the wire shape of `balances.employees`
+   * and the SQL contract: any future code that reintroduces
+   * `net_balance` (or otherwise drifts away from `balance`) fails
+   * CI before reaching production.
+   */
+  describe('PR-FIN-2-HOTFIX-3 — employee balances column', () => {
+    it('returns owed_to/owed_by/net from the v_employee_gl_balance.balance column', async () => {
+      const { svc } = buildSvc({
+        matchers: [
+          {
+            test: (s) => /v_employee_gl_balance/.test(s),
+            // Mirrors the live shape: the SELECT projects three
+            // aliases (owed_to / owed_by / net) computed from
+            // SUM(CASE … balance …).
+            rows: [{ owed_to: '480.00', owed_by: '55.00', net: '425.00' }],
+          },
+        ],
+      });
+      const r = await svc.dashboard({ from: '2026-04-01', to: '2026-04-28' });
+      expect(r.balances.employees).toEqual({
+        total_owed_to: 480,
+        total_owed_by: 55,
+        net: 425,
+      });
+    });
+
+    it('SQL never references the non-existent net_balance column', async () => {
+      const { svc, calls } = buildSvc();
+      await svc.dashboard({ from: '2026-04-01', to: '2026-04-28' });
+      const empCall = calls.find((c) => /v_employee_gl_balance/.test(c.sql));
+      expect(empCall).toBeDefined();
+      expect(empCall!.sql).not.toMatch(/net_balance/);
+      expect(empCall!.sql).toMatch(/\bbalance\b/);
+    });
+  });
+
+  /**
    * PR-FIN-2-HOTFIX-2 — connection-pool exhaustion guard.
    *
    * The original PR-FIN-2 fanned out ~28 concurrent SELECTs via
