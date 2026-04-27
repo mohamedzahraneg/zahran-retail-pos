@@ -307,6 +307,7 @@ function PendingRequestsCard({
           <table className="min-w-full text-xs">
             <thead className="bg-slate-50">
               <tr>
+                <Th>رقم الطلب</Th>
                 <Th>التاريخ</Th>
                 <Th>الموظف</Th>
                 <Th>نوع الطلب</Th>
@@ -319,6 +320,13 @@ function PendingRequestsCard({
             <tbody>
               {rows.map((r) => (
                 <tr key={r.id} className="border-t border-slate-100">
+                  {/* PR-ESS-2C-1 — user-facing numeric request number.
+                      Falls back to internal id during deploy-window
+                      cache; migration 118 enforces NOT NULL at the DB
+                      level so the fallback is transient. */}
+                  <Td className="font-mono tabular-nums font-bold text-slate-800">
+                    {r.request_no ?? r.id}
+                  </Td>
                   <Td className="font-mono tabular-nums whitespace-nowrap">
                     {fmtDateTime(r.created_at)}
                   </Td>

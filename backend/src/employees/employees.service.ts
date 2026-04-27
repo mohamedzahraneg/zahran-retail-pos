@@ -713,8 +713,13 @@ export class EmployeesService {
    * migration 117 makes this lookup cheap).
    */
   listDisbursableAdvanceRequests(userId: string) {
+    // PR-ESS-2C-1 — `request_no` is the user-facing numeric identifier
+    // (BIGINT NOT NULL, UNIQUE) added by migration 118. The admin
+    // AdvanceModal dropdown displays it as "طلب رقم 1003"; the
+    // technical `id` is kept in the payload for FK linkage but never
+    // shown to operators.
     return this.ds.query(
-      `SELECT r.id, r.user_id, r.kind, r.amount, r.status,
+      `SELECT r.id, r.request_no, r.user_id, r.kind, r.amount, r.status,
               r.reason, r.decided_at, r.created_at
          FROM employee_requests r
         WHERE r.user_id = $1
