@@ -262,8 +262,14 @@ export interface OpenShiftPayload {
 }
 
 export const shiftsApi = {
-  list: (params?: { status?: string; user_id?: string }) =>
-    unwrap<Shift[]>(api.get('/shifts', { params })),
+  list: (params?: {
+    status?: string;
+    user_id?: string;
+    cashbox_id?: string;
+    /** YYYY-MM-DD — Cairo-local. Matches shifts overlapping the window. */
+    from?: string;
+    to?: string;
+  }) => unwrap<Shift[]>(api.get('/shifts', { params })),
 
   current: () => unwrap<Shift | null>(api.get('/shifts/current')),
 

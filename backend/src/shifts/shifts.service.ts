@@ -1175,10 +1175,16 @@ export class ShiftsService {
     );
   }
 
-  list(status?: string, userId?: string) {
+  list(
+    status?: string,
+    userId?: string,
+    cashboxId?: string,
+    from?: string,
+    to?: string,
+  ) {
     const conds: string[] = [];
     const params: any[] = [];
-    if (status) {
+    if (status && status !== 'all') {
       params.push(status);
       conds.push(`s.status = $${params.length}`);
     }
@@ -1186,7 +1192,33 @@ export class ShiftsService {
       params.push(userId);
       conds.push(`s.opened_by = $${params.length}`);
     }
+    if (cashboxId) {
+      params.push(cashboxId);
+      conds.push(`s.cashbox_id = $${params.length}`);
+    }
+    // PR-REPORTS-1 — match shifts whose lifetime overlaps the picked
+    // window. A shift "belongs" to the window if it was opened on/before
+    // `to` and either is still open or closed on/after `from`. Both
+    // bounds are evaluated against Cairo-local dates so the daily /
+    // weekly / monthly chips line up with what the cashier sees.
+    if (from) {
+      params.push(from);
+      conds.push(
+        `(s.closed_at IS NULL
+          OR (s.closed_at AT TIME ZONE 'Africa/Cairo')::date >= $${params.length}::date)`,
+      );
+    }
+    if (to) {
+      params.push(to);
+      conds.push(
+        `(s.opened_at AT TIME ZONE 'Africa/Cairo')::date <= $${params.length}::date`,
+      );
+    }
     const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+    // Range queries can legitimately cover the full month — bump the
+    // cap to 1000 (single-shift cashbox-on-busy-day rarely exceeds 30
+    // entries, so this still bounds memory).
+    const limit = from || to ? 1000 : 200;
     return this.ds.query(
       `
       SELECT
@@ -1203,7 +1235,7 @@ export class ShiftsService {
       LEFT JOIN users u2 ON u2.id = s.closed_by
       ${where}
       ORDER BY s.opened_at DESC
-      LIMIT 200
+      LIMIT ${limit}
       `,
       params,
     );

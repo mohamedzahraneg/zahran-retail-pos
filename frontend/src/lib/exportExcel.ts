@@ -47,15 +47,33 @@ export function exportMultiSheet(
 /**
  * Generic "print this report" helper — opens a plain HTML dump in a
  * new window and calls print. Fast PDF replacement without a library.
+ *
+ * The `title` parameter is interpolated into both `<title>` and `<h1>`,
+ * so it MUST be HTML-escaped before being written to the document.
+ * Callers regularly pass user-influenced values (shift numbers, date
+ * ranges, employee names), and CodeQL flagged the unescaped path as
+ * "DOM text reinterpreted as HTML". `htmlBody` is intentionally raw —
+ * the per-feature builders are responsible for escaping inside their
+ * own templates (see `escapeHtml` in shiftReportBuilder.ts and
+ * shiftsPeriodReportBuilder.ts).
  */
+const escapeHtmlForPrint = (s: string) =>
+  String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+
 export function printReport(title: string, htmlBody: string) {
   const w = window.open('', '_blank', 'width=900,height=1100');
   if (!w) return;
+  const safeTitle = escapeHtmlForPrint(title);
   w.document.write(`<!doctype html>
 <html dir="rtl" lang="ar">
 <head>
   <meta charset="utf-8" />
-  <title>${title}</title>
+  <title>${safeTitle}</title>
   <style>
     body { font-family: 'Tajawal','Cairo',Tahoma,sans-serif; padding: 20px; }
     h1 { font-size: 22px; margin: 0 0 10px; }
@@ -68,8 +86,10 @@ export function printReport(title: string, htmlBody: string) {
   </style>
 </head>
 <body>
-  <h1>${title}</h1>
-  <div class="muted">طُبع في ${new Date().toLocaleString('ar-EG', { timeZone: 'Africa/Cairo' })}</div>
+  <h1>${safeTitle}</h1>
+  <div class="muted">طُبع في ${escapeHtmlForPrint(
+    new Date().toLocaleString('ar-EG', { timeZone: 'Africa/Cairo' }),
+  )}</div>
   ${htmlBody}
   <script>
     setTimeout(() => window.print(), 300);

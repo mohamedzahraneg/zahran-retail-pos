@@ -99,8 +99,14 @@ export class ShiftsController {
 
   @Get()
   @ApiOperation({ summary: 'قائمة الورديات' })
-  list(@Query('status') status?: string, @Query('user_id') userId?: string) {
-    return this.svc.list(status, userId);
+  list(
+    @Query('status') status?: string,
+    @Query('user_id') userId?: string,
+    @Query('cashbox_id') cashboxId?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    return this.svc.list(status, userId, cashboxId, from, to);
   }
 
   @Get('current')

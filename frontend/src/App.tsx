@@ -23,6 +23,7 @@ import AuditLog from '@/pages/AuditLog';
 import Reports from '@/pages/Reports';
 import Import from '@/pages/Import';
 import Shifts from '@/pages/Shifts';
+import ShiftReports from '@/pages/ShiftReports';
 import StockTransfers from '@/pages/StockTransfers';
 import StockCount from '@/pages/StockCount';
 import Coupons from '@/pages/Coupons';
@@ -129,6 +130,14 @@ export default function App() {
           }
         />
         <Route path="shifts" element={<Shifts />} />
+        <Route
+          path="shift-reports"
+          element={
+            <ProtectedRoute anyPermission={['reports.view', 'shifts.view']}>
+              <ShiftReports />
+            </ProtectedRoute>
+          }
+        />
         <Route path="stock-transfers" element={<StockTransfers />} />
         <Route path="stock-count" element={<StockCount />} />
         <Route path="coupons" element={<Coupons />} />
