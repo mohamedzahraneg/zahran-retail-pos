@@ -19,7 +19,15 @@ import {
   ValidateIf,
 } from 'class-validator';
 import { CommissionsService } from './commissions.service';
-import { Roles, Permissions } from '../common/decorators/roles.decorator';
+import {
+  Roles,
+  Permissions,
+  AnyPermissions,
+} from '../common/decorators/roles.decorator';
+import {
+  CurrentUser,
+  JwtUser,
+} from '../common/decorators/current-user.decorator';
 
 class UpdateRateDto {
   @IsNumber()
@@ -86,6 +94,27 @@ class UpdateSellerSettingsDto {
 @Controller('commissions')
 export class CommissionsController {
   constructor(private readonly svc: CommissionsService) {}
+
+  /**
+   * PR-ESS-2A — self-service commission detail. Resolves user from JWT
+   * so the employee can read their own sales/commission data without
+   * needing the `accounting.view` gate that scopes the rest of this
+   * controller. No IDOR — `:userId` is replaced by `user.userId`.
+   *
+   * `@AnyPermissions` widens the class-level gate for this single
+   * route: the user can pass with EITHER `employee.dashboard.view`
+   * (the gate already used by the rest of /me) OR `accounting.view`
+   * (so admins/managers can hit /me/detail too without losing access).
+   */
+  @Get('me/detail')
+  @AnyPermissions('employee.dashboard.view', 'accounting.view')
+  myDetail(
+    @CurrentUser() user: JwtUser,
+    @Query('from') from: string,
+    @Query('to') to: string,
+  ) {
+    return this.svc.detail(user.userId, { from, to });
+  }
 
   @Get('salespeople')
   @Roles('admin', 'manager', 'accountant')

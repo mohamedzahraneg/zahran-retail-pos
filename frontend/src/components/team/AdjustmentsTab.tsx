@@ -95,18 +95,47 @@ function classify(rows: EmployeeGlLedgerEntry[]): ClassifiedRow[] {
  * Top-level component
  * ───────────────────────────────────────────────────────────────── */
 
-export function AdjustmentsTab({ employee }: { employee: TeamRow }) {
+/**
+ * PR-ESS-2A — `mode='self'` is used by the /me self-service profile to
+ * reuse this tab read-only. In self mode every admin mutation control
+ * is hidden:
+ *   · "تسجيل سلفة" (admin direct path) — hidden
+ *   · "تسجيل خصم" — hidden
+ *   · "تسجيل مكافأة" — hidden
+ * The 3 BucketTable readouts (السلف / الخصومات / المكافآت) and the 4
+ * summary cards stay visible so the employee can audit their own
+ * adjustments. Self-service ADVANCE REQUEST submission is a separate
+ * button on the /me header, not in this tab.
+ */
+export function AdjustmentsTab({
+  employee,
+  mode = 'admin',
+}: {
+  employee: TeamRow;
+  mode?: 'admin' | 'self';
+}) {
   const hasPermission = useAuthStore((s) => s.hasPermission);
-  const canBonus = hasPermission('employee.bonuses.manage');
-  const canDeduct = hasPermission('employee.deductions.manage');
-  const canAdvance = hasPermission('employee.deductions.manage');
+  // Self mode strips ALL admin mutation buttons regardless of what
+  // permissions the viewer happens to hold.
+  const canBonus =
+    mode === 'admin' && hasPermission('employee.bonuses.manage');
+  const canDeduct =
+    mode === 'admin' && hasPermission('employee.deductions.manage');
+  const canAdvance =
+    mode === 'admin' && hasPermission('employee.deductions.manage');
 
   const [modal, setModal] = useState<Modal>(null);
   const range = useMemo(() => monthBounds(), []);
 
+  // PR-ESS-2A — self mode uses /me/ledger so the employee can read
+  // their own adjustments without the admin gate.
+  const isSelf = mode === 'self';
   const { data: ledger, isFetching } = useQuery({
-    queryKey: ['employee-ledger', employee.id, range.from, range.to],
-    queryFn: () => employeesApi.userLedger(employee.id, range.from, range.to),
+    queryKey: ['employee-ledger', employee.id, range.from, range.to, isSelf],
+    queryFn: () =>
+      isSelf
+        ? employeesApi.myLedger(range.from, range.to)
+        : employeesApi.userLedger(employee.id, range.from, range.to),
   });
 
   const classified = useMemo(
@@ -148,36 +177,39 @@ export function AdjustmentsTab({ employee }: { employee: TeamRow }) {
 
       {/* Action bar — three focused buttons. Permission-aware. The
           payout button intentionally does NOT live here (it belongs
-          on الحسابات والحركات per PR-T3.1). */}
-      <div className="flex items-center justify-end flex-wrap gap-2 bg-white rounded-2xl border border-slate-200 shadow-sm p-3">
-        {canAdvance && (
-          <ActionButton
-            tone="indigo"
-            icon={<TrendingDown size={15} />}
-            onClick={() => setModal('advance')}
-          >
-            تسجيل سلفة
-          </ActionButton>
-        )}
-        {canDeduct && (
-          <ActionButton
-            tone="rose"
-            icon={<Minus size={15} />}
-            onClick={() => setModal('deduction')}
-          >
-            تسجيل خصم
-          </ActionButton>
-        )}
-        {canBonus && (
-          <ActionButton
-            tone="emerald"
-            icon={<Gift size={15} />}
-            onClick={() => setModal('bonus')}
-          >
-            تسجيل مكافأة
-          </ActionButton>
-        )}
-      </div>
+          on الحسابات والحركات per PR-T3.1).
+          PR-ESS-2A — entire admin action bar hidden in self mode. */}
+      {mode === 'admin' && (
+        <div className="flex items-center justify-end flex-wrap gap-2 bg-white rounded-2xl border border-slate-200 shadow-sm p-3">
+          {canAdvance && (
+            <ActionButton
+              tone="indigo"
+              icon={<TrendingDown size={15} />}
+              onClick={() => setModal('advance')}
+            >
+              تسجيل سلفة
+            </ActionButton>
+          )}
+          {canDeduct && (
+            <ActionButton
+              tone="rose"
+              icon={<Minus size={15} />}
+              onClick={() => setModal('deduction')}
+            >
+              تسجيل خصم
+            </ActionButton>
+          )}
+          {canBonus && (
+            <ActionButton
+              tone="emerald"
+              icon={<Gift size={15} />}
+              onClick={() => setModal('bonus')}
+            >
+              تسجيل مكافأة
+            </ActionButton>
+          )}
+        </div>
+      )}
 
       {/* Summary cards — focused on adjustments only. */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">

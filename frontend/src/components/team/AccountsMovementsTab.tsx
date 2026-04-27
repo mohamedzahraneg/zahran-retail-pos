@@ -94,9 +94,26 @@ const fmtDate = (iso?: string | null) => {
 
 type ModalKind = 'payout' | 'advance' | 'bonus' | 'deduction' | null;
 
-export function AccountsMovementsTab({ employee }: { employee: TeamRow }) {
+/**
+ * PR-ESS-2A — `mode='self'` is used by the /me self-service profile to
+ * reuse this tab read-only. In self mode every admin mutation control
+ * is hidden:
+ *   · "صرف مستحقات / صرف يومية" (PayWageModal trigger) — hidden
+ *   · per-row "إلغاء الحركة" void affordance — disabled (canVoid=false)
+ * The full ledger table + summary cards stay visible.
+ */
+export function AccountsMovementsTab({
+  employee,
+  mode = 'admin',
+}: {
+  employee: TeamRow;
+  mode?: 'admin' | 'self';
+}) {
   const hasPermission = useAuthStore((s) => s.hasPermission);
-  const canPayWage = hasPermission('employee.ledger.view');
+  // Self mode is a UX boundary — strip the wage-payout trigger even if
+  // the employee happens to also hold the admin permission.
+  const canPayWage =
+    mode === 'admin' && hasPermission('employee.ledger.view');
 
   const userId = employee.id;
   const liveGl = Number(employee.gl_balance || 0);
@@ -109,15 +126,24 @@ export function AccountsMovementsTab({ employee }: { employee: TeamRow }) {
   const [from, setFrom] = useState(defaultRange.from);
   const [to, setTo] = useState(defaultRange.to);
 
+  // PR-ESS-2A — in self mode use /me/* endpoints (no `:id`) so the
+  // employee can read their own ledger without the admin gate.
+  const isSelf = mode === 'self';
   const { data: ledger, isFetching: ledgerLoading } = useQuery({
-    queryKey: ['employee-ledger', userId, from, to],
-    queryFn: () => employeesApi.userLedger(userId, from, to),
+    queryKey: ['employee-ledger', userId, from, to, isSelf],
+    queryFn: () =>
+      isSelf
+        ? employeesApi.myLedger(from, to)
+        : employeesApi.userLedger(userId, from, to),
     refetchOnMount: 'always',
   });
 
   const { data: dash } = useQuery({
-    queryKey: ['employee-user-dashboard', userId],
-    queryFn: () => employeesApi.userDashboard(userId),
+    queryKey: ['employee-user-dashboard', userId, isSelf],
+    queryFn: () =>
+      isSelf
+        ? employeesApi.dashboard()
+        : employeesApi.userDashboard(userId),
   });
 
   return (
@@ -126,28 +152,27 @@ export function AccountsMovementsTab({ employee }: { employee: TeamRow }) {
 
       {/* PR-T4.2 — action ownership boundaries:
           · This tab owns ONLY: صرف مستحقات / صرف يومية (payout)
-          · تسجيل سلفة / خصم / مكافأة moved to السلف والخصومات tab
-            exclusively. The full ledger below still SHOWS those
-            movement types (filterable via the type dropdown), but
-            the create-buttons live in their owning tab to remove
-            duplicate UX. */}
-      <div className="flex items-center justify-between flex-wrap gap-2 bg-white rounded-2xl border border-slate-200 shadow-sm p-3">
-        {canPayWage ? (
-          <ActionButton
-            tone="amber"
-            icon={<Banknote size={15} />}
-            onClick={() => setModal('payout')}
-          >
-            صرف مستحقات / صرف يومية
-          </ActionButton>
-        ) : (
-          <span />
-        )}
-        <div className="text-[11px] text-slate-500 leading-snug max-w-xs">
-          تسجيل السلف / الخصومات / المكافآت يتم من تبويب{' '}
-          <span className="font-bold text-violet-700">السلف والخصومات</span>.
+          · تسجيل سلفة / خصم / مكافأة moved to السلف والخصومات tab.
+          PR-ESS-2A — entire admin action bar hidden in self mode. */}
+      {mode === 'admin' && (
+        <div className="flex items-center justify-between flex-wrap gap-2 bg-white rounded-2xl border border-slate-200 shadow-sm p-3">
+          {canPayWage ? (
+            <ActionButton
+              tone="amber"
+              icon={<Banknote size={15} />}
+              onClick={() => setModal('payout')}
+            >
+              صرف مستحقات / صرف يومية
+            </ActionButton>
+          ) : (
+            <span />
+          )}
+          <div className="text-[11px] text-slate-500 leading-snug max-w-xs">
+            تسجيل السلف / الخصومات / المكافآت يتم من تبويب{' '}
+            <span className="font-bold text-violet-700">السلف والخصومات</span>.
+          </div>
         </div>
-      </div>
+      )}
 
       <SummaryCards ledger={ledger} dash={dash} liveGl={liveGl} />
 
@@ -159,6 +184,7 @@ export function AccountsMovementsTab({ employee }: { employee: TeamRow }) {
         to={to}
         onChangeFrom={setFrom}
         onChangeTo={setTo}
+        mode={mode}
       />
 
       {/* Modals — only payout is reachable from this tab now (PR-T4.2).
@@ -265,6 +291,7 @@ function LedgerCard({
   to,
   onChangeFrom,
   onChangeTo,
+  mode = 'admin',
 }: {
   userId: string;
   ledger?: EmployeeLedger;
@@ -273,9 +300,13 @@ function LedgerCard({
   to: string;
   onChangeFrom: (s: string) => void;
   onChangeTo: (s: string) => void;
+  /** PR-ESS-2A — hides per-row "إلغاء" button in self mode. */
+  mode?: 'admin' | 'self';
 }) {
   const hasPermission = useAuthStore((s) => s.hasPermission);
-  const canVoid = hasPermission('payroll.void');
+  // Self mode strips the void affordance; the ledger stays read-only
+  // for the employee even if they happen to hold `payroll.void`.
+  const canVoid = mode === 'admin' && hasPermission('payroll.void');
   const qc = useQueryClient();
 
   const [search, setSearch] = useState('');

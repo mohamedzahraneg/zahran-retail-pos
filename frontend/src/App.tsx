@@ -42,7 +42,11 @@ import CustomerGroups from '@/pages/CustomerGroups';
 import Settings from '@/pages/Settings';
 import Users from '@/pages/Users';
 import Loyalty from '@/pages/Loyalty';
-import EmployeeProfile from '@/pages/EmployeeProfile';
+// PR-ESS-2A — /me now renders the simplified self-service personal
+// employee file. The legacy EmployeeProfile component still exports
+// PayWageModal which is consumed by AccountsMovementsTab (admin
+// flow), so the file stays — only the /me route binding moved.
+import MyProfile from '@/pages/MyProfile';
 import Team from '@/pages/Team';
 import SetupWizard from '@/pages/SetupWizard';
 import NotFound from '@/pages/NotFound';
@@ -259,7 +263,7 @@ export default function App() {
           path="me"
           element={
             <ProtectedRoute permissions={['employee.dashboard.view']}>
-              <EmployeeProfile />
+              <MyProfile />
             </ProtectedRoute>
           }
         />
