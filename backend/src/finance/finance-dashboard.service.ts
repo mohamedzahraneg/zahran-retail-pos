@@ -22,6 +22,16 @@
  *     route exists today is `available=true`, the rest are
  *     placeholders.
  *
+ * PR-FIN-2-HOTFIX-2 — connection-pool exhaustion fix:
+ *   The original PR-FIN-2 fired 18 aggregators through a top-level
+ *   `Promise.all`, plus an inner `Promise.all` of 3 inside `balances()`,
+ *   plus multi-query helpers (`profit_trend`, `alerts`). On a typical
+ *   request that meant ~28 concurrent SELECTs against the DB. Supabase's
+ *   session-mode pooler caps at `pool_size: 15`, so the dashboard
+ *   reliably returned `EMAXCONNSESSION max clients reached in session
+ *   mode`. Fix: sequential awaits everywhere — concurrent queries
+ *   per request capped at 1.
+ *
  * PR-FIN-2-HOTFIX-1 — invoice_status enum fix:
  *   The original PR-FIN-2 SQL excluded out-of-scope invoices via
  *   `i.status NOT IN ('voided','cancelled')`. The Postgres
@@ -51,49 +61,40 @@ export class FinanceDashboardService {
     const range = this.resolveRange(filters);
     const prevRange = this.previousRange(range);
 
-    // Run aggregators in parallel where possible. Each helper is a
-    // single SELECT; we don't share results between them on purpose
-    // so a failure in one section doesn't poison the rest (NestJS
-    // will short-circuit on the first throw, which is what we want).
-    const [
-      health,
-      liquidity,
-      dailyExpenses,
-      balances,
-      profitNow,
-      profitPrev,
-      profitTrend,
-      paymentChannels,
-      groupProfits,
-      topProducts,
-      profitByCustomer,
-      profitBySupplier,
-      profitByDepartment,
-      profitByShift,
-      profitByPaymentMethod,
-      cashAccounts,
-      recentMovements,
-      alerts,
-    ] = await Promise.all([
-      this.health(),
-      this.liquidity(filters),
-      this.dailyExpensesToday(),
-      this.balances(),
-      this.profitTotals(range, filters),
-      this.profitTotals(prevRange, filters),
-      this.profitTrendDaily(range, filters),
-      this.paymentChannelsMix(range, filters),
-      this.profitByCategoryGroups(range, filters),
-      this.topProducts(range, filters, 10),
-      this.profitByCustomer(range, filters, 5),
-      this.profitBySupplier(range, filters, 5),
-      this.profitByDepartment(range, filters, 5),
-      this.profitByShift(range, filters, 5),
-      this.profitByPaymentMethod(range, filters),
-      this.cashAccountsTable(filters),
-      this.recentMovements(range, filters, 20),
-      this.alerts(),
-    ]);
+    // PR-FIN-2-HOTFIX-2 — sequentialised aggregators.
+    //
+    // The original implementation fired all 18 aggregators through a
+    // single `Promise.all` which, combined with the inner Promise.all
+    // in `balances()` and the multi-query helpers, drove ~28 SELECTs
+    // concurrent. Supabase's session-mode pooler caps at 15 clients
+    // per session, so the dashboard reliably exhausted the pool with:
+    //
+    //   EMAXCONNSESSION max clients reached in session mode
+    //
+    // Sequential awaits cap concurrent queries at exactly 1 per
+    // request — well under the pool limit, and the cumulative wall
+    // time is acceptable because each query is a small SELECT
+    // (typical < 50ms). Any future need for parallelism should use a
+    // bounded concurrency limiter (max 2-3) plus a single shared
+    // queryRunner — see Plan §13 in PR-FIN-2-HOTFIX-2 PR description.
+    const health = await this.health();
+    const liquidity = await this.liquidity(filters);
+    const dailyExpenses = await this.dailyExpensesToday();
+    const balances = await this.balances();
+    const profitNow = await this.profitTotals(range, filters);
+    const profitPrev = await this.profitTotals(prevRange, filters);
+    const profitTrend = await this.profitTrendDaily(range, filters);
+    const paymentChannels = await this.paymentChannelsMix(range, filters);
+    const groupProfits = await this.profitByCategoryGroups(range, filters);
+    const topProducts = await this.topProducts(range, filters, 10);
+    const profitByCustomer = await this.profitByCustomer(range, filters, 5);
+    const profitBySupplier = await this.profitBySupplier(range, filters, 5);
+    const profitByDepartment = await this.profitByDepartment(range, filters, 5);
+    const profitByShift = await this.profitByShift(range, filters, 5);
+    const profitByPaymentMethod = await this.profitByPaymentMethod(range, filters);
+    const cashAccounts = await this.cashAccountsTable(filters);
+    const recentMovements = await this.recentMovements(range, filters, 20);
+    const alerts = await this.alerts();
 
     return {
       range,
@@ -304,43 +305,44 @@ export class FinanceDashboardService {
 
   // ─── Balances (customers / suppliers / employees) ─────────────────
   private async balances(): Promise<FinanceDashboardResponse['balances']> {
-    const [customers, suppliers, employees] = await Promise.all([
-      this.ds.query(`
-        WITH active AS (
-          SELECT id, full_name, COALESCE(current_balance, 0) AS bal
-          FROM customers
-          WHERE deleted_at IS NULL
-            AND COALESCE(current_balance, 0) > 0
-        )
-        SELECT
-          COALESCE(SUM(bal), 0) AS total,
-          COUNT(*)              AS n,
-          (SELECT full_name FROM active ORDER BY bal DESC, full_name ASC LIMIT 1) AS top_name,
-          (SELECT bal       FROM active ORDER BY bal DESC, full_name ASC LIMIT 1) AS top_amount
-        FROM active
-      `),
-      this.ds.query(`
-        WITH active AS (
-          SELECT id, name, COALESCE(current_balance, 0) AS bal
-          FROM suppliers
-          WHERE deleted_at IS NULL
-            AND COALESCE(current_balance, 0) > 0
-        )
-        SELECT
-          COALESCE(SUM(bal), 0) AS total,
-          COUNT(*)              AS n,
-          (SELECT name FROM active ORDER BY bal DESC, name ASC LIMIT 1) AS top_name,
-          (SELECT bal  FROM active ORDER BY bal DESC, name ASC LIMIT 1) AS top_amount
-        FROM active
-      `),
-      this.ds.query(`
-        SELECT
-          COALESCE(SUM(CASE WHEN net_balance > 0 THEN net_balance ELSE 0 END), 0) AS owed_to,
-          COALESCE(SUM(CASE WHEN net_balance < 0 THEN -net_balance ELSE 0 END), 0) AS owed_by,
-          COALESCE(SUM(net_balance), 0) AS net
-        FROM v_employee_gl_balance
-      `).catch(() => [{ owed_to: 0, owed_by: 0, net: 0 }]),
-    ]);
+    // PR-FIN-2-HOTFIX-2 — sequentialised. The original `Promise.all`
+    // contributed 3 of the ~28 concurrent queries that exhausted the
+    // pool. Each helper SELECT here is small; sequential is fine.
+    const customers = await this.ds.query(`
+      WITH active AS (
+        SELECT id, full_name, COALESCE(current_balance, 0) AS bal
+        FROM customers
+        WHERE deleted_at IS NULL
+          AND COALESCE(current_balance, 0) > 0
+      )
+      SELECT
+        COALESCE(SUM(bal), 0) AS total,
+        COUNT(*)              AS n,
+        (SELECT full_name FROM active ORDER BY bal DESC, full_name ASC LIMIT 1) AS top_name,
+        (SELECT bal       FROM active ORDER BY bal DESC, full_name ASC LIMIT 1) AS top_amount
+      FROM active
+    `);
+    const suppliers = await this.ds.query(`
+      WITH active AS (
+        SELECT id, name, COALESCE(current_balance, 0) AS bal
+        FROM suppliers
+        WHERE deleted_at IS NULL
+          AND COALESCE(current_balance, 0) > 0
+      )
+      SELECT
+        COALESCE(SUM(bal), 0) AS total,
+        COUNT(*)              AS n,
+        (SELECT name FROM active ORDER BY bal DESC, name ASC LIMIT 1) AS top_name,
+        (SELECT bal  FROM active ORDER BY bal DESC, name ASC LIMIT 1) AS top_amount
+      FROM active
+    `);
+    const employees = await this.ds.query(`
+      SELECT
+        COALESCE(SUM(CASE WHEN net_balance > 0 THEN net_balance ELSE 0 END), 0) AS owed_to,
+        COALESCE(SUM(CASE WHEN net_balance < 0 THEN -net_balance ELSE 0 END), 0) AS owed_by,
+        COALESCE(SUM(net_balance), 0) AS net
+      FROM v_employee_gl_balance
+    `).catch(() => [{ owed_to: 0, owed_by: 0, net: 0 }]);
 
     const c = customers[0] ?? {};
     const s = suppliers[0] ?? {};

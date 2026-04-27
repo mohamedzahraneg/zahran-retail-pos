@@ -378,6 +378,61 @@ describe('FinanceDashboardService — PR-FIN-2', () => {
   });
 
   /**
+   * PR-FIN-2-HOTFIX-2 — connection-pool exhaustion guard.
+   *
+   * The original PR-FIN-2 fanned out ~28 concurrent SELECTs via
+   * `Promise.all`, exhausting Supabase's session-mode pool
+   * (pool_size: 15) on every authenticated dashboard load. The fix
+   * is sequential awaits — concurrent queries per request capped
+   * at 1.
+   *
+   * This test instruments `ds.query` to track in-flight count and
+   * asserts that **at no point** does the dashboard have more than
+   * a small number (≤3) of concurrent queries. If a future
+   * contributor reintroduces a `Promise.all` over DB queries this
+   * test fails before the change reaches production.
+   */
+  describe('PR-FIN-2-HOTFIX-2 — concurrency cap', () => {
+    it('never has more than 3 DB queries in flight concurrently', async () => {
+      let inFlight = 0;
+      let peak = 0;
+      const ds = {
+        query: jest.fn(async (_sql: string, _params?: any[]) => {
+          inFlight += 1;
+          peak = Math.max(peak, inFlight);
+          // Defer resolution by a microtask so any sibling Promise.all
+          // would actually overlap. Without this, jest mocks resolve
+          // synchronously and we'd never observe parallelism even
+          // when it's there.
+          await new Promise((r) => setImmediate(r));
+          inFlight -= 1;
+          return [];
+        }),
+      };
+      const svc = new FinanceDashboardService(ds as any);
+      await svc.dashboard({ from: '2026-04-01', to: '2026-04-30' });
+      expect(peak).toBeLessThanOrEqual(3);
+    });
+
+    it('with sequential awaits, peak in-flight is exactly 1', async () => {
+      let inFlight = 0;
+      let peak = 0;
+      const ds = {
+        query: jest.fn(async () => {
+          inFlight += 1;
+          peak = Math.max(peak, inFlight);
+          await new Promise((r) => setImmediate(r));
+          inFlight -= 1;
+          return [];
+        }),
+      };
+      const svc = new FinanceDashboardService(ds as any);
+      await svc.dashboard({ from: '2026-04-01', to: '2026-04-30' });
+      expect(peak).toBe(1);
+    });
+  });
+
+  /**
    * PR-FIN-2-HOTFIX-1 — regression guard.
    *
    * The original PR-FIN-2 SQL used `i.status NOT IN ('voided','cancelled')`
