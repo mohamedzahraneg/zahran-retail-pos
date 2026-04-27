@@ -177,7 +177,14 @@ export const accountingApi = {
    * only book expenses against their own user id.
    */
   createDailyExpense: (body: {
-    warehouse_id: string;
+    /**
+     * PR-EMP-FIX — optional. Backend DTO is
+     * `@IsOptional() @IsUUID()`; an empty string fails validation.
+     * When omitted the service auto-resolves the first active
+     * warehouse (accounting.service.ts:439-451). Daily expenses
+     * aren't branch-scoped so omitting is the canonical path on prod.
+     */
+    warehouse_id?: string;
     cashbox_id?: string;
     category_id: string;
     amount: number;

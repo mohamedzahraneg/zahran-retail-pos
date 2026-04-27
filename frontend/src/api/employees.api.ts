@@ -310,6 +310,16 @@ export const employeesApi = {
       method?: 'cash' | 'bank' | 'payroll_deduction' | 'other';
       cashbox_id?: string;
       notes?: string;
+      /**
+       * PR-EMP-FIX — explicit open-shift linkage. When the operator
+       * picks "from open shift" in CashSourceSelector, this MUST be
+       * forwarded; otherwise the backend treats the settlement as a
+       * direct-cashbox payout and demands the
+       * `employees.settlement.direct_cashbox` permission. Same shape
+       * as PayWageModal.adminPayWage and the backend
+       * recordSettlement DTO (employees.service.ts:1355).
+       */
+      shift_id?: string;
     },
   ) => unwrap<any>(api.post(`/employees/${id}/settlements`, body)),
 };
