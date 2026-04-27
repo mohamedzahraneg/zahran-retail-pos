@@ -54,10 +54,19 @@ export function MyRequestsCard() {
   });
   const list = requests as EmployeeRequest[];
 
-  const advances = list.filter((r) => r.kind === 'advance');
+  // PR-ESS-2A-HOTFIX-1 — both legacy `'advance'` and the new safe
+  // `'advance_request'` render under "طلبات السلف". Only the new
+  // value is emitted by the self-service endpoint, but pre-hotfix
+  // rows still carry `'advance'` and need to display correctly.
+  const advances = list.filter(
+    (r) => r.kind === 'advance' || r.kind === 'advance_request',
+  );
   const leaves = list.filter((r) => r.kind === 'leave');
   const others = list.filter(
-    (r) => r.kind !== 'advance' && r.kind !== 'leave',
+    (r) =>
+      r.kind !== 'advance' &&
+      r.kind !== 'advance_request' &&
+      r.kind !== 'leave',
   );
 
   return (

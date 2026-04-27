@@ -609,22 +609,44 @@ export class EmployeesService {
   /**
    * PR-ESS-2A — self-service salary-advance REQUEST submission.
    *
-   * Inserts an `employee_requests` row with `kind='advance'` and
-   * `status='pending'` (default). REQUEST-ONLY by design:
+   * Inserts an `employee_requests` row with `kind='advance_request'`
+   * and `status='pending'` (default). REQUEST-ONLY by design:
    *
    *   - No journal_entries / journal_lines write.
    *   - No cashbox_transactions write.
    *   - No expense row created.
    *   - No FinancialEngineService call.
-   *   - No employee_transactions trigger (the legacy mirror path that
-   *     PR audit #4 closed off remains closed — this method only
-   *     writes employee_requests).
+   *   - No employee_transactions trigger fires.
    *
-   * The DB CHECK constraint on `employee_requests.kind` already
-   * accepts 'advance' (verified live on Supabase project
-   * teyjynfijgwdxusbdzgz before implementation), so no migration is
-   * needed. Manager approval flips the row's status to 'approved' via
-   * `decideRequest`, which itself never moves money.
+   * Why a *new* kind value (`advance_request`) instead of the legacy
+   * `advance` (PR-ESS-2A-HOTFIX-1):
+   *
+   * The original PR-ESS-2A used `kind='advance'`, relying on a
+   * pre-implementation check that the CHECK constraint accepts that
+   * value. That check missed an existing legacy trigger chain on the
+   * `employee_requests` table:
+   *
+   *     trg_mirror_advance_to_txn (AFTER UPDATE)
+   *     └── INSERT INTO employee_transactions (type='advance', ...)
+   *          └── trg_employee_txn_post (AFTER INSERT)
+   *               └── set_config('app.engine_context','engine:payroll')
+   *               └── INSERT INTO journal_entries  (DR 1123 / CR 1111)
+   *               └── INSERT INTO journal_lines  × 2
+   *
+   * The session-context bypass means migration 063's GL guard doesn't
+   * reject the auto-post and `engine_bypass_alerts` isn't tripped —
+   * the cascade is silent. Result: when a manager approves a /me
+   * advance REQUEST, the employee's GL balance immediately shows them
+   * owing the amount even though no cash moved. That violates the
+   * documented contract of this endpoint ("REQUEST-ONLY") and is the
+   * exact bug PR-ESS-2A shipped on 2026-04-27.
+   *
+   * Migration 114 widens the CHECK to also accept `'advance_request'`.
+   * The legacy mirror trigger function literal-matches
+   * `NEW.kind = 'advance'`, so it stays inert for the new value and
+   * approval is a pure status flip. The legacy `'advance'` value is
+   * still allowed in the CHECK so any historical rows / writers that
+   * still post with that kind keep their existing side-effect.
    *
    * Disbursement remains the operator's separate Daily Expense step
    * (`POST /accounting/expenses/daily` with `is_advance=true`). The
@@ -637,7 +659,7 @@ export class EmployeesService {
    * Notes (`dto.notes`) are appended to the existing `reason` column
    * separated by a blank line — `employee_requests` doesn't have a
    * separate notes column, so adding one would require a migration we
-   * intentionally skip in PR-ESS-2A.
+   * intentionally skip here.
    */
   async submitAdvanceRequest(
     userId: string,
@@ -658,7 +680,7 @@ export class EmployeesService {
     const [row] = await this.ds.query(
       `INSERT INTO employee_requests
          (user_id, kind, amount, reason)
-       VALUES ($1, 'advance', $2, $3)
+       VALUES ($1, 'advance_request', $2, $3)
        RETURNING *`,
       [userId, dto.amount, reasonField],
     );

@@ -90,6 +90,13 @@ const fmtDateTime = (iso?: string | null) => {
 
 const KIND_LABEL: Record<EmployeeRequest['kind'], string> = {
   advance: 'سلفة',
+  // PR-ESS-2A-HOTFIX-1 — same Arabic label as legacy 'advance' so
+  // the manager's approvals queue renders both kinds identically.
+  // The kind value differs only at the data-flow level: approving
+  // 'advance_request' is a pure status flip (no GL/cashbox writes),
+  // while approving the legacy 'advance' triggers the historical
+  // mirror cascade. See migration 114 + employees.service.ts.
+  advance_request: 'سلفة',
   leave: 'إجازة',
   overtime_extension: 'تمديد ساعات إضافية',
   other: 'أخرى',

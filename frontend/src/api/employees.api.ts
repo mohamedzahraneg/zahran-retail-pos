@@ -22,7 +22,25 @@ export type SubmitRequestKind = 'leave' | 'overtime_extension' | 'other';
 export interface EmployeeRequest {
   id: string;
   user_id: string;
-  kind: 'advance' | 'leave' | 'overtime_extension' | 'other';
+  /**
+   * PR-ESS-2A-HOTFIX-1 — `'advance_request'` is the safe self-service
+   * salary-advance kind introduced by migration 114. It does NOT
+   * trigger the legacy `fn_mirror_advance_to_txn` cascade that
+   * `'advance'` does, so approving an `'advance_request'` is a pure
+   * status flip with no GL/cashbox/employee_transactions side
+   * effects.
+   *
+   * Both values are accepted for read-display compatibility — older
+   * historical rows still carry `'advance'` and must continue to
+   * render correctly under "طلبات السلف". Write-side, the
+   * self-service endpoint only emits `'advance_request'`.
+   */
+  kind:
+    | 'advance'
+    | 'advance_request'
+    | 'leave'
+    | 'overtime_extension'
+    | 'other';
   amount?: number | string;
   starts_at?: string;
   ends_at?: string;
