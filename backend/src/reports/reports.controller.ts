@@ -10,7 +10,10 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
 import { ReportsService } from './reports.service';
 import { SalesReportDto, DateRangeDto, ExportFormatDto } from './dto/reports.dto';
-import { Permissions } from '../common/decorators/roles.decorator';
+import {
+  AnyPermissions,
+  Permissions,
+} from '../common/decorators/roles.decorator';
 
 @ApiBearerAuth()
 @ApiTags('reports')
@@ -19,6 +22,36 @@ import { Permissions } from '../common/decorators/roles.decorator';
 @Controller('reports')
 export class ReportsController {
   constructor(private readonly svc: ReportsService) {}
+
+  // ── Payment channels (PR-REPORTS-2) ──────────────────────────────────
+  // Read-only roll-up powering the /shift-reports payment-channel
+  // report. Mirrors `dashboard/payment-channels` but adds cashbox /
+  // cashier / shift-status filters so the report matches the
+  // all-shifts report exactly. Method-level @AnyPermissions widens
+  // the class-level @Permissions('reports.view') so anyone with
+  // `shifts.view` (cashiers / managers running their own shifts) can
+  // pull this page's data without needing a separate report grant.
+  @Get('payment-channels')
+  @AnyPermissions('reports.view', 'shifts.view')
+  @ApiOperation({
+    summary:
+      'تقرير وسائل الدفع/الحسابات مع فلاتر الفترة والخزنة والكاشير وحالة الوردية',
+  })
+  paymentChannels(
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('cashbox_id') cashboxId?: string,
+    @Query('user_id') userId?: string,
+    @Query('status') status?: string,
+  ) {
+    return this.svc.paymentChannels({
+      from,
+      to,
+      cashbox_id: cashboxId,
+      user_id: userId,
+      status,
+    });
+  }
 
   // ── Sales ──────────────────────────────────────────────────────────────
   @Get('sales')

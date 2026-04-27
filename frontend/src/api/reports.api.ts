@@ -72,7 +72,64 @@ async function download(endpoint: string, params: Record<string, any>, filename:
   URL.revokeObjectURL(url);
 }
 
+/* PR-REPORTS-2 — same response shape as `dashboardApi.paymentChannels`,
+ * extended with the active filter set so the channels report can
+ * mirror the all-shifts report. The dashboard widget keeps using the
+ * date-only `/dashboard/payment-channels` endpoint untouched. */
+export interface PaymentChannelAccountRow {
+  payment_account_id: string | null;
+  display_name: string | null;
+  identifier: string | null;
+  provider_key: string | null;
+  total_amount: number;
+  invoice_count: number;
+  payment_count: number;
+  share_pct: number;
+}
+export interface PaymentChannelMethodRow {
+  method: string;
+  method_label_ar: string;
+  total_amount: number;
+  invoice_count: number;
+  payment_count: number;
+  share_pct: number;
+  accounts: PaymentChannelAccountRow[];
+}
+export interface PaymentChannelsReport {
+  range: { from: string; to: string };
+  filters: {
+    cashbox_id: string | null;
+    user_id: string | null;
+    status: string | null;
+  };
+  cash_total: number;
+  non_cash_total: number;
+  grand_total: number;
+  channels: PaymentChannelMethodRow[];
+}
+
 export const reportsApi = {
+  /** PR-REPORTS-2 — payment-method/account roll-up with full filter set. */
+  paymentChannels: (params: {
+    from?: string;
+    to?: string;
+    cashbox_id?: string;
+    user_id?: string;
+    status?: string;
+  }) =>
+    unwrap<PaymentChannelsReport>(
+      api.get('/reports/payment-channels', {
+        params: {
+          from: params.from || undefined,
+          to: params.to || undefined,
+          cashbox_id: params.cashbox_id || undefined,
+          user_id: params.user_id || undefined,
+          status:
+            params.status && params.status !== 'all' ? params.status : undefined,
+        },
+      }),
+    ),
+
   sales: (params: DateRange & { group_by?: 'day' | 'week' | 'month' }) =>
     unwrap<SalesRow[]>(api.get('/reports/sales', { params })),
 

@@ -466,4 +466,198 @@ export class ReportsService {
       [from, to],
     );
   }
+
+  // ── Payment channels (PR-REPORTS-2) ───────────────────────────────────
+  /**
+   * Same per-method + per-account roll-up as
+   * `DashboardService.paymentChannels`, but extended with cashbox /
+   * cashier / shift-status filters so the /shift-reports
+   * payment-channel report can match the all-shifts report exactly.
+   *
+   * Reads only — no writes, no migrations. The dashboard widget keeps
+   * calling its own date-only endpoint so its behaviour is unchanged.
+   *
+   * Cashbox + status filters reach the invoice via its `shift_id`
+   * (LEFT JOIN, so invoices without a shift are still counted by the
+   * date-only path). User filter goes straight to `i.cashier_id` since
+   * every paid invoice has one.
+   */
+  async paymentChannels(opts: {
+    from?: string;
+    to?: string;
+    cashbox_id?: string;
+    user_id?: string;
+    /** Shift status: 'open' | 'closed' | 'pending_close' | 'all' */
+    status?: string;
+  }) {
+    const fromDate = opts.from || this.todayCairoIso();
+    const toDate = opts.to || this.todayCairoIso();
+
+    const params: any[] = [fromDate, toDate];
+    const extraJoinNeeded = !!(opts.cashbox_id || (opts.status && opts.status !== 'all'));
+    const conds: string[] = [
+      `i.status IN ('paid','completed','partially_paid')`,
+      `(COALESCE(i.completed_at, i.created_at) AT TIME ZONE 'Africa/Cairo')::date BETWEEN $1::date AND $2::date`,
+    ];
+
+    if (opts.cashbox_id) {
+      params.push(opts.cashbox_id);
+      conds.push(`s.cashbox_id = $${params.length}`);
+    }
+    if (opts.user_id) {
+      params.push(opts.user_id);
+      conds.push(`i.cashier_id = $${params.length}`);
+    }
+    if (opts.status && opts.status !== 'all') {
+      params.push(opts.status);
+      conds.push(`s.status = $${params.length}`);
+    }
+
+    // Cashbox + shift status need the shift row; cashbox-filtered rows
+    // also implicitly require a shift_id (no shift → no cashbox), so an
+    // INNER JOIN there is correct. For status-only we still INNER-join
+    // because invoices without a shift have no status. Otherwise we
+    // skip the join entirely so the date-only path matches the
+    // dashboard widget byte-for-byte.
+    const shiftJoin = extraJoinNeeded
+      ? `JOIN shifts s ON s.id = i.shift_id`
+      : '';
+
+    const rows = await this.ds.query(
+      `
+      SELECT ip.payment_method::text                AS method,
+             ip.payment_account_id,
+             pa.display_name                        AS live_display_name,
+             pa.identifier                          AS live_identifier,
+             pa.provider_key                        AS live_provider_key,
+             ip.payment_account_snapshot            AS snap,
+             COALESCE(SUM(ip.amount),0)::numeric(18,2) AS amount,
+             COUNT(*)::int                              AS payment_count,
+             COUNT(DISTINCT ip.invoice_id)::int         AS invoice_count
+        FROM invoice_payments ip
+        JOIN invoices i        ON i.id = ip.invoice_id
+        ${shiftJoin}
+   LEFT JOIN payment_accounts pa ON pa.id = ip.payment_account_id
+       WHERE ${conds.join(' AND ')}
+       GROUP BY ip.payment_method, ip.payment_account_id, pa.display_name,
+                pa.identifier, pa.provider_key, ip.payment_account_snapshot
+      `,
+      params,
+    );
+
+    const METHOD_LABEL_AR: Record<string, string> = {
+      cash: 'كاش',
+      card_visa: 'فيزا',
+      card_mastercard: 'ماستركارد',
+      card_meeza: 'ميزة',
+      instapay: 'إنستا باي',
+      vodafone_cash: 'فودافون كاش',
+      orange_cash: 'أورانج كاش',
+      wallet: 'محفظة إلكترونية',
+      bank_transfer: 'تحويل بنكي',
+      credit: 'آجل',
+      other: 'أخرى',
+    };
+
+    type AccountRow = {
+      payment_account_id: string | null;
+      display_name: string | null;
+      identifier: string | null;
+      provider_key: string | null;
+      total_amount: number;
+      invoice_count: number;
+      payment_count: number;
+    };
+    type MethodRow = {
+      method: string;
+      method_label_ar: string;
+      total_amount: number;
+      invoice_count: number;
+      payment_count: number;
+      accounts: AccountRow[];
+    };
+
+    const methodMap = new Map<string, MethodRow>();
+    for (const r of rows) {
+      const method = r.method as string;
+      let bucket = methodMap.get(method);
+      if (!bucket) {
+        bucket = {
+          method,
+          method_label_ar: METHOD_LABEL_AR[method] || method,
+          total_amount: 0,
+          invoice_count: 0,
+          payment_count: 0,
+          accounts: [],
+        };
+        methodMap.set(method, bucket);
+      }
+      const amt = Number(r.amount);
+      const invs = Number(r.invoice_count);
+      const pays = Number(r.payment_count);
+      bucket.total_amount += amt;
+      bucket.invoice_count += invs;
+      bucket.payment_count += pays;
+
+      const snap = r.snap || null;
+      const display = r.live_display_name ?? snap?.display_name ?? null;
+      const identifier = r.live_identifier ?? snap?.identifier ?? null;
+      const provider = r.live_provider_key ?? snap?.provider_key ?? null;
+      bucket.accounts.push({
+        payment_account_id: r.payment_account_id ?? null,
+        display_name: display,
+        identifier,
+        provider_key: provider,
+        total_amount: amt,
+        invoice_count: invs,
+        payment_count: pays,
+      });
+    }
+    for (const m of methodMap.values()) {
+      m.accounts.sort((a, b) => b.total_amount - a.total_amount);
+    }
+    const channels = Array.from(methodMap.values()).sort(
+      (a, b) => b.total_amount - a.total_amount,
+    );
+
+    const cashTotal = channels
+      .filter((m) => m.method === 'cash')
+      .reduce((s, m) => s + m.total_amount, 0);
+    const nonCashTotal = channels
+      .filter((m) => m.method !== 'cash')
+      .reduce((s, m) => s + m.total_amount, 0);
+    const grandTotal = cashTotal + nonCashTotal;
+
+    const pct = (n: number) =>
+      grandTotal > 0 ? Math.round((n / grandTotal) * 10000) / 100 : 0;
+
+    const channelsWithShare = channels.map((m) => ({
+      ...m,
+      share_pct: pct(m.total_amount),
+      accounts: m.accounts.map((a) => ({
+        ...a,
+        share_pct: pct(a.total_amount),
+      })),
+    }));
+
+    return {
+      range: { from: fromDate, to: toDate },
+      filters: {
+        cashbox_id: opts.cashbox_id ?? null,
+        user_id: opts.user_id ?? null,
+        status: opts.status ?? null,
+      },
+      cash_total: cashTotal,
+      non_cash_total: nonCashTotal,
+      grand_total: grandTotal,
+      channels: channelsWithShare,
+    };
+  }
+
+  private todayCairoIso(): string {
+    const d = new Date();
+    const cairo = new Date(d.toLocaleString('en-US', { timeZone: 'Africa/Cairo' }));
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${cairo.getFullYear()}-${pad(cairo.getMonth() + 1)}-${pad(cairo.getDate())}`;
+  }
 }
