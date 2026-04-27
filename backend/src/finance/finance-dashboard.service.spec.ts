@@ -376,4 +376,45 @@ describe('FinanceDashboardService — PR-FIN-2', () => {
       }
     });
   });
+
+  /**
+   * PR-FIN-2-HOTFIX-1 — regression guard.
+   *
+   * The original PR-FIN-2 SQL used `i.status NOT IN ('voided','cancelled')`
+   * which threw at runtime because the Postgres `invoice_status` enum
+   * doesn't have a 'voided' value. The valid enum values today are
+   * {draft, completed, partially_paid, paid, refunded, cancelled}.
+   * "Voided" on `invoices` is represented by `voided_at IS NOT NULL`.
+   *
+   * This test scans every SQL issued during a full dashboard call
+   * and asserts:
+   *   1. No comparison against the literal 'voided' on `i.status`.
+   *   2. Where invoices are filtered out by status, the canonical
+   *      `voided_at IS NULL` predicate is paired with the
+   *      `status <> 'cancelled'` filter.
+   * If a future contributor reintroduces the bad pattern, this test
+   * fails before it reaches production.
+   */
+  describe('PR-FIN-2-HOTFIX-1 — invoice_status enum guard', () => {
+    it('never compares i.status to the literal \'voided\'', async () => {
+      const { svc, calls } = buildSvc();
+      await svc.dashboard({ from: '2026-04-01', to: '2026-04-30' });
+      for (const c of calls) {
+        // Match any pattern like   i.status ... 'voided'   or
+        // status IN ('voided', ...) — case-insensitive, allow whitespace.
+        expect(c.sql).not.toMatch(/i\.status[^']*'voided'/i);
+        expect(c.sql).not.toMatch(/'voided'\s*,\s*'cancelled'/i);
+      }
+    });
+
+    it('every invoice query that filters cancelled also filters voided_at', async () => {
+      const { svc, calls } = buildSvc();
+      await svc.dashboard({ from: '2026-04-01', to: '2026-04-30' });
+      for (const c of calls) {
+        if (/i\.status\s*<>\s*'cancelled'/i.test(c.sql)) {
+          expect(c.sql).toMatch(/i\.voided_at\s+IS\s+NULL/i);
+        }
+      }
+    });
+  });
 });
