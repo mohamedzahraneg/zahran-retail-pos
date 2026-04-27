@@ -198,6 +198,17 @@ export const accountingApi = {
     shift_id?: string;
     /** PR-15 — explicit advance flag (was previously read via dto-as-any). */
     is_advance?: boolean;
+    /**
+     * PR-ESS-2B — link this advance daily-expense to the originating
+     * self-service `employee_requests` row. Required to be a row
+     * with `kind='advance_request'` and `status='approved'`; the
+     * backend pre-validates kind / status / user / amount / and that
+     * no other expense already links to it. On engine success the
+     * request flips to `status='disbursed'` inside the same
+     * transaction. On any failure the transaction rolls back and the
+     * request stays `'approved'`. Must be sent with `is_advance=true`.
+     */
+    source_employee_request_id?: number;
   }) => unwrap<Expense>(api.post('/accounting/expenses/daily', body)),
   updateExpense: (id: string, body: Partial<Expense>) =>
     unwrap<Expense>(api.patch(`/accounting/expenses/${id}`, body)),

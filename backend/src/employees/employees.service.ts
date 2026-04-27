@@ -698,6 +698,37 @@ export class EmployeesService {
     );
   }
 
+  /**
+   * PR-ESS-2B — list a single user's advance_requests that are
+   * eligible for disbursement: kind='advance_request',
+   * status='approved', AND no other expense already links to them.
+   *
+   * Used by the admin AdvanceModal dropdown so the operator can pick
+   * which request the daily-expense they're about to post will
+   * disburse. Read-only; the actual linkage is established by
+   * `accountingService.createDailyExpense({ source_employee_request_id })`.
+   *
+   * The "not already linked" filter uses NOT EXISTS against
+   * `expenses.source_employee_request_id` (the partial index added in
+   * migration 117 makes this lookup cheap).
+   */
+  listDisbursableAdvanceRequests(userId: string) {
+    return this.ds.query(
+      `SELECT r.id, r.user_id, r.kind, r.amount, r.status,
+              r.reason, r.decided_at, r.created_at
+         FROM employee_requests r
+        WHERE r.user_id = $1
+          AND r.kind   = 'advance_request'
+          AND r.status = 'approved'
+          AND NOT EXISTS (
+            SELECT 1 FROM expenses e
+             WHERE e.source_employee_request_id = r.id
+          )
+        ORDER BY r.decided_at DESC, r.created_at DESC`,
+      [userId],
+    );
+  }
+
   async decideRequest(
     id: string,
     decision: 'approved' | 'rejected',
