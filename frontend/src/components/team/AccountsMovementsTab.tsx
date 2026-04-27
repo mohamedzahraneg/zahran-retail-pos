@@ -670,7 +670,9 @@ export function AdvanceModal({
       if (r) {
         setAmount(String(r.amount));
         if (!reason.trim() && r.reason) {
-          setReason(`صرف طلب سلفة #${r.id}: ${r.reason}`);
+          // PR-ESS-2C-1 — prefer the user-facing request_no (e.g.
+          // 1003) over the technical id when seeding the reason.
+          setReason(`صرف طلب سلفة رقم ${r.request_no ?? r.id}: ${r.reason}`);
         }
       }
     }
@@ -701,8 +703,17 @@ export function AdvanceModal({
           : undefined,
       }),
     onSuccess: () => {
+      // PR-ESS-2C-1 — surface the user-facing request_no (digits only)
+      // in the success toast, not the technical id.
+      const linkedRequestRow = linkedRequestId
+        ? (disbursableRequests as any[]).find(
+            (r) => String(r.id) === linkedRequestId,
+          )
+        : null;
+      const linkedDisplayNo =
+        linkedRequestRow?.request_no ?? linkedRequestId;
       const linkedNote = linkedRequestId
-        ? ` تم وسم طلب السلفة #${linkedRequestId} كـ "تم الصرف".`
+        ? ` تم وسم طلب السلفة رقم ${linkedDisplayNo} كـ "تم الصرف".`
         : '';
       toast.success(
         `تم تسجيل السلفة وخروج النقد من المصدر المختار.${linkedNote}`,
@@ -820,20 +831,33 @@ export function AdvanceModal({
             data-testid="advance-link-dropdown"
           >
             <option value="">— لا ربط —</option>
-            {(disbursableRequests as any[]).map((r) => (
-              <option key={r.id} value={r.id}>
-                #{r.id} · {EGP(r.amount)} ·{' '}
-                {r.reason
-                  ? r.reason.split('\n')[0].slice(0, 60)
-                  : 'بدون سبب'}
-              </option>
-            ))}
+            {(disbursableRequests as any[]).map((r) => {
+              // PR-ESS-2C-1 — show numeric request_no (e.g. "طلب رقم
+              // 1003"); fall back to internal id only if request_no
+              // is missing during a deploy-window cache.
+              const displayNo = r.request_no ?? r.id;
+              return (
+                <option key={r.id} value={r.id}>
+                  طلب رقم {displayNo} · {EGP(r.amount)} ·{' '}
+                  {r.reason
+                    ? r.reason.split('\n')[0].slice(0, 60)
+                    : 'بدون سبب'}
+                </option>
+              );
+            })}
           </select>
-          {linkedRequestId && (
-            <div className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 mt-2 leading-relaxed">
-              عند نجاح الترحيل سيتم وسم طلب السلفة <span className="font-bold">#{linkedRequestId}</span> كـ <span className="font-bold">"تم الصرف"</span>. يجب أن يكون المبلغ مطابقًا تمامًا لقيمة الطلب.
-            </div>
-          )}
+          {linkedRequestId && (() => {
+            const linkedRequest = (disbursableRequests as any[]).find(
+              (r) => String(r.id) === linkedRequestId,
+            );
+            const linkedDisplayNo =
+              linkedRequest?.request_no ?? linkedRequestId;
+            return (
+              <div className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 mt-2 leading-relaxed">
+                عند نجاح الترحيل سيتم وسم طلب السلفة <span className="font-bold tabular-nums">رقم {linkedDisplayNo}</span> كـ <span className="font-bold">"تم الصرف"</span>. يجب أن يكون المبلغ مطابقًا تمامًا لقيمة الطلب.
+              </div>
+            );
+          })()}
         </div>
       )}
 

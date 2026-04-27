@@ -21,6 +21,20 @@ export type SubmitRequestKind = 'leave' | 'overtime_extension' | 'other';
 
 export interface EmployeeRequest {
   id: string;
+  /**
+   * PR-ESS-2C-1 — user-facing numeric request number (BIGINT NOT NULL,
+   * UNIQUE) added by migration 118. Display this — never display
+   * `id`. Format is digits only (e.g. 1001, 1002, 1003 …); existing
+   * rows backfilled in created_at ASC, id ASC order.
+   *
+   * Optional in the type only to keep older bundles cached during
+   * deploy from crashing on rows missing the field — the column is
+   * NOT NULL at the DB level. Frontend code falls back to `id` if
+   * `request_no` is absent (during the brief deploy window) and
+   * never silently displays the technical id once `request_no`
+   * is present.
+   */
+  request_no?: number;
   user_id: string;
   /**
    * PR-ESS-2A-HOTFIX-1 — `'advance_request'` is the safe self-service

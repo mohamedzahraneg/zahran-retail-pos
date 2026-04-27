@@ -179,6 +179,14 @@ function RequestRow({
         ? `إجازة من ${fmtDate(r.starts_at)} إلى ${fmtDate(r.ends_at)}`
         : (r.reason ?? 'طلب');
 
+  // PR-ESS-2C-1 — user-facing numeric request number. Display
+  // `request_no` (BIGINT, e.g. 1003) when present; fall back to `id`
+  // only as a transient safety net during the deploy window when an
+  // older bundle might still be cached. Migration 118 makes
+  // `request_no` NOT NULL at the DB level so the fallback never
+  // fires for fresh data.
+  const displayNo = r.request_no ?? r.id;
+
   // PR-ESS-2A — approved advance request must clearly say "بانتظار
   // الصرف" so neither operators nor employees mistake it for a money
   // movement.
@@ -198,13 +206,22 @@ function RequestRow({
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-start justify-between flex-wrap gap-2">
-            <div className="text-sm font-bold text-slate-800">{headline}</div>
+            <div className="text-sm font-bold text-slate-800" data-testid="request-row-headline">
+              {headline}
+            </div>
             <span
               className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold border ${statusTone[status]}`}
             >
               <StatusIcon size={11} />
               {statusLabel[status]}
             </span>
+          </div>
+          {/* PR-ESS-2C-1 — numeric request number (digits only, no prefix). */}
+          <div
+            className="text-[11px] text-slate-500 mt-0.5 font-mono tabular-nums"
+            data-testid="request-row-no"
+          >
+            رقم الطلب: {displayNo}
           </div>
           {approvedAdvanceHint && (
             <div className="text-[11px] text-amber-800/90 mt-1">

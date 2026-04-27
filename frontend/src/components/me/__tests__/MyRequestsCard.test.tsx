@@ -100,6 +100,45 @@ describe('<MyRequestsCard /> — PR-ESS-2B disbursed status', () => {
     expect(await screen.findByText('ملغي')).toBeInTheDocument();
   });
 
+  // PR-ESS-2C-1 — numeric request_no display + fallback ────────────
+  it('displays request_no (numeric, no prefix) on every row when present', async () => {
+    renderWithClient([
+      {
+        ...baseAdvance,
+        id: '101',
+        request_no: 1003,
+        status: 'approved',
+      },
+    ]);
+    const noEl = await screen.findByTestId('request-row-no');
+    expect(noEl.textContent).toMatch(/رقم الطلب:\s*1003/);
+    // The technical id (101) must NOT appear in the user-facing row no.
+    expect(noEl.textContent).not.toContain('101');
+  });
+
+  it('falls back to id when request_no is missing (deploy-window cache)', async () => {
+    renderWithClient([
+      {
+        ...baseAdvance,
+        id: '99',
+        // request_no intentionally omitted to simulate a stale row
+        status: 'pending',
+      },
+    ]);
+    const noEl = await screen.findByTestId('request-row-no');
+    expect(noEl.textContent).toMatch(/رقم الطلب:\s*99/);
+  });
+
+  it('does NOT prefix the displayed request_no with REQ- / ADV- / LV-', async () => {
+    renderWithClient([
+      { ...baseAdvance, id: '202', request_no: 1010, status: 'disbursed' },
+    ]);
+    const noEl = await screen.findByTestId('request-row-no');
+    // Spec: digits only.
+    expect(noEl.textContent).not.toMatch(/REQ|ADV|LV|OT/);
+    expect(noEl.textContent).toMatch(/^\s*رقم الطلب:\s*1010\s*$/);
+  });
+
   it('groups legacy kind=advance under the same "طلبات السلف" section as advance_request (display continuity)', async () => {
     renderWithClient([
       {
