@@ -98,9 +98,28 @@ const fmtMin = (m: number | null | undefined) => {
  * Top-level component
  * ───────────────────────────────────────────────────────────────── */
 
-export function AttendanceWageTab({ employee }: { employee: TeamRow }) {
+/**
+ * PR-ESS-2A — `mode='self'` is used by the /me self-service profile to
+ * reuse this tab read-only. In self mode every admin mutation control
+ * is hidden:
+ *   · "اعتماد يومية" approval modal trigger — hidden
+ *   · admin clock-in / clock-out (نيابةً) — hidden
+ *   · per-row "تعديل بيانات صرف اليومية" — hidden (canManage falsified)
+ * The data tables (SummaryCards, AttendanceLogCard, DailyWageCard) stay
+ * visible — the employee can read their own attendance + accrual log.
+ */
+export function AttendanceWageTab({
+  employee,
+  mode = 'admin',
+}: {
+  employee: TeamRow;
+  mode?: 'admin' | 'self';
+}) {
   const hasPermission = useAuthStore((s) => s.hasPermission);
-  const canManage = hasPermission('employee.attendance.manage');
+  // In self mode, force-disable the admin-only edit affordances even if
+  // the employee happens to also hold the admin permission. Self mode
+  // is a UX boundary, not a permission boundary.
+  const canManage = mode === 'admin' && hasPermission('employee.attendance.manage');
 
   const userId = employee.id;
   const dailyAmount = Number(employee.salary_amount || 0);
@@ -115,39 +134,39 @@ export function AttendanceWageTab({ employee }: { employee: TeamRow }) {
 
   return (
     <div className="space-y-5">
-      <HeaderCard />
+      <HeaderCard mode={mode} />
 
       {/* PR-T3.1 — action ownership boundaries:
           · This tab owns: اعتماد يومية + admin clock-in/out
-          · Payout (صرف مستحقات) lives ONLY on الحسابات والحركات. The
-            duplicate payout button that briefly lived here in PR-T2
-            was removed to match the spec ("صرف مستحقات appears in
-            الحسابات والحركات only"). */}
-      <div className="flex items-center justify-between flex-wrap gap-2 bg-white rounded-2xl border border-slate-200 shadow-sm p-3">
-        <div className="flex items-center gap-2 flex-wrap">
-          {canManage && (
-            <button
-              type="button"
-              onClick={() => setApproveOpen(true)}
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-600 text-white text-sm font-bold hover:bg-emerald-700"
-            >
-              <CheckCircle2 size={15} />
-              اعتماد يومية
-            </button>
-          )}
-          {canManage && <AdminClockInOutButtons userId={userId} />}
+          · Payout (صرف مستحقات) lives ONLY on الحسابات والحركات.
+          PR-ESS-2A — entire admin action bar hidden in self mode. */}
+      {mode === 'admin' && (
+        <div className="flex items-center justify-between flex-wrap gap-2 bg-white rounded-2xl border border-slate-200 shadow-sm p-3">
+          <div className="flex items-center gap-2 flex-wrap">
+            {canManage && (
+              <button
+                type="button"
+                onClick={() => setApproveOpen(true)}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-600 text-white text-sm font-bold hover:bg-emerald-700"
+              >
+                <CheckCircle2 size={15} />
+                اعتماد يومية
+              </button>
+            )}
+            {canManage && <AdminClockInOutButtons userId={userId} />}
+          </div>
+          <div className="text-[11px] text-slate-500 leading-snug max-w-xs">
+            الصرف النقدي يتم من تبويب{' '}
+            <span className="font-bold text-amber-700">
+              الحسابات والحركات
+            </span>
+            {' '}— هذا التبويب للاعتماد فقط.
+          </div>
         </div>
-        <div className="text-[11px] text-slate-500 leading-snug max-w-xs">
-          الصرف النقدي يتم من تبويب{' '}
-          <span className="font-bold text-amber-700">
-            الحسابات والحركات
-          </span>
-          {' '}— هذا التبويب للاعتماد فقط.
-        </div>
-      </div>
+      )}
 
-      <SummaryCards userId={userId} from={range.from} to={range.to} />
-      <AttendanceLogCard userId={userId} from={range.from} to={range.to} />
+      <SummaryCards userId={userId} from={range.from} to={range.to} mode={mode} />
+      <AttendanceLogCard userId={userId} from={range.from} to={range.to} mode={mode} />
       <DailyWageCard
         userId={userId}
         from={range.from}
@@ -155,6 +174,7 @@ export function AttendanceWageTab({ employee }: { employee: TeamRow }) {
         dailyAmount={dailyAmount}
         canManage={canManage}
         onEdit={(row) => setEditTarget(row)}
+        mode={mode}
       />
 
       {approveOpen && (
@@ -182,7 +202,7 @@ export function AttendanceWageTab({ employee }: { employee: TeamRow }) {
  * Sections
  * ───────────────────────────────────────────────────────────────── */
 
-function HeaderCard() {
+function HeaderCard({ mode = 'admin' }: { mode?: 'admin' | 'self' }) {
   return (
     <div className="rounded-2xl border border-violet-200 bg-violet-50/60 p-5 shadow-sm">
       <div className="flex items-start gap-3">
@@ -191,21 +211,25 @@ function HeaderCard() {
         </div>
         <div className="flex-1 min-w-0">
           <h3 className="text-lg font-black text-violet-900">
-            الحضور واليوميات
+            {mode === 'self' ? 'سجل الحضور والانصراف' : 'الحضور واليوميات'}
           </h3>
           <p className="text-sm text-violet-900/70 mt-0.5">
-            متابعة الحضور واعتماد اليوميات بدون صرف نقدي.
+            {mode === 'self'
+              ? 'سجلات حضوري وانصرافي والمستحقات المعتمدة — للعرض فقط.'
+              : 'متابعة الحضور واعتماد اليوميات بدون صرف نقدي.'}
           </p>
-          <div className="mt-3 flex items-start gap-2 rounded-xl bg-white border border-violet-200 px-3 py-2 text-xs text-slate-700 leading-relaxed">
-            <ShieldCheck size={14} className="text-violet-600 shrink-0 mt-0.5" />
-            <span>
-              <span className="font-bold text-violet-900">اعتماد اليومية</span>
-              {' '}يضيف مستحقًا للموظف فقط (DR 521 / CR 213) ولا يؤثر على
-              الخزنة أو الوردية. الصرف النقدي يتم من زر{' '}
-              <span className="font-bold text-amber-700">صرف يومية / مستحقات</span>
-              {' '}بشكل منفصل.
-            </span>
-          </div>
+          {mode === 'admin' && (
+            <div className="mt-3 flex items-start gap-2 rounded-xl bg-white border border-violet-200 px-3 py-2 text-xs text-slate-700 leading-relaxed">
+              <ShieldCheck size={14} className="text-violet-600 shrink-0 mt-0.5" />
+              <span>
+                <span className="font-bold text-violet-900">اعتماد اليومية</span>
+                {' '}يضيف مستحقًا للموظف فقط (DR 521 / CR 213) ولا يؤثر على
+                الخزنة أو الوردية. الصرف النقدي يتم من زر{' '}
+                <span className="font-bold text-amber-700">صرف يومية / مستحقات</span>
+                {' '}بشكل منفصل.
+              </span>
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -258,20 +282,29 @@ function SummaryCards({
   userId,
   from,
   to,
+  mode = 'admin',
 }: {
   userId: string;
   from: string;
   to: string;
+  mode?: 'admin' | 'self';
 }) {
+  const isSelf = mode === 'self';
   const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Africa/Cairo' });
+  // PR-ESS-2A — in self mode use /me endpoints (no admin gate).
   const { data: todayRow } = useQuery({
-    queryKey: ['attendance-employee-today', userId, today],
+    queryKey: ['attendance-employee-today', userId, today, isSelf],
     queryFn: () =>
-      attendanceApi.list({ user_id: userId, from: today, to: today, limit: 1 }),
+      isSelf
+        ? attendanceApi.myList({ from: today, to: today, limit: 1 })
+        : attendanceApi.list({ user_id: userId, from: today, to: today, limit: 1 }),
   });
   const { data: payable = [] } = useQuery({
-    queryKey: ['payable-days', userId, from, to],
-    queryFn: () => attendanceApi.payableDays({ user_id: userId, from, to }),
+    queryKey: ['payable-days', userId, from, to, isSelf],
+    queryFn: () =>
+      isSelf
+        ? attendanceApi.myPayableDays({ from, to })
+        : attendanceApi.payableDays({ user_id: userId, from, to }),
   });
 
   const todayAttendance = (todayRow as AttendanceRecord[] | undefined)?.[0];
@@ -357,15 +390,20 @@ function AttendanceLogCard({
   userId,
   from,
   to,
+  mode = 'admin',
 }: {
   userId: string;
   from: string;
   to: string;
+  mode?: 'admin' | 'self';
 }) {
+  const isSelf = mode === 'self';
   const { data: rows = [], isFetching } = useQuery({
-    queryKey: ['attendance-employee-log', userId, from, to],
+    queryKey: ['attendance-employee-log', userId, from, to, isSelf],
     queryFn: () =>
-      attendanceApi.list({ user_id: userId, from, to, limit: 200 }),
+      isSelf
+        ? attendanceApi.myList({ from, to, limit: 200 })
+        : attendanceApi.list({ user_id: userId, from, to, limit: 200 }),
   });
   const list = (rows as AttendanceRecord[]) || [];
   return (
@@ -430,6 +468,7 @@ function DailyWageCard({
   dailyAmount,
   canManage,
   onEdit,
+  mode = 'admin',
 }: {
   userId: string;
   from: string;
@@ -437,11 +476,16 @@ function DailyWageCard({
   dailyAmount: number;
   canManage: boolean;
   onEdit: (row: PayableDayRow) => void;
+  mode?: 'admin' | 'self';
 }) {
+  const isSelf = mode === 'self';
   const qc = useQueryClient();
   const { data: rows = [], isFetching } = useQuery({
-    queryKey: ['payable-days', userId, from, to],
-    queryFn: () => attendanceApi.payableDays({ user_id: userId, from, to }),
+    queryKey: ['payable-days', userId, from, to, isSelf],
+    queryFn: () =>
+      isSelf
+        ? attendanceApi.myPayableDays({ from, to })
+        : attendanceApi.payableDays({ user_id: userId, from, to }),
   });
   const list = (rows as PayableDayRow[]) || [];
 

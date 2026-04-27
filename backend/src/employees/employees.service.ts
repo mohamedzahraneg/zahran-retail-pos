@@ -606,6 +606,65 @@ export class EmployeesService {
     return row;
   }
 
+  /**
+   * PR-ESS-2A — self-service salary-advance REQUEST submission.
+   *
+   * Inserts an `employee_requests` row with `kind='advance'` and
+   * `status='pending'` (default). REQUEST-ONLY by design:
+   *
+   *   - No journal_entries / journal_lines write.
+   *   - No cashbox_transactions write.
+   *   - No expense row created.
+   *   - No FinancialEngineService call.
+   *   - No employee_transactions trigger (the legacy mirror path that
+   *     PR audit #4 closed off remains closed — this method only
+   *     writes employee_requests).
+   *
+   * The DB CHECK constraint on `employee_requests.kind` already
+   * accepts 'advance' (verified live on Supabase project
+   * teyjynfijgwdxusbdzgz before implementation), so no migration is
+   * needed. Manager approval flips the row's status to 'approved' via
+   * `decideRequest`, which itself never moves money.
+   *
+   * Disbursement remains the operator's separate Daily Expense step
+   * (`POST /accounting/expenses/daily` with `is_advance=true`). The
+   * canonical FinancialEngine.recordExpense path is the only place
+   * that writes both the GL pair (DR 1123 / CR cashbox) AND the
+   * cashbox_transactions row atomically. PR-ESS-2B will add
+   * `expenses.source_employee_request_id` so an approved request can
+   * be marked "disbursed" only after that linked expense posts.
+   *
+   * Notes (`dto.notes`) are appended to the existing `reason` column
+   * separated by a blank line — `employee_requests` doesn't have a
+   * separate notes column, so adding one would require a migration we
+   * intentionally skip in PR-ESS-2A.
+   */
+  async submitAdvanceRequest(
+    userId: string,
+    dto: { amount: number; reason: string; notes?: string },
+  ) {
+    if (!dto.amount || dto.amount <= 0) {
+      throw new BadRequestException('يجب تحديد قيمة السلفة');
+    }
+    const trimmedReason = dto.reason?.trim();
+    if (!trimmedReason) {
+      throw new BadRequestException('يجب كتابة سبب طلب السلفة');
+    }
+    const trimmedNotes = dto.notes?.trim();
+    const reasonField = trimmedNotes
+      ? `${trimmedReason}\n\n${trimmedNotes}`
+      : trimmedReason;
+
+    const [row] = await this.ds.query(
+      `INSERT INTO employee_requests
+         (user_id, kind, amount, reason)
+       VALUES ($1, 'advance', $2, $3)
+       RETURNING *`,
+      [userId, dto.amount, reasonField],
+    );
+    return row;
+  }
+
   listPendingRequests() {
     return this.ds.query(
       `SELECT r.*,

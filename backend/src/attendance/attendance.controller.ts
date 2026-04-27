@@ -56,6 +56,50 @@ export class AttendanceController {
     return this.svc.myToday(user.userId);
   }
 
+  /**
+   * PR-ESS-2A — self-service payable-days listing for the current user.
+   *
+   * Existing `/attendance/payable-days` is gated by
+   * `employee.attendance.manage` (admin path used by the wage-approval
+   * tab in Team Management). This /me wrapper resolves the user from
+   * JWT so the employee can see their own approved-yomeya entries on
+   * the self-service profile (`/me`, "سجل الحضور والانصراف" tab)
+   * without the admin gate. Read-only — no IDOR.
+   */
+  @Get('me/payable-days')
+  myPayableDays(
+    @CurrentUser() user: JwtUser,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    return this.svc.listPayableDays({ user_id: user.userId, from, to });
+  }
+
+  /**
+   * PR-ESS-2A — self-service attendance log for the current user.
+   *
+   * Existing `GET /attendance` is gated by `attendance.view_team` (the
+   * admin/HR path used to view *anyone's* log, including filtered by
+   * user_id). This /me wrapper forces `user_id = jwtUser.userId` so
+   * the employee can read their own clock-in / clock-out history on
+   * /me's "سجل الحضور والانصراف" tab without the admin gate.
+   * Read-only — no IDOR.
+   */
+  @Get('me/list')
+  myList(
+    @CurrentUser() user: JwtUser,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.svc.list({
+      user_id: user.userId,
+      from,
+      to,
+      limit: limit ? Number(limit) : undefined,
+    });
+  }
+
   @Get()
   @Permissions('attendance.view_team')
   list(

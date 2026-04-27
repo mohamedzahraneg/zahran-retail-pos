@@ -114,6 +114,30 @@ export const attendanceApi = {
     unwrap<PayableDayRow[]>(api.get('/attendance/payable-days', { params })),
 
   /**
+   * PR-ESS-2A — self-service payable-days for the current user. Used
+   * by the /me "سجل الحضور والانصراف" tab. Backed by the same service
+   * method as the admin `payableDays` above, but the endpoint resolves
+   * `user_id` from JWT instead of accepting it as a parameter, so the
+   * employee can read their own approved-yomeya entries without the
+   * `employee.attendance.manage` admin gate. No IDOR.
+   */
+  myPayableDays: (params?: { from?: string; to?: string }) =>
+    unwrap<PayableDayRow[]>(
+      api.get('/attendance/me/payable-days', { params }),
+    ),
+
+  /**
+   * PR-ESS-2A — self-service attendance log for the current user.
+   * Same shape as `list` above but `user_id` is forced from JWT, so
+   * the employee can read their own clock-in/out history without the
+   * `attendance.view_team` admin gate. No IDOR.
+   */
+  myList: (params?: { from?: string; to?: string; limit?: number }) =>
+    unwrap<AttendanceRecord[]>(
+      api.get('/attendance/me/list', { params }),
+    ),
+
+  /**
    * Daily-wage payout. Settles the payable portion (DR 213 / CR cashbox);
    * any excess must be classified explicitly as 'advance' (DR 1123 /
    * CR cashbox) or 'bonus' (DR 521 / CR 213 then DR 213 / CR cashbox).

@@ -142,8 +142,28 @@ function previousPeriodBoundsFor(current: PeriodBounds): PeriodBounds {
  * Top-level component — full dashboard layout
  * ───────────────────────────────────────────────────────────────── */
 
-export function EmployeeOverviewTab({ employee }: { employee: TeamRow }) {
+/**
+ * PR-ESS-2A — `mode='self'` is used by the /me self-service profile to
+ * reuse this overview read-only. All admin mutation surfaces in this
+ * tab live in the Team workspace HEADER (above the tabs in Team.tsx),
+ * not inside this component, so there's nothing inline to gate. The
+ * only behavioural difference in self mode is data sourcing:
+ *   · commissions detail uses /me/detail (no `accounting.view` gate)
+ *   · category breakdown + seller settings are hidden — they require
+ *     `accounting.view` and a self-service /me equivalent isn't worth
+ *     adding for the small marginal value (the donut + target widgets
+ *     are admin-grade signals; the employee's headline KPIs are still
+ *     visible from the dashboard endpoint).
+ */
+export function EmployeeOverviewTab({
+  employee,
+  mode = 'admin',
+}: {
+  employee: TeamRow;
+  mode?: 'admin' | 'self';
+}) {
   const userId = employee.id;
+  const isSelf = mode === 'self';
 
   // PR-T4.5 — period filter (يومي / أسبوعي / شهري / مخصص). Default:
   // monthly to match the prior fixed-month behavior. All sales panels
@@ -159,8 +179,11 @@ export function EmployeeOverviewTab({ employee }: { employee: TeamRow }) {
   const prevPeriod = useMemo(() => previousPeriodBoundsFor(period), [period]);
 
   const { data: dash } = useQuery({
-    queryKey: ['employee-user-dashboard', userId],
-    queryFn: () => employeesApi.userDashboard(userId),
+    queryKey: ['employee-user-dashboard', userId, isSelf],
+    queryFn: () =>
+      isSelf
+        ? employeesApi.dashboard()
+        : employeesApi.userDashboard(userId),
   });
 
   // PR-T4.4 — sales data is driven by the per-invoice detail endpoint
@@ -168,18 +191,37 @@ export function EmployeeOverviewTab({ employee }: { employee: TeamRow }) {
   // PR-T4.5 — paid_total / grand_total now also returned for the
   // collection KPIs, and a separate categoryBreakdown query feeds the
   // donut panel.
+  // PR-ESS-2A — in self mode we use /commissions/me/detail (gated by
+  // employee.dashboard.view) instead of /commissions/:userId/detail
+  // (gated by accounting.view).
   const { data: detail = [] } = useQuery({
-    queryKey: ['commissions-detail', userId, period.from, period.to],
-    queryFn: () => commissionsApi.detail(userId, period.from, period.to),
+    queryKey: ['commissions-detail', userId, period.from, period.to, isSelf],
+    queryFn: () =>
+      isSelf
+        ? commissionsApi.myDetail(period.from, period.to)
+        : commissionsApi.detail(userId, period.from, period.to),
   });
   const { data: prevDetail = [] } = useQuery({
-    queryKey: ['commissions-detail', userId, prevPeriod.from, prevPeriod.to],
-    queryFn: () => commissionsApi.detail(userId, prevPeriod.from, prevPeriod.to),
+    queryKey: [
+      'commissions-detail',
+      userId,
+      prevPeriod.from,
+      prevPeriod.to,
+      isSelf,
+    ],
+    queryFn: () =>
+      isSelf
+        ? commissionsApi.myDetail(prevPeriod.from, prevPeriod.to)
+        : commissionsApi.detail(userId, prevPeriod.from, prevPeriod.to),
   });
+  // categoryBreakdown + sellerSettings stay admin-only. In self mode
+  // we skip the queries entirely (the donut + target widgets render
+  // empty — see SalesPanels for the empty-state).
   const { data: categoryBreakdown = [] } = useQuery({
     queryKey: ['commissions-category-breakdown', userId, period.from, period.to],
     queryFn: () =>
       commissionsApi.categoryBreakdown(userId, period.from, period.to),
+    enabled: !isSelf,
   });
   // PR-T4.6 — seller settings drive the target widgets. Independent of
   // the period filter (target is a per-user config, not a per-period
@@ -188,6 +230,7 @@ export function EmployeeOverviewTab({ employee }: { employee: TeamRow }) {
   const { data: sellerSettings } = useQuery({
     queryKey: ['commissions-seller-settings', userId],
     queryFn: () => commissionsApi.getSellerSettings(userId),
+    enabled: !isSelf,
   });
 
   const detailRows = detail as CommissionDetailRow[];

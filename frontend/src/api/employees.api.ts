@@ -189,6 +189,29 @@ export const employeesApi = {
     reason?: string;
   }) => unwrap<EmployeeRequest>(api.post('/employees/me/requests', body)),
 
+  /**
+   * PR-ESS-2A — self-service salary-advance REQUEST submission.
+   *
+   * Inserts an `employee_requests` row with `kind='advance'` and
+   * `status='pending'`. **REQUEST-ONLY** — this never moves money,
+   * never triggers GL/cashbox writes, never creates an expense, and
+   * never invokes FinancialEngineService. Approval flips status to
+   * `'approved'` only; the actual disbursement remains the operator's
+   * separate Daily Expense step (PR-ESS-2B will link the two).
+   *
+   * In the UI an approved advance request must be labelled "موافق
+   * عليه — بانتظار الصرف" (NOT "تم الصرف") so neither operators nor
+   * employees mistake an approved request for a money movement.
+   */
+  submitAdvanceRequest: (body: {
+    amount: number;
+    reason: string;
+    notes?: string;
+  }) =>
+    unwrap<EmployeeRequest>(
+      api.post('/employees/me/requests/advance', body),
+    ),
+
   // Admin / HR
   team: () => unwrap<TeamRow[]>(api.get('/employees/team')),
   pendingRequests: () =>

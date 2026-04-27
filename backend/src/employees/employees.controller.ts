@@ -27,15 +27,25 @@ import {
 } from '../common/decorators/current-user.decorator';
 
 class RequestDto {
-  // 'advance' removed (audit #4 — triple-path dual-write risk).
-  // Approved advance requests used to chain through a DB mirror
-  // trigger → employee_transactions → fn_post_employee_txn, which
-  // writes journal_lines only (no cashbox_transactions) and can
+  // 'advance' removed from the generic dropdown (audit #4 — triple-path
+  // dual-write risk). Approved advance requests used to chain through
+  // a DB mirror trigger → employee_transactions → fn_post_employee_txn,
+  // which writes journal_lines only (no cashbox_transactions) and can
   // duplicate an expenses.is_advance=TRUE entry for the same money.
   // Canonical advance path is POST /accounting/expenses{,/daily}
   // with is_advance=TRUE, which routes through FinancialEngine and
   // correctly writes both GL + cashbox. Historical advance requests
-  // still read correctly; only new submissions are refused here.
+  // still read correctly; this generic endpoint refuses new advance
+  // submissions to keep the surface narrow.
+  //
+  // PR-ESS-2A — self-service advance submission re-introduced via a
+  // SEPARATE dedicated endpoint (POST /me/requests/advance, DTO below)
+  // that lands in the same employee_requests table. The dedicated
+  // endpoint is REQUEST-ONLY: it never posts GL/cashbox/expense and
+  // never invokes FinancialEngineService. Disbursement of an approved
+  // request will be wired in PR-ESS-2B (links the request to a Daily
+  // Expense via source_employee_request_id and updates status only
+  // after the canonical FinancialEngine.recordExpense path completes).
   @IsIn(['leave', 'overtime_extension', 'other']) kind:
     | 'leave'
     | 'overtime_extension'
@@ -44,6 +54,23 @@ class RequestDto {
   @IsOptional() @IsDateString() starts_at?: string;
   @IsOptional() @IsDateString() ends_at?: string;
   @IsOptional() @IsString() reason?: string;
+}
+
+/**
+ * PR-ESS-2A — self-service salary-advance REQUEST submission.
+ *
+ * IMPORTANT: this DTO captures a *request* only — it MUST NOT be used
+ * to record an actual paid advance. Approval of a request created from
+ * this DTO is a status flip in employee_requests; it never moves money,
+ * never touches journal_entries / journal_lines / cashbox_transactions,
+ * and never calls FinancialEngineService. The actual disbursement is
+ * the operator's separate Daily Expense step (PR-ESS-2B will link the
+ * two via expenses.source_employee_request_id).
+ */
+class AdvanceRequestDto {
+  @IsNumber() @Min(0.01) amount: number;
+  @IsString() @MinLength(1) reason: string;
+  @IsOptional() @IsString() notes?: string;
 }
 
 class DecideDto {
@@ -161,6 +188,40 @@ export class EmployeesController {
   @Permissions('employee.requests.submit')
   submitRequest(@Body() dto: RequestDto, @CurrentUser() user: JwtUser) {
     return this.svc.submitRequest(user.userId, dto);
+  }
+
+  /**
+   * PR-ESS-2A — self-service salary-advance REQUEST submission.
+   *
+   * Request-only path. Inserts an `employee_requests` row with
+   * `kind='advance'` and `status='pending'`. Manager approval (via the
+   * existing `POST /employees/requests/:id/decide` endpoint) flips
+   * `status` to `'approved'` or `'rejected'` — and that's all it does.
+   * No GL, no cashbox, no expense, no FinancialEngine call.
+   *
+   * Disbursement remains the operator's separate Daily Expense step.
+   * PR-ESS-2B will add `expenses.source_employee_request_id` so an
+   * approved request can be marked "disbursed" once the linked expense
+   * posts via the canonical FinancialEngine path. Until then, the UI
+   * should show approved advance requests as "موافق عليه — بانتظار
+   * الصرف من قِبَل المحاسبة" so neither operators nor employees
+   * mistake an approved request for an actual money movement.
+   *
+   * Permission: reuses `employee.requests.submit` (same gate as the
+   * other self-service request types). A dedicated
+   * `employee.advance.request` permission is intentionally NOT added
+   * here — see PR-PERM-CATALOG-1 to normalize the permissions catalog
+   * holistically (multiple existing self-service permissions are
+   * declared in code only and missing from the DB `permissions`
+   * catalog, so adding one in isolation would be inconsistent).
+   */
+  @Post('me/requests/advance')
+  @Permissions('employee.requests.submit')
+  submitAdvanceRequest(
+    @Body() dto: AdvanceRequestDto,
+    @CurrentUser() user: JwtUser,
+  ) {
+    return this.svc.submitAdvanceRequest(user.userId, dto);
   }
 
   // ── Admin / HR ─────────────────────────────────────────────────────

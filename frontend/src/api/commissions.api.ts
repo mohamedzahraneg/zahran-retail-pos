@@ -61,6 +61,17 @@ export const commissionsApi = {
       api.get(`/commissions/${userId}/detail`, { params: { from, to } }),
     ),
 
+  /**
+   * PR-ESS-2A — self-service commission detail. Same shape as `detail`
+   * above but resolves user from JWT, so the employee can see their
+   * own sales/commission rows on /me without the `accounting.view`
+   * gate that scopes the rest of this controller. No IDOR.
+   */
+  myDetail: (from: string, to: string) =>
+    unwrap<CommissionDetailRow[]>(
+      api.get('/commissions/me/detail', { params: { from, to } }),
+    ),
+
   categoryBreakdown: (userId: string, from: string, to: string) =>
     unwrap<CommissionCategoryBreakdownRow[]>(
       api.get(`/commissions/${userId}/category-breakdown`, {
