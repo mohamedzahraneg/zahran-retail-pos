@@ -149,7 +149,31 @@ export function AttendanceCountdown({
     [clockIn, profile],
   );
 
-  if (!clockIn) return null;
+  // PR-ESS-2A-UI-1 — when the employee hasn't clocked in today yet,
+  // render an explicit "حضور اليوم" placeholder card instead of
+  // returning null. This keeps the 3-card dashboard row on /me
+  // always visually balanced (BalanceCard | LiveClockCard | this).
+  if (!clockIn) {
+    return (
+      <div
+        className="rounded-2xl border border-slate-200 bg-slate-50/60 p-4 shadow-sm flex flex-col gap-2"
+        data-testid="attendance-countdown-not-checked-in"
+        dir="rtl"
+      >
+        <div className="flex items-center gap-2 text-[12px] font-bold text-slate-700">
+          <Clock size={14} />
+          <span>حضور اليوم</span>
+        </div>
+        <div className="text-sm font-bold text-slate-800">
+          لم تسجل الحضور بعد اليوم
+        </div>
+        <div className="text-[11px] text-slate-500 leading-relaxed">
+          استخدم زر <span className="font-bold">تسجيل حضور</span> في رأس الصفحة
+          لبدء وردية اليوم.
+        </div>
+      </div>
+    );
+  }
 
   const clockedOut = !!clockOutISO;
   const elapsedMs = (clockedOut ? new Date(clockOutISO!).getTime() : now) - clockIn.getTime();
@@ -171,15 +195,34 @@ export function AttendanceCountdown({
       }).format(scheduledEnd)
     : null;
 
+  // Cairo wall-clock for clock-in (e.g. "08:15") for display in the
+  // card body. The frontend isn't authoritative — backend remains
+  // source of truth for the actual timestamp.
+  const clockInLabel = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Africa/Cairo',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(clockIn);
+
   if (clockedOut) {
     return (
-      <div className="rounded-2xl border border-slate-200 bg-slate-50/60 p-4 shadow-sm">
-        <div className="flex items-center gap-2 text-slate-600 text-sm">
-          <Clock size={16} />
-          <span>
-            انصرفت بعد <span className="font-bold tabular-nums">{fmtHM(elapsed)}</span>{' '}
-            من بداية الوردية.
-          </span>
+      <div
+        className="rounded-2xl border border-slate-200 bg-slate-50/60 p-4 shadow-sm flex flex-col gap-2"
+        data-testid="attendance-countdown-clocked-out"
+        dir="rtl"
+      >
+        <div className="flex items-center gap-2 text-[12px] font-bold text-slate-700">
+          <Clock size={14} />
+          <span>حضور اليوم</span>
+        </div>
+        <div className="text-sm font-bold text-slate-800">انصرف اليوم</div>
+        <div className="text-[11px] text-slate-600 leading-relaxed">
+          الحضور كان{' '}
+          <span className="font-mono tabular-nums">{clockInLabel}</span>
+          {' · '}
+          الزمن الكلي{' '}
+          <span className="font-bold tabular-nums">{fmtHM(elapsed)}</span>.
         </div>
       </div>
     );
@@ -187,40 +230,50 @@ export function AttendanceCountdown({
 
   if (overdue) {
     return (
-      <div className="rounded-2xl border border-amber-300 bg-amber-50 p-4 shadow-sm">
-        <div className="flex items-start gap-3">
-          <AlertCircle size={18} className="text-amber-700 mt-0.5 shrink-0" />
-          <div className="flex-1 min-w-0">
-            <div className="text-sm font-bold text-amber-900">
-              انتهى وقت العمل منذ{' '}
-              <span className="tabular-nums">{fmtHM(overflow)}</span>
-            </div>
-            <div className="text-[11px] text-amber-800/80 mt-1 leading-relaxed">
-              زمن الحضور حتى الآن{' '}
-              <span className="font-mono tabular-nums">{fmtClock(elapsed)}</span>
-              {endLabel ? ` · موعد الانتهاء كان ${endLabel}` : null}.
-            </div>
-          </div>
+      <div
+        className="rounded-2xl border border-amber-300 bg-amber-50 p-4 shadow-sm flex flex-col gap-2"
+        data-testid="attendance-countdown-overdue"
+        dir="rtl"
+      >
+        <div className="flex items-center gap-2 text-[12px] font-bold text-amber-900">
+          <AlertCircle size={14} />
+          <span>حضور اليوم</span>
+        </div>
+        <div className="text-sm font-bold text-amber-900">
+          انتهى وقت العمل منذ{' '}
+          <span className="tabular-nums">{fmtHM(overflow)}</span>
+        </div>
+        <div className="text-[11px] text-amber-800/80 leading-relaxed">
+          الحضور <span className="font-mono tabular-nums">{clockInLabel}</span>
+          {' · '}
+          مرّ{' '}
+          <span className="font-mono tabular-nums">{fmtClock(elapsed)}</span>
+          {endLabel ? ` · موعد الانتهاء كان ${endLabel}` : null}.
         </div>
       </div>
     );
   }
 
   return (
-    <div className="rounded-2xl border border-blue-200 bg-blue-50/70 p-4 shadow-sm">
-      <div className="flex items-start gap-3">
-        <Hourglass size={18} className="text-blue-700 mt-0.5 shrink-0" />
-        <div className="flex-1 min-w-0">
-          <div className="text-sm font-bold text-blue-900">
-            متبقي على انتهاء وقت العمل{' '}
-            <span className="tabular-nums">{fmtHM(remaining)}</span>
-          </div>
-          <div className="text-[11px] text-blue-800/80 mt-1 leading-relaxed">
-            زمن الحضور حتى الآن{' '}
-            <span className="font-mono tabular-nums">{fmtClock(elapsed)}</span>
-            {endLabel ? ` · ينتهي ${endLabel}` : null}.
-          </div>
-        </div>
+    <div
+      className="rounded-2xl border border-blue-200 bg-blue-50/70 p-4 shadow-sm flex flex-col gap-2"
+      data-testid="attendance-countdown-active"
+      dir="rtl"
+    >
+      <div className="flex items-center gap-2 text-[12px] font-bold text-blue-900">
+        <Hourglass size={14} />
+        <span>حضور اليوم</span>
+      </div>
+      <div className="text-sm font-bold text-blue-900">
+        متبقي{' '}
+        <span className="tabular-nums">{fmtHM(remaining)}</span>
+      </div>
+      <div className="text-[11px] text-blue-800/80 leading-relaxed">
+        الحضور <span className="font-mono tabular-nums">{clockInLabel}</span>
+        {' · '}
+        مرّ{' '}
+        <span className="font-mono tabular-nums">{fmtClock(elapsed)}</span>
+        {endLabel ? ` · ينتهي ${endLabel}` : null}.
       </div>
     </div>
   );

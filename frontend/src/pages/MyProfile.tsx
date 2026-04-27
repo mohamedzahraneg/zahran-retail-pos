@@ -65,6 +65,8 @@ import { AccountsMovementsTab } from '@/components/team/AccountsMovementsTab';
 import { AttendanceWageTab } from '@/components/team/AttendanceWageTab';
 import { CashRecordsTab } from '@/components/me/CashRecordsTab';
 import { AttendanceCountdown } from '@/components/me/AttendanceCountdown';
+import { BalanceCard } from '@/components/me/BalanceCard';
+import { LiveClockCard } from '@/components/me/LiveClockCard';
 import { LeaveRequestModal } from '@/components/me/LeaveRequestModal';
 import { AdvanceRequestModal } from '@/components/me/AdvanceRequestModal';
 import { MyRequestsCard } from '@/components/me/MyRequestsCard';
@@ -193,11 +195,26 @@ export default function MyProfile() {
         clockBusy={clockInMut.isPending || clockOutMut.isPending}
       />
 
-      <AttendanceCountdown
-        clockInISO={today?.clock_in ?? null}
-        clockOutISO={today?.clock_out ?? null}
-        profile={dash?.profile ?? null}
-      />
+      {/* PR-ESS-2A-UI-1 — three-card dashboard row above the tabs.
+          BalanceCard reads `dash.gl.live_snapshot` (same source as
+          Team Management's "الرصيد النهائي" card). LiveClockCard
+          ticks once per second in Cairo timezone. AttendanceCountdown
+          renders one of four states (not-checked-in / active /
+          overdue / clocked-out) and is the source of the workday
+          remaining-time display. None of these cards trigger any
+          accounting write — they're pure presentation. */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <BalanceCard
+          glLiveSnapshot={dash?.gl?.live_snapshot}
+          loading={!dash}
+        />
+        <LiveClockCard />
+        <AttendanceCountdown
+          clockInISO={today?.clock_in ?? null}
+          clockOutISO={today?.clock_out ?? null}
+          profile={dash?.profile ?? null}
+        />
+      </div>
 
       {/* Tabs nav */}
       <div className="flex items-center gap-1 overflow-x-auto bg-white rounded-2xl border border-slate-200 p-2 shadow-sm">
