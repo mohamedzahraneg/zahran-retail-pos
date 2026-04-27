@@ -46,6 +46,7 @@ import { AttendanceModule } from './attendance/attendance.module';
 import { EmployeesModule } from './employees/employees.module';
 import { ChartOfAccountsModule } from './chart-of-accounts/chart-of-accounts.module';
 import { PaymentsModule } from './payments/payments.module';
+import { FinanceModule } from './finance/finance.module';
 import { ServeStaticModule } from '@nestjs/serve-static';
 import { join } from 'path';
 
@@ -114,6 +115,7 @@ class HealthController {
     CategoriesModule,
     ChartOfAccountsModule,
     PaymentsModule,
+    FinanceModule,
   ],
   controllers: [HealthController],
   providers: [
