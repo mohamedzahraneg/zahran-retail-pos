@@ -621,8 +621,16 @@ export function AdvanceModal({
 
   const advanceMut = useMutation({
     mutationFn: () =>
+      // PR-EMP-FIX — payload normalization:
+      //   · `warehouse_id` was previously hardcoded to `''`. The
+      //     backend DTO is `@IsOptional() @IsUUID()`, so an empty
+      //     string fails class-validator with "warehouse_id must be a
+      //     UUID". The service auto-resolves the first active
+      //     warehouse when the field is omitted entirely
+      //     (accounting.service.ts:439-451), so DON'T send it.
+      //   · `cashbox_id` / `shift_id` are forwarded only when the
+      //     operator's CashSource picks an explicit source.
       accountingApi.createDailyExpense({
-        warehouse_id: '', // resolved server-side from the user's default warehouse
         cashbox_id:
           source.mode === 'open_shift' || source.mode === 'direct_cashbox'
             ? source.cashbox_id ?? undefined
@@ -647,6 +655,13 @@ export function AdvanceModal({
   // PR-T6.1 — settlement path triggered when the operator picks
   // "صرف مستحقات" inside the guard dialog. Routes to the existing
   // /employees/:id/settlements endpoint instead of the advance path.
+  //
+  // PR-EMP-FIX — `shift_id` is now propagated whenever the operator
+  // picks the "from open shift" mode in CashSourceSelector. Without
+  // it the backend treats the settlement as a direct-cashbox payout
+  // and demands `employees.settlement.direct_cashbox`
+  // (employees.service.ts:1398-1412) — which is exactly the error
+  // operators were hitting from the employee profile.
   const settlementMut = useMutation({
     mutationFn: () =>
       employeesApi.addSettlement(employee.id, {
@@ -656,8 +671,10 @@ export function AdvanceModal({
           source.mode === 'open_shift' || source.mode === 'direct_cashbox'
             ? source.cashbox_id ?? undefined
             : undefined,
+        shift_id:
+          source.mode === 'open_shift' ? source.shift_id : undefined,
         notes: reason.trim() || `صرف مستحقات — ${employee.full_name || employee.username}`,
-      } as any),
+      }),
     onSuccess: () => {
       toast.success('تم تسجيل صرف المستحقات (DR 213 / CR الخزنة).');
       invalidateAccounts(qc, employee.id);
