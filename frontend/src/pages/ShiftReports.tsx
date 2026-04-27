@@ -1,5 +1,5 @@
 /**
- * PR-REPORTS-1 — Shift reports page.
+ * PR-REPORTS-1 / PR-REPORTS-2 — Shift reports page.
  *
  * Three reports, all driven by the same period + filter bar:
  *
@@ -7,10 +7,14 @@
  *   2. All shifts    → ./shiftsPeriodReportBuilder (HTML + Excel)
  *   3. Payment channels → ./shiftsPeriodReportBuilder
  *
- * The page is read-only. No mutations, no migrations — it composes
- * existing endpoints (`/shifts`, `/shifts/:id/summary`,
- * `/dashboard/payment-channels`) plus the `from/to/cashbox_id` filter
- * extensions added to `GET /shifts` in this PR.
+ * The page is read-only. No mutations, no migrations.
+ *
+ * PR-REPORTS-2: the channels report now hits the new
+ * `GET /reports/payment-channels` endpoint, which honours the same
+ * cashbox / cashier / shift-status filters as the all-shifts report.
+ * The legacy date-only `GET /dashboard/payment-channels` endpoint is
+ * still used by the owner-dashboard widget — it stays untouched so
+ * dashboard behaviour is unchanged.
  */
 
 import { useMemo, useState } from 'react';
@@ -25,12 +29,11 @@ import {
   Wallet,
   Layers,
   ClipboardList,
-  Info,
 } from 'lucide-react';
 
 import { useAuthStore } from '@/stores/auth.store';
 import { shiftsApi, Shift } from '@/api/shifts.api';
-import { dashboardApi } from '@/api/dashboard.api';
+import { reportsApi } from '@/api/reports.api';
 import { cashDeskApi } from '@/api/cash-desk.api';
 import { usersApi } from '@/api/users.api';
 import { exportMultiSheet, printReport } from '@/lib/exportExcel';
@@ -177,10 +180,23 @@ export default function ShiftReports() {
   );
 
   /* ─── Payment-channels query (Report 3) ─── */
+  // PR-REPORTS-2: hits the new /reports/payment-channels endpoint
+  // which honours cashbox / cashier / shift-status — so the channels
+  // tab now matches the all-shifts tab for the same filter set.
   const channelsQuery = useQuery({
-    queryKey: ['report-payment-channels', { from, to }],
+    queryKey: [
+      'report-payment-channels',
+      { from, to, cashboxId, cashierId, statusFilter },
+    ],
     enabled: tab === 'channels',
-    queryFn: () => dashboardApi.paymentChannels(from, to),
+    queryFn: () =>
+      reportsApi.paymentChannels({
+        from,
+        to,
+        cashbox_id: cashboxId || undefined,
+        user_id: cashierId || undefined,
+        status: statusFilter,
+      }),
   });
 
   /* ─── Single-shift query (Report 1) ─── */
@@ -446,28 +462,13 @@ export default function ShiftReports() {
       )}
 
       {tab === 'channels' && (
-        <>
-          {(cashboxId || cashierId || statusFilter !== 'all') && (
-            <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800 flex items-start gap-2">
-              <Info size={16} className="mt-0.5 flex-shrink-0" />
-              <div>
-                <strong>تنبيه:</strong> تقرير وسائل الدفع مفلتَر بالفترة فقط
-                حالياً. الفلاتر الأخرى (الخزنة / الكاشير / حالة الوردية)
-                <strong> لا تُطبَّق </strong>
-                على هذا التقرير في هذه النسخة، لأن نقطة الـ API الحالية
-                <code className="mx-1">/dashboard/payment-channels</code>
-                تستقبل التواريخ فقط. سيُضاف الدعم في PR-REPORTS-2.
-              </div>
-            </div>
-          )}
-          <ChannelsPanel
-            data={channelsQuery.data}
-            loading={channelsQuery.isFetching}
-            rangeLabel={rangeLabel}
-            onPrint={handlePrintChannels}
-            onExport={handleExportChannels}
-          />
-        </>
+        <ChannelsPanel
+          data={channelsQuery.data}
+          loading={channelsQuery.isFetching}
+          rangeLabel={rangeLabel}
+          onPrint={handlePrintChannels}
+          onExport={handleExportChannels}
+        />
       )}
     </div>
   );
@@ -699,9 +700,6 @@ function ChannelsPanel(props: {
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div className="text-sm text-slate-600 flex items-center gap-2 flex-wrap">
           <CalendarDays size={16} /> {rangeLabel}
-          <span className="text-xs text-slate-500">
-            · مفلتَر بالفترة فقط (راجع PR-REPORTS-2 لإضافة فلاتر الخزنة/الكاشير)
-          </span>
         </div>
         <div className="flex gap-2">
           <button

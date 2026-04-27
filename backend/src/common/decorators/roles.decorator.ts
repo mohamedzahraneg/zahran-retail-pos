@@ -12,7 +12,18 @@ export const Public = () => SetMetadata(IS_PUBLIC_KEY, true);
  * Checked by PermissionsGuard against the user's effective permission set
  * (role.permissions ∪ user.extra_permissions ∖ user.denied_permissions).
  * A user with the wildcard "*" passes every permission check.
+ *
+ * `Permissions(...)` requires ALL listed codes (every).
+ * `AnyPermissions(...)` requires AT LEAST ONE listed code (some).
+ *
+ * When both are present at the same level, `AnyPermissions` wins (more
+ * permissive). At the method vs. class level, the closer-to-handler one
+ * wins as usual via `getAllAndOverride`.
  */
 export const PERMISSIONS_KEY = 'permissions';
 export const Permissions = (...perms: string[]) =>
   SetMetadata(PERMISSIONS_KEY, perms);
+
+export const ANY_PERMISSIONS_KEY = 'anyPermissions';
+export const AnyPermissions = (...perms: string[]) =>
+  SetMetadata(ANY_PERMISSIONS_KEY, perms);
