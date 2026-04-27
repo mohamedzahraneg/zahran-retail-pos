@@ -21,6 +21,17 @@
  *   · Quick reports availability is a static map: any report whose
  *     route exists today is `available=true`, the rest are
  *     placeholders.
+ *
+ * PR-FIN-2-HOTFIX-1 — invoice_status enum fix:
+ *   The original PR-FIN-2 SQL excluded out-of-scope invoices via
+ *   `i.status NOT IN ('voided','cancelled')`. The Postgres
+ *   `invoice_status` enum is {draft, completed, partially_paid,
+ *   paid, refunded, cancelled} — NO 'voided' value — so every query
+ *   threw `invalid input value for enum invoice_status: "voided"`
+ *   at runtime, breaking the dashboard. The canonical "voided"
+ *   indicator on `invoices` is the timestamp `voided_at` (paired
+ *   with `voided_by` + `void_reason`). Fixed by replacing the bad
+ *   filter with `i.status <> 'cancelled' AND i.voided_at IS NULL`.
  */
 
 import { Injectable } from '@nestjs/common';
@@ -382,7 +393,8 @@ export class FinanceDashboardService {
          WHERE i.created_at >= $1::date
            AND i.created_at <  ($2::date + INTERVAL '1 day')
            AND i.is_return  = FALSE
-           AND i.status NOT IN ('voided','cancelled')
+           AND i.status <> 'cancelled'
+         AND i.voided_at IS NULL
            ${f.shift_id ? 'AND i.shift_id = $3' : ''}
            ${f.user_id ? `AND i.cashier_id = ${f.shift_id ? '$4' : '$3'}` : ''}
        ),
@@ -537,7 +549,8 @@ export class FinanceDashboardService {
        WHERE i.created_at >= $1::date
          AND i.created_at <  ($2::date + INTERVAL '1 day')
          AND i.is_return  = FALSE
-         AND i.status NOT IN ('voided','cancelled')
+         AND i.status <> 'cancelled'
+         AND i.voided_at IS NULL
          ${f.shift_id ? 'AND i.shift_id = $3' : ''}
          ${f.user_id ? `AND i.cashier_id = ${f.shift_id ? '$4' : '$3'}` : ''}
        GROUP BY 1
@@ -588,7 +601,8 @@ export class FinanceDashboardService {
        WHERE i.created_at >= $1::date
          AND i.created_at <  ($2::date + INTERVAL '1 day')
          AND i.is_return  = FALSE
-         AND i.status NOT IN ('voided','cancelled')
+         AND i.status <> 'cancelled'
+         AND i.voided_at IS NULL
          ${f.shift_id ? 'AND i.shift_id = $3' : ''}
          ${f.user_id ? `AND i.cashier_id = ${f.shift_id ? '$4' : '$3'}` : ''}
        GROUP BY ip.payment_method
@@ -631,7 +645,8 @@ export class FinanceDashboardService {
        WHERE i.created_at >= $1::date
          AND i.created_at <  ($2::date + INTERVAL '1 day')
          AND i.is_return  = FALSE
-         AND i.status NOT IN ('voided','cancelled')
+         AND i.status <> 'cancelled'
+         AND i.voided_at IS NULL
          ${f.shift_id ? 'AND i.shift_id = $3' : ''}
          ${f.user_id ? `AND i.cashier_id = ${f.shift_id ? '$4' : '$3'}` : ''}
        GROUP BY c.id, c.name_ar
@@ -670,7 +685,8 @@ export class FinanceDashboardService {
        WHERE i.created_at >= $1::date
          AND i.created_at <  ($2::date + INTERVAL '1 day')
          AND i.is_return  = FALSE
-         AND i.status NOT IN ('voided','cancelled')
+         AND i.status <> 'cancelled'
+         AND i.voided_at IS NULL
          ${f.shift_id ? 'AND i.shift_id = $3' : ''}
          ${f.user_id ? `AND i.cashier_id = ${f.shift_id ? '$4' : '$3'}` : ''}
        GROUP BY p.id, p.name_ar, p.name, p.name_en
@@ -721,7 +737,8 @@ export class FinanceDashboardService {
        WHERE i.created_at >= $1::date
          AND i.created_at <  ($2::date + INTERVAL '1 day')
          AND i.is_return  = FALSE
-         AND i.status NOT IN ('voided','cancelled')
+         AND i.status <> 'cancelled'
+         AND i.voided_at IS NULL
          ${f.shift_id ? 'AND i.shift_id = $3' : ''}
          ${f.user_id ? `AND i.cashier_id = ${f.shift_id ? '$4' : '$3'}` : ''}
        GROUP BY c.id, c.full_name
@@ -769,7 +786,8 @@ export class FinanceDashboardService {
        WHERE i.created_at >= $1::date
          AND i.created_at <  ($2::date + INTERVAL '1 day')
          AND i.is_return  = FALSE
-         AND i.status NOT IN ('voided','cancelled')
+         AND i.status <> 'cancelled'
+         AND i.voided_at IS NULL
          ${f.shift_id ? 'AND i.shift_id = $3' : ''}
          ${f.user_id ? `AND i.cashier_id = ${f.shift_id ? '$4' : '$3'}` : ''}
        GROUP BY s.id, s.name
@@ -817,7 +835,8 @@ export class FinanceDashboardService {
        WHERE i.created_at >= $1::date
          AND i.created_at <  ($2::date + INTERVAL '1 day')
          AND i.is_return  = FALSE
-         AND i.status NOT IN ('voided','cancelled')
+         AND i.status <> 'cancelled'
+         AND i.voided_at IS NULL
          ${f.shift_id ? 'AND i.shift_id = $3' : ''}
          ${f.user_id ? `AND i.cashier_id = ${f.shift_id ? '$4' : '$3'}` : ''}
        GROUP BY c.id, c.name_ar
@@ -860,7 +879,8 @@ export class FinanceDashboardService {
        LEFT JOIN invoices i
          ON i.shift_id = s.id
         AND i.is_return = FALSE
-        AND i.status NOT IN ('voided','cancelled')
+        AND i.status <> 'cancelled'
+        AND i.voided_at IS NULL
        WHERE s.opened_at >= $1::date
          AND s.opened_at <  ($2::date + INTERVAL '1 day')
        GROUP BY s.id, s.opened_at, s.total_cash_in, s.total_cash_out
@@ -898,7 +918,8 @@ export class FinanceDashboardService {
        WHERE i.created_at >= $1::date
          AND i.created_at <  ($2::date + INTERVAL '1 day')
          AND i.is_return  = FALSE
-         AND i.status NOT IN ('voided','cancelled')
+         AND i.status <> 'cancelled'
+         AND i.voided_at IS NULL
          ${f.shift_id ? 'AND i.shift_id = $3' : ''}
          ${f.user_id ? `AND i.cashier_id = ${f.shift_id ? '$4' : '$3'}` : ''}
        GROUP BY ip.payment_method
