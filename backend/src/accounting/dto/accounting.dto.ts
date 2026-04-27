@@ -2,6 +2,7 @@ import {
   IsBoolean,
   IsDateString,
   IsIn,
+  IsInt,
   IsNumber,
   IsOptional,
   IsPositive,
@@ -187,6 +188,36 @@ export class CreateDailyExpenseDto {
    *  the API contract explicit. */
   @IsOptional()
   is_advance?: boolean;
+
+  /**
+   * PR-ESS-2B — link this advance daily-expense to the originating
+   * self-service `employee_requests` row (kind='advance_request',
+   * status='approved'). When supplied:
+   *
+   *   · the service validates the request exists, kind is
+   *     `advance_request`, status is `approved`, the amount equals
+   *     `dto.amount` exactly, the user_id matches
+   *     `dto.employee_user_id`, and no other expense already links to
+   *     it (refusing duplicate disbursement);
+   *   · the linkage is persisted on the expense row via the new
+   *     `expenses.source_employee_request_id` column (migration 117);
+   *   · once `FinancialEngineService.recordExpense` succeeds, the
+   *     request is flipped from `'approved'` to `'disbursed'` inside
+   *     the same DB transaction. Any failure (engine, posting,
+   *     mapping) rolls the whole transaction back and the request
+   *     stays `'approved'` — operator can retry.
+   *
+   * Rules in this PR:
+   *   · `is_advance` MUST be true when this field is set (the
+   *     linkage is only meaningful for the advance posting path).
+   *   · Exact amount match (no partial disbursement in this PR).
+   *
+   * BIGINT because employee_requests.id is bigint (verified live).
+   */
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  source_employee_request_id?: number;
 }
 
 export class ListExpensesDto {

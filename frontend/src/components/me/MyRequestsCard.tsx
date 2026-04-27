@@ -28,6 +28,7 @@ import {
   XCircle,
   Ban,
   Inbox,
+  Banknote,
 } from 'lucide-react';
 import { employeesApi, EmployeeRequest } from '@/api/employees.api';
 
@@ -145,11 +146,18 @@ function RequestRow({
         ? CheckCircle2
         : status === 'rejected'
           ? XCircle
-          : Ban;
+          : status === 'disbursed'
+            ? Banknote
+            : Ban;
 
+  // PR-ESS-2B — `disbursed` is the terminal "money has actually
+  // moved" state. Distinct emerald tone (slightly stronger than
+  // approved) so the operator/employee can tell at-a-glance that
+  // the cash leg actually posted.
   const statusTone: Record<string, string> = {
     pending: 'bg-amber-50 text-amber-800 border-amber-200',
     approved: 'bg-emerald-50 text-emerald-800 border-emerald-200',
+    disbursed: 'bg-emerald-100 text-emerald-900 border-emerald-300',
     rejected: 'bg-rose-50 text-rose-800 border-rose-200',
     cancelled: 'bg-slate-100 text-slate-600 border-slate-200',
   };
@@ -157,6 +165,7 @@ function RequestRow({
   const statusLabel: Record<string, string> = {
     pending: 'قيد المراجعة',
     approved: 'موافق عليه',
+    disbursed: 'تم الصرف',
     rejected: 'مرفوض',
     cancelled: 'ملغي',
   };
@@ -172,7 +181,10 @@ function RequestRow({
 
   // PR-ESS-2A — approved advance request must clearly say "بانتظار
   // الصرف" so neither operators nor employees mistake it for a money
-  // movement. Disbursement linkage ships in PR-ESS-2B.
+  // movement.
+  // PR-ESS-2B — once disbursement linkage flips status to 'disbursed',
+  // the hint is suppressed (the green "تم الصرف" badge is the new
+  // canonical signal that money has moved).
   const approvedAdvanceHint =
     kind === 'advance' && status === 'approved'
       ? 'بانتظار الصرف من قِبَل المحاسبة'

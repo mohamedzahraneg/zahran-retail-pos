@@ -237,6 +237,24 @@ export class EmployeesController {
     return this.svc.listPendingRequests();
   }
 
+  /**
+   * PR-ESS-2B — list `kind='advance_request'` rows for `:id` that are
+   * currently in `status='approved'` AND not yet linked to any
+   * `expenses.source_employee_request_id`. Drives the admin
+   * AdvanceModal dropdown that lets the operator link a daily-expense
+   * disbursement back to the originating request.
+   *
+   * Permission: `accounts.journal.post` is the existing gate that
+   * already protects the AdvanceModal action surface, so it's the
+   * natural choice here too — anyone who can post the disbursing
+   * expense can see what's available to link.
+   */
+  @Get(':id/disbursable-advance-requests')
+  @Permissions('accounts.journal.post')
+  listDisbursableAdvanceRequests(@Param('id', ParseUUIDPipe) id: string) {
+    return this.svc.listDisbursableAdvanceRequests(id);
+  }
+
   @Post('requests/:id/decide')
   @Permissions('employee.requests.approve')
   decide(

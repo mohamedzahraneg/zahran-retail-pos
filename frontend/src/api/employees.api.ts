@@ -45,7 +45,16 @@ export interface EmployeeRequest {
   starts_at?: string;
   ends_at?: string;
   reason?: string;
-  status: 'pending' | 'approved' | 'rejected' | 'cancelled';
+  /**
+   * PR-ESS-2B — `'disbursed'` is the terminal state for an
+   * `advance_request` after a Daily Expense is posted with
+   * `source_employee_request_id` matching the request and the
+   * canonical FinancialEngine.recordExpense path completes
+   * successfully. Migration 117 widened the DB CHECK to accept it.
+   * The flip happens inside the same transaction as the engine
+   * post — if the engine fails the request stays `'approved'`.
+   */
+  status: 'pending' | 'approved' | 'rejected' | 'cancelled' | 'disbursed';
   decided_by?: string;
   decided_at?: string;
   decision_reason?: string;
@@ -228,6 +237,18 @@ export const employeesApi = {
   }) =>
     unwrap<EmployeeRequest>(
       api.post('/employees/me/requests/advance', body),
+    ),
+
+  /**
+   * PR-ESS-2B — admin lookup for the AdvanceModal dropdown. Returns
+   * the employee's `kind='advance_request'` rows in `status='approved'`
+   * that are NOT yet linked to any expense (i.e. eligible for
+   * disbursement). Permission: `accounts.journal.post` (same gate as
+   * the disbursing AdvanceModal action surface).
+   */
+  listDisbursableAdvanceRequests: (employeeId: string) =>
+    unwrap<EmployeeRequest[]>(
+      api.get(`/employees/${employeeId}/disbursable-advance-requests`),
     ),
 
   // Admin / HR

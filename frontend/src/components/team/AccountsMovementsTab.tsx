@@ -628,16 +628,15 @@ export function AdvanceModal({
     shift_id: null,
     cashbox_id: null,
   });
-  // PR-T6.1 — guard dialog state. When the operator clicks "تسجيل
-  // السلفة" we open the EmployeeCashClassifierGuard first; only after
-  // an explicit "تسجيل كسلفة" or "صرف مستحقات" decision do we run
-  // the actual mutation. Prevents the silent "wage payout posted as
-  // advance" pattern that confused Mohamed El-Zebaty's ledger.
+  // PR-T6.1 — guard dialog state.
   const [guardOpen, setGuardOpen] = useState(false);
 
+  // PR-ESS-2B — optional dropdown lets the operator link this
+  // disbursing daily-expense to an existing approved-pending-
+  // disbursement advance_request. Empty string = no link.
+  const [linkedRequestId, setLinkedRequestId] = useState<string>('');
+
   // Resolve the canonical "employee_advance" expense category id.
-  // Migration 086 created it; the modal must reuse the same category
-  // so backend posting goes through the existing employee-advance path.
   const { data: categories = [] } = useQuery({
     queryKey: ['accounting-categories'],
     queryFn: () => accountingApi.categories(),
@@ -650,17 +649,41 @@ export function AdvanceModal({
     [categories],
   );
 
+  // PR-ESS-2B — list of approved-pending-disbursement advance_requests
+  // for THIS employee. Drives the optional linkage dropdown.
+  const { data: disbursableRequests = [] } = useQuery({
+    queryKey: ['disbursable-advance-requests', employee.id],
+    queryFn: () =>
+      employeesApi.listDisbursableAdvanceRequests(employee.id),
+  });
+
+  // When the operator picks a request, prefill the amount + reason
+  // from it. Reason is appended (not overwritten) so the operator's
+  // freeform notes survive. Switching back to "(لا ربط)" leaves the
+  // amount/reason as last-typed — prevents accidental clearing.
+  const onSelectRequest = (id: string) => {
+    setLinkedRequestId(id);
+    if (id) {
+      const r = (disbursableRequests as any[]).find(
+        (x) => String(x.id) === id,
+      );
+      if (r) {
+        setAmount(String(r.amount));
+        if (!reason.trim() && r.reason) {
+          setReason(`صرف طلب سلفة #${r.id}: ${r.reason}`);
+        }
+      }
+    }
+  };
+
   const advanceMut = useMutation({
     mutationFn: () =>
-      // PR-EMP-FIX — payload normalization:
-      //   · `warehouse_id` was previously hardcoded to `''`. The
-      //     backend DTO is `@IsOptional() @IsUUID()`, so an empty
-      //     string fails class-validator with "warehouse_id must be a
-      //     UUID". The service auto-resolves the first active
-      //     warehouse when the field is omitted entirely
-      //     (accounting.service.ts:439-451), so DON'T send it.
-      //   · `cashbox_id` / `shift_id` are forwarded only when the
-      //     operator's CashSource picks an explicit source.
+      // PR-EMP-FIX — payload normalization (warehouse_id omitted, etc.)
+      // PR-ESS-2B — `source_employee_request_id` is forwarded only
+      // when the operator picked a request from the dropdown. Backend
+      // pre-validates kind/status/amount/user/duplicate before any
+      // INSERT and flips the request to 'disbursed' AFTER the engine
+      // posts (inside the same transaction).
       accountingApi.createDailyExpense({
         cashbox_id:
           source.mode === 'open_shift' || source.mode === 'direct_cashbox'
@@ -673,10 +696,24 @@ export function AdvanceModal({
         employee_user_id: employee.id,
         is_advance: true,
         shift_id: source.mode === 'open_shift' ? source.shift_id : undefined,
+        source_employee_request_id: linkedRequestId
+          ? Number(linkedRequestId)
+          : undefined,
       }),
     onSuccess: () => {
-      toast.success('تم تسجيل السلفة وخروج النقد من المصدر المختار.');
+      const linkedNote = linkedRequestId
+        ? ` تم وسم طلب السلفة #${linkedRequestId} كـ "تم الصرف".`
+        : '';
+      toast.success(
+        `تم تسجيل السلفة وخروج النقد من المصدر المختار.${linkedNote}`,
+      );
       invalidateAccounts(qc, employee.id);
+      // Refresh the disbursable list so the just-disbursed request
+      // disappears from the dropdown across other open instances.
+      qc.invalidateQueries({
+        queryKey: ['disbursable-advance-requests', employee.id],
+      });
+      qc.invalidateQueries({ queryKey: ['my-requests'] });
       onClose();
     },
     onError: (e: any) =>
@@ -753,6 +790,52 @@ export function AdvanceModal({
         credit={{ code: 'cashbox', name: 'الخزنة' }}
         note="يضيف رصيد على الموظف (مدين للشركة) ويُخرج نقدًا من الخزنة المختارة."
       />
+
+      {/* PR-ESS-2B — optional linkage to an existing approved-pending-
+          disbursement advance_request. Only renders when the employee
+          has at least one eligible request (kind='advance_request',
+          status='approved', not yet linked). When the operator picks a
+          request:
+            · Amount is prefilled from the request (exact-match required
+              by the backend).
+            · Reason is pre-filled with a "صرف طلب سلفة #ID" prefix if
+              the operator hasn't typed one yet.
+            · `source_employee_request_id` joins the createDailyExpense
+              payload; backend validates kind/status/user/amount/dup
+              and flips the request to status='disbursed' AFTER the
+              engine posts (atomic with the expense + JE + CT writes).
+          The dropdown is intentionally optional — the operator can
+          still post a free-form advance daily-expense without linking
+          (existing behaviour, e.g. for adjustments). */}
+      {(disbursableRequests as any[]).length > 0 && (
+        <div data-testid="advance-link-dropdown-wrap">
+          <div className="text-[11px] font-bold text-slate-600 mb-1">
+            ربط بطلب سلفة قائم (اختياري)
+          </div>
+          <select
+            value={linkedRequestId}
+            onChange={(e) => onSelectRequest(e.target.value)}
+            disabled={mut.isPending}
+            className="input w-full"
+            data-testid="advance-link-dropdown"
+          >
+            <option value="">— لا ربط —</option>
+            {(disbursableRequests as any[]).map((r) => (
+              <option key={r.id} value={r.id}>
+                #{r.id} · {EGP(r.amount)} ·{' '}
+                {r.reason
+                  ? r.reason.split('\n')[0].slice(0, 60)
+                  : 'بدون سبب'}
+              </option>
+            ))}
+          </select>
+          {linkedRequestId && (
+            <div className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 mt-2 leading-relaxed">
+              عند نجاح الترحيل سيتم وسم طلب السلفة <span className="font-bold">#{linkedRequestId}</span> كـ <span className="font-bold">"تم الصرف"</span>. يجب أن يكون المبلغ مطابقًا تمامًا لقيمة الطلب.
+            </div>
+          )}
+        </div>
+      )}
 
       <Field label="المبلغ">
         <input
