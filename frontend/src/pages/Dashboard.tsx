@@ -35,6 +35,8 @@ import {
   PaymentChannelsResponse,
   PaymentChannelMethod,
 } from '@/api/dashboard.api';
+import { paymentsApi } from '@/api/payments.api';
+import { PaymentProviderLogo } from '@/components/payments/PaymentProviderLogo';
 import { accountingApi } from '@/api/accounting.api';
 import { useAuthStore } from '@/stores/auth.store';
 import { ReturnsWidget } from '@/components/dashboard/ReturnsWidget';
@@ -1081,6 +1083,20 @@ function PaymentChannelsSection({
       maximumFractionDigits: 2,
     })} ج.م`;
 
+  // PR-PAY-6 — provider_key → logo_key map for chip/table icons.
+  // The dashboard endpoint returns provider_key per account; the
+  // frontend resolves it to a bundled SVG via the providers catalog.
+  const providersQuery = useQuery({
+    queryKey: ['payment-providers'],
+    queryFn: () => paymentsApi.listProviders(),
+    staleTime: 60_000,
+  });
+  const providerLogoMap: Record<string, string> = useMemo(() => {
+    const m: Record<string, string> = {};
+    for (const p of providersQuery.data ?? []) m[p.provider_key] = p.logo_key;
+    return m;
+  }, [providersQuery.data]);
+
   const cashChannel = data.channels.find((c) => c.method === 'cash');
   const nonCashChannels = data.channels.filter((c) => c.method !== 'cash');
   const grand = data.grand_total;
@@ -1148,7 +1164,11 @@ function PaymentChannelsSection({
       {nonCashChannels.length > 0 && (
         <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
           {nonCashChannels.map((c) => (
-            <PaymentChannelChip key={c.method} method={c} />
+            <PaymentChannelChip
+              key={c.method}
+              method={c}
+              providerLogoMap={providerLogoMap}
+            />
           ))}
         </div>
       )}
@@ -1206,17 +1226,35 @@ function PaymentChannelsSection({
   );
 }
 
-function PaymentChannelChip({ method }: { method: PaymentChannelMethod }) {
+function PaymentChannelChip({
+  method,
+  providerLogoMap,
+}: {
+  method: PaymentChannelMethod;
+  providerLogoMap: Record<string, string>;
+}) {
   const fmt = (n: number) =>
     `${Number(n || 0).toLocaleString('en-US', {
       minimumFractionDigits: 0,
       maximumFractionDigits: 0,
     })}`;
   const top = method.accounts[0];
+  const logoKey = top?.provider_key
+    ? providerLogoMap[top.provider_key] ?? null
+    : null;
   return (
     <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">
       <div className="flex items-center justify-between text-xs">
-        <span className="font-bold text-slate-700">{method.method_label_ar}</span>
+        <div className="flex items-center gap-2">
+          <PaymentProviderLogo
+            logoKey={logoKey}
+            method={method.method}
+            name={method.method_label_ar}
+            size="sm"
+            decorative
+          />
+          <span className="font-bold text-slate-700">{method.method_label_ar}</span>
+        </div>
         <span className="text-[10px] text-slate-400">{method.share_pct}%</span>
       </div>
       <div className="text-base font-black text-slate-900 mt-0.5">

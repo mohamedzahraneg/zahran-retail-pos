@@ -32,6 +32,7 @@ import {
   PaymentAccount,
   PaymentMethodCode,
 } from '@/api/payments.api';
+import { PaymentProviderLogo } from '@/components/payments/PaymentProviderLogo';
 import { cashDeskApi } from '@/api/cash-desk.api';
 import { usersApi } from '@/api/users.api';
 import { exportMultiSheet, printReport } from '@/lib/exportExcel';
@@ -2589,6 +2590,11 @@ interface MethodAccountCard {
   tone: string;
   account_id: string | null;
   account_display_name: string | null;
+  /** PR-PAY-6 — provider_key + resolved logo_key. */
+  provider_key: string | null;
+  logo_key: string | null;
+  /** PR-PAY-7 (Option C) — operator custom override via drag-drop only. */
+  logo_data_url: string | null;
   amount: number;
   invoice_count: number;
   payment_count: number;
@@ -2609,6 +2615,17 @@ function PaymentMethodCardsGrid({
     queryFn: () => paymentsApi.listAccounts({ active: true }),
     refetchInterval: 60_000,
   });
+  const providersQuery = useQuery({
+    queryKey: ['payment-providers'],
+    queryFn: () => paymentsApi.listProviders(),
+  });
+  // PR-PAY-6 — provider_key → logo_key map so cards can render the
+  // brand badge without each cell re-iterating the catalog.
+  const providerLogoMap = useMemo(() => {
+    const m: Record<string, string> = {};
+    for (const p of providersQuery.data ?? []) m[p.provider_key] = p.logo_key;
+    return m;
+  }, [providersQuery.data]);
 
   const cards = useMemo<MethodAccountCard[]>(() => {
     const map = new Map<string, MethodAccountCard>();
@@ -2622,6 +2639,9 @@ function PaymentMethodCardsGrid({
       tone: METHOD_GROUP_TONE.cash,
       account_id: null,
       account_display_name: null,
+      provider_key: 'cash',
+      logo_key: providerLogoMap['cash'] ?? 'cash',
+      logo_data_url: null,
       amount: cashAmount,
       invoice_count: cashBucket?.invoice_count ?? 0,
       payment_count: cashBucket?.payment_count ?? 0,
@@ -2641,6 +2661,10 @@ function PaymentMethodCardsGrid({
         tone: METHOD_GROUP_TONE[a.method] ?? METHOD_GROUP_TONE.other,
         account_id: a.id,
         account_display_name: a.display_name,
+        provider_key: a.provider_key,
+        logo_key: (a.provider_key && providerLogoMap[a.provider_key]) ?? null,
+        // PR-PAY-7 (Option C) — operator custom override from account metadata.
+        logo_data_url: ((a.metadata as any)?.logo_data_url as string) ?? null,
         amount: 0,
         invoice_count: 0,
         payment_count: 0,
@@ -2663,6 +2687,7 @@ function PaymentMethodCardsGrid({
         const isHistoricalOnly =
           !!a.payment_account_id &&
           !activeAccounts.some((x) => x.id === a.payment_account_id);
+        const provKey = (a.provider_key ?? existing?.provider_key) ?? null;
         map.set(acctKey, {
           key: acctKey,
           method: m.method,
@@ -2673,6 +2698,13 @@ function PaymentMethodCardsGrid({
           account_id: a.payment_account_id,
           account_display_name:
             a.display_name ?? existing?.account_display_name ?? null,
+          provider_key: provKey,
+          logo_key:
+            (provKey && providerLogoMap[provKey]) ?? existing?.logo_key ?? null,
+          // PR-PAY-7 (Option C) — historical breakdown rows don't carry
+          // the custom override (it lives on the account, not the
+          // snapshot loop here); inherit from the seeded card if present.
+          logo_data_url: existing?.logo_data_url ?? null,
           amount: a.total_amount,
           invoice_count: a.invoice_count,
           payment_count: a.payment_count,
@@ -2692,7 +2724,7 @@ function PaymentMethodCardsGrid({
       if (b.amount !== a.amount) return b.amount - a.amount;
       return a.group_label_ar.localeCompare(b.group_label_ar, 'ar');
     });
-  }, [breakdown, cashAmount, cashBucket, accountsQuery.data]);
+  }, [breakdown, cashAmount, cashBucket, accountsQuery.data, providerLogoMap]);
 
   if (cards.length === 0) {
     return null;
@@ -2711,8 +2743,15 @@ function PaymentMethodCard({ card }: { card: MethodAccountCard }) {
   return (
     <div className={`rounded-md border p-3 ${card.tone}`}>
       <div className="flex items-center justify-between">
-        <div className="font-bold flex items-center gap-1">
-          <span>{card.icon}</span>
+        <div className="font-bold flex items-center gap-2">
+          <PaymentProviderLogo
+            logoDataUrl={card.logo_data_url}
+            logoKey={card.logo_key}
+            method={card.method}
+            name={card.account_display_name ?? card.group_label_ar}
+            size="md"
+            decorative
+          />
           <span>{card.group_label_ar}</span>
         </div>
         {card.is_inactive_historical && (

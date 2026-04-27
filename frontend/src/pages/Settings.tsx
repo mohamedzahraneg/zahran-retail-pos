@@ -38,6 +38,8 @@ import {
   GROUP_LABEL_AR,
   groupAccountsByProviderGroup,
 } from '@/api/payments.api';
+import { PaymentProviderLogo } from '@/components/payments/PaymentProviderLogo';
+import { LogoPicker } from '@/components/payments/LogoPicker';
 import { useAuthStore } from '@/stores/auth.store';
 import { ReceiptTemplatesTab } from './ReceiptTemplatesTab';
 
@@ -1455,9 +1457,13 @@ function PaymentAccountRow({
   return (
     <div className="flex items-start justify-between gap-4 px-5 py-4">
       <div className="flex items-start gap-3">
-        <div className="w-10 h-10 rounded-lg bg-slate-100 text-slate-600 flex items-center justify-center font-bold">
-          {account.display_name.slice(0, 2)}
-        </div>
+        <PaymentProviderLogo
+          logoDataUrl={(account.metadata as any)?.logo_data_url}
+          logoKey={provider?.logo_key}
+          method={account.method}
+          name={provider?.name_ar ?? account.display_name}
+          size="md"
+        />
         <div>
           <div className="flex items-center gap-2 flex-wrap">
             <div className="font-bold text-slate-900">{account.display_name}</div>
@@ -1557,6 +1563,11 @@ function PaymentAccountModal({
   onSaved: () => void;
 }) {
   const isEdit = !!account;
+  // PR-PAY-7 — pull custom logo overrides out of the existing
+  // `metadata` jsonb so we can edit them via LogoPicker. The form is
+  // parameterized by metadata; on save we merge back into a flat
+  // metadata jsonb the backend stores as-is.
+  const initialMetadata = (account?.metadata ?? {}) as Record<string, any>;
   const [form, setForm] = useState<CreatePaymentAccountInput>({
     method: account?.method ?? 'instapay',
     provider_key: account?.provider_key ?? '',
@@ -1566,7 +1577,12 @@ function PaymentAccountModal({
     is_default: account?.is_default ?? false,
     active: account?.active ?? true,
     sort_order: account?.sort_order ?? 0,
+    metadata: initialMetadata,
   });
+  // PR-PAY-7 (Option C) — only data URL; URL paste was removed.
+  const [logoDataUrl, setLogoDataUrl] = useState<string | null>(
+    initialMetadata.logo_data_url ?? null,
+  );
 
   const providersForMethod = providers.filter((p) => p.method === form.method);
 
@@ -1582,6 +1598,19 @@ function PaymentAccountModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.method]);
 
+  // PR-PAY-7 (Option C) — merge custom-logo override into metadata
+  // before save. Only `logo_data_url` is touched; any other keys
+  // already on metadata are preserved. Legacy `logo_url` (from the
+  // earlier draft that included URL paste) is intentionally
+  // dropped on save so existing rows stop carrying it.
+  const mergedMetadata = (): Record<string, unknown> => {
+    const base = { ...((form.metadata as Record<string, unknown>) ?? {}) };
+    if (logoDataUrl) base.logo_data_url = logoDataUrl;
+    else delete base.logo_data_url;
+    delete base.logo_url; // PR-PAY-7 Option C: never persist URL paste.
+    return base;
+  };
+
   const save = useMutation({
     mutationFn: () =>
       isEdit
@@ -1591,8 +1620,9 @@ function PaymentAccountModal({
             gl_account_code: form.gl_account_code,
             provider_key: form.provider_key || undefined,
             sort_order: form.sort_order,
+            metadata: mergedMetadata(),
           })
-        : paymentsApi.createAccount(form),
+        : paymentsApi.createAccount({ ...form, metadata: mergedMetadata() }),
     onSuccess: () => {
       toast.success(isEdit ? 'تم تحديث الحساب' : 'تم إنشاء الحساب');
       onSaved();
@@ -1722,6 +1752,22 @@ function PaymentAccountModal({
               onChange={(v) => setForm({ ...form, is_default: v })}
             />
           </div>
+
+          {/* PR-PAY-7 (Option C) — per-account custom logo via
+              drag-drop only. Resolution at render: data URL > catalog. */}
+          <LogoPicker
+            value={{ dataUrl: logoDataUrl }}
+            onChange={(v) => setLogoDataUrl(v.dataUrl ?? null)}
+            fallbackLogoKey={
+              providers.find((p) => p.provider_key === form.provider_key)
+                ?.logo_key ?? null
+            }
+            fallbackMethod={form.method}
+            fallbackName={
+              form.display_name ||
+              providers.find((p) => p.provider_key === form.provider_key)?.name_ar
+            }
+          />
         </div>
 
         <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-slate-200 bg-slate-50 rounded-b-2xl">

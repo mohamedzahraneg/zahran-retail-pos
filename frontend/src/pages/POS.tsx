@@ -47,6 +47,7 @@ import {
   PaymentProvider,
   METHOD_LABEL_AR,
 } from '@/api/payments.api';
+import { PaymentProviderLogo } from '@/components/payments/PaymentProviderLogo';
 import { useAuthStore } from '@/stores/auth.store';
 import { useLayoutStore } from '@/stores/layout.store';
 import { Receipt, ReceiptData } from '@/components/Receipt';
@@ -2035,12 +2036,16 @@ function PaymentMethodGrid({
             }`}
           >
             <div className="flex items-center gap-2 justify-between">
-              <span className="text-sm">{METHOD_LABEL_AR[m]}</span>
-              {provider?.icon_name && (
-                <span className="text-[10px] opacity-60 font-mono">
-                  {provider.icon_name}
-                </span>
-              )}
+              <div className="flex items-center gap-2">
+                <PaymentProviderLogo
+                  logoKey={provider?.logo_key}
+                  method={m}
+                  name={provider?.name_ar ?? METHOD_LABEL_AR[m]}
+                  size="sm"
+                  decorative
+                />
+                <span className="text-sm">{METHOD_LABEL_AR[m]}</span>
+              </div>
             </div>
           </button>
         );
@@ -2088,23 +2093,35 @@ function PaymentAccountPicker({
             <button
               key={a.id}
               onClick={() => onSelect(a.id)}
-              className={`w-full text-right p-2.5 rounded-lg border transition ${
+              className={`w-full text-right p-2.5 rounded-lg border transition flex items-start gap-2 ${
                 isSelected
                   ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-300'
                   : 'bg-white/5 border-white/10 text-slate-300 hover:bg-white/10'
               }`}
             >
-              <div className="flex items-center justify-between">
-                <span className="font-bold text-sm">{a.display_name}</span>
-                {a.is_default && (
-                  <span className="text-[10px] font-bold bg-amber-500/20 text-amber-200 px-2 py-0.5 rounded">
-                    افتراضي
+              <PaymentProviderLogo
+                logoDataUrl={(a.metadata as any)?.logo_data_url}
+                logoKey={provider?.logo_key}
+                method={a.method}
+                name={a.display_name}
+                size="md"
+                decorative
+              />
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-sm truncate">
+                    {a.display_name}
                   </span>
-                )}
-              </div>
-              <div className="text-[11px] text-slate-400 mt-0.5">
-                {provider?.name_ar ?? METHOD_LABEL_AR[method]}
-                {a.identifier ? ` · ${a.identifier}` : ''}
+                  {a.is_default && (
+                    <span className="text-[10px] font-bold bg-amber-500/20 text-amber-200 px-2 py-0.5 rounded shrink-0">
+                      افتراضي
+                    </span>
+                  )}
+                </div>
+                <div className="text-[11px] text-slate-400 mt-0.5 truncate">
+                  {provider?.name_ar ?? METHOD_LABEL_AR[method]}
+                  {a.identifier ? ` · ${a.identifier}` : ''}
+                </div>
               </div>
             </button>
           );
