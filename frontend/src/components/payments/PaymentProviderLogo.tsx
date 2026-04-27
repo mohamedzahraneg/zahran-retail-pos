@@ -1,30 +1,31 @@
 import { getPaymentLogo } from '@/lib/paymentLogos';
 
 /**
- * PR-PAY-6 + PR-PAY-7 — Renders a payment provider's brand logo.
+ * PR-PAY-6 + PR-PAY-7 (Option C) — Renders a payment provider's
+ * brand logo from one of two trusted sources only:
  *
- * Resolution order (first hit wins):
- *   1. `logoDataUrl` — operator dragged-and-dropped a custom file in
- *      Settings; stored as base64 data URL in
- *      payment_accounts.metadata.logo_data_url. Wins so receipts can
- *      render offline.
- *   2. `logoUrl` — operator pasted a remote URL in Settings; stored
- *      in payment_accounts.metadata.logo_url. Subject to network
- *      reachability.
- *   3. `logoKey` — bundled asset under
+ *   1. `logoDataUrl` — operator dragged-and-dropped a raster image
+ *      file in Settings; stored as `data:image/(png|jpeg|webp);base64,…`
+ *      in `payment_accounts.metadata.logo_data_url`. Works offline.
+ *      Validated at upload time (LogoPicker) and again at render
+ *      time (sanitizeImgSrc).
+ *
+ *   2. `logoKey` — bundled asset under
  *      `frontend/src/assets/payment-logos/{logoKey}.{svg|png|...}`
- *      resolved by `getPaymentLogo`.
- *   4. Method group fallback — `wallet-other` / `card-other` /
- *      `bank-other` based on `method`.
- *   5. Coloured initials avatar — when nothing else is available.
+ *      resolved by `getPaymentLogo` to a Vite-hashed relative URL.
+ *
+ * Method group fallback (`wallet-other` / `card-other` / `bank-other`)
+ * applies when `logoKey` doesn't resolve.
+ *
+ * If neither source produces a sanitized value, the component
+ * renders a coloured initials avatar instead.
+ *
+ * NO external HTTP(S) URLs. NO `logoUrl` prop. NO hotlinks.
  *
  * Rendering style:
- *   • When a real image is available (any of 1-3), the component
- *     renders the image NAKED — no border, no background, just
- *     `object-contain` inside the requested box. This matches the
- *     operator's spec: "تتكيف على مساحة واضحة بدون إطار ولا خلفية".
- *   • Initials fallback (5) keeps the coloured rounded chrome so the
- *     row stays scannable when no logo is available.
+ *   • Naked image (no border, no background, `object-contain`) when a
+ *     real source resolves.
+ *   • Initials fallback keeps the chrome so the row stays scannable.
  *
  * Sizes:
  *   sm = 24px  (table rows, dropdown options)
@@ -32,10 +33,8 @@ import { getPaymentLogo } from '@/lib/paymentLogos';
  *   lg = 56px  (hero summary cards)
  */
 export interface PaymentProviderLogoProps {
-  /** PR-PAY-7 — operator-uploaded base64 data URL (highest priority). */
+  /** Operator-uploaded base64 data URL (raster only, validated). */
   logoDataUrl?: string | null;
-  /** PR-PAY-7 — operator-pasted remote URL (second priority). */
-  logoUrl?: string | null;
   /** Stable key into `frontend/src/assets/payment-logos/`. */
   logoKey?: string | null;
   /** Used for the group-fallback when other sources are missing. */
@@ -70,35 +69,26 @@ function initials(name?: string | null): string {
 /**
  * Sink-side sanitizer for the `<img src>` value.
  *
- * The `src` flows in from props that originate at DOM-text sources
- * (FileReader result for drag-dropped files, `<input>` value for
- * URL paste). LogoPicker validates at the source; this is the
- * authoritative sink-side check that CodeQL's
- * `js/xss-through-dom` analysis terminates on.
+ * PR-PAY-7 / Option C — the URL paste field was removed from
+ * LogoPicker entirely. Logos can ONLY come from two trusted sources:
  *
- * Why URL constructor + protocol allow-list (not just regex):
- *   CodeQL recognises `new URL(...)` + protocol comparison as a
- *   trustworthy URL sanitizer pattern; a hand-rolled regex did not
- *   register as a sanitizer in `js/xss-through-dom` analysis.
+ *   1. Vite-bundled relative URLs (the placeholder/real catalog
+ *      assets under `frontend/src/assets/payment-logos/`). Vite
+ *      hashes the URL at build time, so the value is always a
+ *      same-origin relative path like `/assets/instapay-abc.svg`.
  *
- * Allowed shapes:
- *   • Vite-bundled relative URLs (`/assets/...`) — same-origin only,
- *     never protocol-relative (`//evil.com`).
- *   • Absolute http(s) URLs (`http://...`, `https://...`) — operator-
- *     pasted brand asset host.
- *   • Base64 data URLs ONLY for raster MIME types
- *     (image/png, image/jpeg, image/webp). Explicitly NOT
- *     `image/svg+xml`, `text/html`, or anything else.
+ *   2. Operator-uploaded raster image files, validated at upload
+ *      time in LogoPicker (PNG/JPG/WebP/GIF only, MIME-checked,
+ *      80KB cap), then encoded as `data:image/(png|jpe?g|webp);base64,…`.
  *
- * Explicitly rejected:
- *   • javascript:, vbscript:, file:, ftp:, mailto:, tel:, …
- *   • data:image/svg+xml, data:text/html, data:application/*
- *   • protocol-relative URLs (`//host/...`)
- *   • blob: (we don't use it; rejecting keeps the surface minimal)
+ * Anything else — http(s) URLs, javascript:, vbscript:, file:,
+ * data:text/html, data:image/svg+xml, blob:, protocol-relative
+ * `//host/...`, malformed strings — is rejected outright. The
+ * consumer must fall through to the initials avatar instead of
+ * binding the unsafe value to `<img src>`.
  *
- * Returns `null` for invalid inputs — the consumer must fall through
- * to a safe alternative (initials avatar) instead of binding the
- * unsafe value to `<img src>`.
+ * No external image hosting is supported by design (operator
+ * directive: "we don't want hotlinks; logos are local files only").
  */
 const SAFE_DATA_URL =
   /^data:image\/(png|jpe?g|webp);base64,[A-Za-z0-9+/=]+$/i;
@@ -116,34 +106,22 @@ export function sanitizeImgSrc(
     return trimmed;
   }
 
-  // Try the URL constructor — CodeQL recognises this as a URL
-  // sanitizer entry point. Anything that fails to parse is rejected.
-  let parsed: URL;
-  try {
-    parsed = new URL(trimmed);
-  } catch {
-    return null;
-  }
-
-  // Absolute http(s) URL — protocol allow-list. CodeQL trusts this
-  // pattern.
-  if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+  // Data URL — only raster images, base64-encoded. Strict prefix
+  // check covers MIME (no svg+xml/text/html/application/*) and
+  // payload format (no `data:image/png,raw-bytes`). The URL
+  // constructor isn't needed: we never accept any non-data
+  // absolute URL, so there's no protocol comparison surface.
+  if (SAFE_DATA_URL.test(trimmed)) {
     return trimmed;
   }
 
-  // Data URL — only raster images. The URL constructor accepts
-  // arbitrary `data:` payloads, so we additionally check the MIME
-  // prefix here. Anything else (svg+xml, text/html, …) is rejected.
-  if (parsed.protocol === 'data:' && SAFE_DATA_URL.test(trimmed)) {
-    return trimmed;
-  }
-
+  // Anything else — http(s), javascript:, file:, blob:, etc. — is
+  // rejected. The operator directive is "no external hotlinks".
   return null;
 }
 
 export function PaymentProviderLogo({
   logoDataUrl,
-  logoUrl,
   logoKey,
   method,
   name,
@@ -151,13 +129,12 @@ export function PaymentProviderLogo({
   className,
   decorative,
 }: PaymentProviderLogoProps) {
-  // Resolution order — dataUrl > url > catalog > group fallback.
-  // Pass through `sanitizeImgSrc` so an attacker-influenced value
-  // (e.g. `javascript:` or SVG-with-script data URL) can never reach
-  // <img src>. Vite-bundled assets (relative URLs) always pass.
+  // Resolution order — operator-uploaded data URL > catalog asset >
+  // group fallback. Pass through `sanitizeImgSrc` so an attacker-
+  // influenced data URL (e.g. SVG-with-script or text/html) can
+  // never reach `<img src>`. Vite-bundled assets always pass.
   const candidate =
     (logoDataUrl && logoDataUrl.trim()) ||
-    (logoUrl && logoUrl.trim()) ||
     getPaymentLogo(logoKey, method);
   const src = sanitizeImgSrc(candidate);
 

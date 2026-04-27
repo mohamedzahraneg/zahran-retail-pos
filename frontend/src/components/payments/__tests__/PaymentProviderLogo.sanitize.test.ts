@@ -2,13 +2,18 @@ import { describe, it, expect } from 'vitest';
 import { sanitizeImgSrc } from '../PaymentProviderLogo';
 
 /**
- * PR-PAY-7 / PR-PAY-6 hardening — lock the `<img src>` allow-list.
+ * PR-PAY-7 (Option C) — `<img src>` allow-list is intentionally
+ * narrow. NO external HTTP(S) URLs. NO hotlinks. Logos must come
+ * from one of two trusted sources:
  *
- * The sanitizer is the LAST line of defence before a DOM-text value
- * reaches a `<img src>` sink. CodeQL's `js/xss-through-dom` analysis
- * terminates on `new URL(...)` + protocol comparison — these tests
- * pin both the allow-list and the reject-list so a future refactor
- * can't accidentally widen the surface.
+ *   1. Vite-bundled relative URLs (`/assets/...`).
+ *   2. Operator-uploaded raster image files, encoded as
+ *      `data:image/(png|jpe?g|webp);base64,...`.
+ *
+ * Anything else — javascript:, vbscript:, file:, http:, https:,
+ * blob:, data:image/svg+xml, data:text/html, data:application/*,
+ * protocol-relative `//host/...`, malformed strings — is rejected
+ * outright. The consumer falls through to the initials avatar.
  */
 
 describe('sanitizeImgSrc — accept', () => {
@@ -17,16 +22,6 @@ describe('sanitizeImgSrc — accept', () => {
       .toBe('/assets/logo.svg');
     expect(sanitizeImgSrc('/payment-logos/instapay-abc123.svg'))
       .toBe('/payment-logos/instapay-abc123.svg');
-  });
-
-  it('accepts absolute https URLs', () => {
-    expect(sanitizeImgSrc('https://example.com/logo.png'))
-      .toBe('https://example.com/logo.png');
-  });
-
-  it('accepts absolute http URLs (operator-pasted)', () => {
-    expect(sanitizeImgSrc('http://example.com/logo.png'))
-      .toBe('http://example.com/logo.png');
   });
 
   it('accepts data URLs for png/jpeg/webp (raster only)', () => {
@@ -46,7 +41,16 @@ describe('sanitizeImgSrc — accept', () => {
   });
 });
 
-describe('sanitizeImgSrc — reject (XSS surface)', () => {
+describe('sanitizeImgSrc — reject (XSS surface + Option-C policy)', () => {
+  it('rejects external https URLs (no hotlinks per Option C)', () => {
+    expect(sanitizeImgSrc('https://example.com/logo.png')).toBeNull();
+    expect(sanitizeImgSrc('https://attacker.com/x.svg')).toBeNull();
+  });
+
+  it('rejects external http URLs', () => {
+    expect(sanitizeImgSrc('http://example.com/logo.png')).toBeNull();
+  });
+
   it('rejects javascript: pseudo-protocol', () => {
     expect(sanitizeImgSrc('javascript:alert(1)')).toBeNull();
     expect(sanitizeImgSrc('JAVASCRIPT:alert(1)')).toBeNull();
@@ -73,9 +77,7 @@ describe('sanitizeImgSrc — reject (XSS surface)', () => {
       ),
     ).toBeNull();
     expect(
-      sanitizeImgSrc(
-        'data:image/svg+xml;utf8,<svg onload=alert(1)></svg>',
-      ),
+      sanitizeImgSrc('data:image/svg+xml;utf8,<svg onload=alert(1)></svg>'),
     ).toBeNull();
   });
 
@@ -86,9 +88,14 @@ describe('sanitizeImgSrc — reject (XSS surface)', () => {
   });
 
   it('rejects data: URLs without base64 (URL-encoded payload)', () => {
-    expect(
-      sanitizeImgSrc('data:image/png,raw-bytes-here'),
-    ).toBeNull();
+    expect(sanitizeImgSrc('data:image/png,raw-bytes-here')).toBeNull();
+  });
+
+  it('rejects data:image/gif (GIF is allowed for upload but not rendered until catalog adds it)', () => {
+    // Future-proofing: GIF is accepted by LogoPicker upload but
+    // currently not in the sanitizer allow-list. If the catalog
+    // ever needs GIF, update both sides.
+    expect(sanitizeImgSrc('data:image/gif;base64,R0lGOD==')).toBeNull();
   });
 
   it('rejects protocol-relative URLs (//evil.com)', () => {
@@ -102,9 +109,7 @@ describe('sanitizeImgSrc — reject (XSS surface)', () => {
   });
 
   it('rejects blob: (we never produce blob URLs in this flow)', () => {
-    expect(
-      sanitizeImgSrc('blob:https://example.com/uuid-1234'),
-    ).toBeNull();
+    expect(sanitizeImgSrc('blob:https://example.com/uuid-1234')).toBeNull();
   });
 
   it('rejects empty / whitespace-only / null / undefined', () => {

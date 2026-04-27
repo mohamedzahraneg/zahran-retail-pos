@@ -1,48 +1,40 @@
 import { useRef, useState } from 'react';
-import { Upload, Link as LinkIcon, X } from 'lucide-react';
+import { Upload, X } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { PaymentProviderLogo } from './PaymentProviderLogo';
 
 /**
- * PR-PAY-7 — Per-account custom logo picker.
+ * PR-PAY-7 (Option C) — Per-account custom logo picker.
  *
- * Two input modes (operator picks either, both, or neither):
+ * Single input mode: drag-and-drop a local raster image file. URL
+ * paste was removed entirely — the operator directive is "logos are
+ * local files only, no hotlinks". The dropped file is read as a
+ * base64 data URL via FileReader and stored in
+ * `payment_accounts.metadata.logo_data_url`.
  *
- *   1. Drag-and-drop a local image file. The component reads it as a
- *      base64 data URL via FileReader and stores it in
- *      `dataUrl`. Hard cap at 80 KB *encoded* size — beyond that the
- *      DB row gets fat and snapshots in invoice_payments balloon.
- *      Accepted MIME types: image/png, image/jpeg, image/webp,
- *      image/svg+xml, image/gif.
+ * Strict acceptance:
+ *   • MIME types: image/png, image/jpeg, image/webp, image/gif.
+ *     SVG is intentionally excluded from runtime upload (the bundled
+ *     catalog has SVGs we wrote ourselves; operator uploads are
+ *     raster-only to keep the XSS surface zero).
+ *   • Encoded size cap: 80 KB. Beyond that the DB row + invoice
+ *     snapshots get bulky.
+ *   • Data URL prefix re-validated after FileReader to catch any
+ *     browser MIME-hint bypass.
  *
- *   2. Paste a remote logo URL. Stored verbatim in `url`. The
- *      operator is responsible for picking a URL they're allowed to
- *      hotlink (their own CDN, the brand's official asset hub, etc.).
- *
- * Resolution at render time (handled by `PaymentProviderLogo`):
- *   dataUrl > url > catalog logo_key > method group fallback > initials
- *
- * Empty state = both `dataUrl` and `url` are null/empty → the
- * provider catalog default kicks in automatically.
+ * Rendering at every UI surface goes through `PaymentProviderLogo`
+ * which sanitizes again at the sink — defense in depth.
  */
 
-// Drag-drop accepts ONLY raster formats. SVG is intentionally
-// excluded from runtime upload because an operator-uploaded SVG could
-// embed `<script>` or event handlers; while `<img src>` does sandbox
-// SVG (no script execution), CodeQL flags the dataflow as
-// js/xss-through-dom and we'd rather not expose the surface. SVG
-// brand assets live in the bundled catalog
-// (frontend/src/assets/payment-logos/) where they are vetted.
 const ACCEPTED = 'image/png,image/jpeg,image/jpg,image/webp,image/gif';
-const ACCEPTED_DATA_URL_PREFIX =
-  /^data:image\/(png|jpe?g|webp|gif);base64,[A-Za-z0-9+/=]+$/;
 // Encoded size cap. 80 KB base64 ≈ 60 KB raw — comfortable for clean
 // brand badges without inflating the DB row.
 const MAX_DATA_URL_BYTES = 80 * 1024;
+const ACCEPTED_DATA_URL_PREFIX =
+  /^data:image\/(png|jpe?g|webp|gif);base64,[A-Za-z0-9+/=]+$/;
 
 export interface LogoPickerValue {
   dataUrl?: string | null;
-  url?: string | null;
 }
 
 export interface LogoPickerProps {
@@ -64,16 +56,14 @@ export function LogoPicker({
   fallbackName,
 }: LogoPickerProps) {
   const [dragOver, setDragOver] = useState(false);
-  const [urlDraft, setUrlDraft] = useState(value.url ?? '');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleFile = (file: File) => {
     // Strict MIME allow-list. SVG is intentionally rejected at upload
-    // (see ACCEPTED_DATA_URL_PREFIX comment).
-    if (
-      !/^image\/(png|jpe?g|webp|gif)$/i.test(file.type)
-    ) {
-      toast.error('الملف لازم يكون صورة PNG / JPG / WebP / GIF (الـ SVG محجوز للكتالوج)');
+    // time — the bundled catalog has vetted SVGs; operator uploads
+    // stay raster-only.
+    if (!/^image\/(png|jpe?g|webp|gif)$/i.test(file.type)) {
+      toast.error('الملف لازم يكون صورة PNG / JPG / WebP / GIF');
       return;
     }
     const reader = new FileReader();
@@ -83,7 +73,6 @@ export function LogoPicker({
         toast.error('تعذّر قراءة الملف');
         return;
       }
-      // Encoded size guard so DB rows + receipt snapshots stay slim.
       if (result.length > MAX_DATA_URL_BYTES) {
         toast.error(
           `حجم الصورة كبير. الحد الأقصى ${(MAX_DATA_URL_BYTES / 1024).toFixed(0)} KB ` +
@@ -91,13 +80,14 @@ export function LogoPicker({
         );
         return;
       }
-      // Defense in depth — reject any data URL that doesn't match the
-      // raster-image pattern, even if the file picker was bypassed.
+      // Defense in depth — reject any data URL that doesn't match
+      // the raster-image pattern, even if the file picker MIME hint
+      // was bypassed.
       if (!ACCEPTED_DATA_URL_PREFIX.test(result)) {
         toast.error('صيغة الصورة غير مدعومة. ارفع PNG / JPG / WebP / GIF.');
         return;
       }
-      onChange({ dataUrl: result, url: value.url ?? null });
+      onChange({ dataUrl: result });
     };
     reader.onerror = () => toast.error('تعذّر قراءة الملف');
     reader.readAsDataURL(file);
@@ -116,25 +106,9 @@ export function LogoPicker({
     e.target.value = ''; // allow re-picking the same file
   };
 
-  const commitUrl = () => {
-    const trimmed = urlDraft.trim();
-    if (!trimmed) {
-      onChange({ dataUrl: value.dataUrl ?? null, url: null });
-      return;
-    }
-    if (!/^https?:\/\//i.test(trimmed) && !/^\//i.test(trimmed)) {
-      toast.error('الرابط لازم يبدأ بـ https://‎ أو http://‎ أو /');
-      return;
-    }
-    onChange({ dataUrl: value.dataUrl ?? null, url: trimmed });
-  };
+  const clearAll = () => onChange({ dataUrl: null });
 
-  const clearAll = () => {
-    setUrlDraft('');
-    onChange({ dataUrl: null, url: null });
-  };
-
-  const hasCustom = !!(value.dataUrl || value.url);
+  const hasCustom = !!value.dataUrl;
 
   return (
     <div className="space-y-3">
@@ -155,7 +129,6 @@ export function LogoPicker({
       <div className="flex items-center gap-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
         <PaymentProviderLogo
           logoDataUrl={value.dataUrl ?? null}
-          logoUrl={value.url ?? null}
           logoKey={fallbackLogoKey}
           method={fallbackMethod}
           name={fallbackName}
@@ -167,9 +140,7 @@ export function LogoPicker({
             <>
               <div className="font-bold text-slate-800">شعار مخصص</div>
               <div className="opacity-70">
-                {value.dataUrl
-                  ? 'مرفوع كصورة (يعمل بدون إنترنت)'
-                  : 'رابط خارجي'}
+                مرفوع كصورة (يعمل بدون إنترنت)
               </div>
             </>
           ) : (
@@ -183,7 +154,7 @@ export function LogoPicker({
         </div>
       </div>
 
-      {/* Drag-drop zone */}
+      {/* Drag-drop zone — the only way to provide a custom logo. */}
       <div
         onDragOver={(e) => {
           e.preventDefault();
@@ -214,41 +185,6 @@ export function LogoPicker({
           onChange={onPick}
           className="hidden"
         />
-      </div>
-
-      {/* URL paste — stored verbatim as metadata.logo_url */}
-      <div>
-        <label className="text-xs text-slate-600 block mb-1 flex items-center gap-1">
-          <LinkIcon className="w-3 h-3" />
-          أو الصق رابط الشعار
-        </label>
-        <div className="flex gap-2">
-          <input
-            type="url"
-            placeholder="https://example.com/logo.png"
-            value={urlDraft}
-            onChange={(e) => setUrlDraft(e.target.value)}
-            onBlur={commitUrl}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                e.preventDefault();
-                commitUrl();
-              }
-            }}
-            dir="ltr"
-            className="flex-1 border border-slate-300 rounded-lg px-3 py-2 text-sm font-mono"
-          />
-          <button
-            type="button"
-            onClick={commitUrl}
-            className="px-3 py-2 rounded-lg text-sm bg-slate-100 hover:bg-slate-200 text-slate-700"
-          >
-            تأكيد
-          </button>
-        </div>
-        <div className="text-[10px] text-slate-500 mt-1">
-          الرابط الخارجي يعمل أونلاين فقط. للعمل أوفلاين على نقطة البيع، فضّل الرفع المباشر.
-        </div>
       </div>
     </div>
   );

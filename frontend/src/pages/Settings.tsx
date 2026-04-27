@@ -1459,7 +1459,6 @@ function PaymentAccountRow({
       <div className="flex items-start gap-3">
         <PaymentProviderLogo
           logoDataUrl={(account.metadata as any)?.logo_data_url}
-          logoUrl={(account.metadata as any)?.logo_url}
           logoKey={provider?.logo_key}
           method={account.method}
           name={provider?.name_ar ?? account.display_name}
@@ -1580,11 +1579,9 @@ function PaymentAccountModal({
     sort_order: account?.sort_order ?? 0,
     metadata: initialMetadata,
   });
+  // PR-PAY-7 (Option C) — only data URL; URL paste was removed.
   const [logoDataUrl, setLogoDataUrl] = useState<string | null>(
     initialMetadata.logo_data_url ?? null,
-  );
-  const [logoUrl, setLogoUrl] = useState<string | null>(
-    initialMetadata.logo_url ?? null,
   );
 
   const providersForMethod = providers.filter((p) => p.method === form.method);
@@ -1601,16 +1598,16 @@ function PaymentAccountModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.method]);
 
-  // PR-PAY-7 — merge custom-logo overrides into metadata before save.
-  // Existing keys on metadata (anything else admin/integrations might
-  // store) are preserved; only `logo_data_url` and `logo_url` are
-  // touched. Empty values are dropped so we don't pollute the row.
+  // PR-PAY-7 (Option C) — merge custom-logo override into metadata
+  // before save. Only `logo_data_url` is touched; any other keys
+  // already on metadata are preserved. Legacy `logo_url` (from the
+  // earlier draft that included URL paste) is intentionally
+  // dropped on save so existing rows stop carrying it.
   const mergedMetadata = (): Record<string, unknown> => {
     const base = { ...((form.metadata as Record<string, unknown>) ?? {}) };
     if (logoDataUrl) base.logo_data_url = logoDataUrl;
     else delete base.logo_data_url;
-    if (logoUrl) base.logo_url = logoUrl;
-    else delete base.logo_url;
+    delete base.logo_url; // PR-PAY-7 Option C: never persist URL paste.
     return base;
   };
 
@@ -1756,20 +1753,20 @@ function PaymentAccountModal({
             />
           </div>
 
-          {/* PR-PAY-7 — per-account custom logo (drag-drop or URL).
-              Resolution at render: data URL > URL > catalog default. */}
+          {/* PR-PAY-7 (Option C) — per-account custom logo via
+              drag-drop only. Resolution at render: data URL > catalog. */}
           <LogoPicker
-            value={{ dataUrl: logoDataUrl, url: logoUrl }}
-            onChange={(v) => {
-              setLogoDataUrl(v.dataUrl ?? null);
-              setLogoUrl(v.url ?? null);
-            }}
+            value={{ dataUrl: logoDataUrl }}
+            onChange={(v) => setLogoDataUrl(v.dataUrl ?? null)}
             fallbackLogoKey={
               providers.find((p) => p.provider_key === form.provider_key)
                 ?.logo_key ?? null
             }
             fallbackMethod={form.method}
-            fallbackName={form.display_name || providers.find((p) => p.provider_key === form.provider_key)?.name_ar}
+            fallbackName={
+              form.display_name ||
+              providers.find((p) => p.provider_key === form.provider_key)?.name_ar
+            }
           />
         </div>
 
