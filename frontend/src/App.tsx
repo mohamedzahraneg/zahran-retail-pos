@@ -133,7 +133,7 @@ export default function App() {
         <Route
           path="shift-reports"
           element={
-            <ProtectedRoute permissions={['reports.view', 'shifts.view']}>
+            <ProtectedRoute anyPermission={['reports.view', 'shifts.view']}>
               <ShiftReports />
             </ProtectedRoute>
           }

@@ -25,6 +25,7 @@ import {
   Wallet,
   Layers,
   ClipboardList,
+  Info,
 } from 'lucide-react';
 
 import { useAuthStore } from '@/stores/auth.store';
@@ -445,13 +446,28 @@ export default function ShiftReports() {
       )}
 
       {tab === 'channels' && (
-        <ChannelsPanel
-          data={channelsQuery.data}
-          loading={channelsQuery.isFetching}
-          rangeLabel={rangeLabel}
-          onPrint={handlePrintChannels}
-          onExport={handleExportChannels}
-        />
+        <>
+          {(cashboxId || cashierId || statusFilter !== 'all') && (
+            <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800 flex items-start gap-2">
+              <Info size={16} className="mt-0.5 flex-shrink-0" />
+              <div>
+                <strong>تنبيه:</strong> تقرير وسائل الدفع مفلتَر بالفترة فقط
+                حالياً. الفلاتر الأخرى (الخزنة / الكاشير / حالة الوردية)
+                <strong> لا تُطبَّق </strong>
+                على هذا التقرير في هذه النسخة، لأن نقطة الـ API الحالية
+                <code className="mx-1">/dashboard/payment-channels</code>
+                تستقبل التواريخ فقط. سيُضاف الدعم في PR-REPORTS-2.
+              </div>
+            </div>
+          )}
+          <ChannelsPanel
+            data={channelsQuery.data}
+            loading={channelsQuery.isFetching}
+            rangeLabel={rangeLabel}
+            onPrint={handlePrintChannels}
+            onExport={handleExportChannels}
+          />
+        </>
       )}
     </div>
   );
@@ -681,8 +697,11 @@ function ChannelsPanel(props: {
   return (
     <div className="bg-white rounded-2xl border border-slate-200 p-4 space-y-4">
       <div className="flex items-center justify-between flex-wrap gap-2">
-        <div className="text-sm text-slate-600 flex items-center gap-2">
+        <div className="text-sm text-slate-600 flex items-center gap-2 flex-wrap">
           <CalendarDays size={16} /> {rangeLabel}
+          <span className="text-xs text-slate-500">
+            · مفلتَر بالفترة فقط (راجع PR-REPORTS-2 لإضافة فلاتر الخزنة/الكاشير)
+          </span>
         </div>
         <div className="flex gap-2">
           <button
