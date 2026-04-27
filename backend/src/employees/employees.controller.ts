@@ -180,8 +180,25 @@ export class EmployeesController {
 
   @Get('me/requests')
   @Permissions('employee.dashboard.view')
-  myRequests(@CurrentUser() user: JwtUser) {
-    return this.svc.myRequests(user.userId);
+  myRequests(
+    @CurrentUser() user: JwtUser,
+    @Query('kind') kind?: string,
+    @Query('status') status?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
+  ) {
+    // PR-ESS-2C-2 — filters are optional + backward-compat. JWT user
+    // is the only identity; query strings cannot redirect the lookup.
+    return this.svc.myRequests(user.userId, {
+      kind,
+      status,
+      from,
+      to,
+      limit: limit ? Number(limit) : undefined,
+      offset: offset ? Number(offset) : undefined,
+    });
   }
 
   @Post('me/requests')
@@ -388,5 +405,41 @@ export class EmployeesController {
       .toISOString()
       .slice(0, 10);
     return this.svc.daysHistory(id, from || thirty, to || today);
+  }
+
+  /**
+   * PR-ESS-2C-2 — admin per-employee request history with filters.
+   *
+   * Mirrors `/me/requests` but the user_id comes from the path
+   * parameter (validated as UUID by the pipe). The `employee.team.view`
+   * gate matches the rest of the per-employee admin reads
+   * (`/:id/dashboard`, `/:id/ledger`, `/:id/history`).
+   *
+   * Filters: kind / status / from / to / limit / offset (date filters
+   * apply to `created_at` — i.e. when the request was submitted).
+   * Each row is enriched with `decided_by_name` and the linked
+   * disbursement expense (when `expenses.source_employee_request_id`
+   * matches) so the timeline UI can render "تم الصرف · #EXP-...".
+   * Read-only — no writes, no engine calls.
+   */
+  @Get(':id/requests')
+  @Permissions('employee.team.view')
+  listEmployeeRequests(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query('kind') kind?: string,
+    @Query('status') status?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
+  ) {
+    return this.svc.listEmployeeRequests(id, {
+      kind,
+      status,
+      from,
+      to,
+      limit: limit ? Number(limit) : undefined,
+      offset: offset ? Number(offset) : undefined,
+    });
   }
 }
