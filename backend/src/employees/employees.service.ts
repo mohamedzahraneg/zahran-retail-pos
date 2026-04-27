@@ -567,13 +567,128 @@ export class EmployeesService {
   }
 
   // ── Requests (advance / leave / overtime) ──────────────────────────
-  myRequests(userId: string) {
+
+  /**
+   * PR-ESS-2C-2 — shared filter / enrichment SQL used by both
+   * `myRequests` (employee viewing own history via JWT) and
+   * `listEmployeeRequests` (admin viewing one employee's history).
+   *
+   * Filters (all optional, omit = no constraint):
+   *   · `kind`      — 'advance' | 'advance_request' | 'leave' | 'overtime_extension' | 'other'
+   *   · `status`    — 'pending' | 'approved' | 'rejected' | 'cancelled' | 'disbursed'
+   *   · `from`/`to` — ISO date strings; filter on `created_at` (when
+   *                   the request was submitted, NOT when it was decided)
+   *   · `limit`     — default 50, max 500 (defensive cap)
+   *   · `offset`    — default 0
+   *
+   * Enrichment:
+   *   · `decided_by_name` — full_name of the user who approved/rejected
+   *   · `linked_expense_*` — set when a Daily Expense links back via
+   *     `expenses.source_employee_request_id` (PR-ESS-2B). Null when
+   *     no disbursement has happened. Drives the timeline's
+   *     "تم الصرف" event.
+   *
+   * Read-only — no writes, no engine calls.
+   */
+  private async listRequestsForUser(
+    userId: string,
+    filters: {
+      kind?: string;
+      status?: string;
+      from?: string;
+      to?: string;
+      limit?: number;
+      offset?: number;
+    } = {},
+  ) {
+    const conds: string[] = ['r.user_id = $1'];
+    const params: any[] = [userId];
+
+    if (filters.kind) {
+      params.push(filters.kind);
+      conds.push(`r.kind = $${params.length}`);
+    }
+    if (filters.status) {
+      params.push(filters.status);
+      conds.push(`r.status = $${params.length}`);
+    }
+    if (filters.from) {
+      params.push(filters.from);
+      conds.push(`r.created_at >= $${params.length}::date`);
+    }
+    if (filters.to) {
+      params.push(filters.to);
+      // Inclusive of the to date — `<=` vs the day's end-of-day
+      // boundary. We use `< (to + 1 day)` so an entire day is matched
+      // regardless of timezone offset on `created_at`.
+      conds.push(`r.created_at < ($${params.length}::date + INTERVAL '1 day')`);
+    }
+
+    const limit = Math.min(Math.max(Number(filters.limit ?? 50), 1), 500);
+    const offset = Math.max(Number(filters.offset ?? 0), 0);
+    params.push(limit);
+    const limitParam = params.length;
+    params.push(offset);
+    const offsetParam = params.length;
+
     return this.ds.query(
-      `SELECT * FROM employee_requests
-        WHERE user_id = $1
-        ORDER BY created_at DESC`,
-      [userId],
+      `SELECT
+         r.id, r.request_no, r.user_id, r.kind, r.amount,
+         r.starts_at, r.ends_at, r.reason, r.status,
+         r.decided_by, r.decided_at, r.decision_reason, r.created_at,
+         decider.full_name AS decided_by_name,
+         e.id::text       AS linked_expense_id,
+         e.expense_no     AS linked_expense_no,
+         e.amount         AS linked_expense_amount,
+         e.expense_date   AS linked_expense_date,
+         e.created_at     AS linked_expense_posted_at,
+         e.created_by     AS linked_expense_posted_by,
+         poster.full_name AS linked_expense_posted_by_name
+       FROM employee_requests r
+       LEFT JOIN users decider ON decider.id = r.decided_by
+       LEFT JOIN expenses e    ON e.source_employee_request_id = r.id
+       LEFT JOIN users poster  ON poster.id = e.created_by
+       WHERE ${conds.join(' AND ')}
+       ORDER BY r.created_at DESC
+       LIMIT $${limitParam} OFFSET $${offsetParam}`,
+      params,
     );
+  }
+
+  myRequests(
+    userId: string,
+    filters: {
+      kind?: string;
+      status?: string;
+      from?: string;
+      to?: string;
+      limit?: number;
+      offset?: number;
+    } = {},
+  ) {
+    return this.listRequestsForUser(userId, filters);
+  }
+
+  /**
+   * PR-ESS-2C-2 — admin per-employee history. Same SQL+filters as
+   * `myRequests` but the caller's permission must include
+   * `employee.team.view` (enforced at the controller). The `userId`
+   * comes from the path parameter, NOT from JWT — but the controller
+   * never forwards JWT.userId here, so admins can see anyone's
+   * history without IDOR risk on the JWT side.
+   */
+  listEmployeeRequests(
+    userId: string,
+    filters: {
+      kind?: string;
+      status?: string;
+      from?: string;
+      to?: string;
+      limit?: number;
+      offset?: number;
+    } = {},
+  ) {
+    return this.listRequestsForUser(userId, filters);
   }
 
   async submitRequest(

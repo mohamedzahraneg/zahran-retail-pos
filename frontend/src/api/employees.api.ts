@@ -70,12 +70,49 @@ export interface EmployeeRequest {
    */
   status: 'pending' | 'approved' | 'rejected' | 'cancelled' | 'disbursed';
   decided_by?: string;
+  /**
+   * PR-ESS-2C-2 — full_name of the user who approved/rejected.
+   * Populated by the enriched LEFT JOIN on `users` in `myRequests`
+   * and `listEmployeeRequests`. Null for pending requests.
+   */
+  decided_by_name?: string | null;
   decided_at?: string;
   decision_reason?: string;
   created_at: string;
   user_name?: string;
   username?: string;
   employee_no?: string;
+
+  /**
+   * PR-ESS-2C-2 — disbursement linkage from PR-ESS-2B's
+   * `expenses.source_employee_request_id` FK. Populated by a LEFT
+   * JOIN on `expenses`; null until a Daily Expense is posted with
+   * `is_advance=true` AND `source_employee_request_id` set, at
+   * which point the canonical FinancialEngine.recordExpense path
+   * also flips `status` to `'disbursed'` (atomic, same transaction).
+   */
+  linked_expense_id?: string | null;
+  linked_expense_no?: string | null;
+  linked_expense_amount?: number | string | null;
+  linked_expense_date?: string | null;
+  linked_expense_posted_at?: string | null;
+  linked_expense_posted_by?: string | null;
+  linked_expense_posted_by_name?: string | null;
+}
+
+export interface RequestFilters {
+  kind?:
+    | 'advance'
+    | 'advance_request'
+    | 'leave'
+    | 'overtime_extension'
+    | 'other';
+  status?: 'pending' | 'approved' | 'rejected' | 'cancelled' | 'disbursed';
+  /** YYYY-MM-DD; filters on `created_at` (when submitted). */
+  from?: string;
+  to?: string;
+  limit?: number;
+  offset?: number;
 }
 
 export interface EmployeeDashboard {
@@ -220,8 +257,32 @@ export const employeesApi = {
   completeTask: (id: string | number) =>
     unwrap<EmployeeTask>(api.post(`/employees/me/tasks/${id}/complete`, {})),
 
-  myRequests: () =>
-    unwrap<EmployeeRequest[]>(api.get('/employees/me/requests')),
+  /**
+   * PR-ESS-2C-2 — `/me/requests` now accepts optional filters. When
+   * called with no params it preserves the original behavior (full
+   * history of the JWT user, sorted by created_at DESC).
+   */
+  myRequests: (filters?: RequestFilters) =>
+    unwrap<EmployeeRequest[]>(
+      api.get('/employees/me/requests', {
+        params: filters && Object.keys(filters).length ? filters : undefined,
+      }),
+    ),
+
+  /**
+   * PR-ESS-2C-2 — admin per-employee request history. Same shape as
+   * `myRequests` but the user_id is a path parameter; backend gates
+   * the route with `employee.team.view`.
+   */
+  listEmployeeRequests: (
+    employeeId: string,
+    filters?: RequestFilters,
+  ) =>
+    unwrap<EmployeeRequest[]>(
+      api.get(`/employees/${employeeId}/requests`, {
+        params: filters && Object.keys(filters).length ? filters : undefined,
+      }),
+    ),
   submitRequest: (body: {
     kind: SubmitRequestKind;
     amount?: number;

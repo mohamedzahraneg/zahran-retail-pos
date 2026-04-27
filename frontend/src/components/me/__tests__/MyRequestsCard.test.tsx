@@ -15,10 +15,22 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MyRequestsCard } from '../MyRequestsCard';
 import type { EmployeeRequest } from '@/api/employees.api';
+
+/**
+ * Helper — wait for a row to render and return the row element so
+ * that subsequent text queries are scoped to the row only. Necessary
+ * after PR-ESS-2C-2 because the filter bar above the rows reuses the
+ * same Arabic status labels (الكل / قيد المراجعة / موافق عليه / تم
+ * الصرف / مرفوض / ملغي), so a global findByText would match the
+ * filter tab instead of the row chip.
+ */
+async function findRow(): Promise<HTMLElement> {
+  return await screen.findByTestId('request-row');
+}
 
 // Stub the API module: we want MyRequestsCard to render a fixed
 // list without hitting the network. Vitest hoists vi.mock calls
@@ -62,24 +74,27 @@ const baseAdvance: EmployeeRequest = {
 describe('<MyRequestsCard /> — PR-ESS-2B disbursed status', () => {
   it('renders pending advance with "قيد المراجعة" amber chip', async () => {
     renderWithClient([{ ...baseAdvance, status: 'pending' }]);
-    expect(await screen.findByText('قيد المراجعة')).toBeInTheDocument();
+    const row = await findRow();
+    expect(within(row).getByText('قيد المراجعة')).toBeInTheDocument();
   });
 
   it('renders approved advance with "موافق عليه" + "بانتظار الصرف" subtext', async () => {
     renderWithClient([{ ...baseAdvance, status: 'approved' }]);
-    expect(await screen.findByText('موافق عليه')).toBeInTheDocument();
+    const row = await findRow();
+    expect(within(row).getByText('موافق عليه')).toBeInTheDocument();
     expect(
-      screen.getByText(/بانتظار الصرف من قِبَل المحاسبة/),
+      within(row).getByText(/بانتظار الصرف من قِبَل المحاسبة/),
     ).toBeInTheDocument();
   });
 
   it('renders disbursed advance with "تم الصرف" green chip and NO "بانتظار" subtext', async () => {
     renderWithClient([{ ...baseAdvance, status: 'disbursed' }]);
-    expect(await screen.findByText('تم الصرف')).toBeInTheDocument();
+    const row = await findRow();
+    expect(within(row).getByText('تم الصرف')).toBeInTheDocument();
     // The "بانتظار الصرف" hint must NOT appear once the request is
     // disbursed — the green badge IS the disbursed signal.
     expect(
-      screen.queryByText(/بانتظار الصرف من قِبَل المحاسبة/),
+      within(row).queryByText(/بانتظار الصرف من قِبَل المحاسبة/),
     ).toBeNull();
   });
 
@@ -91,13 +106,15 @@ describe('<MyRequestsCard /> — PR-ESS-2B disbursed status', () => {
         decision_reason: 'مكرر',
       },
     ]);
-    expect(await screen.findByText('مرفوض')).toBeInTheDocument();
-    expect(screen.getByText(/سبب الرفض: مكرر/)).toBeInTheDocument();
+    const row = await findRow();
+    expect(within(row).getByText('مرفوض')).toBeInTheDocument();
+    expect(within(row).getByText(/سبب الرفض: مكرر/)).toBeInTheDocument();
   });
 
   it('renders cancelled advance with slate tone "ملغي"', async () => {
     renderWithClient([{ ...baseAdvance, status: 'cancelled' }]);
-    expect(await screen.findByText('ملغي')).toBeInTheDocument();
+    const row = await findRow();
+    expect(within(row).getByText('ملغي')).toBeInTheDocument();
   });
 
   // PR-ESS-2C-1 — numeric request_no display + fallback ────────────
@@ -154,9 +171,14 @@ describe('<MyRequestsCard /> — PR-ESS-2B disbursed status', () => {
         status: 'disbursed',
       },
     ]);
-    // Two "تم الصرف" chips should both render under the advance section.
-    const disbursedChips = await screen.findAllByText('تم الصرف');
-    expect(disbursedChips.length).toBe(2);
+    // Two "تم الصرف" status chips should render — one per row.
+    // Scoped to row testid so the filter bar's "تم الصرف" tab
+    // doesn't inflate the count.
+    const rows = await screen.findAllByTestId('request-row');
+    expect(rows.length).toBe(2);
+    for (const row of rows) {
+      expect(within(row).getByText('تم الصرف')).toBeInTheDocument();
+    }
     expect(screen.getByText(/طلبات السلف/)).toBeInTheDocument();
   });
 });

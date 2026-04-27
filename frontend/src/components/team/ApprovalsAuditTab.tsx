@@ -51,6 +51,7 @@ import {
 import {
   employeesApi,
   EmployeeRequest,
+  RequestFilters,
   TeamRow,
 } from '@/api/employees.api';
 import {
@@ -58,6 +59,8 @@ import {
   PayableDayRow,
 } from '@/api/attendance.api';
 import { useAuthStore } from '@/stores/auth.store';
+import { RequestsFilterBar } from '@/components/me/RequestsFilterBar';
+import { RequestTimelineDrawer } from '@/components/me/RequestTimelineDrawer';
 
 const EGP = (n: number | string | null | undefined) =>
   `${Number(n || 0).toLocaleString('en-US', {
@@ -176,6 +179,7 @@ export function ApprovalsAuditTab({ employee }: { employee?: TeamRow }) {
       />
       {employee ? (
         <>
+          <EmployeeRequestHistoryCard employeeId={employee.id} />
           <WageApprovalHistoryCard history={wageHistory} />
           <MovementVoidHistoryCard rows={voidedGlRows} />
         </>
@@ -406,6 +410,142 @@ function PendingRequestsCard({
           submitting={decide.isPending}
         />
       )}
+    </SectionCard>
+  );
+}
+
+/**
+ * EmployeeRequestHistoryCard — PR-ESS-2C-2
+ * ────────────────────────────────────────────────────────────────────
+ *
+ * "كل طلبات الموظف" section. Lists every `employee_requests` row for
+ * the selected employee — pending, approved, rejected, cancelled,
+ * disbursed — with the same filter strip used on /me MyRequestsCard
+ * and a click-through to the shared RequestTimeline drawer.
+ *
+ * Backed by the new admin endpoint `GET /employees/:id/requests`
+ * (added in this PR) which is gated by the `employee.team.view`
+ * permission. Read-only — no mutations here. The pending decisions
+ * still flow through PendingRequestsCard above.
+ */
+function EmployeeRequestHistoryCard({ employeeId }: { employeeId: string }) {
+  const [filters, setFilters] = useState<RequestFilters>({});
+  const [openRequest, setOpenRequest] = useState<EmployeeRequest | null>(null);
+
+  const { data: rows = [], isFetching } = useQuery({
+    queryKey: ['employee-requests-history', employeeId, filters],
+    queryFn: () => employeesApi.listEmployeeRequests(employeeId, filters),
+    enabled: !!employeeId,
+  });
+  const list = rows as EmployeeRequest[];
+
+  return (
+    <SectionCard
+      title="كل طلبات الموظف"
+      subtitle="السجل الكامل للطلبات (سلف / إجازات / تمديد) مع المسار الزمني لكل طلب."
+    >
+      <RequestsFilterBar
+        filters={filters}
+        onChange={setFilters}
+        testIdPrefix="employee-history-filter"
+      />
+      {isFetching && list.length === 0 ? (
+        <EmptyRow message="جارٍ التحميل…" />
+      ) : list.length === 0 ? (
+        <EmptyRow message="لا توجد طلبات تطابق التصفية." />
+      ) : (
+        <div
+          className="overflow-x-auto"
+          data-testid="employee-history-table"
+        >
+          <table className="min-w-full text-xs">
+            <thead className="bg-slate-50">
+              <tr>
+                <Th>رقم الطلب</Th>
+                <Th>تاريخ الطلب</Th>
+                <Th>النوع</Th>
+                <Th>المبلغ / الفترة</Th>
+                <Th>الحالة</Th>
+                <Th>تم البتّ</Th>
+                <Th>المصروف المرتبط</Th>
+                <Th>عرض</Th>
+              </tr>
+            </thead>
+            <tbody>
+              {list.map((r) => {
+                const displayNo = r.request_no ?? r.id;
+                const period =
+                  r.kind === 'leave'
+                    ? `${fmtDate(r.starts_at)} → ${fmtDate(r.ends_at)}`
+                    : r.amount != null
+                      ? EGP(r.amount)
+                      : '—';
+                return (
+                  <tr
+                    key={r.id}
+                    className="border-t border-slate-100 hover:bg-slate-50 cursor-pointer"
+                    onClick={() => setOpenRequest(r)}
+                    data-testid="employee-history-row"
+                    data-request-id={r.id}
+                    data-request-no={displayNo}
+                  >
+                    <Td className="font-mono tabular-nums font-bold text-slate-800">
+                      {displayNo}
+                    </Td>
+                    <Td className="font-mono tabular-nums whitespace-nowrap">
+                      {fmtDate(r.created_at)}
+                    </Td>
+                    <Td>
+                      <Chip tone="amber">{KIND_LABEL[r.kind]}</Chip>
+                    </Td>
+                    <Td className="font-mono tabular-nums">{period}</Td>
+                    <Td>
+                      <StatusChip status={r.status} />
+                    </Td>
+                    <Td className="font-mono tabular-nums whitespace-nowrap">
+                      {r.decided_at ? fmtDate(r.decided_at) : '—'}
+                    </Td>
+                    <Td className="font-mono tabular-nums">
+                      {r.linked_expense_no ? (
+                        <span
+                          className="text-emerald-800"
+                          data-testid="employee-history-row-expense"
+                        >
+                          #{r.linked_expense_no}
+                          {r.linked_expense_amount != null
+                            ? ` · ${EGP(r.linked_expense_amount)}`
+                            : ''}
+                        </span>
+                      ) : (
+                        <span className="text-slate-400">—</span>
+                      )}
+                    </Td>
+                    <Td>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setOpenRequest(r);
+                        }}
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-slate-50 text-slate-700 border border-slate-200 text-[11px] font-bold hover:bg-slate-100"
+                        data-testid="employee-history-row-open"
+                      >
+                        <Eye size={12} />
+                        المسار الزمني
+                      </button>
+                    </Td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <RequestTimelineDrawer
+        request={openRequest}
+        onClose={() => setOpenRequest(null)}
+      />
     </SectionCard>
   );
 }
@@ -811,5 +951,5 @@ function monthBounds(): { from: string; to: string } {
 }
 
 // Mark imports used to keep linter happy.
-const _icons = [Clock, Eye];
+const _icons = [Clock];
 void _icons;
