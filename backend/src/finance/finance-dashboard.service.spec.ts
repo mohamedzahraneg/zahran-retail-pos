@@ -225,6 +225,95 @@ describe('FinanceDashboardService — PR-FIN-2', () => {
     });
   });
 
+  describe('best_customer / best_supplier / best_product', () => {
+    /**
+     * Stubs the three aggregate queries (top products, profit_by_customer,
+     * profit_by_supplier) so we can assert the row-0 picking logic.
+     */
+    function buildSvcWithBests(
+      bests: { customer?: any[]; supplier?: any[]; product?: any[] } = {},
+      profit: any = {
+        sales: '0', cogs: '0', gross: '0', expenses: '0',
+        high_lines: 0, medium_lines: 0, low_lines: 0,
+      },
+    ) {
+      return buildSvc({
+        matchers: [
+          // Profit totals (so confidence = N/A path is fine)
+          {
+            test: (s) => /high_lines/.test(s) && /low_lines/.test(s) && /WITH inv AS/.test(s),
+            rows: [profit],
+          },
+          // Top products (used for best_product)
+          {
+            test: (s) => /FROM invoice_lines il/.test(s) && /LEFT JOIN products p/.test(s) && /GROUP BY p\.id/.test(s),
+            rows: bests.product ?? [],
+          },
+          // Profit by customer
+          {
+            test: (s) => /JOIN customers c/.test(s) && /GROUP BY c\.id/.test(s),
+            rows: bests.customer ?? [],
+          },
+          // Profit by supplier
+          {
+            test: (s) => /JOIN suppliers s/.test(s) && /GROUP BY s\.id/.test(s),
+            rows: bests.supplier ?? [],
+          },
+        ],
+      });
+    }
+
+    it('populates best_* from row 0 when aggregates have positive-profit rows', async () => {
+      const { svc } = buildSvcWithBests({
+        customer: [
+          { customer_id: 'c1', name_ar: 'مؤسسة النور', sales: '500', gross: '120', invoices_count: 3 },
+          { customer_id: 'c2', name_ar: 'شركة س', sales: '200', gross: '40', invoices_count: 1 },
+        ],
+        supplier: [
+          { supplier_id: 's1', name_ar: 'شركة الخليج', sales: '300', cost: '200', gross: '90' },
+        ],
+        product: [
+          { product_id: 'p1', name_ar: 'لاب توب ديل', sales: '650', gross: '180' },
+          { product_id: 'p2', name_ar: 'هاتف',       sales: '300', gross: '50' },
+        ],
+      });
+      const r = await svc.dashboard({ from: '2026-04-01', to: '2026-04-30' });
+      expect(r.profit.best_customer).toEqual({ name: 'مؤسسة النور', profit: 120 });
+      expect(r.profit.best_supplier).toEqual({ name: 'شركة الخليج', profit: 90 });
+      expect(r.profit.best_product).toEqual({ name: 'لاب توب ديل', profit: 180 });
+    });
+
+    it('returns null when aggregate is empty', async () => {
+      const { svc } = buildSvcWithBests({}); // all empty
+      const r = await svc.dashboard({ from: '2026-04-01', to: '2026-04-30' });
+      expect(r.profit.best_customer).toBeNull();
+      expect(r.profit.best_supplier).toBeNull();
+      expect(r.profit.best_product).toBeNull();
+    });
+
+    it('returns null when row 0 has zero or negative profit (no misleading "best")', async () => {
+      const { svc } = buildSvcWithBests({
+        customer: [{ customer_id: 'c1', name_ar: 'عميل', sales: '100', gross: '0', invoices_count: 1 }],
+        supplier: [{ supplier_id: 's1', name_ar: 'مورد', sales: '100', cost: '120', gross: '-20' }],
+        product:  [{ product_id: 'p1', name_ar: 'صنف', sales: '50',  gross: '0' }],
+      });
+      const r = await svc.dashboard({ from: '2026-04-01', to: '2026-04-30' });
+      expect(r.profit.best_customer).toBeNull();
+      expect(r.profit.best_supplier).toBeNull();
+      expect(r.profit.best_product).toBeNull();
+    });
+
+    it('rounds the surfaced profit to 2 decimals', async () => {
+      const { svc } = buildSvcWithBests({
+        customer: [
+          { customer_id: 'c1', name_ar: 'عميل', sales: '100', gross: '12.345', invoices_count: 1 },
+        ],
+      });
+      const r = await svc.dashboard({ from: '2026-04-01', to: '2026-04-30' });
+      expect(r.profit.best_customer).toEqual({ name: 'عميل', profit: 12.35 });
+    });
+  });
+
   describe('empty data', () => {
     it('returns zeros (not crashes) when every query returns []', async () => {
       const { svc } = buildSvc({ default: [] });

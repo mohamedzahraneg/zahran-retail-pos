@@ -92,7 +92,16 @@ export class FinanceDashboardService {
       liquidity,
       daily_expenses: dailyExpenses,
       balances,
-      profit: this.composeProfit(profitNow, profitPrev),
+      // best_* surfaced from the already-computed aggregates so Row 2
+      // doesn't render "لا يتوفر بعد" while the underlying tables show
+      // concrete winners. Aggregates are pre-sorted by
+      // (gross_profit DESC, name_ar ASC) so row 0 is the canonical
+      // tie-broken winner.
+      profit: this.composeProfit(profitNow, profitPrev, {
+        topCustomer: profitByCustomer[0],
+        topSupplier: profitBySupplier[0],
+        topProduct: topProducts[0],
+      }),
       profit_trend: profitTrend,
       payment_channels: paymentChannels,
       group_profits: groupProfits,
@@ -461,6 +470,11 @@ export class FinanceDashboardService {
   private composeProfit(
     now: Awaited<ReturnType<typeof this.profitTotals>>,
     prev: Awaited<ReturnType<typeof this.profitTotals>>,
+    bests: {
+      topCustomer?: { name_ar: string; gross_profit: number };
+      topSupplier?: { name_ar: string; gross_profit: number };
+      topProduct?: { name_ar: string; gross_profit: number };
+    } = {},
   ): FinanceDashboardResponse['profit'] {
     const net = round2(now.gross - now.expenses);
     const margin = now.sales > 0 ? round2((now.gross / now.sales) * 100) : 0;
@@ -492,9 +506,13 @@ export class FinanceDashboardService {
         net_pct: pct(net, prevNet),
         margin_pp: round2(margin - prevMargin),
       },
-      best_customer: null,
-      best_supplier: null,
-      best_product: null,
+      // Pick row 0 of each aggregate. Aggregates are pre-sorted by
+      // (gross_profit DESC, name_ar ASC) so row 0 honors the
+      // approved Q5 tie-break. Skip when profit is non-positive — a
+      // "best" with zero/negative profit is misleading.
+      best_customer: pickBest(bests.topCustomer),
+      best_supplier: pickBest(bests.topSupplier),
+      best_product: pickBest(bests.topProduct),
       confidence: tier,
       confidence_breakdown: {
         high_lines: now.high_lines,
@@ -1152,6 +1170,21 @@ function round2(n: any): number {
 function pct(now: number, prev: number): number {
   if (prev === 0) return now === 0 ? 0 : 100;
   return round2(((now - prev) / Math.abs(prev)) * 100);
+}
+
+/**
+ * Reduces an aggregate row 0 to the `{name, profit}` shape the
+ * dashboard cards consume. Returns null when the row is missing or
+ * when its profit isn't strictly positive (a "best" with zero or
+ * negative profit would mislead the operator).
+ */
+function pickBest(
+  row: { name_ar: string; gross_profit: number } | undefined,
+): { name: string; profit: number } | null {
+  if (!row) return null;
+  const profit = round2(row.gross_profit);
+  if (profit <= 0) return null;
+  return { name: row.name_ar, profit };
 }
 
 const METHOD_LABEL_AR: Record<string, string> = {
