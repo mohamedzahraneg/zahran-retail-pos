@@ -89,6 +89,12 @@ const groups: NavGroup[] = [
   {
     title: 'الحسابات والمالية',
     items: [
+      // PR-FIN-2 — لوحة التحكم (Financial Dashboard, read-only).
+      // Sits at the top of the financial group per the approved
+      // dashboard image. Distinct from /dashboard/financial (the
+      // Control Tower / anomaly view), which keeps its own entry
+      // ("برج المراقبة المالية") below.
+      { to: '/dashboard/finance', label: 'لوحة التحكم', icon: LayoutDashboard, roles: ['admin', 'manager', 'accountant'], permission: 'finance.dashboard.view' },
       // Unified accounts page — tree, journal, reports, budgets, FX,
       // approvals all live inside as tabs.
       { to: '/accounts', label: 'الحسابات', icon: BookOpen, roles: ['admin', 'manager', 'accountant'], permission: 'accounts.chart.view' },

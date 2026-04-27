@@ -38,6 +38,7 @@ import OpeningBalance from '@/pages/OpeningBalance';
 import RecurringExpenses from '@/pages/RecurringExpenses';
 import DailyExpenses from '@/pages/DailyExpenses';
 import FinancialControlTower from '@/pages/FinancialControlTower';
+import FinanceDashboard from '@/pages/FinanceDashboard';
 import CustomerGroups from '@/pages/CustomerGroups';
 import Settings from '@/pages/Settings';
 import Users from '@/pages/Users';
@@ -241,6 +242,18 @@ export default function App() {
           element={
             <ProtectedRoute permissions={['dashboard.financial.view']}>
               <FinancialControlTower />
+            </ProtectedRoute>
+          }
+        />
+        {/* PR-FIN-2 — Financial Dashboard (read-only).
+            Distinct from /dashboard/financial (Control Tower).
+            Permission: finance.dashboard.view (admin gets it via the
+            `*` wildcard). */}
+        <Route
+          path="dashboard/finance"
+          element={
+            <ProtectedRoute permissions={['finance.dashboard.view']}>
+              <FinanceDashboard />
             </ProtectedRoute>
           }
         />
