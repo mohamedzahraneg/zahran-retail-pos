@@ -155,7 +155,7 @@ export class ProductsService {
    * Used by the POS scan-and-enter flow so typing a product code and
    * hitting Enter adds the product immediately without a search list.
    */
-  async findByBarcode(code: string) {
+  async findByBarcode(code: string, warehouse_id?: string) {
     // 1) Try variant barcode
     let variant = await this.variants.findOne({ where: { barcode: code } });
     // 2) Try variant SKU
@@ -176,7 +176,7 @@ export class ProductsService {
             `لا يوجد متغير نشط للمنتج بالكود ${code}`,
           );
         }
-        return { product, variant };
+        return this.attachAvailableStock({ product, variant }, warehouse_id);
       }
     }
     if (!variant) {
@@ -185,7 +185,34 @@ export class ProductsService {
     const product = await this.repo.findOne({
       where: { id: variant.product_id },
     });
-    return { product, variant };
+    return this.attachAvailableStock({ product, variant }, warehouse_id);
+  }
+
+  /**
+   * PR-POS-STOCK-1 — when `warehouse_id` is supplied, look up the
+   * `stock` row for (variant, warehouse) and stamp `available_stock`
+   * on the response. Missing stock row → `available_stock = 0` (treat
+   * as out-of-stock; safer than `undefined`). When no warehouse is
+   * provided the method is a no-op so legacy callers see exactly the
+   * same shape they did before.
+   */
+  private async attachAvailableStock(
+    payload: { product: any; variant: any },
+    warehouse_id?: string,
+  ): Promise<{ product: any; variant: any; available_stock?: number }> {
+    if (!warehouse_id) return payload;
+    const [row] = await this.ds.query(
+      `SELECT quantity_on_hand
+         FROM stock
+        WHERE variant_id = $1
+          AND warehouse_id = $2
+        LIMIT 1`,
+      [payload.variant.id, warehouse_id],
+    );
+    return {
+      ...payload,
+      available_stock: Number(row?.quantity_on_hand ?? 0),
+    };
   }
 
   create(dto: CreateProductDto) {

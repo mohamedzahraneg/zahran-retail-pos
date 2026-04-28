@@ -20,6 +20,14 @@ export interface CartItem {
   /** Cashier overrode the price manually — group-pricing resolver
    *  must not reset it. */
   priceLocked?: boolean;
+  /** PR-POS-STOCK-1 — Snapshot of `stock.quantity_on_hand` for the
+   *  cart's current warehouse at the moment the line was added.
+   *  Drives the in-cart "+1" guard and the submit-time over-stock
+   *  sweep in `lib/posStockGuard.ts`. `undefined` means the line
+   *  pre-dates this PR or the stock figure was not yet loaded —
+   *  treat as unbounded client-side; the backend pre-check in
+   *  `pos.service.ts::createInvoice` is the authoritative gate. */
+  availableStock?: number;
 }
 
 export type ManualDiscountType = 'percent' | 'value';
@@ -73,7 +81,17 @@ interface CartState {
   coupon: AppliedCoupon | null;
   loyalty: AppliedLoyalty | null;
 
-  addItem: (input: { product: Product; variant: Variant; qty?: number }) => void;
+  addItem: (input: {
+    product: Product;
+    variant: Variant;
+    qty?: number;
+    /** PR-POS-STOCK-1 — Optional warehouse-scoped stock snapshot for
+     *  the variant. Plumbed into the resulting `CartItem.availableStock`.
+     *  When the same variant is re-added (stacking), the **highest**
+     *  observed snapshot wins — the most recent observation is the
+     *  freshest read. */
+    availableStock?: number;
+  }) => void;
   updateQty: (variantId: string, qty: number) => void;
   /** Manually override the unit price for a line — cashier-only edit. */
   updateUnitPrice: (variantId: string, unitPrice: number) => void;
@@ -114,13 +132,22 @@ export const useCartStore = create<CartState>((set, get) => ({
   coupon: null,
   loyalty: null,
 
-  addItem: ({ product, variant, qty = 1 }) =>
+  addItem: ({ product, variant, qty = 1, availableStock }) =>
     set((state) => {
       const existing = state.items.find((i) => i.variantId === variant.id);
       if (existing) {
+        // PR-POS-STOCK-1 — refresh the line's stock snapshot when the
+        // caller passed a freshly-observed value. Use the LATEST
+        // observation (not max) so a deactivated/zeroed account
+        // immediately propagates to the in-cart guard if reality
+        // changed between scans. UI gates fire on this value.
+        const nextAvail =
+          availableStock !== undefined ? availableStock : existing.availableStock;
         return {
           items: state.items.map((i) =>
-            i.variantId === variant.id ? { ...i, qty: i.qty + qty } : i,
+            i.variantId === variant.id
+              ? { ...i, qty: i.qty + qty, availableStock: nextAvail }
+              : i,
           ),
         };
       }
@@ -145,6 +172,7 @@ export const useCartStore = create<CartState>((set, get) => ({
             costPrice: Number(variant.cost_price ?? product.cost_price ?? 0),
             discount: 0,
             notes: '',
+            availableStock,
           },
         ],
       };

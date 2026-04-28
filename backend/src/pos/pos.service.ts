@@ -243,6 +243,60 @@ export class PosService {
         );
       }
 
+      // PR-POS-STOCK-1 — Pre-validate stock availability before
+      // letting the trigger fire. Without this, the only enforcement
+      // is the `CHECK (quantity_on_hand >= 0)` constraint
+      // (`database/migrations/004_inventory.sql:45`), which surfaces
+      // to the cashier as a raw "violates check constraint" string.
+      // Now we issue a single SELECT against `stock` for every variant
+      // in this invoice (in the same transaction so the read sees a
+      // consistent snapshot before the upcoming `INSERT INTO
+      // stock_movements`), aggregate the requested qty per variant
+      // (a cart can have multiple lines for the same variant), and
+      // throw `BadRequestException` with a friendly Arabic message if
+      // any line exceeds available. The DB constraint stays exactly
+      // as-is — it remains the ultimate last-line defence for any
+      // future writer that bypasses this service path.
+      const stockRows = await em.query(
+        `SELECT s.variant_id::text AS variant_id,
+                s.quantity_on_hand,
+                p.name_ar           AS product_name
+           FROM stock s
+           JOIN product_variants v ON v.id = s.variant_id
+           JOIN products p ON p.id = v.product_id
+          WHERE s.warehouse_id = $1
+            AND s.variant_id = ANY($2::uuid[])`,
+        [dto.warehouse_id, variantIds],
+      );
+      const stockMap = new Map<string, { available: number; name: string }>(
+        stockRows.map((r: any) => [
+          r.variant_id,
+          {
+            available: Number(r.quantity_on_hand ?? 0),
+            name: String(r.product_name ?? ''),
+          },
+        ]),
+      );
+      const requestedByVariant = new Map<string, number>();
+      for (const line of dto.lines) {
+        requestedByVariant.set(
+          line.variant_id,
+          (requestedByVariant.get(line.variant_id) ?? 0) + Number(line.qty || 0),
+        );
+      }
+      for (const [variantId, requested] of requestedByVariant) {
+        const stock = stockMap.get(variantId);
+        const available = stock?.available ?? 0;
+        if (requested > available) {
+          const v = variantMap.get(variantId);
+          const label =
+            stock?.name?.trim() || v?.product_name?.trim() || variantId;
+          throw new BadRequestException(
+            `الرصيد غير كافٍ للصنف ${label}. المتاح ${available} والمطلوب ${requested}`,
+          );
+        }
+      }
+
       // Decrement stock for each sold line (trigger updates `stock.quantity_on_hand`).
       for (const line of dto.lines) {
         const v = variantMap.get(line.variant_id);
