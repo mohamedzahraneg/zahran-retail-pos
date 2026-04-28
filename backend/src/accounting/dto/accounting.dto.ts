@@ -115,6 +115,26 @@ export class CreateExpenseDto {
   @IsOptional()
   @IsUUID()
   shift_id?: string;
+
+  /**
+   * PR-EMP-ADVANCE-PAY-1 — explicit cash-source intent.
+   *
+   *   - `'open_shift'`     — the operator explicitly chose a shift via
+   *     the source selector. `shift_id` is required; `cashbox_id` is
+   *     either omitted (derived from the shift) or must match it.
+   *   - `'direct_cashbox'` — the operator explicitly chose a standalone
+   *     cashbox. `cashbox_id` is required; `shift_id` MUST be absent.
+   *     The service skips its legacy shift auto-resolve (lines 167–190
+   *     of accounting.service.ts) so the resulting `expenses.shift_id`
+   *     stays NULL — i.e. the disbursement is not attributed to any
+   *     shift's close-out.
+   *   - `undefined`        — legacy callers (any code path predating
+   *     this PR) keep the old auto-resolve behaviour for backward compat.
+   */
+  @IsOptional()
+  @IsString()
+  @IsIn(['open_shift', 'direct_cashbox'])
+  source_type?: 'open_shift' | 'direct_cashbox';
 }
 
 export class UpdateExpenseDto extends PartialType(CreateExpenseDto) {}
@@ -218,6 +238,18 @@ export class CreateDailyExpenseDto {
   @IsInt()
   @Min(1)
   source_employee_request_id?: number;
+
+  /**
+   * PR-EMP-ADVANCE-PAY-1 — explicit cash-source intent. See the
+   * matching field on `CreateExpenseDto` for the full contract. The
+   * advance-disbursement modal in `AccountsMovementsTab.tsx` always
+   * sends this so the backend never has to guess between "operator
+   * picked direct-cashbox" vs "caller forgot to set shift_id".
+   */
+  @IsOptional()
+  @IsString()
+  @IsIn(['open_shift', 'direct_cashbox'])
+  source_type?: 'open_shift' | 'direct_cashbox';
 }
 
 export class ListExpensesDto {
