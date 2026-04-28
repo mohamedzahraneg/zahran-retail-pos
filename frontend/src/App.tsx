@@ -39,6 +39,7 @@ import RecurringExpenses from '@/pages/RecurringExpenses';
 import DailyExpenses from '@/pages/DailyExpenses';
 import FinancialControlTower from '@/pages/FinancialControlTower';
 import FinanceDashboard from '@/pages/FinanceDashboard';
+import FinanceStatements from '@/pages/FinanceStatements';
 import CustomerGroups from '@/pages/CustomerGroups';
 import Settings from '@/pages/Settings';
 import Users from '@/pages/Users';
@@ -254,6 +255,18 @@ export default function App() {
           element={
             <ProtectedRoute permissions={['finance.dashboard.view']}>
               <FinanceDashboard />
+            </ProtectedRoute>
+          }
+        />
+        {/* PR-FIN-3 — Advanced Account Statements (read-only).
+            Permission: finance.statements.view (admin gets it via
+            the `*` wildcard). Flips the sidebar placeholder for
+            "كشف الحسابات" from disabled to active. */}
+        <Route
+          path="finance/statements"
+          element={
+            <ProtectedRoute permissions={['finance.statements.view']}>
+              <FinanceStatements />
             </ProtectedRoute>
           }
         />

@@ -130,7 +130,8 @@ const groups: NavGroup[] = [
       // visibility so admins always see the roadmap; cashiers/etc.
       // never do.
       { to: '/finance/reports', label: 'التقارير', icon: PieChart, roles: ['admin', 'manager', 'accountant'], permission: 'finance.dashboard.view', placeholder: true },
-      { to: '/finance/statements', label: 'كشف الحسابات', icon: ListChecks, roles: ['admin', 'manager', 'accountant'], permission: 'finance.dashboard.view', placeholder: true },
+      // PR-FIN-3 — flipped from placeholder to active link.
+      { to: '/finance/statements', label: 'كشف الحسابات', icon: ListChecks, roles: ['admin', 'manager', 'accountant'], permission: 'finance.statements.view' },
       { to: '/finance/zakat', label: 'الزكاة', icon: HandCoins, roles: ['admin', 'manager', 'accountant'], permission: 'finance.dashboard.view', placeholder: true },
       { to: '/audit/financial-movements', label: 'تتبع الحركات المالية', icon: History, roles: ['admin', 'manager', 'accountant'], permission: 'finance.dashboard.view', placeholder: true },
       // /accounting (legacy), /budgets, /financial-controls,
