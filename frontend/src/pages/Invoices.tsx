@@ -18,11 +18,19 @@ import {
   History,
 } from 'lucide-react';
 import { posApi } from '@/api/pos.api';
+import { paymentsApi, type PaymentMethodCode } from '@/api/payments.api';
+// PR-POS-PAY-2 — split-payment helpers + shared editor.
+//   Pure helpers stay in lib (DOM-free, fully unit-tested).
+//   Shared editor is the same component the POS PaymentModal uses,
+//   so the edit modal renders an identical multi-row UI without
+//   forking the implementation.
 import {
-  paymentsApi,
-  PaymentMethodCode,
-  METHOD_LABEL_AR,
-} from '@/api/payments.api';
+  type SplitPaymentRow,
+  validateSplitPayments,
+  rowsToPaymentDrafts,
+  makeRowUid,
+} from '@/lib/posSplitPayment';
+import { SplitPaymentsEditor } from '@/components/pos/SplitPaymentsEditor';
 import { usersApi } from '@/api/users.api';
 import { productsApi, Product, Variant } from '@/api/products.api';
 import { Receipt, ReceiptData } from '@/components/Receipt';
@@ -1237,7 +1245,12 @@ interface EditLine {
   discount: number;
 }
 
-function InvoiceEditModal({
+// PR-POS-PAY-2 — exported for direct DOM tests of the multi-row
+// payment editor wiring (see `__tests__/Invoices.edit-split-payment.test.tsx`).
+// Re-exporting an internal modal keeps the test from having to render
+// the full Invoices page (and mock every list/sort/pagination side
+// effect) just to reach the edit form.
+export function InvoiceEditModal({
   invoiceId,
   onClose,
 }: {
@@ -1247,11 +1260,13 @@ function InvoiceEditModal({
   const qc = useQueryClient();
   const [reason, setReason] = useState('');
   const [lines, setLines] = useState<EditLine[]>([]);
-  // PR-PAY-3 — Edit modal now mirrors the DB enum and persists the
-  // chosen payment_account_id so reposts via postInvoiceEdit land on
-  // the right GL bucket.
-  const [paymentMethod, setPaymentMethod] = useState<PaymentMethodCode>('cash');
-  const [paymentAccountId, setPaymentAccountId] = useState<string | null>(null);
+  // PR-POS-PAY-2 — Multi-row split-payments state (replaces the
+  // PR-PAY-3 single-method/single-account tuple). Each row carries
+  // its own method, amount, and (for non-cash) payment_account_id.
+  // The seed effect below loads ALL original payments — not just the
+  // first row — so an invoice that was already split stays split in
+  // the editor instead of silently collapsing to its first row.
+  const [payments, setPayments] = useState<SplitPaymentRow[]>([]);
   const [discountTotal, setDiscountTotal] = useState(0);
   const [notes, setNotes] = useState('');
 
@@ -1260,7 +1275,21 @@ function InvoiceEditModal({
     queryFn: () => posApi.get(invoiceId),
   });
 
-  // Seed the editor once when the invoice payload lands.
+  // Subscribe to active payment accounts so the submit-time gate
+  // (`isAccountRequired`) matches what the editor itself enforces.
+  // The editor mounts the same query internally; React Query caches
+  // the shared key so we don't refetch.
+  const accountsQuery = useQuery({
+    queryKey: ['payment-accounts', 'active'],
+    queryFn: () => paymentsApi.listAccounts({ active: true }),
+  });
+  const accounts = accountsQuery.data ?? [];
+
+  // Seed the editor once when the invoice payload lands. Map ALL
+  // existing invoice_payments rows into UI rows (PR-POS-PAY-2 fix
+  // for the legacy "first-row only" behaviour). If an invoice had
+  // no payments yet, fall back to a single cash row at the grand
+  // total so the operator never sees an empty editor.
   useEffect(() => {
     if (!data) return;
     const items = (data.items || data.lines || []).map((it: any) => ({
@@ -1276,14 +1305,39 @@ function InvoiceEditModal({
     setLines(items);
     setDiscountTotal(Number(data.invoice_discount || 0));
     setNotes(data.notes || '');
-    const firstPay = (data.payments || [])[0];
-    if (firstPay?.payment_method) setPaymentMethod(firstPay.payment_method);
-    // PR-PAY-3: preselect the payment account that paired with the
-    // original payment row. If the account was later deactivated the
-    // operator must re-pick (the active-only accounts list won't
-    // contain it) — but the historical row + its snapshot remain
-    // intact on the invoice.
-    setPaymentAccountId(firstPay?.payment_account_id ?? null);
+
+    const origPayments = (data.payments || []) as Array<{
+      payment_method?: PaymentMethodCode;
+      amount?: number | string;
+      payment_account_id?: string | null;
+      payment_account_snapshot?: { display_name?: string } | null;
+      reference?: string | null;
+    }>;
+    if (origPayments.length === 0) {
+      // No prior payments → seed one cash row at the invoice grand
+      // total. This is a defensive fallback (every paid invoice
+      // already has at least one row) so the editor never opens
+      // with zero rows.
+      setPayments([
+        {
+          uid: makeRowUid(),
+          method: 'cash',
+          amount: Number(data.grand_total || data.paid_total || 0),
+          payment_account_id: null,
+        },
+      ]);
+    } else {
+      setPayments(
+        origPayments.map((p) => ({
+          uid: makeRowUid(),
+          method: (p.payment_method ?? 'cash') as PaymentMethodCode,
+          amount: Number(p.amount || 0),
+          payment_account_id: p.payment_account_id ?? null,
+          account_display_name: p.payment_account_snapshot?.display_name ?? null,
+          reference: p.reference ?? undefined,
+        })),
+      );
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data?.id]);
 
@@ -1305,12 +1359,36 @@ function InvoiceEditModal({
   const canSubmitRequest =
     !canApplyDirect && hasPermission('invoices.edit_request');
 
+  // PR-POS-PAY-2 — Same predicate the editor uses internally; we
+  // recompute it here so the submit-time gate matches the validation
+  // banner the operator sees.
+  const isAccountRequired = (m: PaymentMethodCode) =>
+    m !== 'cash' && accounts.filter((a) => a.method === m).length > 0;
+  const paymentValidation = validateSplitPayments(payments, grand, {
+    isAccountRequired,
+  });
+
   const save = useMutation<unknown>({
     mutationFn: () => {
       if (lines.length === 0)
         return Promise.reject(new Error('يجب وجود صنف واحد على الأقل'));
       if (!reason.trim())
         return Promise.reject(new Error('يجب كتابة سبب التعديل'));
+      // PR-POS-PAY-2 — multi-row validation. Same helper PaymentModal
+      // uses, so the rules are identical to the new-invoice flow:
+      //   - ≥ 1 row, each amount > 0
+      //   - non-cash + accounts catalogued → must select an account
+      //   - non-cash overpay blocked (cash overpay → change)
+      if (!paymentValidation.ok) {
+        return Promise.reject(
+          new Error(paymentValidation.reason ?? 'تحقّق من سطور الدفع'),
+        );
+      }
+      // Build the API payload from the freshly-built drafts. Both
+      // permission paths (`invoices.edit` direct + `invoices.edit_request`
+      // approval queue) share the SAME builder so the multi-row UI
+      // stays consistent across roles.
+      const drafts = rowsToPaymentDrafts(payments);
       const payload = {
         warehouse_id: data.warehouse_id,
         customer_id: data.customer_id || undefined,
@@ -1324,16 +1402,12 @@ function InvoiceEditModal({
           unit_price: l.unit_price,
           discount: l.discount || 0,
         })),
-        payments: [
-          {
-            payment_method: paymentMethod,
-            amount: grand,
-            // PR-PAY-3: thread the chosen account through the edit
-            // payload. postInvoiceEdit voids the prior JE and reposts
-            // on this account's GL code (cash leaves it null).
-            payment_account_id: paymentAccountId ?? undefined,
-          },
-        ],
+        payments: drafts.map((d) => ({
+          payment_method: d.method,
+          amount: d.amount,
+          reference: d.reference,
+          payment_account_id: d.payment_account_id ?? undefined,
+        })),
       };
       if (canApplyDirect) return posApi.edit(invoiceId, payload);
       if (canSubmitRequest) return posApi.submitEditRequest(invoiceId, payload);
@@ -1537,7 +1611,7 @@ function InvoiceEditModal({
                 </table>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 <div>
                   <label className="text-xs text-slate-600 block mb-1">
                     خصم إجمالي
@@ -1551,16 +1625,6 @@ function InvoiceEditModal({
                     }
                   />
                 </div>
-                <EditPaymentPicker
-                  method={paymentMethod}
-                  setMethod={(m) => {
-                    setPaymentMethod(m);
-                    setPaymentAccountId(null); // method change resets account
-                  }}
-                  accountId={paymentAccountId}
-                  setAccountId={setPaymentAccountId}
-                />
-                <div className="hidden">{/* spacer to keep grid alignment with previous row */}</div>
                 <div>
                   <label className="text-xs text-slate-600 block mb-1">
                     ملاحظات
@@ -1583,6 +1647,24 @@ function InvoiceEditModal({
                 </div>
               </div>
 
+              {/* PR-POS-PAY-2 — Multi-row split-payment editor.
+                  Same shared component the POS PaymentModal uses, in
+                  the light variant to fit the edit modal's surface.
+                  `hideGrandTotalBanner` because the row above already
+                  shows the invoice total. */}
+              <div className="rounded-xl border border-slate-200 bg-white p-3">
+                <div className="text-xs text-slate-600 font-bold mb-3">
+                  طرق الدفع
+                </div>
+                <SplitPaymentsEditor
+                  rows={payments}
+                  onChange={setPayments}
+                  grandTotal={grand}
+                  variant="light"
+                  hideGrandTotalBanner
+                />
+              </div>
+
               <div>
                 <label className="text-xs text-slate-600 block mb-1">
                   سبب التعديل *
@@ -1603,6 +1685,10 @@ function InvoiceEditModal({
           <div className="text-xs text-amber-700 min-h-[16px]">
             {!reason.trim() && 'اكتب سبب التعديل قبل الإرسال'}
             {reason.trim() && lines.length === 0 && 'أضف صنف واحد على الأقل'}
+            {reason.trim() &&
+              lines.length > 0 &&
+              !paymentValidation.ok &&
+              paymentValidation.reason}
           </div>
           <div className="flex items-center gap-2">
             <button onClick={onClose} className="btn-ghost" disabled={save.isPending}>
@@ -1629,9 +1715,19 @@ function InvoiceEditModal({
                   toast.error('لا تملك صلاحية تعديل الفاتورة');
                   return;
                 }
+                // PR-POS-PAY-2 — surface multi-row payment errors
+                // (zero-amount row, missing non-cash account, non-cash
+                // overpay) so the cashier knows why save is blocked.
+                if (!paymentValidation.ok) {
+                  toast.error(
+                    paymentValidation.reason ?? 'تحقّق من سطور الدفع',
+                  );
+                  return;
+                }
                 save.mutate();
               }}
-              disabled={save.isPending}
+              disabled={save.isPending || !paymentValidation.ok}
+              data-testid="invoice-edit-save"
               className={`btn-primary ${
                 save.isPending ? 'opacity-60 cursor-wait' : ''
               }`}
@@ -1882,84 +1978,6 @@ function AppliedChanges({ history }: { history: any }) {
   return <ChangeList changes={changes} />;
 }
 
-// PR-PAY-3 — Compact method+account picker for the invoice edit modal.
-// Mirrors the POS PaymentModal but inlined as a 2-column row inside
-// the existing edit form so the surface area stays tight.
-const EDIT_METHODS: PaymentMethodCode[] = [
-  'cash',
-  'instapay',
-  'vodafone_cash',
-  'orange_cash',
-  'wallet',         // PR-PAY-3.1
-  'card_visa',
-  'card_mastercard',
-  'card_meeza',
-  'bank_transfer',
-];
-
-function EditPaymentPicker({
-  method,
-  setMethod,
-  accountId,
-  setAccountId,
-}: {
-  method: PaymentMethodCode;
-  setMethod: (m: PaymentMethodCode) => void;
-  accountId: string | null;
-  setAccountId: (id: string | null) => void;
-}) {
-  const accountsQuery = useQuery({
-    queryKey: ['payment-accounts', 'active'],
-    queryFn: () => paymentsApi.listAccounts({ active: true }),
-  });
-  const accountsForMethod = (accountsQuery.data ?? []).filter(
-    (a) => a.method === method,
-  );
-  const isCash = method === 'cash';
-  const blocked = !isCash && accountsForMethod.length === 0;
-
-  return (
-    <>
-      <div>
-        <label className="text-xs text-slate-600 block mb-1">طريقة الدفع</label>
-        <select
-          className="input"
-          value={method}
-          onChange={(e) => setMethod(e.target.value as PaymentMethodCode)}
-        >
-          {EDIT_METHODS.map((m) => (
-            <option key={m} value={m}>
-              {METHOD_LABEL_AR[m]}
-            </option>
-          ))}
-        </select>
-      </div>
-      {!isCash && (
-        <div>
-          <label className="text-xs text-slate-600 block mb-1">
-            حساب التحصيل
-          </label>
-          {blocked ? (
-            <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1.5">
-              لا يوجد حساب مفعل لهذه الطريقة. أضفه من إعدادات وسائل الدفع.
-            </div>
-          ) : (
-            <select
-              className="input"
-              value={accountId ?? ''}
-              onChange={(e) => setAccountId(e.target.value || null)}
-            >
-              <option value="">— اختر حساب —</option>
-              {accountsForMethod.map((a) => (
-                <option key={a.id} value={a.id}>
-                  {a.display_name}
-                  {a.identifier ? ` · ${a.identifier}` : ''}
-                </option>
-              ))}
-            </select>
-          )}
-        </div>
-      )}
-    </>
-  );
-}
+// PR-POS-PAY-2 — `EditPaymentPicker` (single-method+single-account
+// dropdown) was removed; the invoice-edit modal now embeds the same
+// `<SplitPaymentsEditor />` the POS PaymentModal uses.
