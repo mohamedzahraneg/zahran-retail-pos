@@ -76,6 +76,16 @@ interface NavItem {
   placeholder?: boolean;
   /** Optional override for the disabled tooltip. Defaults to "متاح في تحديث لاحق". */
   placeholderTooltip?: string;
+  /**
+   * PR-FIN-SIDEBAR-2 — when 'subheader', the row renders as a small
+   * section divider (label + thin border above) instead of a link.
+   * `to` becomes a synthetic React-key; `icon` / `roles` / `permission`
+   * are unused at render time but kept typed so the array stays
+   * homogeneous. In collapsed mode the sub-header degrades to a
+   * divider only (no label) — same visual treatment groups already
+   * use between top-level groups today.
+   */
+  kind?: 'item' | 'subheader';
 }
 interface NavGroup {
   title: string;
@@ -104,40 +114,59 @@ const groups: NavGroup[] = [
   },
   {
     title: 'الحسابات والمالية',
+    // PR-FIN-SIDEBAR-2 — 6-sub-group structure interleaved into the
+    // single top-level group. Each sub-header is rendered by the
+    // `kind === 'subheader'` branch (small bold label + thin divider
+    // above when expanded; divider only when collapsed). Item order
+    // and routes are unchanged from PR-FIN-3 except:
+    //   · "التقارير" (placeholder /finance/reports) renamed to
+    //     "التقارير المالية" to disambiguate from the global
+    //     "التقارير" item in the top-level reports group.
+    //   · المصروفات اليومية now precedes المصاريف الدورية (Q4).
+    //   · التحليلات الذكية moved to "المراقبة والتقارير" (Q1A).
     items: [
-      // PR-FIN-2 — لوحة التحكم (Financial Dashboard, read-only).
-      // Sits at the top of the financial group per the approved
-      // dashboard image. Distinct from /dashboard/financial (the
-      // Control Tower / anomaly view), which keeps its own entry
-      // ("برج المراقبة المالية") below.
+      // ─── 1. لوحة الحسابات ──────────────────────────────────
+      { kind: 'subheader', to: 'subhdr:fin:dashboard', label: 'لوحة الحسابات', icon: LayoutDashboard, roles: ['admin', 'manager', 'accountant'], permission: 'finance.dashboard.view' },
       { to: '/dashboard/finance', label: 'لوحة التحكم', icon: LayoutDashboard, roles: ['admin', 'manager', 'accountant'], permission: 'finance.dashboard.view' },
-      // Unified accounts page — tree, journal, reports, budgets, FX,
-      // approvals all live inside as tabs.
+
+      // ─── 2. الحسابات والكشوف ──────────────────────────────
+      { kind: 'subheader', to: 'subhdr:fin:accounts', label: 'الحسابات والكشوف', icon: BookOpen, roles: ['admin', 'manager', 'accountant'], permission: 'accounts.chart.view' },
       { to: '/accounts', label: 'الحسابات', icon: BookOpen, roles: ['admin', 'manager', 'accountant'], permission: 'accounts.chart.view' },
-      { to: '/opening-balance', label: 'فتح الحسابات', icon: BookOpen, roles: ['admin', 'accountant'], permission: 'accounts.journal.post' },
-      { to: '/analytics', label: 'التحليلات الذكية', icon: Sparkles, roles: ['admin', 'manager', 'accountant'], permission: 'accounts.chart.view' },
+      { to: '/finance/statements', label: 'كشف الحسابات', icon: ListChecks, roles: ['admin', 'manager', 'accountant'], permission: 'finance.statements.view' },
+
+      // ─── 3. النقدية والخزائن ──────────────────────────────
+      { kind: 'subheader', to: 'subhdr:fin:cash', label: 'النقدية والخزائن', icon: Wallet, roles: ['admin', 'manager', 'accountant', 'cashier'], permission: 'cashdesk.view' },
       { to: '/cash-desk', label: 'الصندوق اليومي', icon: Wallet, roles: ['admin', 'manager', 'accountant', 'cashier'], permission: 'cashdesk.view' },
       { to: '/cashboxes', label: 'الخزائن والبنوك', icon: Wallet, roles: ['admin', 'manager', 'accountant'], permission: 'cashdesk.manage_accounts' },
-      { to: '/recurring-expenses', label: 'المصاريف الدورية', icon: Repeat, roles: ['admin', 'manager', 'accountant'], permission: 'recurring_expenses.manage' },
+
+      // ─── 4. المصروفات ─────────────────────────────────────
+      // PR-FIN-SIDEBAR-2 Q4 — daily-before-recurring (was reversed).
+      // المصروفات اليومية page is FROZEN; only sidebar position changes.
+      { kind: 'subheader', to: 'subhdr:fin:expenses', label: 'المصروفات', icon: Receipt, roles: ['admin', 'manager', 'accountant', 'cashier'], permission: 'expenses.daily.create' },
       { to: '/daily-expenses', label: 'المصروفات اليومية', icon: Receipt, roles: ['admin', 'manager', 'accountant', 'cashier'], permission: 'expenses.daily.create' },
+      { to: '/recurring-expenses', label: 'المصاريف الدورية', icon: Repeat, roles: ['admin', 'manager', 'accountant'], permission: 'recurring_expenses.manage' },
+
+      // ─── 5. المراقبة والتقارير ────────────────────────────
+      // PR-FIN-SIDEBAR-2 Q1A — Analytics moves here (semantic fit:
+      // KPI observation). Page itself is NOT touched.
+      { kind: 'subheader', to: 'subhdr:fin:monitoring', label: 'المراقبة والتقارير', icon: Activity, roles: ['admin', 'manager', 'accountant'], permission: 'dashboard.financial.view' },
       { to: '/dashboard/financial', label: 'برج المراقبة المالية', icon: Activity, roles: ['admin', 'manager', 'accountant'], permission: 'dashboard.financial.view' },
-      // PR-FIN-SIDEBAR-1 — disabled placeholders for upcoming PRs.
-      // Each item shows the future label + icon + "قريبًا" pill but
-      // never navigates. The `to` strings here are planning-only
-      // markers; no routes are registered. Once the real PR lands,
-      // each entry flips by removing `placeholder: true`. Permission
-      // gate `finance.dashboard.view` matches `/dashboard/finance`
-      // visibility so admins always see the roadmap; cashiers/etc.
-      // never do.
-      { to: '/finance/reports', label: 'التقارير', icon: PieChart, roles: ['admin', 'manager', 'accountant'], permission: 'finance.dashboard.view', placeholder: true },
-      // PR-FIN-3 — flipped from placeholder to active link.
-      { to: '/finance/statements', label: 'كشف الحسابات', icon: ListChecks, roles: ['admin', 'manager', 'accountant'], permission: 'finance.statements.view' },
-      { to: '/finance/zakat', label: 'الزكاة', icon: HandCoins, roles: ['admin', 'manager', 'accountant'], permission: 'finance.dashboard.view', placeholder: true },
+      { to: '/analytics', label: 'التحليلات الذكية', icon: Sparkles, roles: ['admin', 'manager', 'accountant'], permission: 'accounts.chart.view' },
+      // Placeholders for upcoming PRs — never navigate.
       { to: '/audit/financial-movements', label: 'تتبع الحركات المالية', icon: History, roles: ['admin', 'manager', 'accountant'], permission: 'finance.dashboard.view', placeholder: true },
+      // PR-FIN-SIDEBAR-2 Q2B — renamed from "التقارير" to disambiguate
+      // from the global /reports item in the top-level reports group.
+      { to: '/finance/reports', label: 'التقارير المالية', icon: PieChart, roles: ['admin', 'manager', 'accountant'], permission: 'finance.dashboard.view', placeholder: true },
+
+      // ─── 6. عمليات متقدمة ─────────────────────────────────
+      { kind: 'subheader', to: 'subhdr:fin:advanced', label: 'عمليات متقدمة', icon: Calculator, roles: ['admin', 'accountant'], permission: 'accounts.journal.post' },
+      { to: '/opening-balance', label: 'فتح الحسابات', icon: BookOpen, roles: ['admin', 'accountant'], permission: 'accounts.journal.post' },
+      { to: '/finance/zakat', label: 'الزكاة', icon: HandCoins, roles: ['admin', 'manager', 'accountant'], permission: 'finance.dashboard.view', placeholder: true },
+
       // /accounting (legacy), /budgets, /financial-controls,
       // /bank-reconciliation, /accounts-audit — all routes still work
-      // but removed from sidebar to reduce cognitive load. Power users
-      // can still navigate by URL when needed.
+      // but stay hidden (Q3) to keep "قسم الحسابات واضح ومختصر".
+      // Power users can still reach them by URL.
     ],
   },
   {
@@ -223,8 +252,36 @@ export function Sidebar() {
     return perms.some((p) => hasPermission(p));
   };
 
+  /**
+   * PR-FIN-SIDEBAR-2 — sub-headers participate in the same permission
+   * filter as items but additionally get pruned when no real items
+   * survive between them and the next sub-header (or end of group).
+   * That prevents orphan headers when a user lacks every permission
+   * inside a sub-section.
+   */
+  const filterItems = (items: NavItem[]): NavItem[] => {
+    const allowedItems = items.filter(allowed);
+    const result: NavItem[] = [];
+    for (let i = 0; i < allowedItems.length; i++) {
+      const cur = allowedItems[i];
+      if (cur.kind === 'subheader') {
+        // Look ahead — keep the sub-header only if at least one
+        // non-subheader item appears before the next sub-header.
+        let hasFollowingItem = false;
+        for (let j = i + 1; j < allowedItems.length; j++) {
+          if (allowedItems[j].kind === 'subheader') break;
+          hasFollowingItem = true;
+          break;
+        }
+        if (!hasFollowingItem) continue;
+      }
+      result.push(cur);
+    }
+    return result;
+  };
+
   const visibleGroups = groups
-    .map((g) => ({ ...g, items: g.items.filter(allowed) }))
+    .map((g) => ({ ...g, items: filterItems(g.items) }))
     .filter((g) => g.items.length > 0);
 
   const [online, setOnline] = useState<boolean>(
@@ -358,7 +415,39 @@ export function Sidebar() {
               )}
               <div className="space-y-0.5">
                 {group.items.map((item) => {
-                  const { to, label, icon: Icon, placeholder, placeholderTooltip } = item;
+                  const { to, label, icon: Icon, placeholder, placeholderTooltip, kind } = item;
+
+                  // PR-FIN-SIDEBAR-2 — sub-header branch. In expanded
+                  // mode renders a small bold label with a thin border
+                  // above. In collapsed mode renders a divider only
+                  // (no text), matching the visual treatment used
+                  // between top-level groups today. Never a link.
+                  if (kind === 'subheader') {
+                    if (collapsed && !mobileOpen) {
+                      return (
+                        <div
+                          key={to}
+                          aria-hidden
+                          data-testid={`sidebar-subheader-${to}`}
+                          className="mx-2 my-1.5 border-t border-slate-200 lg:block hidden"
+                        />
+                      );
+                    }
+                    return (
+                      <div
+                        key={to}
+                        role="presentation"
+                        data-testid={`sidebar-subheader-${to}`}
+                        className="px-3 pt-3 pb-1 first:pt-1"
+                      >
+                        <div className="border-t border-slate-200 dark:border-slate-700 mb-1.5" />
+                        <div className="text-[10px] font-bold tracking-wide text-slate-500 dark:text-slate-400">
+                          {label}
+                        </div>
+                      </div>
+                    );
+                  }
+
                   // PR-FIN-SIDEBAR-1 — placeholder branch. Renders a
                   // non-clickable element with the same icon + label
                   // as a real NavLink, plus a "قريبًا" pill and a
