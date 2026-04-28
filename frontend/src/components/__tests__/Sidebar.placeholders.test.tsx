@@ -63,7 +63,10 @@ describe('<Sidebar /> — PR-FIN-SIDEBAR-1 placeholders', () => {
     // PR-FIN-3 flipped "كشف الحسابات" from placeholder to active link
     // (/finance/statements). The remaining 3 stay as placeholders
     // until their respective PRs (FIN-7 / FIN-8 / FIN-4) ship.
-    { label: 'التقارير', to: '/finance/reports' },
+    // PR-FIN-SIDEBAR-2 renamed the /finance/reports placeholder from
+    // "التقارير" to "التقارير المالية" to disambiguate from the
+    // global /reports item in the top-level reports sidebar group.
+    { label: 'التقارير المالية', to: '/finance/reports' },
     { label: 'الزكاة', to: '/finance/zakat' },
     { label: 'تتبع الحركات المالية', to: '/audit/financial-movements' },
   ];
