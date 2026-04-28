@@ -40,9 +40,11 @@ function buildFixture(overrides: Partial<Data> = {}): Data {
     filters_applied: {},
     health: {
       trial_balance_imbalance: 0,
+      cashbox_balance_drift_count: 0,
       cashbox_drift_total: 0,
       cashbox_drift_count: 0,
       engine_bypass_alerts_7d: 0,
+      engine_bypass_alerts_last_seen: null,
       unbalanced_entries_count: 0,
       overall: 'healthy',
     },
@@ -54,13 +56,22 @@ function buildFixture(overrides: Partial<Data> = {}): Data {
       total_cash_equivalents: 350,
     },
     daily_expenses: {
-      total: 250,
-      count: 3,
-      largest: { category: 'إيجار', amount: 150 },
+      today_total: 0,
+      today_count: 0,
+      today_largest: null,
+      period_total: 250,
+      period_count: 3,
+      period_largest: { category: 'إيجار', amount: 150 },
     },
     balances: {
       customers: { total_due: 1000, count: 5, top: { name: 'أحمد', amount: 400 } },
-      suppliers: { total_due: 500, count: 3, top: { name: 'مصنع النور', amount: 200 } },
+      suppliers: {
+        total_due: 500,
+        count: 3,
+        top: { name: 'مصنع النور', amount: 200 },
+        effective_source: 'suppliers_table',
+        sources_checked: ['suppliers_table', 'gl_211', 'purchases'],
+      },
       employees: { total_owed_to: 200, total_owed_by: 50, net: 150 },
     },
     profit: {
@@ -143,7 +154,10 @@ describe('<FinanceDashboard />', () => {
     expect(screen.getByText('أرصدة العملاء')).toBeInTheDocument();
     expect(screen.getByText('أرصدة الموردين')).toBeInTheDocument();
     expect(screen.getByText('أرصدة الموظفين')).toBeInTheDocument();
-    expect(screen.getByText('المصروفات اليوم')).toBeInTheDocument();
+    // PR-FIN-2-HOTFIX-4 — title relabeled to surface period totals.
+    expect(
+      screen.getByText('المصروفات (اليوم / الفترة)'),
+    ).toBeInTheDocument();
     expect(screen.getByText('مؤشرات السلامة المالية')).toBeInTheDocument();
   });
 
@@ -238,5 +252,133 @@ describe('<FinanceDashboard />', () => {
     await waitFor(() =>
       expect(screen.getByTestId('dashboard-error')).toBeInTheDocument(),
     );
+  });
+
+  // PR-FIN-2-HOTFIX-4 — health card relabeling + period expenses +
+  // supplier source caption.
+  describe('PR-FIN-2-HOTFIX-4 — dashboard clarity', () => {
+    it('HealthCard renders the 5 distinct rows with the new Arabic labels', async () => {
+      renderPage();
+      await waitFor(() =>
+        expect(screen.getByTestId('card-health')).toBeInTheDocument(),
+      );
+      // Five distinct testids — one per invariant.
+      expect(screen.getByTestId('health-row-trial-balance')).toBeInTheDocument();
+      expect(screen.getByTestId('health-row-cashbox-balance')).toBeInTheDocument();
+      expect(screen.getByTestId('health-row-reference-drift')).toBeInTheDocument();
+      expect(screen.getByTestId('health-row-engine-alerts')).toBeInTheDocument();
+      expect(screen.getByTestId('health-row-unbalanced')).toBeInTheDocument();
+      // New labels visible.
+      expect(screen.getByText('رصيد الخزائن')).toBeInTheDocument();
+      expect(screen.getByText('فروق تصنيف مراجع')).toBeInTheDocument();
+      expect(screen.getByText('Engine Alerts تاريخية')).toBeInTheDocument();
+      expect(screen.getByText('قيود غير متوازنة')).toBeInTheDocument();
+    });
+
+    it('HealthCard shows captions only for non-OK rows that have one', async () => {
+      // Stage current prod-like state: real cashbox balance is fine,
+      // but reference-drift and engine-alerts are non-zero.
+      renderPage(buildFixture({
+        health: {
+          trial_balance_imbalance: 0,
+          cashbox_balance_drift_count: 0,
+          cashbox_drift_total: 1057.98,
+          cashbox_drift_count: 8,
+          engine_bypass_alerts_7d: 22,
+          engine_bypass_alerts_last_seen: '2026-04-25T14:00:00Z',
+          unbalanced_entries_count: 0,
+          overall: 'warning',
+        },
+      }));
+      await waitFor(() =>
+        expect(screen.getByTestId('card-health')).toBeInTheDocument(),
+      );
+      // Reference drift caption visible — explicitly says it's not money drift.
+      expect(
+        screen.getByText(/فروق ربط\/تصنيف قديمة/),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText(/لا تعني فرقًا فعليًا في رصيد الخزائن/),
+      ).toBeInTheDocument();
+      // Engine alerts caption shows last_seen date in Cairo TZ + historical wording.
+      expect(
+        screen.getByText(/تنبيهات تاريخية، لا توجد حركة مالية جديدة بسببها/),
+      ).toBeInTheDocument();
+    });
+
+    it('TodayExpensesCard renders both today AND period sections', async () => {
+      renderPage(buildFixture({
+        daily_expenses: {
+          today_total: 0,
+          today_count: 0,
+          today_largest: null,
+          period_total: 3821,
+          period_count: 17,
+          period_largest: { category: 'كهرباء ومرافق', amount: 2000 },
+        },
+      }));
+      await waitFor(() =>
+        expect(screen.getByTestId('card-today-expenses')).toBeInTheDocument(),
+      );
+      // Title relabeled.
+      expect(
+        screen.getByText('المصروفات (اليوم / الفترة)'),
+      ).toBeInTheDocument();
+      // Both sections render.
+      expect(screen.getByTestId('expenses-today-total')).toBeInTheDocument();
+      expect(screen.getByTestId('expenses-period-total')).toBeInTheDocument();
+      expect(screen.getByTestId('expenses-period-count')).toBeInTheDocument();
+      expect(screen.getByTestId('expenses-period-largest-cat')).toBeInTheDocument();
+      // Period rows reflect data, today shows zeros.
+      expect(screen.getByTestId('expenses-period-total').textContent).toMatch(/3,821/);
+      expect(screen.getByTestId('expenses-period-count').textContent).toMatch(/17/);
+    });
+
+    it('SuppliersBalanceCard caption explains the source(s)', async () => {
+      renderPage(buildFixture({
+        balances: {
+          customers: { total_due: 0, count: 0, top: null },
+          employees: { total_owed_to: 0, total_owed_by: 0, net: 0 },
+          suppliers: {
+            total_due: 0,
+            count: 0,
+            top: null,
+            effective_source: 'none',
+            sources_checked: ['suppliers_table', 'gl_211', 'purchases'],
+          },
+        },
+      }));
+      await waitFor(() =>
+        expect(screen.getByTestId('card-suppliers-balance')).toBeInTheDocument(),
+      );
+      // 'none' branch renders the explicit "no records" message.
+      expect(
+        screen.getByText('لا توجد أرصدة موردين مسجلة حاليًا'),
+      ).toBeInTheDocument();
+      // Source list is always shown so the operator knows what was checked.
+      expect(
+        screen.getByText(/سجل الموردين · GL 211 · المشتريات غير المسدّدة/),
+      ).toBeInTheDocument();
+    });
+
+    it('SuppliersBalanceCard shows the dominant source when one has data', async () => {
+      renderPage(buildFixture({
+        balances: {
+          customers: { total_due: 0, count: 0, top: null },
+          employees: { total_owed_to: 0, total_owed_by: 0, net: 0 },
+          suppliers: {
+            total_due: 600,
+            count: 2,
+            top: { name: 'مصنع النور', amount: 400 },
+            effective_source: 'gl_211',
+            sources_checked: ['suppliers_table', 'gl_211', 'purchases'],
+          },
+        },
+      }));
+      await waitFor(() =>
+        expect(screen.getByTestId('card-suppliers-balance')).toBeInTheDocument(),
+      );
+      expect(screen.getByText(/محسوب من: GL 211/)).toBeInTheDocument();
+    });
   });
 });
