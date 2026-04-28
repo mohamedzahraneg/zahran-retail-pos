@@ -247,7 +247,15 @@ export default function POS() {
       toast.error('السلة فارغة');
       return;
     }
-    cart.setPayments([{ method: 'cash', amount: cart.grandTotal() }]);
+    // PR-POS-PAY-1-HOTFIX-1 — DO NOT pre-fill `cart.payments` here.
+    // The legacy single-method UI used to seed a one-element cash row
+    // so the parent's submit could read it back from the store. The
+    // multi-row PaymentModal now owns its own draft state and pushes
+    // the final list through `onConfirm(drafts)`. Pre-filling here
+    // races the modal's own initialization and — combined with the
+    // stale `cart.payments` snapshot captured by `submit`'s closure —
+    // caused split payments to be persisted as a single cash row
+    // (see INV-2026-000116). The modal seeds its own default row.
     setPayOpen(true);
   };
 
@@ -263,9 +271,21 @@ export default function POS() {
     setReserveOpen(true);
   };
 
-  const submit = () => {
+  // PR-POS-PAY-1-HOTFIX-1 — `paymentsOverride` lets PaymentModal pass
+  // its freshly-built drafts directly into the payload, bypassing the
+  // closure-captured `cart.payments` snapshot. Without this override,
+  // the modal's `cart.setPayments(...)` call would not have flushed
+  // before this closure was invoked, so the payload would ship the
+  // stale (or legacy-prefilled) value from the previous render.
+  const submit = (paymentsOverride?: PaymentDraft[]) => {
     if (!cart.items.length) return;
-    if (cart.totalPaid() < cart.grandTotal()) {
+    // Use the live total from the override when present so the
+    // sufficient-payment gate also reads the fresh drafts instead of
+    // the stale store value.
+    const liveTotal = paymentsOverride
+      ? paymentsOverride.reduce((s, p) => s + (Number(p.amount) || 0), 0)
+      : cart.totalPaid();
+    if (liveTotal < cart.grandTotal()) {
       toast.error('المبلغ المدفوع أقل من الإجمالي');
       return;
     }
@@ -278,6 +298,7 @@ export default function POS() {
       toast.error('يجب اختيار البائع قبل حفظ الفاتورة');
       return;
     }
+    const paymentsForPayload = paymentsOverride ?? cart.payments;
     const payload = {
       warehouse_id: warehouseId,
       customer_id: cart.customer?.id,
@@ -288,7 +309,7 @@ export default function POS() {
         unit_price: i.unitPrice,
         discount: i.discount,
       })),
-      payments: cart.payments.map((p) => ({
+      payments: paymentsForPayload.map((p) => ({
         payment_method: p.method,
         amount: p.amount,
         reference: p.reference,
@@ -1085,7 +1106,10 @@ export default function POS() {
       {payOpen && (
         <PaymentModal
           onClose={() => setPayOpen(false)}
-          onConfirm={submit}
+          // PR-POS-PAY-1-HOTFIX-1 — forward the freshly-built drafts
+          // straight into `submit` so the payload uses them instead
+          // of the closure-captured `cart.payments` snapshot.
+          onConfirm={(drafts) => submit(drafts)}
           isPending={createInvoice.isPending}
         />
       )}
@@ -1873,7 +1897,14 @@ export function PaymentModal({
   isPending,
 }: {
   onClose: () => void;
-  onConfirm: () => void;
+  // PR-POS-PAY-1-HOTFIX-1 — `onConfirm` now receives the freshly-built
+  // drafts so the parent can ship them in the API payload without
+  // depending on `cart.payments` having flushed through React's render
+  // cycle. The modal still mirrors them into the store via
+  // `cart.setPayments(...)` for any downstream consumer that reads
+  // from there (Receipt preview, etc.), but the source of truth for
+  // the submit payload is this argument.
+  onConfirm: (drafts: PaymentDraft[]) => void;
   isPending: boolean;
 }) {
   const cart = useCartStore();
@@ -1979,8 +2010,17 @@ export function PaymentModal({
 
   const submit = () => {
     if (!canConfirm) return;
-    cart.setPayments(rowsToPaymentDrafts(rows));
-    onConfirm();
+    // Build drafts ONCE and hand the same array to both consumers:
+    //   1. cart.setPayments — keeps the store in sync for any other
+    //      reader (Receipt preview, devtools, etc.).
+    //   2. onConfirm(drafts) — the parent's submit uses this directly
+    //      so the API payload never depends on the store flushing
+    //      through React's render cycle. Without this, the parent's
+    //      closure-captured `cart.payments` could ship a stale or
+    //      legacy-prefilled value (PR-POS-PAY-1-HOTFIX-1).
+    const drafts = rowsToPaymentDrafts(rows);
+    cart.setPayments(drafts);
+    onConfirm(drafts);
   };
 
   return (
