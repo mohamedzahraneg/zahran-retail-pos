@@ -40,6 +40,14 @@ import { customersApi, Customer } from '@/api/customers.api';
 import { shiftsApi } from '@/api/shifts.api';
 import { reservationsApi } from '@/api/reservations.api';
 import { useCartStore, PaymentDraft, ManualDiscountType } from '@/stores/cart.store';
+// PR-POS-PAY-1 — split-payments helper (pure validation + summary).
+import {
+  type SplitPaymentRow,
+  validateSplitPayments,
+  summarizeSplitPayments,
+  rowsToPaymentDrafts,
+  makeRowUid,
+} from '@/lib/posSplitPayment';
 import {
   paymentsApi,
   PaymentAccount,
@@ -1840,7 +1848,26 @@ const POS_METHODS: PaymentMethodCode[] = [
   'bank_transfer',
 ];
 
-function PaymentModal({
+/**
+ * PaymentModal — PR-POS-PAY-1
+ * ──────────────────────────────────────────────────────────────────
+ *
+ * Replaces the single-method modal with a multi-row split-payments
+ * panel. The cashier can mix cash + non-cash on the same invoice
+ * (e.g. 600 كاش + 400 InstaPay). The backend already accepts an
+ * `payments[]` array (`CreateInvoiceDto.payments` in
+ * `backend/src/pos/dto/invoice.dto.ts`) so this is a pure UI change.
+ *
+ * Backward compat:
+ *   - Default state is one cash row prefilled with grand_total →
+ *     identical UX + payload to the previous single-method modal.
+ *   - Cashier adds extra rows only when they want to split.
+ *
+ * Validation lives in `lib/posSplitPayment.ts` (pure helper, fully
+ * unit-tested). The modal just renders state and surfaces the
+ * helper's `reason` string for invalid states.
+ */
+export function PaymentModal({
   onClose,
   onConfirm,
   isPending,
@@ -1850,14 +1877,8 @@ function PaymentModal({
   isPending: boolean;
 }) {
   const cart = useCartStore();
-  const [method, setMethod] = useState<PaymentMethodCode>('cash');
-  const [accountId, setAccountId] = useState<string | null>(null);
-  const [amount, setAmount] = useState(cart.grandTotal());
-  const change = Math.max(0, amount - cart.grandTotal());
+  const grandTotal = cart.grandTotal();
 
-  // Provider catalog + active accounts. Both load once per modal open;
-  // PR-PAY-2 admin actions are RTK-cached so changes flow in via
-  // invalidate.
   const providersQuery = useQuery({
     queryKey: ['payment-providers'],
     queryFn: () => paymentsApi.listProviders(),
@@ -1870,110 +1891,183 @@ function PaymentModal({
   const providers = providersQuery.data ?? [];
   const accounts = accountsQuery.data ?? [];
 
-  // PR-PAY-3 fix — when accounts load (or admin creates/deactivates
-  // an account while the modal is open), the currently-selected
-  // method might no longer be visible. Snap back to cash so the UI
-  // stays in sync with what the cashier can actually use.
+  // PR-POS-PAY-1 — multi-row state replaces the previous single
+  // (method, amount, accountId) tuple. Default = one cash row at the
+  // full grand total → same legacy behavior when the cashier doesn't
+  // split.
+  const [rows, setRows] = useState<SplitPaymentRow[]>(() => [
+    {
+      uid: makeRowUid(),
+      method: 'cash',
+      amount: grandTotal,
+      payment_account_id: null,
+    },
+  ]);
+
+  // Snap any row whose method is no longer visible (admin
+  // deactivated its only account) back to cash. Mirrors the legacy
+  // PR-PAY-3 behavior, applied per-row.
   useEffect(() => {
     const visible = visibleMethodsFor(accounts);
-    if (!visible.includes(method)) setMethod('cash');
+    setRows((prev) =>
+      prev.map((r) =>
+        visible.includes(r.method)
+          ? r
+          : { ...r, method: 'cash', payment_account_id: null },
+      ),
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accountsQuery.dataUpdatedAt]);
 
-  const accountsForMethod = accounts.filter((a) => a.method === method);
-  const isCash = method === 'cash';
+  const accountsForMethod = (m: PaymentMethodCode) =>
+    accounts.filter((a) => a.method === m);
 
-  // Auto-select rules for the account picker (PR-PAY-3 §"Selection rules"):
-  //   1) default-active → use it; 2) exactly one active → use it;
-  //   3) multiple + no default → leave blank (operator must pick).
-  useEffect(() => {
-    if (isCash) {
-      setAccountId(null);
-      return;
-    }
-    const def = accountsForMethod.find((a) => a.is_default);
-    if (def) {
-      setAccountId(def.id);
-    } else if (accountsForMethod.length === 1) {
-      setAccountId(accountsForMethod[0].id);
-    } else {
-      setAccountId(null);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [method, accountsQuery.dataUpdatedAt]);
+  const isAccountRequired = (m: PaymentMethodCode) =>
+    m !== 'cash' && accountsForMethod(m).length > 0;
 
-  const blockedNoAccount = !isCash && accountsForMethod.length === 0;
-  const needsManualPick =
-    !isCash && accountsForMethod.length > 1 && !accountId;
+  const updateRow = (uid: string, patch: Partial<SplitPaymentRow>) => {
+    setRows((prev) =>
+      prev.map((r) => {
+        if (r.uid !== uid) return r;
+        const next = { ...r, ...patch };
+        // When the method changes, recompute the account selection
+        // using the same auto-select logic the legacy single-row
+        // modal had: prefer the default-active account, else the
+        // unique active account, else leave blank.
+        if (patch.method && patch.method !== r.method) {
+          if (patch.method === 'cash') {
+            next.payment_account_id = null;
+            next.account_display_name = null;
+          } else {
+            const candidates = accountsForMethod(patch.method);
+            const def = candidates.find((a) => a.is_default);
+            const auto =
+              def ?? (candidates.length === 1 ? candidates[0] : null);
+            next.payment_account_id = auto?.id ?? null;
+            next.account_display_name = auto?.display_name ?? null;
+          }
+        }
+        return next;
+      }),
+    );
+  };
 
-  const canConfirm =
-    amount > 0 && !blockedNoAccount && !needsManualPick && !isPending;
+  const addRow = () => {
+    // New row defaults to cash for the remaining amount (or 0 if
+    // already overpaid). Cashier can change method/amount in-place.
+    const summary = summarizeSplitPayments(rows, grandTotal);
+    setRows((prev) => [
+      ...prev,
+      {
+        uid: makeRowUid(),
+        method: 'cash',
+        amount: Math.max(0, summary.remaining),
+        payment_account_id: null,
+      },
+    ]);
+  };
+
+  const removeRow = (uid: string) => {
+    setRows((prev) => (prev.length <= 1 ? prev : prev.filter((r) => r.uid !== uid)));
+  };
+
+  const summary = summarizeSplitPayments(rows, grandTotal);
+  const validation = validateSplitPayments(rows, grandTotal, {
+    isAccountRequired,
+  });
+  const canConfirm = validation.ok && !isPending;
 
   const submit = () => {
     if (!canConfirm) return;
-    const acct = accountId ? accountsForMethod.find((a) => a.id === accountId) : null;
-    cart.setPayments([
-      {
-        method,
-        amount,
-        payment_account_id: acct?.id ?? null,
-        account_display_name: acct?.display_name,
-      },
-    ]);
+    cart.setPayments(rowsToPaymentDrafts(rows));
     onConfirm();
   };
 
   return (
     <ModalShell onClose={onClose} title="إتمام الدفع">
       <div className="p-5 space-y-4">
-        <PaymentMethodGrid
-          providers={providers}
-          accounts={accounts}
-          selected={method}
-          onSelect={setMethod}
-        />
-
-        {!isCash && (
-          <PaymentAccountPicker
-            method={method}
-            providers={providers}
-            accounts={accountsForMethod}
-            selected={accountId}
-            onSelect={setAccountId}
-            blocked={blockedNoAccount}
-            needsManualPick={needsManualPick}
-          />
-        )}
-
+        {/* Grand total banner */}
         <div>
           <label className="text-xs text-slate-400 block mb-1">
             الإجمالي المطلوب
           </label>
           <div className="text-3xl font-black text-emerald-400 text-center py-2 bg-white/5 rounded-lg">
-            {EGP(cart.grandTotal())}
+            {EGP(grandTotal)}
           </div>
         </div>
 
-        <div>
-          <label className="text-xs text-slate-400 block mb-1">
-            {isCash ? 'المبلغ المستلم' : 'المبلغ'}
-          </label>
-          <input
-            autoFocus
-            type="number"
-            className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-3 text-white text-xl font-bold"
-            value={amount}
-            onChange={(e) => setAmount(parseFloat(e.target.value) || 0)}
-          />
+        {/* Payment rows */}
+        <div className="space-y-3" data-testid="payment-rows">
+          {rows.map((row, idx) => (
+            <PaymentRow
+              key={row.uid}
+              row={row}
+              index={idx}
+              providers={providers}
+              accounts={accounts}
+              isOnlyRow={rows.length === 1}
+              onChange={(patch) => updateRow(row.uid, patch)}
+              onRemove={() => removeRow(row.uid)}
+            />
+          ))}
         </div>
 
-        {isCash && (
-          <div className="flex justify-between p-3 bg-white/5 rounded-lg">
-            <span className="text-slate-400">الباقي للعميل</span>
-            <span className="font-black text-emerald-400">{EGP(change)}</span>
+        {/* Add another payment method */}
+        <button
+          type="button"
+          onClick={addRow}
+          data-testid="payment-add-row"
+          className="w-full py-2 rounded-lg border border-dashed border-white/20 text-slate-300 text-sm font-bold hover:bg-white/5 hover:border-white/40 transition"
+        >
+          + إضافة وسيلة دفع
+        </button>
+
+        {/* Summary panel */}
+        <div
+          className="rounded-lg bg-white/5 p-3 space-y-1.5 text-sm"
+          data-testid="payment-summary"
+        >
+          <div className="flex justify-between">
+            <span className="text-slate-400">إجمالي الفاتورة</span>
+            <span className="font-mono tabular-nums text-white">
+              {EGP(grandTotal)}
+            </span>
+          </div>
+          <div className="flex justify-between" data-testid="payment-summary-paid">
+            <span className="text-slate-400">إجمالي المدفوع</span>
+            <span className="font-mono tabular-nums text-emerald-400 font-bold">
+              {EGP(summary.totalPaid)}
+            </span>
+          </div>
+          {summary.remaining > 0.001 && (
+            <div className="flex justify-between" data-testid="payment-summary-remaining">
+              <span className="text-slate-400">المتبقي (آجل)</span>
+              <span className="font-mono tabular-nums text-amber-400 font-bold">
+                {EGP(summary.remaining)}
+              </span>
+            </div>
+          )}
+          {summary.change > 0.001 && (
+            <div className="flex justify-between" data-testid="payment-summary-change">
+              <span className="text-slate-400">الباقي للعميل</span>
+              <span className="font-mono tabular-nums text-emerald-400 font-bold">
+                {EGP(summary.change)}
+              </span>
+            </div>
+          )}
+        </div>
+
+        {/* Validation message */}
+        {!validation.ok && (
+          <div
+            className="rounded-lg bg-rose-500/10 border border-rose-500/30 px-3 py-2 text-[12px] text-rose-300 font-bold"
+            data-testid="payment-validation-error"
+          >
+            {validation.reason}
           </div>
         )}
 
+        {/* Actions */}
         <div className="flex gap-2">
           <button
             className="flex-1 py-2.5 rounded-lg bg-white/5 text-slate-300 hover:bg-white/10"
@@ -1985,12 +2079,110 @@ function PaymentModal({
             className="flex-1 py-2.5 rounded-lg bg-gradient-to-br from-emerald-500 to-teal-600 text-white font-bold hover:opacity-90 disabled:opacity-40"
             onClick={submit}
             disabled={!canConfirm}
+            data-testid="payment-confirm"
           >
             {isPending ? 'جاري...' : 'تأكيد الدفع'}
           </button>
         </div>
       </div>
     </ModalShell>
+  );
+}
+
+/**
+ * PaymentRow — PR-POS-PAY-1
+ *
+ * Single split-payment row inside `PaymentModal`. Encapsulates the
+ * per-row method picker, account picker (when needed), amount
+ * input, and remove button. Pure presentational — all state lives
+ * in the parent's `rows[]` array.
+ */
+function PaymentRow({
+  row,
+  index,
+  providers,
+  accounts,
+  isOnlyRow,
+  onChange,
+  onRemove,
+}: {
+  row: SplitPaymentRow;
+  index: number;
+  providers: PaymentProvider[];
+  accounts: PaymentAccount[];
+  isOnlyRow: boolean;
+  onChange: (patch: Partial<SplitPaymentRow>) => void;
+  onRemove: () => void;
+}) {
+  const visibleMethods = visibleMethodsFor(accounts);
+  const accountsForRow = accounts.filter((a) => a.method === row.method);
+  const isCash = row.method === 'cash';
+  const blockedNoAccount = !isCash && accountsForRow.length === 0;
+
+  return (
+    <div
+      className="rounded-xl border border-white/10 bg-white/5 p-3 space-y-2"
+      data-testid="payment-row"
+      data-row-index={index}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[10px] font-bold text-slate-400">
+          سطر #{index + 1}
+        </span>
+        {!isOnlyRow && (
+          <button
+            type="button"
+            onClick={onRemove}
+            data-testid={`payment-row-remove-${index}`}
+            aria-label="حذف سطر الدفع"
+            className="text-rose-400 hover:text-rose-300 text-[11px] font-bold"
+          >
+            حذف
+          </button>
+        )}
+      </div>
+
+      {/* Method picker — same grid as the legacy modal but per-row. */}
+      <PaymentMethodGrid
+        providers={providers}
+        accounts={accounts}
+        selected={row.method}
+        onSelect={(m) => onChange({ method: m })}
+      />
+
+      {/* Account picker for non-cash methods. */}
+      {!isCash && visibleMethods.includes(row.method) && (
+        <PaymentAccountPicker
+          method={row.method}
+          providers={providers}
+          accounts={accountsForRow}
+          selected={row.payment_account_id}
+          onSelect={(id) => {
+            const acct = accountsForRow.find((a) => a.id === id) ?? null;
+            onChange({
+              payment_account_id: id,
+              account_display_name: acct?.display_name ?? null,
+            });
+          }}
+          blocked={blockedNoAccount}
+          needsManualPick={
+            !isCash && accountsForRow.length > 1 && !row.payment_account_id
+          }
+        />
+      )}
+
+      {/* Amount input. */}
+      <div>
+        <label className="text-xs text-slate-400 block mb-1">المبلغ</label>
+        <input
+          type="number"
+          className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-lg font-bold"
+          value={row.amount}
+          onChange={(e) => onChange({ amount: parseFloat(e.target.value) || 0 })}
+          data-testid={`payment-row-amount-${index}`}
+        />
+      </div>
+    </div>
   );
 }
 
