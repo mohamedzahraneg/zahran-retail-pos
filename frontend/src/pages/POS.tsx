@@ -47,6 +47,15 @@ import {
   rowsToPaymentDrafts,
   makeRowUid,
 } from '@/lib/posSplitPayment';
+// PR-POS-STOCK-1 — out-of-stock guard helpers. The same module
+// powers the Enter / scanner / image-scan / cart-bump / submit gates
+// so all four entry points decide via the same rules.
+import {
+  canAddOne,
+  canBumpTo,
+  findOverStockLines,
+  formatOverStockLine,
+} from '@/lib/posStockGuard';
 import {
   paymentsApi,
   PaymentAccount,
@@ -237,10 +246,32 @@ export default function POS() {
     },
   });
 
+  // PR-POS-STOCK-1 — `byBarcode` now accepts `warehouse_id` and
+  // returns the warehouse-scoped `available_stock` so the Enter /
+  // scanner / image-scan path can refuse to add an out-of-stock or
+  // over-cap item BEFORE it reaches the cart and (later) the backend
+  // CHECK constraint. The click path keeps its existing PR-PAY guard
+  // through `VariantPickerModal`.
   const scanBarcode = useMutation({
-    mutationFn: productsApi.byBarcode,
-    onSuccess: ({ product, variant }) => {
-      cart.addItem({ product, variant });
+    mutationFn: (code: string) =>
+      productsApi.byBarcode(code, { warehouse_id: cart.warehouse?.id }),
+    onSuccess: ({ product, variant, available_stock }) => {
+      const current = cart.items.find((i) => i.variantId === variant.id) ?? null;
+      const guard = canAddOne({
+        current: current
+          ? { variantId: current.variantId, qty: current.qty, availableStock: current.availableStock }
+          : null,
+        availableStock: available_stock,
+      });
+      if (!guard.ok) {
+        toast.error(guard.reason);
+        return;
+      }
+      cart.addItem({
+        product,
+        variant,
+        availableStock: Number(available_stock ?? 0),
+      });
     },
     onError: () => toast.error('لم يتم العثور على المنتج'),
   });
@@ -282,6 +313,26 @@ export default function POS() {
   // stale (or legacy-prefilled) value from the previous render.
   const submit = (paymentsOverride?: PaymentDraft[]) => {
     if (!cart.items.length) return;
+    // PR-POS-STOCK-1 — final client-side over-stock sweep. Anything
+    // that slipped past the per-add gate (e.g. a race during a long
+    // checkout dialog, or an offline-replay invoice with stale stock)
+    // is caught here so the cashier sees a friendly toast instead of
+    // the backend's BadRequestException → DB CHECK constraint cascade.
+    // Lines without an `availableStock` annotation (legacy / pre-PR
+    // cart contents) are intentionally skipped — the backend pre-check
+    // in `pos.service.ts::createInvoice` is the authoritative gate.
+    const overStock = findOverStockLines(
+      cart.items.map((i) => ({
+        variantId: i.variantId,
+        qty: i.qty,
+        availableStock: i.availableStock,
+        name: i.name,
+      })),
+    );
+    if (overStock.length > 0) {
+      toast.error(formatOverStockLine(overStock[0]));
+      return;
+    }
     // Use the live total from the override when present so the
     // sufficient-payment gate also reads the fresh drafts instead of
     // the stale store value.
@@ -613,7 +664,26 @@ export default function POS() {
                     </span>
                     <button
                       className="w-7 h-7 rounded bg-white/10 hover:bg-white/20 flex items-center justify-center"
-                      onClick={() => cart.updateQty(i.variantId, i.qty + 1)}
+                      data-testid={`pos-cart-bump-${i.variantId}`}
+                      onClick={() => {
+                        // PR-POS-STOCK-1 — block in-cart bump when
+                        // the line is already at its `availableStock`
+                        // snapshot. Lines with no annotation pass
+                        // through (legacy + offline-replay safety).
+                        const guard = canBumpTo({
+                          line: {
+                            variantId: i.variantId,
+                            qty: i.qty,
+                            availableStock: i.availableStock,
+                          },
+                          nextQty: i.qty + 1,
+                        });
+                        if (!guard.ok) {
+                          toast.error(guard.reason);
+                          return;
+                        }
+                        cart.updateQty(i.variantId, i.qty + 1);
+                      }}
                     >
                       <Plus size={14} />
                     </button>
@@ -1150,8 +1220,28 @@ export default function POS() {
           product={variantPickerProduct}
           warehouseId={cart.warehouse?.id}
           onClose={() => setVariantPickerProduct(null)}
-          onPick={(product, variant) => {
-            cart.addItem({ product, variant });
+          onPick={(product, variant, availableStock) => {
+            // PR-POS-STOCK-1 — re-run the same `canAddOne` gate the
+            // scanner path uses so a cashier who reaches the cart via
+            // the click + variant-picker path is bound by the same
+            // re-add-cap rule as a re-Enter.
+            const current =
+              cart.items.find((i) => i.variantId === variant.id) ?? null;
+            const guard = canAddOne({
+              current: current
+                ? {
+                    variantId: current.variantId,
+                    qty: current.qty,
+                    availableStock: current.availableStock,
+                  }
+                : null,
+              availableStock,
+            });
+            if (!guard.ok) {
+              toast.error(guard.reason);
+              return;
+            }
+            cart.addItem({ product, variant, availableStock });
             setVariantPickerProduct(null);
           }}
         />
@@ -2091,7 +2181,15 @@ function VariantPickerModal({
   product: Product;
   warehouseId?: string;
   onClose: () => void;
-  onPick: (product: Product, variant: Variant) => void;
+  // PR-POS-STOCK-1 — `availableStock` is the warehouse-scoped
+  // `quantity_on_hand` for the selected variant. Plumbed up so the
+  // parent can annotate the cart line and the in-cart `+1` guard +
+  // submit-time sweep can re-check.
+  onPick: (
+    product: Product,
+    variant: Variant,
+    availableStock: number,
+  ) => void;
 }) {
   const { data: variants = [], isLoading } = useQuery({
     queryKey: ['variant-picker', product.id, warehouseId],
@@ -2143,20 +2241,25 @@ function VariantPickerModal({
       toast.error('اختر اللون والمقاس');
       return;
     }
-    if (Number(current.quantity_on_hand || 0) <= 0) {
+    const available = Number(current.quantity_on_hand || 0);
+    if (available <= 0) {
       toast.error('هذا الصنف نافذ — لا يمكن بيعه');
       return;
     }
-    onPick(product, {
-      id: current.variant_id,
-      product_id: product.id,
-      sku: current.sku,
-      barcode: current.barcode,
-      color: current.color,
-      size: current.size,
-      cost_price: current.cost_price,
-      selling_price: current.selling_price,
-    } as Variant);
+    onPick(
+      product,
+      {
+        id: current.variant_id,
+        product_id: product.id,
+        sku: current.sku,
+        barcode: current.barcode,
+        color: current.color,
+        size: current.size,
+        cost_price: current.cost_price,
+        selling_price: current.selling_price,
+      } as Variant,
+      available,
+    );
   };
 
   return (

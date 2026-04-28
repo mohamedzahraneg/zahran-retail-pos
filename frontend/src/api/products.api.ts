@@ -66,8 +66,24 @@ export const productsApi = {
 
   get: (id: string) => unwrap<Product & { variants: Variant[] }>(api.get(`/products/${id}`)),
 
-  byBarcode: (code: string) =>
-    unwrap<{ product: Product; variant: Variant }>(api.get(`/products/barcode/${code}`)),
+  /**
+   * PR-POS-STOCK-1 — When `warehouse_id` is supplied the backend
+   * LEFT JOINs the `stock` table for that warehouse and returns
+   * `available_stock` (= `quantity_on_hand` for this variant in the
+   * caller's warehouse, or `0` if no stock row exists). Without the
+   * param the response shape stays exactly as it was before — no
+   * downstream caller has to change.
+   */
+  byBarcode: (code: string, opts?: { warehouse_id?: string }) =>
+    unwrap<{
+      product: Product;
+      variant: Variant;
+      available_stock?: number;
+    }>(
+      api.get(`/products/barcode/${code}`, {
+        params: opts?.warehouse_id ? { warehouse_id: opts.warehouse_id } : undefined,
+      }),
+    ),
 
   create: (body: Partial<Product>) =>
     unwrap<Product>(api.post('/products', body)),

@@ -55,8 +55,16 @@ export class ProductsController {
   }
 
   @Get('barcode/:code')
-  lookup(@Param('code') code: string) {
-    return this.products.findByBarcode(code);
+  @ApiQuery({ name: 'warehouse_id', required: false })
+  // PR-POS-STOCK-1 — `warehouse_id` is optional; when supplied the
+  // service LEFT JOINs `stock` and returns `available_stock` for the
+  // matched variant in that warehouse so the POS Enter / scanner /
+  // image-scan path can refuse out-of-stock adds in one round-trip.
+  lookup(
+    @Param('code') code: string,
+    @Query('warehouse_id') warehouse_id?: string,
+  ) {
+    return this.products.findByBarcode(code, warehouse_id);
   }
 
   @Get('catalog/colors')
