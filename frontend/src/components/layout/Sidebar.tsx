@@ -46,6 +46,10 @@ import {
   X as XIcon,
   Wifi,
   WifiOff,
+  // PR-FIN-SIDEBAR-1 — placeholder items for future financial PRs.
+  PieChart,
+  ListChecks,
+  HandCoins,
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import clsx from 'clsx';
@@ -60,6 +64,18 @@ interface NavItem {
   roles: string[];
   /** Preferred: permission(s) required to see this item. ANY match grants access. */
   permission?: string | string[];
+  /**
+   * PR-FIN-SIDEBAR-1 — when true, the item renders as a non-clickable
+   * "coming soon" placeholder instead of a `<NavLink>`. The `to` prop
+   * is then a planning-only marker for the future route and never
+   * activates a router transition. Used to surface upcoming PRs
+   * (PR-FIN-3 / 4 / 7 / 8) in the sidebar without registering broken
+   * routes. Permission gate still applies — placeholders only show to
+   * users who would have access once the real route ships.
+   */
+  placeholder?: boolean;
+  /** Optional override for the disabled tooltip. Defaults to "متاح في تحديث لاحق". */
+  placeholderTooltip?: string;
 }
 interface NavGroup {
   title: string;
@@ -105,6 +121,18 @@ const groups: NavGroup[] = [
       { to: '/recurring-expenses', label: 'المصاريف الدورية', icon: Repeat, roles: ['admin', 'manager', 'accountant'], permission: 'recurring_expenses.manage' },
       { to: '/daily-expenses', label: 'المصروفات اليومية', icon: Receipt, roles: ['admin', 'manager', 'accountant', 'cashier'], permission: 'expenses.daily.create' },
       { to: '/dashboard/financial', label: 'برج المراقبة المالية', icon: Activity, roles: ['admin', 'manager', 'accountant'], permission: 'dashboard.financial.view' },
+      // PR-FIN-SIDEBAR-1 — disabled placeholders for upcoming PRs.
+      // Each item shows the future label + icon + "قريبًا" pill but
+      // never navigates. The `to` strings here are planning-only
+      // markers; no routes are registered. Once the real PR lands,
+      // each entry flips by removing `placeholder: true`. Permission
+      // gate `finance.dashboard.view` matches `/dashboard/finance`
+      // visibility so admins always see the roadmap; cashiers/etc.
+      // never do.
+      { to: '/finance/reports', label: 'التقارير', icon: PieChart, roles: ['admin', 'manager', 'accountant'], permission: 'finance.dashboard.view', placeholder: true },
+      { to: '/finance/statements', label: 'كشف الحسابات', icon: ListChecks, roles: ['admin', 'manager', 'accountant'], permission: 'finance.dashboard.view', placeholder: true },
+      { to: '/finance/zakat', label: 'الزكاة', icon: HandCoins, roles: ['admin', 'manager', 'accountant'], permission: 'finance.dashboard.view', placeholder: true },
+      { to: '/audit/financial-movements', label: 'تتبع الحركات المالية', icon: History, roles: ['admin', 'manager', 'accountant'], permission: 'finance.dashboard.view', placeholder: true },
       // /accounting (legacy), /budgets, /financial-controls,
       // /bank-reconciliation, /accounts-audit — all routes still work
       // but removed from sidebar to reduce cognitive load. Power users
@@ -328,36 +356,75 @@ export function Sidebar() {
                 <div className="mx-2 my-2 border-t border-slate-200 lg:block hidden" />
               )}
               <div className="space-y-0.5">
-                {group.items.map(({ to, label, icon: Icon }) => (
-                  <NavLink
-                    key={to}
-                    to={to}
-                    end={to === '/'}
-                    onClick={closeMobile}
-                    title={collapsed ? label : undefined}
-                    className={({ isActive }) =>
-                      clsx(
-                        'flex items-center gap-3 rounded-lg font-semibold transition',
-                        collapsed && !mobileOpen
-                          ? 'lg:justify-center lg:px-2 lg:py-2.5 px-3 py-2.5'
-                          : 'px-3 py-2.5',
-                        isActive
-                          ? 'bg-brand-50 text-brand-700'
-                          : 'text-slate-600 hover:bg-slate-50',
-                      )
-                    }
-                  >
-                    <Icon size={20} className="shrink-0" />
-                    <span
-                      className={clsx(
-                        'truncate',
-                        collapsed && !mobileOpen && 'lg:hidden',
-                      )}
+                {group.items.map((item) => {
+                  const { to, label, icon: Icon, placeholder, placeholderTooltip } = item;
+                  // PR-FIN-SIDEBAR-1 — placeholder branch. Renders a
+                  // non-clickable element with the same icon + label
+                  // as a real NavLink, plus a "قريبًا" pill and a
+                  // tooltip. The active branch below stays untouched.
+                  if (placeholder) {
+                    const tooltip = placeholderTooltip ?? 'متاح في تحديث لاحق';
+                    return (
+                      <div
+                        key={to}
+                        role="link"
+                        aria-disabled="true"
+                        data-testid={`sidebar-placeholder-${to}`}
+                        title={tooltip}
+                        className={clsx(
+                          'flex items-center gap-3 rounded-lg font-semibold opacity-60 cursor-not-allowed select-none',
+                          collapsed && !mobileOpen
+                            ? 'lg:justify-center lg:px-2 lg:py-2.5 px-3 py-2.5'
+                            : 'px-3 py-2.5',
+                          'text-slate-500',
+                        )}
+                      >
+                        <Icon size={20} className="shrink-0" />
+                        {(!collapsed || mobileOpen) && (
+                          <>
+                            <span className="truncate flex-1">{label}</span>
+                            <span
+                              className="shrink-0 rounded-full bg-slate-100 text-slate-500 text-[9px] font-bold px-1.5 py-0.5 leading-none"
+                              data-testid="sidebar-coming-soon-pill"
+                            >
+                              قريبًا
+                            </span>
+                          </>
+                        )}
+                      </div>
+                    );
+                  }
+                  return (
+                    <NavLink
+                      key={to}
+                      to={to}
+                      end={to === '/'}
+                      onClick={closeMobile}
+                      title={collapsed ? label : undefined}
+                      className={({ isActive }) =>
+                        clsx(
+                          'flex items-center gap-3 rounded-lg font-semibold transition',
+                          collapsed && !mobileOpen
+                            ? 'lg:justify-center lg:px-2 lg:py-2.5 px-3 py-2.5'
+                            : 'px-3 py-2.5',
+                          isActive
+                            ? 'bg-brand-50 text-brand-700'
+                            : 'text-slate-600 hover:bg-slate-50',
+                        )
+                      }
                     >
-                      {label}
-                    </span>
-                  </NavLink>
-                ))}
+                      <Icon size={20} className="shrink-0" />
+                      <span
+                        className={clsx(
+                          'truncate',
+                          collapsed && !mobileOpen && 'lg:hidden',
+                        )}
+                      >
+                        {label}
+                      </span>
+                    </NavLink>
+                  );
+                })}
               </div>
             </div>
           ))}
