@@ -14,7 +14,7 @@
  *      array containing every row.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { PaymentModal } from '../POS';
 import { useCartStore } from '@/stores/cart.store';
@@ -60,7 +60,11 @@ function renderModal({
   onClose = vi.fn(),
 }: {
   grandTotal?: number;
-  onConfirm?: () => void;
+  // PR-POS-PAY-1-HOTFIX-1 — `onConfirm` now receives the freshly-built
+  // drafts list. Existing tests that pass `vi.fn()` keep working since
+  // mocks accept any signature; new regression tests below assert on
+  // the argument explicitly.
+  onConfirm?: (...args: unknown[]) => void;
   onClose?: () => void;
 } = {}) {
   // Seed a one-line cart so grandTotal is not zero when the modal
@@ -211,5 +215,127 @@ describe('<PaymentModal /> — PR-POS-PAY-1 split payments', () => {
       amount: 1000,
       payment_account_id: null,
     });
+  });
+
+  // ─────────────────────────────────────────────────────────────────
+  // PR-POS-PAY-1-HOTFIX-1 regression tests
+  //
+  // These pin the two-part stale-closure fix:
+  //
+  //   Fix A — `openPay()` no longer seeds `cart.payments` with a
+  //           legacy single-cash row before opening the modal. The
+  //           modal owns its own draft state.
+  //   Fix B — Submitting the modal invokes `onConfirm(drafts)` and
+  //           the parent's submit uses those drafts directly in the
+  //           API payload, instead of reading the closure-captured
+  //           `cart.payments` snapshot (which can be stale because
+  //           Zustand's `setState` is queued behind React's render
+  //           cycle).
+  //
+  // Invoice INV-2026-000116 was the production reproducer: the
+  // cashier split 350 EGP across cash + InstaPay but the persisted
+  // record was a single `cash 350` row because the parent's submit
+  // closure shipped the legacy pre-fill instead of the modal's
+  // freshly-built drafts.
+  // ─────────────────────────────────────────────────────────────────
+
+  it('PR-POS-PAY-1-HOTFIX-1: onConfirm receives the freshly-built drafts as its first argument (split payment)', () => {
+    const onConfirm = vi.fn();
+    renderModal({ grandTotal: 1000, onConfirm });
+    // Cashier splits 600 cash + 400 cash (two rows).
+    fireEvent.change(screen.getByTestId('payment-row-amount-0'), {
+      target: { value: '600' },
+    });
+    fireEvent.click(screen.getByTestId('payment-add-row'));
+    fireEvent.click(screen.getByTestId('payment-confirm'));
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+    // The drafts argument is the source of truth for the API payload —
+    // the parent's submit must use this, not `cart.payments`.
+    const drafts = (onConfirm.mock.calls[0] as unknown[])[0] as Array<{
+      method: string;
+      amount: number;
+      payment_account_id: string | null;
+    }>;
+    expect(Array.isArray(drafts)).toBe(true);
+    expect(drafts).toHaveLength(2);
+    expect(drafts.map((d) => d.amount)).toEqual([600, 400]);
+    expect(drafts.every((d) => d.method === 'cash')).toBe(true);
+  });
+
+  it('PR-POS-PAY-1-HOTFIX-1: onConfirm drafts reflect the modal\'s current state even when cart.payments is stale', () => {
+    // Reproduces the bug shape: a parent component captured an old
+    // `cart.payments` snapshot (e.g. a legacy pre-fill of one cash
+    // row at grandTotal). The modal builds a multi-row split. The
+    // argument passed to onConfirm MUST be the modal's fresh drafts
+    // — not the store's stale value — so the parent's submit can
+    // pass them through to the API payload regardless of when
+    // Zustand flushes through React's render cycle.
+    const onConfirm = vi.fn();
+    renderModal({ grandTotal: 1000, onConfirm });
+    // Now plant a stale `cart.payments` value AFTER mount so it
+    // does not get clobbered by `renderModal`'s own seeding. This
+    // mimics what the parent's render-time closure would observe
+    // if openPay() had pre-filled the store (the legacy bug).
+    // Wrap in act() because the modal subscribes to the store and
+    // this triggers a re-render.
+    act(() => {
+      useCartStore.setState({
+        payments: [{ method: 'cash', amount: 1000 }],
+      } as Parameters<typeof useCartStore.setState>[0]);
+    });
+    expect(useCartStore.getState().payments).toEqual([
+      { method: 'cash', amount: 1000 },
+    ]);
+    // Cashier splits 350 cash + 650 cash in the modal — the modal
+    // owns its own draft state, so this does NOT touch
+    // cart.payments yet.
+    fireEvent.change(screen.getByTestId('payment-row-amount-0'), {
+      target: { value: '350' },
+    });
+    fireEvent.click(screen.getByTestId('payment-add-row'));
+    fireEvent.click(screen.getByTestId('payment-confirm'));
+    const drafts = (onConfirm.mock.calls[0] as unknown[])[0] as Array<{
+      method: string;
+      amount: number;
+    }>;
+    // The drafts handed to the parent reflect the SPLIT, not the
+    // stale single-cash row a closure-captured `cart.payments`
+    // would otherwise leak through.
+    expect(drafts).toHaveLength(2);
+    expect(drafts.reduce((s, d) => s + d.amount, 0)).toBe(1000);
+  });
+
+  it('PR-POS-PAY-1-HOTFIX-1: modal works with empty cart.payments at mount (Fix A — openPay no longer pre-fills)', () => {
+    // Pre-hotfix, openPay() called `cart.setPayments([{method:'cash',
+    // amount: grandTotal}])` BEFORE opening the modal. Post-hotfix,
+    // openPay() leaves cart.payments untouched and the modal seeds
+    // its own default row from `useState(() => [{...grandTotal}])`.
+    // This test pins that the modal renders correctly — and the
+    // parent's submit is reachable — when cart.payments is empty at
+    // mount time, which is the new normal.
+    useCartStore.setState({ payments: [] } as Parameters<
+      typeof useCartStore.setState
+    >[0]);
+    const onConfirm = vi.fn();
+    renderModal({ grandTotal: 750, onConfirm });
+    // Modal still renders one default cash row prefilled with grand
+    // total, sourced from its OWN useState — not from cart.payments.
+    const rows = screen.getAllByTestId('payment-row');
+    expect(rows).toHaveLength(1);
+    const amount = screen.getByTestId('payment-row-amount-0') as HTMLInputElement;
+    expect(Number(amount.value)).toBe(750);
+    // Confirm is enabled — no pre-fill from openPay was needed.
+    const confirm = screen.getByTestId('payment-confirm') as HTMLButtonElement;
+    expect(confirm.disabled).toBe(false);
+    fireEvent.click(confirm);
+    // onConfirm fires with the modal-sourced default draft.
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+    const drafts = (onConfirm.mock.calls[0] as unknown[])[0] as Array<{
+      method: string;
+      amount: number;
+    }>;
+    expect(drafts).toEqual([
+      expect.objectContaining({ method: 'cash', amount: 750 }),
+    ]);
   });
 });
