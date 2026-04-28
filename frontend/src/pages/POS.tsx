@@ -44,7 +44,6 @@ import { useCartStore, PaymentDraft, ManualDiscountType } from '@/stores/cart.st
 import {
   type SplitPaymentRow,
   validateSplitPayments,
-  summarizeSplitPayments,
   rowsToPaymentDrafts,
   makeRowUid,
 } from '@/lib/posSplitPayment';
@@ -52,10 +51,14 @@ import {
   paymentsApi,
   PaymentAccount,
   PaymentMethodCode,
-  PaymentProvider,
-  METHOD_LABEL_AR,
 } from '@/api/payments.api';
-import { PaymentProviderLogo } from '@/components/payments/PaymentProviderLogo';
+// PR-POS-PAY-2 — multi-row split-payment UI extracted into a shared
+// component so the invoice-edit modal can reuse it. POS continues to
+// own its cart-store integration; the editor is purely presentational.
+import {
+  SplitPaymentsEditor,
+  visibleMethodsFor as _visibleMethodsForShared,
+} from '@/components/pos/SplitPaymentsEditor';
 import { useAuthStore } from '@/stores/auth.store';
 import { useLayoutStore } from '@/stores/layout.store';
 import { Receipt, ReceiptData } from '@/components/Receipt';
@@ -1856,40 +1859,39 @@ function ItemNotesModal({
   );
 }
 
-// PR-PAY-3 — Methods the POS picker exposes (cashier-relevant subset of
-// the DB enum). Exhaustive on the active payment_method_code values
-// the POS currently supports. `credit` and `other` are intentionally
-// hidden from the picker — they are admin-only flows.
-const POS_METHODS: PaymentMethodCode[] = [
-  'cash',
-  'instapay',
-  'vodafone_cash',
-  'orange_cash',
-  'wallet',         // PR-PAY-3.1: generic wallet umbrella (WE Pay, Bank Wallet, …)
-  'card_visa',
-  'card_mastercard',
-  'card_meeza',
-  'bank_transfer',
-];
+// PR-POS-PAY-2 — Re-export `visibleMethodsFor` from the shared editor
+// module so existing imports from `'../POS'` (e.g.
+// `pages/__tests__/POS.payment-visibility.test.ts`) keep resolving
+// without churn. The single source of truth lives in
+// `frontend/src/components/pos/SplitPaymentsEditor.tsx`.
+export const visibleMethodsFor = _visibleMethodsForShared;
 
 /**
- * PaymentModal — PR-POS-PAY-1
+ * PaymentModal — PR-POS-PAY-1 / PR-POS-PAY-2
  * ──────────────────────────────────────────────────────────────────
  *
- * Replaces the single-method modal with a multi-row split-payments
- * panel. The cashier can mix cash + non-cash on the same invoice
- * (e.g. 600 كاش + 400 InstaPay). The backend already accepts an
- * `payments[]` array (`CreateInvoiceDto.payments` in
- * `backend/src/pos/dto/invoice.dto.ts`) so this is a pure UI change.
+ * Multi-row split-payment modal for the POS new-invoice flow.
+ *
+ * PR-POS-PAY-2 thinned this component down to a wrapper around the
+ * shared `<SplitPaymentsEditor />` so the invoice-edit modal can
+ * present the exact same UI without forking the implementation. The
+ * cart-store integration (default-row seeding from
+ * `cart.grandTotal()` and `cart.setPayments(...)` mirroring) stays
+ * here because it is POS-specific.
+ *
+ * Backend contract: `CreateInvoiceDto.payments` already accepts a
+ * `payments[]` array (`backend/src/pos/dto/invoice.dto.ts`) — this
+ * is a pure UI change.
  *
  * Backward compat:
  *   - Default state is one cash row prefilled with grand_total →
  *     identical UX + payload to the previous single-method modal.
  *   - Cashier adds extra rows only when they want to split.
  *
- * Validation lives in `lib/posSplitPayment.ts` (pure helper, fully
- * unit-tested). The modal just renders state and surfaces the
- * helper's `reason` string for invalid states.
+ * `data-testid` selectors are inherited unchanged from
+ * `<SplitPaymentsEditor />` so the existing
+ * `POS.split-payment.test.tsx` regression suite (PR-POS-PAY-1 +
+ * HOTFIX-1) keeps passing through this refactor.
  */
 export function PaymentModal({
   onClose,
@@ -1897,10 +1899,10 @@ export function PaymentModal({
   isPending,
 }: {
   onClose: () => void;
-  // PR-POS-PAY-1-HOTFIX-1 — `onConfirm` now receives the freshly-built
+  // PR-POS-PAY-1-HOTFIX-1 — `onConfirm` receives the freshly-built
   // drafts so the parent can ship them in the API payload without
-  // depending on `cart.payments` having flushed through React's render
-  // cycle. The modal still mirrors them into the store via
+  // depending on `cart.payments` having flushed through React's
+  // render cycle. The modal still mirrors them into the store via
   // `cart.setPayments(...)` for any downstream consumer that reads
   // from there (Receipt preview, etc.), but the source of truth for
   // the submit payload is this argument.
@@ -1910,22 +1912,8 @@ export function PaymentModal({
   const cart = useCartStore();
   const grandTotal = cart.grandTotal();
 
-  const providersQuery = useQuery({
-    queryKey: ['payment-providers'],
-    queryFn: () => paymentsApi.listProviders(),
-  });
-  const accountsQuery = useQuery({
-    queryKey: ['payment-accounts', 'active'],
-    queryFn: () => paymentsApi.listAccounts({ active: true }),
-  });
-
-  const providers = providersQuery.data ?? [];
-  const accounts = accountsQuery.data ?? [];
-
-  // PR-POS-PAY-1 — multi-row state replaces the previous single
-  // (method, amount, accountId) tuple. Default = one cash row at the
-  // full grand total → same legacy behavior when the cashier doesn't
-  // split.
+  // Default = one cash row at the full grand total → same legacy
+  // behavior when the cashier doesn't split.
   const [rows, setRows] = useState<SplitPaymentRow[]>(() => [
     {
       uid: makeRowUid(),
@@ -1935,74 +1923,21 @@ export function PaymentModal({
     },
   ]);
 
-  // Snap any row whose method is no longer visible (admin
-  // deactivated its only account) back to cash. Mirrors the legacy
-  // PR-PAY-3 behavior, applied per-row.
-  useEffect(() => {
-    const visible = visibleMethodsFor(accounts);
-    setRows((prev) =>
-      prev.map((r) =>
-        visible.includes(r.method)
-          ? r
-          : { ...r, method: 'cash', payment_account_id: null },
-      ),
-    );
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accountsQuery.dataUpdatedAt]);
-
-  const accountsForMethod = (m: PaymentMethodCode) =>
-    accounts.filter((a) => a.method === m);
-
+  // Mirror the editor's own internal validation so we can gate the
+  // confirm button. The editor calls the same helper, so the two
+  // results are guaranteed to agree on the same `rows` snapshot.
+  // We intentionally do NOT thread the predicate through the editor;
+  // the editor mounts its own accounts query and computes its own
+  // `isAccountRequired`. To keep parity we re-derive `accounts`
+  // here only for the gate. (Cheap: React Query caches the query
+  // shared with the editor.)
+  const accountsQuery = useQuery({
+    queryKey: ['payment-accounts', 'active'],
+    queryFn: () => paymentsApi.listAccounts({ active: true }),
+  });
+  const accounts: PaymentAccount[] = accountsQuery.data ?? [];
   const isAccountRequired = (m: PaymentMethodCode) =>
-    m !== 'cash' && accountsForMethod(m).length > 0;
-
-  const updateRow = (uid: string, patch: Partial<SplitPaymentRow>) => {
-    setRows((prev) =>
-      prev.map((r) => {
-        if (r.uid !== uid) return r;
-        const next = { ...r, ...patch };
-        // When the method changes, recompute the account selection
-        // using the same auto-select logic the legacy single-row
-        // modal had: prefer the default-active account, else the
-        // unique active account, else leave blank.
-        if (patch.method && patch.method !== r.method) {
-          if (patch.method === 'cash') {
-            next.payment_account_id = null;
-            next.account_display_name = null;
-          } else {
-            const candidates = accountsForMethod(patch.method);
-            const def = candidates.find((a) => a.is_default);
-            const auto =
-              def ?? (candidates.length === 1 ? candidates[0] : null);
-            next.payment_account_id = auto?.id ?? null;
-            next.account_display_name = auto?.display_name ?? null;
-          }
-        }
-        return next;
-      }),
-    );
-  };
-
-  const addRow = () => {
-    // New row defaults to cash for the remaining amount (or 0 if
-    // already overpaid). Cashier can change method/amount in-place.
-    const summary = summarizeSplitPayments(rows, grandTotal);
-    setRows((prev) => [
-      ...prev,
-      {
-        uid: makeRowUid(),
-        method: 'cash',
-        amount: Math.max(0, summary.remaining),
-        payment_account_id: null,
-      },
-    ]);
-  };
-
-  const removeRow = (uid: string) => {
-    setRows((prev) => (prev.length <= 1 ? prev : prev.filter((r) => r.uid !== uid)));
-  };
-
-  const summary = summarizeSplitPayments(rows, grandTotal);
+    m !== 'cash' && accounts.filter((a) => a.method === m).length > 0;
   const validation = validateSplitPayments(rows, grandTotal, {
     isAccountRequired,
   });
@@ -2015,9 +1950,7 @@ export function PaymentModal({
     //      reader (Receipt preview, devtools, etc.).
     //   2. onConfirm(drafts) — the parent's submit uses this directly
     //      so the API payload never depends on the store flushing
-    //      through React's render cycle. Without this, the parent's
-    //      closure-captured `cart.payments` could ship a stale or
-    //      legacy-prefilled value (PR-POS-PAY-1-HOTFIX-1).
+    //      through React's render cycle (PR-POS-PAY-1-HOTFIX-1).
     const drafts = rowsToPaymentDrafts(rows);
     cart.setPayments(drafts);
     onConfirm(drafts);
@@ -2026,96 +1959,25 @@ export function PaymentModal({
   return (
     <ModalShell onClose={onClose} title="إتمام الدفع">
       <div className="p-5 space-y-4">
-        {/* Grand total banner */}
-        <div>
-          <label className="text-xs text-slate-400 block mb-1">
-            الإجمالي المطلوب
-          </label>
-          <div className="text-3xl font-black text-emerald-400 text-center py-2 bg-white/5 rounded-lg">
-            {EGP(grandTotal)}
-          </div>
-        </div>
+        <SplitPaymentsEditor
+          rows={rows}
+          onChange={setRows}
+          grandTotal={grandTotal}
+          variant="dark"
+        />
 
-        {/* Payment rows */}
-        <div className="space-y-3" data-testid="payment-rows">
-          {rows.map((row, idx) => (
-            <PaymentRow
-              key={row.uid}
-              row={row}
-              index={idx}
-              providers={providers}
-              accounts={accounts}
-              isOnlyRow={rows.length === 1}
-              onChange={(patch) => updateRow(row.uid, patch)}
-              onRemove={() => removeRow(row.uid)}
-            />
-          ))}
-        </div>
-
-        {/* Add another payment method */}
-        <button
-          type="button"
-          onClick={addRow}
-          data-testid="payment-add-row"
-          className="w-full py-2 rounded-lg border border-dashed border-white/20 text-slate-300 text-sm font-bold hover:bg-white/5 hover:border-white/40 transition"
-        >
-          + إضافة وسيلة دفع
-        </button>
-
-        {/* Summary panel */}
-        <div
-          className="rounded-lg bg-white/5 p-3 space-y-1.5 text-sm"
-          data-testid="payment-summary"
-        >
-          <div className="flex justify-between">
-            <span className="text-slate-400">إجمالي الفاتورة</span>
-            <span className="font-mono tabular-nums text-white">
-              {EGP(grandTotal)}
-            </span>
-          </div>
-          <div className="flex justify-between" data-testid="payment-summary-paid">
-            <span className="text-slate-400">إجمالي المدفوع</span>
-            <span className="font-mono tabular-nums text-emerald-400 font-bold">
-              {EGP(summary.totalPaid)}
-            </span>
-          </div>
-          {summary.remaining > 0.001 && (
-            <div className="flex justify-between" data-testid="payment-summary-remaining">
-              <span className="text-slate-400">المتبقي (آجل)</span>
-              <span className="font-mono tabular-nums text-amber-400 font-bold">
-                {EGP(summary.remaining)}
-              </span>
-            </div>
-          )}
-          {summary.change > 0.001 && (
-            <div className="flex justify-between" data-testid="payment-summary-change">
-              <span className="text-slate-400">الباقي للعميل</span>
-              <span className="font-mono tabular-nums text-emerald-400 font-bold">
-                {EGP(summary.change)}
-              </span>
-            </div>
-          )}
-        </div>
-
-        {/* Validation message */}
-        {!validation.ok && (
-          <div
-            className="rounded-lg bg-rose-500/10 border border-rose-500/30 px-3 py-2 text-[12px] text-rose-300 font-bold"
-            data-testid="payment-validation-error"
-          >
-            {validation.reason}
-          </div>
-        )}
-
-        {/* Actions */}
+        {/* Actions — kept here so the modal owns its own confirm
+            semantics (cart-store mirroring + drafts handoff). */}
         <div className="flex gap-2">
           <button
+            type="button"
             className="flex-1 py-2.5 rounded-lg bg-white/5 text-slate-300 hover:bg-white/10"
             onClick={onClose}
           >
             إلغاء
           </button>
           <button
+            type="button"
             className="flex-1 py-2.5 rounded-lg bg-gradient-to-br from-emerald-500 to-teal-600 text-white font-bold hover:opacity-90 disabled:opacity-40"
             onClick={submit}
             disabled={!canConfirm}
@@ -2126,245 +1988,6 @@ export function PaymentModal({
         </div>
       </div>
     </ModalShell>
-  );
-}
-
-/**
- * PaymentRow — PR-POS-PAY-1
- *
- * Single split-payment row inside `PaymentModal`. Encapsulates the
- * per-row method picker, account picker (when needed), amount
- * input, and remove button. Pure presentational — all state lives
- * in the parent's `rows[]` array.
- */
-function PaymentRow({
-  row,
-  index,
-  providers,
-  accounts,
-  isOnlyRow,
-  onChange,
-  onRemove,
-}: {
-  row: SplitPaymentRow;
-  index: number;
-  providers: PaymentProvider[];
-  accounts: PaymentAccount[];
-  isOnlyRow: boolean;
-  onChange: (patch: Partial<SplitPaymentRow>) => void;
-  onRemove: () => void;
-}) {
-  const visibleMethods = visibleMethodsFor(accounts);
-  const accountsForRow = accounts.filter((a) => a.method === row.method);
-  const isCash = row.method === 'cash';
-  const blockedNoAccount = !isCash && accountsForRow.length === 0;
-
-  return (
-    <div
-      className="rounded-xl border border-white/10 bg-white/5 p-3 space-y-2"
-      data-testid="payment-row"
-      data-row-index={index}
-    >
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-[10px] font-bold text-slate-400">
-          سطر #{index + 1}
-        </span>
-        {!isOnlyRow && (
-          <button
-            type="button"
-            onClick={onRemove}
-            data-testid={`payment-row-remove-${index}`}
-            aria-label="حذف سطر الدفع"
-            className="text-rose-400 hover:text-rose-300 text-[11px] font-bold"
-          >
-            حذف
-          </button>
-        )}
-      </div>
-
-      {/* Method picker — same grid as the legacy modal but per-row. */}
-      <PaymentMethodGrid
-        providers={providers}
-        accounts={accounts}
-        selected={row.method}
-        onSelect={(m) => onChange({ method: m })}
-      />
-
-      {/* Account picker for non-cash methods. */}
-      {!isCash && visibleMethods.includes(row.method) && (
-        <PaymentAccountPicker
-          method={row.method}
-          providers={providers}
-          accounts={accountsForRow}
-          selected={row.payment_account_id}
-          onSelect={(id) => {
-            const acct = accountsForRow.find((a) => a.id === id) ?? null;
-            onChange({
-              payment_account_id: id,
-              account_display_name: acct?.display_name ?? null,
-            });
-          }}
-          blocked={blockedNoAccount}
-          needsManualPick={
-            !isCash && accountsForRow.length > 1 && !row.payment_account_id
-          }
-        />
-      )}
-
-      {/* Amount input. */}
-      <div>
-        <label className="text-xs text-slate-400 block mb-1">المبلغ</label>
-        <input
-          type="number"
-          className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-lg font-bold"
-          value={row.amount}
-          onChange={(e) => onChange({ amount: parseFloat(e.target.value) || 0 })}
-          data-testid={`payment-row-amount-${index}`}
-        />
-      </div>
-    </div>
-  );
-}
-
-// PR-PAY-3 fix — Compute the methods the cashier can actually USE.
-// Cash is always shown; non-cash methods only appear if at least one
-// active payment_account exists for them. Hidden methods can become
-// visible automatically when admin creates an active account, and
-// disappear automatically on deactivation — no rebuild required.
-export function visibleMethodsFor(
-  accounts: Pick<PaymentAccount, 'method' | 'active'>[],
-): PaymentMethodCode[] {
-  const activeMethods = new Set(
-    accounts.filter((a) => a.active).map((a) => a.method),
-  );
-  return POS_METHODS.filter((m) => m === 'cash' || activeMethods.has(m));
-}
-
-function PaymentMethodGrid({
-  providers,
-  accounts,
-  selected,
-  onSelect,
-}: {
-  providers: PaymentProvider[];
-  accounts: PaymentAccount[];
-  selected: PaymentMethodCode;
-  onSelect: (m: PaymentMethodCode) => void;
-}) {
-  const visible = visibleMethodsFor(accounts);
-  return (
-    <div className="grid grid-cols-2 gap-2">
-      {visible.map((m) => {
-        const provider = providers.find((p) => p.method === m);
-        const isSelected = selected === m;
-        return (
-          <button
-            key={m}
-            onClick={() => onSelect(m)}
-            className={`p-3 rounded-lg font-bold border text-right transition ${
-              isSelected
-                ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-300'
-                : 'bg-white/5 border-white/10 text-slate-300 hover:bg-white/10'
-            }`}
-          >
-            <div className="flex items-center gap-2 justify-between">
-              <div className="flex items-center gap-2">
-                <PaymentProviderLogo
-                  logoKey={provider?.logo_key}
-                  method={m}
-                  name={provider?.name_ar ?? METHOD_LABEL_AR[m]}
-                  size="sm"
-                  decorative
-                />
-                <span className="text-sm">{METHOD_LABEL_AR[m]}</span>
-              </div>
-            </div>
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-function PaymentAccountPicker({
-  method,
-  providers,
-  accounts,
-  selected,
-  onSelect,
-  blocked,
-  needsManualPick,
-}: {
-  method: PaymentMethodCode;
-  providers: PaymentProvider[];
-  accounts: PaymentAccount[];
-  selected: string | null;
-  onSelect: (id: string) => void;
-  blocked: boolean;
-  needsManualPick: boolean;
-}) {
-  if (blocked) {
-    return (
-      <div className="p-3 rounded-lg bg-amber-900/30 border border-amber-500/40 text-amber-200 text-sm">
-        لا يوجد حساب مفعل لهذه الطريقة. أضفه من إعدادات وسائل الدفع.
-      </div>
-    );
-  }
-  return (
-    <div>
-      <label className="text-xs text-slate-400 block mb-1">
-        حساب التحصيل
-      </label>
-      <div className="space-y-2 max-h-48 overflow-auto">
-        {accounts.map((a) => {
-          const provider = providers.find(
-            (p) => p.provider_key === a.provider_key,
-          );
-          const isSelected = selected === a.id;
-          return (
-            <button
-              key={a.id}
-              onClick={() => onSelect(a.id)}
-              className={`w-full text-right p-2.5 rounded-lg border transition flex items-start gap-2 ${
-                isSelected
-                  ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-300'
-                  : 'bg-white/5 border-white/10 text-slate-300 hover:bg-white/10'
-              }`}
-            >
-              <PaymentProviderLogo
-                logoDataUrl={(a.metadata as any)?.logo_data_url}
-                logoKey={provider?.logo_key}
-                method={a.method}
-                name={a.display_name}
-                size="md"
-                decorative
-              />
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center justify-between">
-                  <span className="font-bold text-sm truncate">
-                    {a.display_name}
-                  </span>
-                  {a.is_default && (
-                    <span className="text-[10px] font-bold bg-amber-500/20 text-amber-200 px-2 py-0.5 rounded shrink-0">
-                      افتراضي
-                    </span>
-                  )}
-                </div>
-                <div className="text-[11px] text-slate-400 mt-0.5 truncate">
-                  {provider?.name_ar ?? METHOD_LABEL_AR[method]}
-                  {a.identifier ? ` · ${a.identifier}` : ''}
-                </div>
-              </div>
-            </button>
-          );
-        })}
-      </div>
-      {needsManualPick && (
-        <div className="text-[11px] text-amber-300 mt-1">
-          اختر حساب التحصيل قبل المتابعة.
-        </div>
-      )}
-    </div>
   );
 }
 
