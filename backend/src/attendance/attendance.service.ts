@@ -705,6 +705,17 @@ export class AttendanceService {
         // is_advance lives on CreateExpenseDto; CreateDailyExpenseDto
         // doesn't declare it but the service reads it through `(dto as any)`
         // (accounting.service.ts:152-154). Inject via spread + cast.
+        //
+        // PR-EMP-ADVANCE-PAY-2 — propagate `source_type` so the
+        // accounting service's PR-EMP-ADVANCE-PAY-1 gates fire on
+        // this internal call too. Without it the legacy auto-resolve
+        // would re-attribute a direct-cashbox excess-advance back to
+        // the cashier's open shift (the same bug PR-EMP-ADVANCE-PAY-1
+        // fixed for the modal). Mirror the explicit shift_id signal:
+        //   - shift_id present → operator picked open_shift
+        //   - shift_id absent  → direct cashbox
+        const sourceTypeForAdvance: 'open_shift' | 'direct_cashbox' =
+          body.shift_id ? 'open_shift' : 'direct_cashbox';
         const expense = await this.accountingSvc.createDailyExpense(
           {
             amount: r2(excess),
@@ -720,6 +731,10 @@ export class AttendanceService {
             // amount (settlement + advance) to the same shift's
             // closing.
             shift_id: body.shift_id,
+            // PR-EMP-ADVANCE-PAY-2 — tightens the contract so the
+            // explicit-mode gates in createExpense fire correctly for
+            // this internal flow.
+            source_type: sourceTypeForAdvance,
           } as any,
           adminId,
           adminPermissions,

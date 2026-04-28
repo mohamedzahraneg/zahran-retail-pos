@@ -311,6 +311,13 @@ describe('AttendanceService — admin + wage accrual + pay-wage', () => {
       expect(expenseDto.employee_user_id).toBe(TARGET);
       expect(expenseDto.cashbox_id).toBe(CASHBOX);
       expect(expenseDto.category_id).toBe('advance-cat-uuid');
+      // PR-EMP-ADVANCE-PAY-2 — without shift_id this internal call
+      // must mark itself as `direct_cashbox` so accounting.service's
+      // explicit-mode gate fires and `expenses.shift_id` stays NULL
+      // (instead of the legacy auto-resolve re-attaching the excess
+      // advance to whichever shift happens to share the cashbox).
+      expect(expenseDto.source_type).toBe('direct_cashbox');
+      expect(expenseDto.shift_id).toBeUndefined();
       expect(empSvc.addBonus).not.toHaveBeenCalled();
 
       expect(r.payable_amount_settled).toBe(100);
@@ -318,6 +325,32 @@ describe('AttendanceService — admin + wage accrual + pay-wage', () => {
       expect(r.excess_handling).toBe('advance');
       expect(r.advance_expense_id).toBe('exp-1');
       expect(r.bonus_id).toBeNull();
+    });
+
+    it('PR-EMP-ADVANCE-PAY-2: excess as advance WITH shift_id propagates source_type=open_shift', async () => {
+      mockGl(-100);
+      empSvc.recordSettlement.mockResolvedValueOnce({ id: 'settle-1' });
+      accountingSvc.createDailyExpense.mockResolvedValueOnce({ id: 'exp-2' });
+
+      const SHIFT = '77777777-7777-7777-7777-777777777777';
+      await service.payWage(
+        TARGET,
+        {
+          amount: 270,
+          cashbox_id: CASHBOX,
+          excess_handling: 'advance',
+          shift_id: SHIFT,
+        },
+        ADMIN,
+        ['*'],
+      );
+
+      const expenseDto = accountingSvc.createDailyExpense.mock.calls[0][0];
+      expect(expenseDto.shift_id).toBe(SHIFT);
+      // With shift_id present the internal call switches to
+      // `open_shift` so the accounting service validates the shift
+      // and links the advance to it (PR-15 contract preserved).
+      expect(expenseDto.source_type).toBe('open_shift');
     });
 
     it('excess as bonus: settles payable + accrues bonus + settles bonus', async () => {
