@@ -26,11 +26,26 @@ export interface FinanceDashboardResponse {
   generated_at: string;
   filters_applied: DashboardFilters;
 
+  /**
+   * PR-FIN-2-HOTFIX-4 — health card was conflating two distinct
+   * invariants under "Cashbox Drift". Split into:
+   *   · `cashbox_balance_drift_count` — REAL money drift
+   *     (current_balance ≠ Σ cashbox_transactions per cashbox)
+   *   · `cashbox_drift_count` / `cashbox_drift_total` — per-reference
+   *     LABELING drift only (rows in v_cashbox_drift_per_ref where
+   *     reference_type differs between CT and JE for the same event).
+   *     This NEVER reflects missing money — the per-cashbox totals
+   *     still match.
+   * Plus `engine_bypass_alerts_last_seen` so the UI can mark the
+   * 7-day count as historical when it's older than ~24h.
+   */
   health: {
     trial_balance_imbalance: number;
+    cashbox_balance_drift_count: number;
     cashbox_drift_total: number;
     cashbox_drift_count: number;
     engine_bypass_alerts_7d: number;
+    engine_bypass_alerts_last_seen: string | null;
     unbalanced_entries_count: number;
     overall: 'healthy' | 'warning' | 'critical';
   };
@@ -43,10 +58,20 @@ export interface FinanceDashboardResponse {
     total_cash_equivalents: number;
   };
 
+  /**
+   * PR-FIN-2-HOTFIX-4 — split daily expenses into "today" vs "period"
+   * so the card reads معنى ("اليوم 0 / الفترة 3,821") instead of just
+   * showing zeros when there are no expenses today.
+   *   · `today_*` always uses Cairo today's date.
+   *   · `period_*` uses the dashboard's `range` filter.
+   */
   daily_expenses: {
-    total: number;
-    count: number;
-    largest: { category: string | null; amount: number } | null;
+    today_total: number;
+    today_count: number;
+    today_largest: { category: string | null; amount: number } | null;
+    period_total: number;
+    period_count: number;
+    period_largest: { category: string | null; amount: number } | null;
   };
 
   balances: {
@@ -55,10 +80,30 @@ export interface FinanceDashboardResponse {
       count: number;
       top: { name: string; amount: number } | null;
     };
+    /**
+     * PR-FIN-2-HOTFIX-4 — supplier balances now consult three
+     * independent sources (in order of priority):
+     *   1. `suppliers.current_balance` — the legacy sub-ledger field
+     *   2. `journal_lines` summed on GL account 211 per supplier
+     *   3. `purchases.grand_total - paid_amount` per supplier
+     *
+     * `effective_source` reports which source produced a non-zero
+     * answer (or `'none'` when all three agree on zero).
+     * `sources_checked` lists every source consulted so the UI
+     * caption can be precise: "محسوب من سجل الموردين + GL 211 +
+     * المشتريات غير المسدّدة".
+     */
     suppliers: {
       total_due: number;
       count: number;
       top: { name: string; amount: number } | null;
+      effective_source:
+        | 'suppliers_table'
+        | 'gl_211'
+        | 'purchases'
+        | 'mixed'
+        | 'none';
+      sources_checked: Array<'suppliers_table' | 'gl_211' | 'purchases'>;
     };
     employees: {
       total_owed_to: number;

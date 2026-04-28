@@ -23,11 +23,16 @@ export interface FinanceDashboard {
   generated_at: string;
   filters_applied: DashboardFilters;
 
+  // PR-FIN-2-HOTFIX-4 — split real cashbox-balance drift away from
+  // per-reference labeling drift, plus carry the timestamp of the
+  // most recent bypass alert so the UI can mark counts as historical.
   health: {
     trial_balance_imbalance: number;
+    cashbox_balance_drift_count: number;
     cashbox_drift_total: number;
     cashbox_drift_count: number;
     engine_bypass_alerts_7d: number;
+    engine_bypass_alerts_last_seen: string | null;
     unbalanced_entries_count: number;
     overall: 'healthy' | 'warning' | 'critical';
   };
@@ -40,10 +45,14 @@ export interface FinanceDashboard {
     total_cash_equivalents: number;
   };
 
+  // PR-FIN-2-HOTFIX-4 — both today's and the period's slices.
   daily_expenses: {
-    total: number;
-    count: number;
-    largest: { category: string | null; amount: number } | null;
+    today_total: number;
+    today_count: number;
+    today_largest: { category: string | null; amount: number } | null;
+    period_total: number;
+    period_count: number;
+    period_largest: { category: string | null; amount: number } | null;
   };
 
   balances: {
@@ -52,10 +61,20 @@ export interface FinanceDashboard {
       count: number;
       top: { name: string; amount: number } | null;
     };
+    // PR-FIN-2-HOTFIX-4 — supplier card consults three sources
+    // (suppliers.current_balance → GL 211 → unpaid purchases). The
+    // UI renders a caption derived from these flags.
     suppliers: {
       total_due: number;
       count: number;
       top: { name: string; amount: number } | null;
+      effective_source:
+        | 'suppliers_table'
+        | 'gl_211'
+        | 'purchases'
+        | 'mixed'
+        | 'none';
+      sources_checked: Array<'suppliers_table' | 'gl_211' | 'purchases'>;
     };
     employees: {
       total_owed_to: number;

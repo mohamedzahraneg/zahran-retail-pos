@@ -323,8 +323,10 @@ describe('FinanceDashboardService — PR-FIN-2', () => {
       expect(r.profit.sales_total).toBe(0);
       expect(r.profit.gross_profit).toBe(0);
       expect(r.profit.confidence).toBe('N/A');
-      expect(r.daily_expenses.total).toBe(0);
-      expect(r.daily_expenses.largest).toBeNull();
+      expect(r.daily_expenses.today_total).toBe(0);
+      expect(r.daily_expenses.today_largest).toBeNull();
+      expect(r.daily_expenses.period_total).toBe(0);
+      expect(r.daily_expenses.period_largest).toBeNull();
       expect(r.balances.customers.top).toBeNull();
       expect(r.balances.suppliers.top).toBeNull();
       expect(Array.isArray(r.profit_trend)).toBe(true);
@@ -374,6 +376,223 @@ describe('FinanceDashboardService — PR-FIN-2', () => {
         expect(upper).not.toMatch(/\bDELETE\s+FROM\b/);
         expect(upper).not.toMatch(/\bTRUNCATE\b/);
       }
+    });
+  });
+
+  /**
+   * PR-FIN-2-HOTFIX-4 — dashboard clarity guards.
+   *
+   * Three concerns that the previous PR conflated under generic
+   * field names. Each test pins one shape so the next contributor
+   * can't accidentally collapse them again:
+   *   1. health response splits real cashbox-balance drift away
+   *      from per-reference labeling drift.
+   *   2. health response carries the timestamp of the most recent
+   *      bypass alert so the UI can mark counts as "تاريخية".
+   *   3. daily_expenses returns BOTH today and period slices so
+   *      the operator sees activity even when today is quiet.
+   *   4. supplier balances use a 3-source fallback chain and
+   *      report which source actually carried data.
+   */
+  describe('PR-FIN-2-HOTFIX-4 — dashboard clarity', () => {
+    it('separates real cashbox balance drift from per-reference label drift', async () => {
+      const { svc } = buildSvc({
+        matchers: [
+          {
+            test: (s) => /cashbox_money_drift AS/.test(s) && /ref_drift AS/.test(s),
+            rows: [
+              {
+                total_debit: '100.00',
+                total_credit: '100.00',
+                cashbox_balance_drift_count: 0,
+                drift_count: 8,
+                drift_abs: '1057.98',
+                bypass_7d: 22,
+                bypass_last_seen: '2026-04-25T14:00:00Z',
+                unbalanced_count: 0,
+              },
+            ],
+          },
+        ],
+      });
+      const r = await svc.dashboard({ from: '2026-04-01', to: '2026-04-28' });
+      expect(r.health.cashbox_balance_drift_count).toBe(0);
+      expect(r.health.cashbox_drift_count).toBe(8);
+      expect(r.health.cashbox_drift_total).toBe(1057.98);
+      expect(r.health.engine_bypass_alerts_7d).toBe(22);
+      expect(r.health.engine_bypass_alerts_last_seen).toBe(
+        '2026-04-25T14:00:00Z',
+      );
+      // Labeling drift + historical bypass = warning, not critical.
+      expect(r.health.overall).toBe('warning');
+    });
+
+    it('escalates to critical when REAL cashbox balance drift > 0', async () => {
+      const { svc } = buildSvc({
+        matchers: [
+          {
+            test: (s) => /cashbox_money_drift AS/.test(s) && /ref_drift AS/.test(s),
+            rows: [
+              {
+                total_debit: '100.00',
+                total_credit: '100.00',
+                cashbox_balance_drift_count: 1,
+                drift_count: 0,
+                drift_abs: '0',
+                bypass_7d: 0,
+                bypass_last_seen: null,
+                unbalanced_count: 0,
+              },
+            ],
+          },
+        ],
+      });
+      const r = await svc.dashboard({ from: '2026-04-01', to: '2026-04-28' });
+      expect(r.health.cashbox_balance_drift_count).toBe(1);
+      // Real money drift is critical, not just a warning.
+      expect(r.health.overall).toBe('critical');
+    });
+
+    it('returns engine_bypass_alerts_last_seen=null when no recent alerts', async () => {
+      const { svc } = buildSvc({
+        matchers: [
+          {
+            test: (s) => /cashbox_money_drift AS/.test(s),
+            rows: [
+              {
+                total_debit: '0', total_credit: '0',
+                cashbox_balance_drift_count: 0,
+                drift_count: 0, drift_abs: '0',
+                bypass_7d: 0, bypass_last_seen: null,
+                unbalanced_count: 0,
+              },
+            ],
+          },
+        ],
+      });
+      const r = await svc.dashboard({ from: '2026-04-01', to: '2026-04-28' });
+      expect(r.health.engine_bypass_alerts_last_seen).toBeNull();
+    });
+
+    it('daily_expenses returns both today and period slices', async () => {
+      const { svc } = buildSvc({
+        matchers: [
+          {
+            test: (s) => /today_expenses AS/.test(s) && /period_expenses AS/.test(s),
+            rows: [
+              {
+                today_total: '0',
+                today_count: 0,
+                today_largest_cat: null,
+                today_largest_amt: null,
+                period_total: '3821.00',
+                period_count: 17,
+                period_largest_cat: 'كهرباء ومرافق',
+                period_largest_amt: '2000.00',
+              },
+            ],
+          },
+        ],
+      });
+      const r = await svc.dashboard({ from: '2026-04-01', to: '2026-04-28' });
+      expect(r.daily_expenses.today_total).toBe(0);
+      expect(r.daily_expenses.today_count).toBe(0);
+      expect(r.daily_expenses.today_largest).toBeNull();
+      expect(r.daily_expenses.period_total).toBe(3821);
+      expect(r.daily_expenses.period_count).toBe(17);
+      expect(r.daily_expenses.period_largest).toEqual({
+        category: 'كهرباء ومرافق',
+        amount: 2000,
+      });
+    });
+
+    it('supplier balances pick the suppliers_table source when populated', async () => {
+      const { svc } = buildSvc({
+        matchers: [
+          {
+            test: (s) => /sources AS/.test(s) && /effective AS/.test(s) && /coa_211 AS/.test(s),
+            rows: [
+              {
+                total: '500',
+                n: 2,
+                top_name: 'مصنع النور',
+                top_amount: '300',
+                has_table: true,
+                has_gl: false,
+                has_purchase: false,
+              },
+            ],
+          },
+        ],
+      });
+      const r = await svc.dashboard({ from: '2026-04-01', to: '2026-04-28' });
+      expect(r.balances.suppliers.total_due).toBe(500);
+      expect(r.balances.suppliers.count).toBe(2);
+      expect(r.balances.suppliers.top).toEqual({ name: 'مصنع النور', amount: 300 });
+      expect(r.balances.suppliers.effective_source).toBe('suppliers_table');
+      expect(r.balances.suppliers.sources_checked).toEqual([
+        'suppliers_table', 'gl_211', 'purchases',
+      ]);
+    });
+
+    it('supplier balances fall through to gl_211 when only GL has data', async () => {
+      const { svc } = buildSvc({
+        matchers: [
+          {
+            test: (s) => /sources AS/.test(s) && /effective AS/.test(s),
+            rows: [
+              {
+                total: '120', n: 1,
+                top_name: 'مورد', top_amount: '120',
+                has_table: false, has_gl: true, has_purchase: false,
+              },
+            ],
+          },
+        ],
+      });
+      const r = await svc.dashboard({ from: '2026-04-01', to: '2026-04-28' });
+      expect(r.balances.suppliers.effective_source).toBe('gl_211');
+    });
+
+    it('supplier balances report effective_source=mixed when multiple sources contribute', async () => {
+      const { svc } = buildSvc({
+        matchers: [
+          {
+            test: (s) => /sources AS/.test(s) && /effective AS/.test(s),
+            rows: [
+              {
+                total: '600', n: 3,
+                top_name: 'a', top_amount: '300',
+                has_table: true, has_gl: true, has_purchase: false,
+              },
+            ],
+          },
+        ],
+      });
+      const r = await svc.dashboard({ from: '2026-04-01', to: '2026-04-28' });
+      expect(r.balances.suppliers.effective_source).toBe('mixed');
+    });
+
+    it('supplier balances report effective_source=none when all three sources agree on zero', async () => {
+      const { svc } = buildSvc({
+        matchers: [
+          {
+            test: (s) => /sources AS/.test(s) && /effective AS/.test(s),
+            rows: [
+              {
+                total: '0', n: 0,
+                top_name: null, top_amount: null,
+                has_table: false, has_gl: false, has_purchase: false,
+              },
+            ],
+          },
+        ],
+      });
+      const r = await svc.dashboard({ from: '2026-04-01', to: '2026-04-28' });
+      expect(r.balances.suppliers.total_due).toBe(0);
+      expect(r.balances.suppliers.count).toBe(0);
+      expect(r.balances.suppliers.top).toBeNull();
+      expect(r.balances.suppliers.effective_source).toBe('none');
     });
   });
 

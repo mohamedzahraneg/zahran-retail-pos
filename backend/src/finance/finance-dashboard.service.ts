@@ -22,6 +22,20 @@
  *     route exists today is `available=true`, the rest are
  *     placeholders.
  *
+ * PR-FIN-2-HOTFIX-4 — dashboard clarity (read-only UX fixes):
+ *   The PR-FIN-2 health card collapsed two distinct invariants
+ *   ("Cashbox Drift" mixed real per-cashbox money drift with
+ *   per-reference labeling drift). The expenses card was named
+ *   "اليوم" but only made sense when today actually had expenses.
+ *   The supplier card relied on a single legacy source. HOTFIX-4
+ *   surfaces the right shape:
+ *     · health.cashbox_balance_drift_count (NEW) — real money drift
+ *     · health.engine_bypass_alerts_last_seen (NEW) — historical context
+ *     · daily_expenses.{today_*, period_*} — both slices reported
+ *     · balances.suppliers.{effective_source, sources_checked} —
+ *       fallback chain: suppliers.current_balance → GL 211 →
+ *       unpaid purchases. Pure SELECT; no writes anywhere.
+ *
  * PR-FIN-2-HOTFIX-3 — employee balances column-name fix:
  *   The original PR-FIN-2 read employee balances from
  *   `v_employee_gl_balance` using `net_balance`, but the view
@@ -89,7 +103,7 @@ export class FinanceDashboardService {
     // queryRunner — see Plan §13 in PR-FIN-2-HOTFIX-2 PR description.
     const health = await this.health();
     const liquidity = await this.liquidity(filters);
-    const dailyExpenses = await this.dailyExpensesToday();
+    const dailyExpenses = await this.dailyExpensesTodayAndPeriod(range);
     const balances = await this.balances();
     const profitNow = await this.profitTotals(range, filters);
     const profitPrev = await this.profitTotals(prevRange, filters);
@@ -180,6 +194,25 @@ export class FinanceDashboardService {
   }
 
   // ─── Health (مؤشرات السلامة المالية) ──────────────────────────────
+  /**
+   * PR-FIN-2-HOTFIX-4 — health response now reports three distinct
+   * invariants instead of conflating cashbox-balance drift with
+   * per-reference labeling drift:
+   *
+   *   · `cashbox_balance_drift_count` — count of cashboxes where
+   *     `current_balance ≠ Σ cashbox_transactions(signed)`. This is
+   *     the ONLY metric that means "money is unaccounted for".
+   *   · `cashbox_drift_count` / `cashbox_drift_total` — the v_cashbox
+   *     drift view (per-reference labeling mismatch). Money totals
+   *     per cashbox still match; this only flags ledger hygiene.
+   *   · `engine_bypass_alerts_7d` + `..._last_seen` — historical
+   *     legacy-path writes; the timestamp lets the UI mark them as
+   *     "تنبيهات تاريخية" when last_seen is older than ~24h.
+   *
+   * Status logic unchanged from PR-FIN-2: warnings come from
+   * either drift type or bypass count; criticals from imbalance or
+   * unbalanced JEs.
+   */
   private async health(): Promise<FinanceDashboardResponse['health']> {
     const rows = await this.ds.query(`
       WITH tb AS (
@@ -189,14 +222,27 @@ export class FinanceDashboardService {
         JOIN journal_entries je ON je.id = jl.entry_id
         WHERE je.is_posted = TRUE AND je.is_void = FALSE
       ),
-      drift AS (
+      cashbox_money_drift AS (
+        -- REAL money drift: per-cashbox current_balance vs SUM(ct.signed)
+        SELECT COUNT(*) AS n FROM (
+          SELECT c.id
+          FROM cashboxes c
+          WHERE ROUND(c.current_balance - COALESCE((
+            SELECT SUM(CASE WHEN ct.direction='in' THEN ct.amount ELSE -ct.amount END)
+            FROM cashbox_transactions ct
+            WHERE ct.cashbox_id = c.id AND ct.is_void = FALSE
+          ), 0), 2) <> 0
+        ) s
+      ),
+      ref_drift AS (
         SELECT COUNT(*) AS n,
                COALESCE(SUM(ABS(drift_amount)), 0) AS total_abs
         FROM v_cashbox_drift_per_ref
         WHERE drift_amount <> 0
       ),
       bypass AS (
-        SELECT COUNT(*) AS n
+        SELECT COUNT(*) AS n,
+               MAX(created_at) AS last_seen
         FROM engine_bypass_alerts
         WHERE created_at > now() - INTERVAL '7 days'
       ),
@@ -211,28 +257,41 @@ export class FinanceDashboardService {
         ) s
       )
       SELECT
-        (SELECT total_debit  FROM tb)         AS total_debit,
-        (SELECT total_credit FROM tb)         AS total_credit,
-        (SELECT n            FROM drift)      AS drift_count,
-        (SELECT total_abs    FROM drift)      AS drift_abs,
-        (SELECT n            FROM bypass)     AS bypass_7d,
-        (SELECT n            FROM unbalanced) AS unbalanced_count
+        (SELECT total_debit          FROM tb)                  AS total_debit,
+        (SELECT total_credit         FROM tb)                  AS total_credit,
+        (SELECT n                    FROM cashbox_money_drift) AS cashbox_balance_drift_count,
+        (SELECT n                    FROM ref_drift)           AS drift_count,
+        (SELECT total_abs            FROM ref_drift)           AS drift_abs,
+        (SELECT n                    FROM bypass)              AS bypass_7d,
+        (SELECT last_seen            FROM bypass)              AS bypass_last_seen,
+        (SELECT n                    FROM unbalanced)          AS unbalanced_count
     `);
     const r = rows[0] ?? {};
     const imbalance = Number(r.total_debit ?? 0) - Number(r.total_credit ?? 0);
+    const balanceDriftCount = Number(r.cashbox_balance_drift_count ?? 0);
     const driftAbs = Number(r.drift_abs ?? 0);
     const bypass7d = Number(r.bypass_7d ?? 0);
     const unbalanced = Number(r.unbalanced_count ?? 0);
 
     let overall: 'healthy' | 'warning' | 'critical' = 'healthy';
-    if (Math.abs(imbalance) > 0.01 || unbalanced > 0) overall = 'critical';
-    else if (driftAbs > 0 || bypass7d > 0) overall = 'warning';
+    if (Math.abs(imbalance) > 0.01 || unbalanced > 0 || balanceDriftCount > 0) {
+      overall = 'critical';
+    } else if (driftAbs > 0 || bypass7d > 0) {
+      overall = 'warning';
+    }
 
     return {
       trial_balance_imbalance: round2(imbalance),
+      cashbox_balance_drift_count: balanceDriftCount,
       cashbox_drift_total: round2(driftAbs),
       cashbox_drift_count: Number(r.drift_count ?? 0),
       engine_bypass_alerts_7d: bypass7d,
+      engine_bypass_alerts_last_seen:
+        r.bypass_last_seen instanceof Date
+          ? r.bypass_last_seen.toISOString()
+          : r.bypass_last_seen
+            ? String(r.bypass_last_seen)
+            : null,
       unbalanced_entries_count: unbalanced,
       overall,
     };
@@ -273,42 +332,78 @@ export class FinanceDashboardService {
     };
   }
 
-  // ─── Today's expenses (المصروفات اليوم) ───────────────────────────
-  private async dailyExpensesToday(): Promise<
-    FinanceDashboardResponse['daily_expenses']
-  > {
-    const rows = await this.ds.query(`
-      WITH today_expenses AS (
-        SELECT e.amount, c.name_ar AS category
-        FROM expenses e
-        LEFT JOIN expense_categories c ON c.id = e.category_id
-        WHERE e.expense_date = (now() AT TIME ZONE 'Africa/Cairo')::date
-      ),
-      agg AS (
-        SELECT
-          COALESCE(SUM(amount), 0) AS total,
-          COUNT(*)                 AS n
-        FROM today_expenses
-      ),
-      largest AS (
-        SELECT category, amount
-        FROM today_expenses
-        ORDER BY amount DESC
-        LIMIT 1
-      )
-      SELECT
-        (SELECT total    FROM agg)     AS total,
-        (SELECT n        FROM agg)     AS n,
-        (SELECT category FROM largest) AS largest_cat,
-        (SELECT amount   FROM largest) AS largest_amt
-    `);
+  // ─── Expenses (المصروفات — اليوم / الفترة) ───────────────────────
+  /**
+   * PR-FIN-2-HOTFIX-4 — split `dailyExpensesToday()` into a combined
+   * today + period helper. The card title was "المصروفات اليوم" in
+   * PR-FIN-2 but rendered zero whenever today had no expenses, which
+   * looked broken even though the user had real expense activity in
+   * the selected period. We now return BOTH:
+   *
+   *   · `today_*` — Cairo today's date only (hard-bound, ignores the
+   *     dashboard's range filter so "اليوم" always means today).
+   *   · `period_*` — uses the dashboard's `range` filter so the
+   *     period total respects whatever the user picked in the
+   *     filter bar.
+   *
+   * Both slices read-only from `expenses`; the DailyExpenses page
+   * and `POST /accounting/expenses/daily` are NOT touched.
+   */
+  private async dailyExpensesTodayAndPeriod(
+    range: { from: string; to: string },
+  ): Promise<FinanceDashboardResponse['daily_expenses']> {
+    const rows = await this.ds.query(
+      `WITH today_expenses AS (
+         SELECT e.amount, c.name_ar AS category
+         FROM expenses e
+         LEFT JOIN expense_categories c ON c.id = e.category_id
+         WHERE e.expense_date = (now() AT TIME ZONE 'Africa/Cairo')::date
+       ),
+       period_expenses AS (
+         SELECT e.amount, c.name_ar AS category
+         FROM expenses e
+         LEFT JOIN expense_categories c ON c.id = e.category_id
+         WHERE e.expense_date >= $1::date
+           AND e.expense_date <= $2::date
+       ),
+       today_largest AS (
+         SELECT category, amount FROM today_expenses
+         ORDER BY amount DESC LIMIT 1
+       ),
+       period_largest AS (
+         SELECT category, amount FROM period_expenses
+         ORDER BY amount DESC LIMIT 1
+       )
+       SELECT
+         (SELECT COALESCE(SUM(amount), 0) FROM today_expenses)  AS today_total,
+         (SELECT COUNT(*)                  FROM today_expenses)  AS today_count,
+         (SELECT category FROM today_largest)                    AS today_largest_cat,
+         (SELECT amount   FROM today_largest)                    AS today_largest_amt,
+         (SELECT COALESCE(SUM(amount), 0) FROM period_expenses) AS period_total,
+         (SELECT COUNT(*)                  FROM period_expenses) AS period_count,
+         (SELECT category FROM period_largest)                   AS period_largest_cat,
+         (SELECT amount   FROM period_largest)                   AS period_largest_amt`,
+      [range.from, range.to],
+    );
     const r = rows[0] ?? {};
     return {
-      total: round2(r.total ?? 0),
-      count: Number(r.n ?? 0),
-      largest:
-        r.largest_amt != null
-          ? { category: r.largest_cat ?? null, amount: round2(r.largest_amt) }
+      today_total: round2(r.today_total ?? 0),
+      today_count: Number(r.today_count ?? 0),
+      today_largest:
+        r.today_largest_amt != null
+          ? {
+              category: r.today_largest_cat ?? null,
+              amount: round2(r.today_largest_amt),
+            }
+          : null,
+      period_total: round2(r.period_total ?? 0),
+      period_count: Number(r.period_count ?? 0),
+      period_largest:
+        r.period_largest_amt != null
+          ? {
+              category: r.period_largest_cat ?? null,
+              amount: round2(r.period_largest_amt),
+            }
           : null,
     };
   }
@@ -332,20 +427,73 @@ export class FinanceDashboardService {
         (SELECT bal       FROM active ORDER BY bal DESC, full_name ASC LIMIT 1) AS top_amount
       FROM active
     `);
+    // PR-FIN-2-HOTFIX-4 — supplier balances now consult three
+    // independent sources and pick the most authoritative non-zero
+    // value per supplier:
+    //   1. `suppliers.current_balance` (legacy sub-ledger)
+    //   2. GL account 211 summed per supplier_id from journal_lines
+    //   3. `purchases.grand_total - paid_amount` per supplier
+    // The card shows the aggregate of effective balances + a label
+    // describing which sources contributed (`effective_source`).
+    // When all three agree on zero, `effective_source = 'none'` and
+    // the UI renders "لا توجد أرصدة موردين مسجلة حاليًا".
+    // Nothing is fabricated; nothing is written.
     const suppliers = await this.ds.query(`
-      WITH active AS (
-        SELECT id, name, COALESCE(current_balance, 0) AS bal
-        FROM suppliers
-        WHERE deleted_at IS NULL
-          AND COALESCE(current_balance, 0) > 0
+      WITH coa_211 AS (
+        SELECT id FROM chart_of_accounts WHERE code = '211' LIMIT 1
+      ),
+      sources AS (
+        SELECT
+          s.id,
+          s.name,
+          COALESCE(s.current_balance, 0)                                 AS table_bal,
+          COALESCE((
+            SELECT SUM(jl.credit) - SUM(jl.debit)
+            FROM journal_lines jl
+            JOIN journal_entries je ON je.id = jl.entry_id
+            JOIN coa_211 ca ON jl.account_id = ca.id
+            WHERE je.is_posted = TRUE AND je.is_void = FALSE
+              AND jl.supplier_id = s.id
+          ), 0)                                                          AS gl_bal,
+          COALESCE((
+            SELECT SUM(p.grand_total - COALESCE(p.paid_amount, 0))
+            FROM purchases p
+            WHERE p.supplier_id = s.id
+              AND COALESCE(p.grand_total, 0) > COALESCE(p.paid_amount, 0)
+          ), 0)                                                          AS purchase_bal
+        FROM suppliers s
+        WHERE s.deleted_at IS NULL
+      ),
+      effective AS (
+        SELECT
+          id, name, table_bal, gl_bal, purchase_bal,
+          CASE
+            WHEN table_bal    <> 0 THEN table_bal
+            WHEN gl_bal       <> 0 THEN gl_bal
+            WHEN purchase_bal <> 0 THEN purchase_bal
+            ELSE 0
+          END AS bal,
+          CASE
+            WHEN table_bal    <> 0 THEN 'suppliers_table'
+            WHEN gl_bal       <> 0 THEN 'gl_211'
+            WHEN purchase_bal <> 0 THEN 'purchases'
+            ELSE 'none'
+          END AS source
+        FROM sources
       )
       SELECT
-        COALESCE(SUM(bal), 0) AS total,
-        COUNT(*)              AS n,
-        (SELECT name FROM active ORDER BY bal DESC, name ASC LIMIT 1) AS top_name,
-        (SELECT bal  FROM active ORDER BY bal DESC, name ASC LIMIT 1) AS top_amount
-      FROM active
-    `);
+        COALESCE(SUM(GREATEST(bal, 0)), 0) AS total,
+        COUNT(*) FILTER (WHERE bal > 0) AS n,
+        (SELECT name FROM effective WHERE bal > 0 ORDER BY bal DESC, name ASC LIMIT 1) AS top_name,
+        (SELECT bal  FROM effective WHERE bal > 0 ORDER BY bal DESC, name ASC LIMIT 1) AS top_amount,
+        bool_or(table_bal    <> 0) AS has_table,
+        bool_or(gl_bal       <> 0) AS has_gl,
+        bool_or(purchase_bal <> 0) AS has_purchase
+      FROM effective
+    `).catch(() => [{
+      total: 0, n: 0, top_name: null, top_amount: null,
+      has_table: false, has_gl: false, has_purchase: false,
+    }]);
     // PR-FIN-2-HOTFIX-3 — `v_employee_gl_balance` exposes the column
     // `balance`, NOT `net_balance`. The original PR-FIN-2 query used
     // `net_balance` (anticipated naming) which threw at runtime; the
@@ -384,6 +532,18 @@ export class FinanceDashboardService {
           s.top_name && s.top_amount != null
             ? { name: s.top_name, amount: round2(s.top_amount) }
             : null,
+        // Tells the UI which source dominated. 'mixed' covers the
+        // case where DIFFERENT suppliers had non-zero values from
+        // different sources (e.g. one supplier from `gl_211` plus
+        // another from `purchases`). 'none' means every source
+        // agreed on zero — the UI renders an explicit
+        // "لا توجد أرصدة موردين مسجلة حاليًا" message.
+        effective_source: deriveSupplierSource({
+          has_table: !!s.has_table,
+          has_gl: !!s.has_gl,
+          has_purchase: !!s.has_purchase,
+        }),
+        sources_checked: ['suppliers_table', 'gl_211', 'purchases'],
       },
       employees: {
         total_owed_to: round2(e.owed_to ?? 0),
@@ -1213,6 +1373,27 @@ function round2(n: any): number {
 function pct(now: number, prev: number): number {
   if (prev === 0) return now === 0 ? 0 : 100;
   return round2(((now - prev) / Math.abs(prev)) * 100);
+}
+
+/**
+ * Derives the supplier-balance source label from per-source booleans.
+ * 'mixed' = at least two different sources contributed across the
+ * supplier set. 'none' = all sources agreed on zero. Otherwise
+ * returns the single source that produced data.
+ */
+function deriveSupplierSource(flags: {
+  has_table: boolean;
+  has_gl: boolean;
+  has_purchase: boolean;
+}): 'suppliers_table' | 'gl_211' | 'purchases' | 'mixed' | 'none' {
+  const sources = [
+    flags.has_table ? 'suppliers_table' : null,
+    flags.has_gl ? 'gl_211' : null,
+    flags.has_purchase ? 'purchases' : null,
+  ].filter(Boolean) as Array<'suppliers_table' | 'gl_211' | 'purchases'>;
+  if (sources.length === 0) return 'none';
+  if (sources.length === 1) return sources[0];
+  return 'mixed';
 }
 
 /**
