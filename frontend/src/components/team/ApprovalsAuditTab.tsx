@@ -285,9 +285,14 @@ function PendingRequestsCard({
     }) => employeesApi.decideRequest(id, { decision, reason }),
     onSuccess: (_r, v) => {
       toast.success(v.decision === 'approved' ? 'تم اعتماد الطلب' : 'تم رفض الطلب');
-      qc.invalidateQueries({ queryKey: ['employees-pending'] });
-      qc.invalidateQueries({ queryKey: ['employees-team'] });
-      qc.invalidateQueries({ queryKey: ['employee-user-dashboard'] });
+      // PR-EMP-WAGE-CACHE-1 — same invalidation set the AttendanceWageTab
+      // approve mutation uses. The audit confirmed the backend posts the
+      // request decision correctly (request flips to 'approved'/'rejected',
+      // the linked JE if any is in place); the only reason the on-screen
+      // numbers and ledger panels appeared stuck was that this mutation
+      // invalidated 3 keys when the admin's profile screens read from a
+      // wider set. Mirroring the AttendanceWageTab helper closes the gap.
+      invalidateWageApprovalSurfaces(qc);
       setRejectTarget(null);
       setRejectReason('');
     },
@@ -953,3 +958,35 @@ function monthBounds(): { from: string; to: string } {
 // Mark imports used to keep linter happy.
 const _icons = [Clock];
 void _icons;
+
+/**
+ * Invalidate every React Query key any wage-approval / employee-balance
+ * surface reads from.
+ *
+ * PR-EMP-WAGE-CACHE-1 — mirrors `AttendanceWageTab.tsx::invalidate(qc)`
+ * exactly. The two helpers must stay in sync; the unit tests
+ * (`*.invalidate.test.tsx`) assert each individual key is invalidated
+ * so a future drift between the two copies fails CI before it ships.
+ *
+ * Each key is a top-level prefix; React Query's prefix-match handles
+ * every variant (filters / period / isSelf / userId).
+ */
+export function invalidateWageApprovalSurfaces(
+  qc: ReturnType<typeof useQueryClient>,
+) {
+  // ── Pre-existing decide-mutation set ───────────────────────────
+  qc.invalidateQueries({ queryKey: ['employees-pending'] });
+  qc.invalidateQueries({ queryKey: ['employees-team'] });
+  qc.invalidateQueries({ queryKey: ['employee-user-dashboard'] });
+  // ── PR-EMP-WAGE-CACHE-1 additions (mirroring AttendanceWageTab) ─
+  qc.invalidateQueries({ queryKey: ['payable-days'] });
+  qc.invalidateQueries({ queryKey: ['attendance-employee-log'] });
+  qc.invalidateQueries({ queryKey: ['attendance-employee-today'] });
+  qc.invalidateQueries({ queryKey: ['attendance-summary-today'] });
+  qc.invalidateQueries({ queryKey: ['employee-dashboard'] });
+  qc.invalidateQueries({ queryKey: ['employee-ledger'] });
+  qc.invalidateQueries({ queryKey: ['employee-user-ledger'] });
+  qc.invalidateQueries({ queryKey: ['my-dashboard'] });
+  qc.invalidateQueries({ queryKey: ['employee-history-mine'] });
+  qc.invalidateQueries({ queryKey: ['employee-requests-mine'] });
+}
