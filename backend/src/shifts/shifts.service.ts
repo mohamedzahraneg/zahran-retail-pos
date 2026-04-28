@@ -304,9 +304,7 @@ export class ShiftsService {
       Number(tx.out_adjustment?.amount || 0) +
       Number(tx.out_withdrawal?.amount || 0);
 
-    // Expenses posted during the shift window. Match generously: same
-    // cashbox OR same warehouse OR created by the shift opener — cashiers
-    // often leave cashbox_id blank when adding expenses from the UI.
+    // Expenses posted during the shift window.
     //
     // PR-14: also classify each row as `is_employee_advance` so the UI can
     // separate operating expenses from advances. Heuristic:
@@ -314,6 +312,30 @@ export class ShiftsService {
     //   * category maps to COA code 1123  — semantic advance (admin
     //                                       mapped a "سلف الموظفين" category
     //                                       to Employee Receivables)
+    //
+    // PR-EMP-ADVANCE-PAY-2 — attribution rules (this is the fix the
+    // 5-EGP / 6-EGP advances exposed):
+    //
+    //   (a) Explicitly attributed to this shift (PR-15 / PR-EMP-ADVANCE-PAY-1):
+    //       always include — `e.shift_id = shift.id`.
+    //
+    //   (b) Legacy fallback for `e.shift_id IS NULL` rows: keep the
+    //       generous cashbox/warehouse/creator match for OPERATING
+    //       expenses ONLY (cashiers used to leave cashbox_id blank when
+    //       adding non-advance expenses from the UI; preserving that
+    //       behaviour avoids regressions on historical close-outs).
+    //
+    //   (c) Direct-cashbox advances (`is_advance = TRUE` AND
+    //       `shift_id IS NULL`) are EXCLUDED from every shift's
+    //       summary — the operator's "صرف من الخزنة" choice is the
+    //       explicit "do not attribute to any shift" marker shipped in
+    //       PR-EMP-ADVANCE-PAY-1. Even when the cashbox matches the
+    //       shift's drawer (the only-cashbox-in-the-system case), the
+    //       advance must not bleed into `total_employee_advances` /
+    //       `expected_closing`. Cash physically leaving the drawer is
+    //       still reflected in `cashbox_transactions` and surfaces as
+    //       a variance at close — the cashier annotates it as an
+    //       unattached settlement, not as a shift outflow.
     const expenseRows = await this.ds.query(
       `
       SELECT e.id, e.expense_no, e.amount, e.description,
@@ -348,10 +370,19 @@ export class ShiftsService {
        WHERE e.created_at >= $1
          AND e.created_at <= $2
          AND (
-           e.cashbox_id = $3
-           OR (e.cashbox_id IS NULL)
-           OR e.warehouse_id = $4
-           OR e.created_by = $5
+           -- (a) Explicit shift attribution wins.
+           e.shift_id = $6
+           -- (b) Legacy generous match for OPERATING expenses only.
+           OR (
+             e.shift_id IS NULL
+             AND COALESCE(e.is_advance, FALSE) = FALSE
+             AND (
+               e.cashbox_id = $3
+               OR (e.cashbox_id IS NULL)
+               OR e.warehouse_id = $4
+               OR e.created_by = $5
+             )
+           )
          )
        ORDER BY e.expense_date DESC, e.created_at DESC
       `,
@@ -361,6 +392,7 @@ export class ShiftsService {
         shift.cashbox_id,
         shift.warehouse_id,
         shift.opened_by,
+        shift.id,
       ],
     );
 
