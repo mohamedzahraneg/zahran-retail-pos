@@ -1133,11 +1133,48 @@ function monthBounds(): { from: string; to: string } {
   return { from: `${y}-${m}-01`, to: `${y}-${m}-${d}` };
 }
 
-function invalidate(qc: ReturnType<typeof useQueryClient>) {
+/**
+ * Invalidate every React Query cache key that any wage-approval-aware
+ * surface reads from. The previous version of this helper covered the
+ * tab-local queries (`attendance-*`, `payable-days`) plus the team
+ * overview, but NOT the admin's per-employee profile screens — which
+ * is exactly where the operator opens the modal from.
+ *
+ * PR-EMP-WAGE-CACHE-1: after the audit confirmed the backend posts the
+ * approval correctly (JE legs land with `employee_user_id`,
+ * `v_employee_gl_balance` reflects them), the only reason the
+ * BalanceCard / ledger panels appeared "stuck" was that their query
+ * keys were not in this set. Adding them here makes the on-screen
+ * numbers refresh in the same gesture as the approval.
+ *
+ * Each key is intentionally a top-level invalidation (e.g.
+ * `['employee-ledger']` rather than `['employee-ledger', userId, …]`)
+ * so React Query's prefix-match invalidates every variant — the same
+ * key with different filters (period, isSelf, etc.).
+ */
+export function invalidate(qc: ReturnType<typeof useQueryClient>) {
+  // ── Existing: tab-local + team overview ────────────────────────
   qc.invalidateQueries({ queryKey: ['payable-days'] });
   qc.invalidateQueries({ queryKey: ['attendance-employee-log'] });
   qc.invalidateQueries({ queryKey: ['attendance-employee-today'] });
   qc.invalidateQueries({ queryKey: ['employee-user-dashboard'] });
   qc.invalidateQueries({ queryKey: ['employees-team'] });
   qc.invalidateQueries({ queryKey: ['attendance-summary-today'] });
+
+  // ── PR-EMP-WAGE-CACHE-1: admin employee-profile surfaces ───────
+  // EmployeeProfile.tsx:267 (header dashboard card)
+  qc.invalidateQueries({ queryKey: ['employee-dashboard'] });
+  // EmployeeProfile.tsx:1020, AdjustmentsTab.tsx:134, ApprovalsAuditTab.tsx:140
+  qc.invalidateQueries({ queryKey: ['employee-ledger'] });
+  // EmployeeReportsTab.tsx:103
+  qc.invalidateQueries({ queryKey: ['employee-user-ledger'] });
+  // ApprovalsAuditTab.tsx:119 (left-rail pending count badge)
+  qc.invalidateQueries({ queryKey: ['employees-pending'] });
+  // MyProfile.tsx:144 — the employee's own /me dashboard, in case
+  // the approver is approving their own day (admin-on-self).
+  qc.invalidateQueries({ queryKey: ['my-dashboard'] });
+  // EmployeeProfile.tsx:1441
+  qc.invalidateQueries({ queryKey: ['employee-history-mine'] });
+  // EmployeeProfile.tsx:1884
+  qc.invalidateQueries({ queryKey: ['employee-requests-mine'] });
 }
