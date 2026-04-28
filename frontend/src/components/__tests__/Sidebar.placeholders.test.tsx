@@ -60,8 +60,10 @@ describe('<Sidebar /> — PR-FIN-SIDEBAR-1 placeholders', () => {
   });
 
   const PLACEHOLDERS = [
+    // PR-FIN-3 flipped "كشف الحسابات" from placeholder to active link
+    // (/finance/statements). The remaining 3 stay as placeholders
+    // until their respective PRs (FIN-7 / FIN-8 / FIN-4) ship.
     { label: 'التقارير', to: '/finance/reports' },
-    { label: 'كشف الحسابات', to: '/finance/statements' },
     { label: 'الزكاة', to: '/finance/zakat' },
     { label: 'تتبع الحركات المالية', to: '/audit/financial-movements' },
   ];
@@ -115,6 +117,8 @@ describe('<Sidebar /> — PR-FIN-SIDEBAR-1 placeholders', () => {
       'المصاريف الدورية',
       'المصروفات اليومية',
       'برج المراقبة المالية',
+      // PR-FIN-3 — "كشف الحسابات" is now active too (route added).
+      'كشف الحسابات',
     ];
     for (const label of active) {
       const els = screen.getAllByText(label);
