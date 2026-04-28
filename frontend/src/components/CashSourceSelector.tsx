@@ -34,7 +34,11 @@ const EGP = (n: number | string | null | undefined) =>
 
 export type CashSource =
   | { mode: 'open_shift'; shift_id: string; cashbox_id: string }
-  | { mode: 'direct_cashbox'; shift_id: null; cashbox_id: string }
+  // PR-EMP-ADVANCE-PAY-1 — `cashbox_id` can be `null` while the
+  // operator is still picking. The selector renders the cashbox
+  // dropdown immediately on mode flip so they can choose; the parent
+  // form gates submit on `cashbox_id != null`.
+  | { mode: 'direct_cashbox'; shift_id: null; cashbox_id: string | null }
   | { mode: 'unset'; shift_id: null; cashbox_id: null };
 
 export interface CashSourceSelectorProps {
@@ -116,14 +120,21 @@ export function CashSourceSelector({
         onChange({ mode: 'unset', shift_id: null, cashbox_id: null });
       }
     } else {
-      // Switching to direct cashbox — keep the previously-implied cashbox
-      // (from the shift) so the operator doesn't lose context.
-      const cb = value.cashbox_id;
-      if (cb) {
-        onChange({ mode: 'direct_cashbox', shift_id: null, cashbox_id: cb });
-      } else {
-        onChange({ mode: 'unset', shift_id: null, cashbox_id: null });
-      }
+      // PR-EMP-ADVANCE-PAY-1 — flip to direct_cashbox IMMEDIATELY,
+      // even if no cashbox is currently selected. Previously this
+      // branch fell back to `mode: 'unset'` when `cashbox_id` was
+      // null, which hid the cashbox dropdown entirely (line 246
+      // only renders it when `mode === 'direct_cashbox'`). The
+      // operator's only escape was to first pick a shift to seed
+      // `cashbox_id`, then flip back to direct — which is exactly
+      // the path that mis-attributed advance EXP-2026-000031 to a
+      // shift. Now the dropdown shows up on the first click and
+      // the operator picks the cashbox directly.
+      onChange({
+        mode: 'direct_cashbox',
+        shift_id: null,
+        cashbox_id: value.cashbox_id ?? null,
+      });
     }
   };
 

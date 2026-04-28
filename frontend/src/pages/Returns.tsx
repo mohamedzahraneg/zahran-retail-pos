@@ -1142,6 +1142,17 @@ function CreateExchangeModal({ onClose }: { onClose: () => void }) {
           new Error('اختر مصدر/وجهة النقدية للفرق'),
         );
       }
+      // PR-EMP-ADVANCE-PAY-1 — `direct_cashbox` mode now flips
+      // immediately even when the operator hasn't picked a cashbox
+      // yet. Refuse to ship the request without a cashbox_id —
+      // gives a friendly error instead of letting the backend reject.
+      if (
+        needsCashSource &&
+        cashSource.mode === 'direct_cashbox' &&
+        !cashSource.cashbox_id
+      ) {
+        return Promise.reject(new Error('اختر الخزنة قبل المتابعة'));
+      }
       return returnsApi.exchange({
         original_invoice_id: lookup.invoice.id,
         returned_items: returnedLines.map((l) => ({
@@ -1161,7 +1172,9 @@ function CreateExchangeModal({ onClose }: { onClose: () => void }) {
         ...(needsCashSource && cashSource.mode === 'open_shift'
           ? { shift_id: cashSource.shift_id }
           : {}),
-        ...(needsCashSource && cashSource.mode === 'direct_cashbox'
+        ...(needsCashSource &&
+        cashSource.mode === 'direct_cashbox' &&
+        cashSource.cashbox_id
           ? { cashbox_id: cashSource.cashbox_id }
           : {}),
       });
@@ -1646,7 +1659,13 @@ function RefundModal({
     cashbox_id: null,
   });
   const isCash = method === 'cash';
-  const ready = !isCash || source.mode !== 'unset';
+  // PR-EMP-ADVANCE-PAY-1 — when `direct_cashbox` is picked the
+  // CashSourceSelector flips immediately with `cashbox_id` possibly
+  // still null. Hold submit until the operator picks one.
+  const ready =
+    !isCash ||
+    (source.mode === 'open_shift' && !!source.shift_id) ||
+    (source.mode === 'direct_cashbox' && !!source.cashbox_id);
   const mut = useMutation({
     mutationFn: () =>
       returnsApi.refund(ret.id, {
@@ -1655,7 +1674,7 @@ function RefundModal({
         ...(isCash && source.mode === 'open_shift'
           ? { shift_id: source.shift_id }
           : {}),
-        ...(isCash && source.mode === 'direct_cashbox'
+        ...(isCash && source.mode === 'direct_cashbox' && source.cashbox_id
           ? { cashbox_id: source.cashbox_id }
           : {}),
       }),

@@ -367,4 +367,185 @@ describe('AccountingService.createExpense — PR-ESS-2B disbursement linkage', (
       service.createExpense(makeDto() as any, ADMIN),
     ).rejects.toThrow(/لم يتم تحديث حالة طلب السلفة/);
   });
+
+  // ─────────────────────────────────────────────────────────────────
+  // PR-EMP-ADVANCE-PAY-1 — `source_type` contract
+  //
+  // Pins the four explicit-source rules + a legacy backward-compat
+  // assertion so the audit trail of EXP-2026-000031 (which silently
+  // got `shift_id = SHF-2026-00008` despite the operator picking
+  // "صرف من الخزنة") is no longer reproducible.
+  // ─────────────────────────────────────────────────────────────────
+
+  it('PR-EMP-ADVANCE-PAY-1: source_type=direct_cashbox + cashbox_id INSERTs expense with shift_id=NULL (no auto-resolve)', async () => {
+    // No shift validation runs because shift_id is absent. The
+    // legacy auto-resolve blocks (lines 167–190) MUST be skipped, so
+    // we never see the `WHERE opened_by` lookup in the captured
+    // queries. The INSERT then carries shift_id=null.
+    stubHappyPathDownstream();
+    engine.recordExpense.mockResolvedValueOnce({
+      ok: true,
+      entry_id: 'je-uuid',
+    });
+
+    await service.createExpense(
+      makeDto({
+        source_type: 'direct_cashbox',
+        cashbox_id: CASHBOX,
+        shift_id: undefined,
+      }) as any,
+      ADMIN,
+    );
+
+    // No auto-resolve query against `shifts WHERE opened_by` was
+    // issued — the operator's explicit choice is honoured.
+    const autoResolveByUser = em.query.mock.calls.find((c) =>
+      /shifts[\s\S]*WHERE opened_by/.test(String(c[0])),
+    );
+    expect(autoResolveByUser).toBeUndefined();
+
+    // No fallback "shift on this cashbox" lookup either.
+    const autoResolveByCashbox = em.query.mock.calls.find((c) =>
+      /shifts[\s\S]*WHERE cashbox_id = \$1[\s\S]*status = 'open'/.test(
+        String(c[0]),
+      ),
+    );
+    expect(autoResolveByCashbox).toBeUndefined();
+
+    // The INSERT into expenses received shift_id=null. The INSERT
+    // statement sends shift_id as one of the param positions; the
+    // assertion below confirms the captured params include `null`
+    // alongside the cashbox uuid.
+    const insertCall = em.query.mock.calls.find((c) =>
+      String(c[0]).includes('INSERT INTO expenses'),
+    );
+    expect(insertCall).toBeTruthy();
+    const insertParams = insertCall![1] as any[];
+    expect(insertParams).toContain(CASHBOX);
+    expect(insertParams).toContain(null); // shift_id position
+  });
+
+  it('PR-EMP-ADVANCE-PAY-1: source_type=direct_cashbox WITH shift_id is rejected (conflict)', async () => {
+    await expect(
+      service.createExpense(
+        makeDto({
+          source_type: 'direct_cashbox',
+          cashbox_id: CASHBOX,
+          shift_id: SHIFT, // contradictory
+        }) as any,
+        ADMIN,
+      ),
+    ).rejects.toThrow(/تعارض في مصدر الصرف/);
+
+    // No INSERT happened.
+    const insertCalls = em.query.mock.calls.filter((c) =>
+      String(c[0]).includes('INSERT INTO expenses'),
+    );
+    expect(insertCalls).toHaveLength(0);
+  });
+
+  it('PR-EMP-ADVANCE-PAY-1: source_type=direct_cashbox WITHOUT cashbox_id is rejected (missing-cashbox)', async () => {
+    await expect(
+      service.createExpense(
+        makeDto({
+          source_type: 'direct_cashbox',
+          cashbox_id: undefined,
+          shift_id: undefined,
+        }) as any,
+        ADMIN,
+      ),
+    ).rejects.toThrow(/يجب اختيار الخزنة عند الصرف من خزنة مباشرة/);
+
+    const insertCalls = em.query.mock.calls.filter((c) =>
+      String(c[0]).includes('INSERT INTO expenses'),
+    );
+    expect(insertCalls).toHaveLength(0);
+  });
+
+  it('PR-EMP-ADVANCE-PAY-1: source_type=open_shift WITHOUT shift_id is rejected (missing-shift)', async () => {
+    await expect(
+      service.createExpense(
+        makeDto({
+          source_type: 'open_shift',
+          cashbox_id: CASHBOX,
+          shift_id: undefined,
+        }) as any,
+        ADMIN,
+      ),
+    ).rejects.toThrow(/يجب اختيار الوردية عند الصرف من وردية مفتوحة/);
+
+    const insertCalls = em.query.mock.calls.filter((c) =>
+      String(c[0]).includes('INSERT INTO expenses'),
+    );
+    expect(insertCalls).toHaveLength(0);
+  });
+
+  it('PR-EMP-ADVANCE-PAY-1: source_type=open_shift creates expense linked to the shift (regression — existing PR-15 contract)', async () => {
+    stubShiftResolution();
+    stubHappyPathDownstream();
+    engine.recordExpense.mockResolvedValueOnce({
+      ok: true,
+      entry_id: 'je-uuid',
+    });
+
+    await service.createExpense(
+      makeDto({
+        source_type: 'open_shift',
+        cashbox_id: CASHBOX,
+        shift_id: SHIFT,
+      }) as any,
+      ADMIN,
+    );
+
+    // Shift validation query DID run (the existing PR-15 path).
+    const shiftValidate = em.query.mock.calls.find((c) =>
+      /SELECT id, status, cashbox_id FROM shifts WHERE id = \$1/.test(
+        String(c[0]),
+      ),
+    );
+    expect(shiftValidate).toBeTruthy();
+
+    // INSERT carries the shift_id.
+    const insertCall = em.query.mock.calls.find((c) =>
+      String(c[0]).includes('INSERT INTO expenses'),
+    );
+    const insertParams = insertCall![1] as any[];
+    expect(insertParams).toContain(SHIFT);
+  });
+
+  it('PR-EMP-ADVANCE-PAY-1: legacy payload (no source_type) preserves the old auto-resolve behaviour', async () => {
+    // No source_type → backend falls back to the pre-PR auto-resolve
+    // path. This is exactly the codepath that fired for
+    // EXP-2026-000031, kept intact here for any pre-PR caller that
+    // hasn't been updated yet (e.g. older mobile builds).
+    stubShiftResolution();
+    stubHappyPathDownstream();
+    engine.recordExpense.mockResolvedValueOnce({
+      ok: true,
+      entry_id: 'je-uuid',
+    });
+
+    await service.createExpense(
+      makeDto({
+        // No source_type field at all.
+        cashbox_id: CASHBOX,
+        shift_id: SHIFT,
+      }) as any,
+      ADMIN,
+    );
+
+    // Existing legacy validate-shift query still ran.
+    const shiftValidate = em.query.mock.calls.find((c) =>
+      /SELECT id, status, cashbox_id FROM shifts WHERE id = \$1/.test(
+        String(c[0]),
+      ),
+    );
+    expect(shiftValidate).toBeTruthy();
+
+    // INSERT happens (no rejection).
+    const insertCall = em.query.mock.calls.find((c) =>
+      String(c[0]).includes('INSERT INTO expenses'),
+    );
+    expect(insertCall).toBeTruthy();
+  });
 });

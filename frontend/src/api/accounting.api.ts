@@ -209,6 +209,18 @@ export const accountingApi = {
      * request stays `'approved'`. Must be sent with `is_advance=true`.
      */
     source_employee_request_id?: number;
+    /**
+     * PR-EMP-ADVANCE-PAY-1 — explicit cash-source intent. Either
+     *   - `'open_shift'`     — `shift_id` is required; the backend
+     *     validates the shift is open / pending_close.
+     *   - `'direct_cashbox'` — `cashbox_id` is required; the backend
+     *     skips its legacy shift auto-resolve so the resulting
+     *     `expenses.shift_id` stays NULL (i.e. the disbursement is
+     *     not attributed to any shift's close-out).
+     * Omitting the field falls back to the legacy auto-resolve
+     * behaviour for backward compatibility.
+     */
+    source_type?: 'open_shift' | 'direct_cashbox';
   }) => unwrap<Expense>(api.post('/accounting/expenses/daily', body)),
   updateExpense: (id: string, body: Partial<Expense>) =>
     unwrap<Expense>(api.patch(`/accounting/expenses/${id}`, body)),

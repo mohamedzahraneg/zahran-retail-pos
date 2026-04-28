@@ -686,7 +686,18 @@ export function AdvanceModal({
       // pre-validates kind/status/amount/user/duplicate before any
       // INSERT and flips the request to 'disbursed' AFTER the engine
       // posts (inside the same transaction).
+      // PR-EMP-ADVANCE-PAY-1 — `source_type` mirrors the operator's
+      // explicit pick from `<CashSourceSelector />` so the backend
+      // doesn't have to guess. With `direct_cashbox` the backend
+      // skips its legacy shift auto-resolve and `expenses.shift_id`
+      // stays NULL — the disbursement is genuinely standalone.
       accountingApi.createDailyExpense({
+        source_type:
+          source.mode === 'open_shift'
+            ? 'open_shift'
+            : source.mode === 'direct_cashbox'
+              ? 'direct_cashbox'
+              : undefined,
         cashbox_id:
           source.mode === 'open_shift' || source.mode === 'direct_cashbox'
             ? source.cashbox_id ?? undefined
@@ -776,11 +787,19 @@ export function AdvanceModal({
   }, []);
 
   const amtNum = Number(amount || 0);
+  // PR-EMP-ADVANCE-PAY-1 — `direct_cashbox` mode now flips
+  // immediately with `cashbox_id` potentially still `null`. Hold the
+  // submit button disabled until the operator actually picks a
+  // cashbox so they don't get a backend BadRequest as their first
+  // signal that something is missing.
+  const sourceReady =
+    (source.mode === 'open_shift' && !!source.shift_id && !!source.cashbox_id) ||
+    (source.mode === 'direct_cashbox' && !!source.cashbox_id);
   const ready =
     !!advanceCategory &&
     amtNum > 0 &&
     !!reason.trim() &&
-    source.mode !== 'unset';
+    sourceReady;
 
   return (
     <ModalShell

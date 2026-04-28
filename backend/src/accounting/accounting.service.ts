@@ -135,6 +135,43 @@ export class AccountingService {
       let cashboxId = dto.cashbox_id ?? null;
       let shiftId: string | null = (dto as any).shift_id ?? null;
 
+      // PR-EMP-ADVANCE-PAY-1 — explicit cash-source intent. New
+      // callers (the advance-disbursement modal in
+      // `AccountsMovementsTab.tsx`) always send `source_type` so the
+      // backend never has to *guess* between "operator chose
+      // direct-cashbox" vs "caller forgot shift_id". Legacy callers
+      // that don't send this field keep the old auto-resolve
+      // behaviour for backward compat.
+      const sourceType = (dto as any).source_type as
+        | 'open_shift'
+        | 'direct_cashbox'
+        | undefined;
+
+      if (sourceType === 'direct_cashbox') {
+        // The operator explicitly chose a standalone cashbox. Reject
+        // contradictory payloads up-front instead of silently coercing.
+        if (shiftId) {
+          throw new BadRequestException(
+            'تعارض في مصدر الصرف: اختير من خزنة مباشرة مع وردية محددة',
+          );
+        }
+        if (!cashboxId) {
+          throw new BadRequestException(
+            'يجب اختيار الخزنة عند الصرف من خزنة مباشرة',
+          );
+        }
+      } else if (sourceType === 'open_shift') {
+        // Operator explicitly picked a shift. The shift_id check
+        // below validates existence + status; here we just ensure it
+        // is present so the cashier sees a clear error instead of
+        // silently auto-resolving to a different shift.
+        if (!shiftId) {
+          throw new BadRequestException(
+            'يجب اختيار الوردية عند الصرف من وردية مفتوحة',
+          );
+        }
+      }
+
       // PR-15 — when the caller picked an explicit shift via the
       // source selector, validate it before auto-resolution. Catches
       // closed shifts and cashbox mismatch with friendly Arabic errors
@@ -163,8 +200,15 @@ export class AccountingService {
         cashboxId = cashboxId ?? pickedShift.cashbox_id;
       }
 
+      // PR-EMP-ADVANCE-PAY-1 — when the operator was explicit about
+      // direct-cashbox, skip BOTH legacy auto-resolve blocks so
+      // `expenses.shift_id` stays NULL. The disbursement is then
+      // genuinely standalone — shift reports / shift-close
+      // reconciliation will not attribute it to any drawer.
+      const skipAutoResolveShift = sourceType === 'direct_cashbox';
+
       // Single lookup whether we need cashbox, shift, or both.
-      if (!cashboxId || !shiftId) {
+      if (!skipAutoResolveShift && (!cashboxId || !shiftId)) {
         const [openShift] = await em.query(
           `SELECT id AS shift_id, cashbox_id FROM shifts
             WHERE opened_by = $1 AND status = 'open'
@@ -179,7 +223,9 @@ export class AccountingService {
       // If caller provided a cashbox without a shift, still try to
       // pin the shift via (cashbox + open status) so register rows
       // are consistent. NULL stays NULL when no open shift exists.
-      if (cashboxId && !shiftId) {
+      // PR-EMP-ADVANCE-PAY-1 — same gate: direct-cashbox stays
+      // un-shifted by design.
+      if (!skipAutoResolveShift && cashboxId && !shiftId) {
         const [shift] = await em.query(
           `SELECT id FROM shifts
             WHERE cashbox_id = $1 AND status = 'open'
@@ -187,6 +233,18 @@ export class AccountingService {
           [cashboxId],
         );
         shiftId = shift?.id || null;
+      }
+
+      // PR-EMP-ADVANCE-PAY-1 — belt-and-braces invariant. If
+      // anything in the auto-resolve gates above is later broken by
+      // a refactor and a `direct_cashbox` payload still ends up with
+      // a non-null `shiftId`, refuse the insert. Cheaper to fail
+      // loud than to ship another mis-attributed advance like
+      // EXP-2026-000031.
+      if (sourceType === 'direct_cashbox' && shiftId) {
+        throw new BadRequestException(
+          'تعارض في مصدر الصرف: اختير من خزنة مباشرة مع وردية محددة',
+        );
       }
 
       // ━━━ CRITICAL INVARIANT ━━━
