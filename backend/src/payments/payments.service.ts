@@ -164,9 +164,16 @@ export class PaymentsService {
    *   - customer_payments (receipts; refunds flip to amount_out)
    *   - supplier_payments (supplier disbursements)
    *
-   * Refund handling: customer_payments with `kind='refund'` count as
-   * money OUT of the account (the operator returned cash to the
+   * Refund handling: customer_payments with `kind='refund_out'` count
+   * as money OUT of the account (the operator returned cash to the
    * customer through this account). All other kinds = money IN.
+   *
+   * NOTE on the enum literal: the column is the `party_payment_kind`
+   * Postgres enum whose member names are `refund_in` / `refund_out`
+   * (no bare `refund`). PR-FIN-PAYACCT-4D-UX-FIX-2 shipped this
+   * compare with `'refund'` which Postgres rejects at query time
+   * ("invalid input value for enum"). This commit corrects the
+   * literal to `'refund_out'` so the endpoint actually runs.
    *
    * Void handling: rows with `is_void=true` are excluded from totals
    * AND from the count. invoice_payments has no void column so all of
@@ -223,8 +230,8 @@ export class PaymentsService {
               FROM invoice_payments
              WHERE payment_account_id = pa.id
             UNION ALL
-            SELECT CASE WHEN kind = 'refund' THEN 0::numeric ELSE amount END,
-                   CASE WHEN kind = 'refund' THEN amount      ELSE 0::numeric END,
+            SELECT CASE WHEN kind = 'refund_out' THEN 0::numeric ELSE amount END,
+                   CASE WHEN kind = 'refund_out' THEN amount      ELSE 0::numeric END,
                    created_at
               FROM customer_payments
              WHERE payment_account_id = pa.id
@@ -340,9 +347,9 @@ export class PaymentsService {
           cp.doc_no,
           cp.payment_account_id::text,
           cp.payment_method::text,
-          CASE WHEN cp.kind = 'refund' THEN 0::numeric ELSE cp.amount::numeric END,
-          CASE WHEN cp.kind = 'refund' THEN cp.amount::numeric ELSE 0::numeric END,
-          CASE WHEN cp.kind = 'refund' THEN -cp.amount::numeric ELSE cp.amount::numeric END,
+          CASE WHEN cp.kind = 'refund_out' THEN 0::numeric ELSE cp.amount::numeric END,
+          CASE WHEN cp.kind = 'refund_out' THEN cp.amount::numeric ELSE 0::numeric END,
+          CASE WHEN cp.kind = 'refund_out' THEN -cp.amount::numeric ELSE cp.amount::numeric END,
           cp.customer_id::text,
           c.full_name,
           cp.received_by::text,
