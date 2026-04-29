@@ -1,44 +1,50 @@
 /**
- * Cashboxes — unified treasury page (PR-FIN-PAYACCT-4D).
+ * Cashboxes — table-first treasury / payment-accounts admin page
+ * (PR-FIN-PAYACCT-4D-UX-FIX).
  *
- * Replaces both the old isolated /cashboxes (cashbox CRUD only) and
- * /payment-accounts (admin admin only) experiences with a single
- * treasury surface that reflects how operators actually think:
+ * UI/layout-only repositioning of the unified treasury page to match
+ * the approved screenshot. **No accounting behavior, no GL posting,
+ * no balance changes.** All values come from the same read-only
+ * endpoints already in production:
  *
- *   physical cash ⊕ bank accounts ⊕ e-wallets ⊕ POS terminals
- *   ⊕ InstaPay ⊕ cheque accounts — all under one roof, with
- *   real-time balances, drift alerts, and 30-day usage mix.
- *
- * Routes:
- *   • /cashboxes        — this page (canonical)
- *   • /payment-accounts — redirects here (PR-FIN-PAYACCT-4B compat)
- *
- * Reuses the PR-4B components verbatim:
- *   • PaymentAccountModal  — create/edit a payment_account row
- *   • PaymentAccountAlerts — accounting alerts panel (extended in 4D
- *     with two new alert types)
- *   • PaymentProviderLogo  — initials-fallback aware
- *
- * Right-rail RTL fix (vs PR-4B): grid-cols-[320px_1fr] with the rail
- * as the FIRST child. In RTL the first grid child takes the rightmost
- * slot, putting the rail visually on the right where it belongs.
- *
- * Data sources (all read-only, all real):
+ *   • GET /payment-accounts/balances     ← v_payment_account_balance
  *   • GET /cash-desk/cashboxes
- *   • GET /cash-desk/movements
- *   • GET /cash-desk/gl-drift
+ *   • GET /cash-desk/gl-drift            ← v_cashbox_gl_drift
+ *   • GET /cash-desk/movements           ← v_cashbox_movements
  *   • GET /payment-providers
- *   • GET /payment-accounts/balances
- *   • GET /payments/method-mix?days=30   ← new in 4D
+ *   • GET /payments/method-mix?days=30   ← v_dashboard_payment_mix_30d
+ *
+ * Layout (right→left in RTL):
+ *
+ *   ┌───────────────────────────────────────────────┬────────────┐
+ *   │ Header (breadcrumb / title / subtitle / btns) │            │
+ *   │ KPI row (7 tiles)                             │  RIGHT     │
+ *   │ Warning strips                                │  RAIL      │
+ *   │ Filters row                                   │  (cash     │
+ *   │ Main TABLE (15 columns, paginated)            │   summary  │
+ *   │ Bottom 3 dashboard cards                      │   quick    │
+ *   │                                               │   actions  │
+ *   │                                               │   alerts)  │
+ *   └───────────────────────────────────────────────┴────────────┘
+ *
+ * RTL right-rail invariant: `xl:grid-cols-[320px_1fr]` with the rail
+ * as the FIRST grid child — RTL flow puts the first child in the
+ * rightmost slot.
+ *
+ * Reuses PR-4B components verbatim: PaymentAccountModal,
+ * PaymentAccountAlerts, PaymentProviderLogo. Reuses PR-4D data
+ * hooks (paymentsApi.listBalances/methodMix/listProviders, cashDeskApi.cashboxes/glDrift/movements).
+ *
+ * Cashbox CRUD + transfer surface through the header overflow menu
+ * (the existing TransferModal / CashboxFormModal still live further
+ * down this file untouched).
  */
-import { useMemo, useState } from 'react';
+import { useMemo, useState, useEffect, useRef } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import {
   Plus,
   X,
-  Edit3,
-  Trash2,
   Wallet,
   Building2,
   Smartphone,
@@ -49,16 +55,26 @@ import {
   Hash,
   MapPin,
   Search,
-  Power,
-  PowerOff,
   ArrowRightLeft,
   CreditCard,
   Star,
   ShieldAlert,
-  Activity,
   RefreshCcw,
-  ListChecks,
+  Activity,
   PieChart,
+  ListChecks,
+  MoreVertical,
+  AlertTriangle,
+  Edit3,
+  ChevronLeft,
+  ChevronRight,
+  ChevronsLeft,
+  ChevronsRight,
+  Clock,
+  Trash2,
+  PowerOff,
+  Power,
+  CheckCheck,
 } from 'lucide-react';
 
 import {
@@ -67,7 +83,6 @@ import {
   CashboxKind,
   FinancialInstitution,
   CreateCashboxPayload,
-  CashboxMovement,
 } from '@/api/cash-desk.api';
 import {
   paymentsApi,
@@ -78,14 +93,24 @@ import {
   type PaymentProvider,
   METHOD_LABEL_AR,
 } from '@/api/payments.api';
-import { InstitutionLogo } from '@/components/InstitutionLogo';
 import { PaymentProviderLogo } from '@/components/payments/PaymentProviderLogo';
 import { PaymentAccountModal } from '@/components/payment-accounts/PaymentAccountModal';
 import { PaymentAccountAlerts } from '@/components/payment-accounts/PaymentAccountAlerts';
+import { InstitutionLogo } from '@/components/InstitutionLogo';
 import { useAuthStore } from '@/stores/auth.store';
-// The daily cash-desk operations (receipts / supplier pays / deposits)
-// live in their own page now — we no longer embed them here so this
-// screen stays focused on cashbox MANAGEMENT only.
+
+/**
+ * Icon used by `CashboxFormModal` (kept verbatim from earlier PRs) to
+ * render the kind-specific avatar in its header. The full kind grid
+ * has been retired from the main view; only this icon mapping is
+ * still consumed below.
+ */
+const KIND_ICON: Record<CashboxKind, any> = {
+  cash:    Wallet,
+  bank:    Building2,
+  ewallet: Smartphone,
+  check:   FileCheck,
+};
 
 const EGP = (n: number | string) =>
   `${Number(n || 0).toLocaleString('en-US', {
@@ -100,36 +125,10 @@ const KIND_LABEL: Record<CashboxKind, string> = {
   check: 'شيكات',
 };
 
-const KIND_ICON: Record<CashboxKind, any> = {
-  cash: Wallet,
-  bank: Building2,
-  ewallet: Smartphone,
-  check: FileCheck,
-};
-
-const KIND_COLOR: Record<CashboxKind, string> = {
-  cash: 'bg-emerald-50 border-emerald-200 text-emerald-800',
-  bank: 'bg-indigo-50 border-indigo-200 text-indigo-800',
-  ewallet: 'bg-purple-50 border-purple-200 text-purple-800',
-  check: 'bg-amber-50 border-amber-200 text-amber-800',
-};
-
-// ─── Tab keys for the unified treasury page ────────────────────────
-type TabKey =
-  | 'all'
-  | 'cashboxes'
-  | 'payment-accounts'
-  | 'banks-wallets'
-  | 'pos-cards'
-  | 'cheques'
-  | 'today'
-  | 'alerts';
-
 /**
  * Coarse "type" derived from a payment_account method, used for the
- * inner filter on the "حسابات الدفع" tab and for KPI bucketing.
- *
- * Mirrors the mapping in `pages/PaymentAccounts.tsx` (PR-4B).
+ * النوع column + type filter + bottom distribution card. Mirrors the
+ * grouping used everywhere else in this codebase.
  */
 type PaymentAccountKind = 'wallet' | 'bank' | 'card' | 'check' | 'instapay';
 
@@ -139,38 +138,101 @@ function paymentAccountKind(m: PaymentMethodCode): PaymentAccountKind | null {
   if (m === 'bank_transfer') return 'bank';
   if (m === 'card_visa' || m === 'card_mastercard' || m === 'card_meeza') return 'card';
   if (m === 'check') return 'check';
-  return null; // 'cash' / 'credit' / 'other' don't surface here
+  return null; // 'cash' / 'credit' / 'other' — not surfaced
 }
 
+const KIND_AR_LABEL: Record<PaymentAccountKind, string> = {
+  wallet:   'محفظة إلكترونية',
+  bank:     'تحويل بنكي',
+  card:     'نقاط بيع',
+  check:    'شيكات',
+  instapay: 'إنستا باي',
+};
+
+/** Methods where pinning a `cashbox_id` is recommended (mirrors the same
+ *  set used by `PaymentAccountAlerts` for the "no-cashbox-pin" alert). */
+const PIN_RECOMMENDED_METHODS = new Set<PaymentMethodCode>([
+  'bank_transfer',
+  'card_visa', 'card_mastercard', 'card_meeza',
+  'instapay',
+  'wallet', 'vodafone_cash', 'orange_cash',
+  'check',
+]);
+
+/** Arabic relative-time helper for the "آخر حركة" KPI/column. */
+function relativeArabic(iso: string | null): string {
+  if (!iso) return '—';
+  const ts = new Date(iso).getTime();
+  if (Number.isNaN(ts)) return '—';
+  const ms = Date.now() - ts;
+  const min = Math.floor(ms / 60_000);
+  if (min < 1)  return 'الآن';
+  if (min < 60) return `منذ ${min} دقيقة`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24)  return `منذ ${hr} ساعة`;
+  const days = Math.floor(hr / 24);
+  if (days === 1) return 'أمس';
+  if (days < 7)   return `منذ ${days} أيام`;
+  return new Date(iso).toLocaleDateString('en-CA');
+}
+
+function shortClock(iso: string | null): string {
+  if (!iso) return '';
+  return new Date(iso).toLocaleTimeString('ar-EG', {
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * Main page
+ * ════════════════════════════════════════════════════════════════════ */
 export default function Cashboxes() {
   const qc = useQueryClient();
   const hasPermission = useAuthStore((s) => s.hasPermission);
   const canManageCashboxes = hasPermission('cashdesk.manage_accounts');
   const canManageAccounts  = hasPermission('payment-accounts.manage');
 
-  const [tab, setTab] = useState<TabKey>('all');
-  // Cashbox sub-filters (the "الخزائن" tab keeps the legacy controls).
-  const [cashboxKindFilter, setCashboxKindFilter] = useState<CashboxKind | ''>('');
-  const [cashboxSearch, setCashboxSearch] = useState('');
-  // Payment-account sub-filter (under the "حسابات الدفع" tab).
-  const [paFilter, setPaFilter] = useState<'' | PaymentAccountKind>('');
-  const [paSearch, setPaSearch] = useState('');
+  // ── Filters ────────────────────────────────────────────────────────
+  const [search, setSearch] = useState('');
+  const [methodFilter, setMethodFilter] = useState<PaymentMethodCode | ''>('');
+  const [typeFilter, setTypeFilter] = useState<'' | PaymentAccountKind>('');
+  const [activeFilter, setActiveFilter] = useState<'' | 'active' | 'inactive'>('');
+  const [defaultFilter, setDefaultFilter] = useState<'' | 'default' | 'non-default'>('');
+  const [cashboxFilter, setCashboxFilter] = useState<string>('');
 
-  // Cashbox-side modals
-  const [showCreate, setShowCreate] = useState<CashboxKind | null>(null);
-  const [editing, setEditing] = useState<Cashbox | null>(null);
-  const [showTransfer, setShowTransfer] = useState(false);
-  // Payment-account modal
+  function clearFilters() {
+    setSearch('');
+    setMethodFilter('');
+    setTypeFilter('');
+    setActiveFilter('');
+    setDefaultFilter('');
+    setCashboxFilter('');
+    setPage(1);
+  }
+
+  // ── Pagination (client-side) ───────────────────────────────────────
+  const [pageSize, setPageSize] = useState<number>(10);
+  const [page, setPage] = useState<number>(1);
+
+  // ── Modals ─────────────────────────────────────────────────────────
   const [paCreate, setPaCreate] = useState<{ open: boolean; method: PaymentMethodCode | null }>({
-    open: false,
-    method: null,
+    open: false, method: null,
   });
   const [paEditing, setPaEditing] = useState<PaymentAccount | null>(null);
+  const [showCreateCashbox, setShowCreateCashbox] = useState<CashboxKind | null>(null);
+  const [editingCashbox, setEditingCashbox]       = useState<Cashbox | null>(null);
+  const [showTransfer, setShowTransfer]           = useState(false);
+  const [showOverflow, setShowOverflow]           = useState(false);
 
-  // ─── Live data ────────────────────────────────────────────────────
-  const { data: boxes = [], isLoading: boxesLoading } = useQuery({
+  // ── Selected row (visual highlight) ────────────────────────────────
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  // ── Live data (no mocks, no fallbacks) ─────────────────────────────
+  const { data: boxes = [] } = useQuery({
     queryKey: ['cashboxes', 'all'],
     queryFn: () => cashDeskApi.cashboxes(true),
+    staleTime: 30_000,
   });
   const { data: balances = [] } = useQuery({
     queryKey: ['payment-accounts-balances'],
@@ -192,106 +254,21 @@ export default function Cashboxes() {
     queryFn: () => paymentsApi.methodMix(30),
     staleTime: 5 * 60 * 1000,
   });
-  // Today's movements feed (cashbox-side; non-cash account flows still
-  // ride this view when their cashbox_id is pinned — PR-DRIFT-3F).
+  // /cash-desk/movements is consumed by the "آخر حركة" KPI to surface
+  // the cash-side movement timestamp when it's newer than any
+  // payment_account `last_movement` (e.g. internal transfers).
   const todayISO = new Date().toISOString().slice(0, 10);
-  const { data: todayMovements = [] } = useQuery({
+  const { data: recentMovements = [] } = useQuery({
     queryKey: ['cashbox-movements-today', todayISO],
-    queryFn: () => cashDeskApi.movements({ from: todayISO, to: todayISO, limit: 200 }),
-    staleTime: 15_000,
+    queryFn: () => cashDeskApi.movements({ from: todayISO, to: todayISO, limit: 1 }),
+    staleTime: 30_000,
   });
 
-  // ─── KPI math (8 tiles) ───────────────────────────────────────────
-  const kpis = useMemo(() => {
-    const byKind: Record<CashboxKind, { count: number; balance: number }> = {
-      cash:    { count: 0, balance: 0 },
-      bank:    { count: 0, balance: 0 },
-      ewallet: { count: 0, balance: 0 },
-      check:   { count: 0, balance: 0 },
-    };
-    for (const b of boxes.filter((b) => b.is_active)) {
-      byKind[b.kind].count++;
-      byKind[b.kind].balance += Number(b.current_balance || 0);
-    }
-
-    // Payment-accounts buckets (POS / cards = card kind).
-    const paBalanceByKind: Record<PaymentAccountKind, number> = {
-      wallet: 0, bank: 0, card: 0, check: 0, instapay: 0,
-    };
-    const seenKey = new Set<string>();
-    for (const b of balances) {
-      const k = paymentAccountKind(b.method as PaymentMethodCode);
-      if (!k) continue;
-      // Dedupe by (gl_account_code|cashbox_id) so accounts that share a
-      // bucket don't double-count.
-      const key = `${b.gl_account_code}|${b.cashbox_id ?? 'null'}`;
-      if (seenKey.has(key)) continue;
-      seenKey.add(key);
-      paBalanceByKind[k] += Number(b.net_debit || 0);
-    }
-
-    // Methods with active rows but no `is_default=true`.
-    const activeMethods = new Set<string>();
-    const defaultedMethods = new Set<string>();
-    for (const b of balances) {
-      if (!b.active) continue;
-      activeMethods.add(b.method);
-      if (b.is_default) defaultedMethods.add(b.method);
-    }
-    const noDefaultCount = activeMethods.size - defaultedMethods.size;
-
-    // Drift: any cashbox where |drift_amount| > 0.01.
-    const driftCount = drifts.filter((d) => Math.abs(Number(d.drift_amount || 0)) > 0.01).length;
-
-    const totalBalance =
-      byKind.cash.balance + byKind.bank.balance + byKind.ewallet.balance + byKind.check.balance;
-
-    return {
-      total: totalBalance,
-      cash: byKind.cash.balance,
-      bank: byKind.bank.balance + paBalanceByKind.bank,
-      wallet: byKind.ewallet.balance + paBalanceByKind.wallet + paBalanceByKind.instapay,
-      card: paBalanceByKind.card,
-      check: byKind.check.balance + paBalanceByKind.check,
-      noDefault: noDefaultCount,
-      driftCount,
-    };
-  }, [boxes, balances, drifts]);
-
-  // ─── Filtered cashboxes (الخزائن tab) ─────────────────────────────
-  const filteredBoxes = useMemo(() => {
-    return boxes.filter((b) => {
-      if (cashboxKindFilter && b.kind !== cashboxKindFilter) return false;
-      if (cashboxSearch) {
-        const s = cashboxSearch.toLowerCase();
-        return (
-          b.name_ar?.toLowerCase().includes(s) ||
-          (b.institution_name || '').toLowerCase().includes(s) ||
-          (b.account_number || '').toLowerCase().includes(s) ||
-          (b.account_manager_name || '').toLowerCase().includes(s) ||
-          (b.bank_branch || '').toLowerCase().includes(s)
-        );
-      }
-      return true;
-    });
-  }, [boxes, cashboxKindFilter, cashboxSearch]);
-
-  // ─── Filtered payment accounts (per active tab) ───────────────────
+  // ── Filtered + sorted accounts (no fake rows) ──────────────────────
   const filteredAccounts = useMemo(() => {
-    let kindFilter: PaymentAccountKind | '' = paFilter;
-    if (tab === 'banks-wallets')   kindFilter = ''; // multi-kind in renderer
-    if (tab === 'pos-cards')       kindFilter = 'card';
-    if (tab === 'cheques')         kindFilter = 'check';
-
     return balances.filter((b) => {
-      const k = paymentAccountKind(b.method as PaymentMethodCode);
-      if (tab === 'banks-wallets') {
-        if (k !== 'bank' && k !== 'wallet' && k !== 'instapay') return false;
-      } else if (kindFilter && k !== kindFilter) {
-        return false;
-      }
-      if (paSearch) {
-        const s = paSearch.toLowerCase();
+      if (search) {
+        const q = search.trim().toLowerCase();
         const hay = [
           b.display_name,
           b.provider_key ?? '',
@@ -301,13 +278,132 @@ export default function Cashboxes() {
         ]
           .join(' ')
           .toLowerCase();
-        if (!hay.includes(s)) return false;
+        if (!hay.includes(q)) return false;
       }
+      if (methodFilter && b.method !== methodFilter) return false;
+      if (typeFilter) {
+        const k = paymentAccountKind(b.method as PaymentMethodCode);
+        if (k !== typeFilter) return false;
+      }
+      if (activeFilter === 'active'   && !b.active) return false;
+      if (activeFilter === 'inactive' &&  b.active) return false;
+      if (defaultFilter === 'default'     && !b.is_default) return false;
+      if (defaultFilter === 'non-default' &&  b.is_default) return false;
+      if (cashboxFilter && b.cashbox_id !== cashboxFilter) return false;
       return true;
     });
-  }, [balances, tab, paFilter, paSearch]);
+  }, [balances, search, methodFilter, typeFilter, activeFilter, defaultFilter, cashboxFilter]);
 
-  // ─── Mutations on payment_accounts (reused from PR-4B page) ───────
+  // Reset page when filters narrow the result set out of bounds.
+  useEffect(() => {
+    const totalPages = Math.max(1, Math.ceil(filteredAccounts.length / pageSize));
+    if (page > totalPages) setPage(totalPages);
+  }, [filteredAccounts.length, pageSize, page]);
+
+  const pagedAccounts = useMemo(() => {
+    const start = (page - 1) * pageSize;
+    return filteredAccounts.slice(start, start + pageSize);
+  }, [filteredAccounts, page, pageSize]);
+
+  // ── KPI math (7 tiles) ─────────────────────────────────────────────
+  const kpis = useMemo(() => {
+    const total    = balances.length;
+    const active   = balances.filter((b) => b.active).length;
+    const inactive = total - active;
+
+    // Active methods missing a default.
+    const activeMethods    = new Set<string>();
+    const defaultedMethods = new Set<string>();
+    for (const b of balances) {
+      if (!b.active) continue;
+      activeMethods.add(b.method);
+      if (b.is_default) defaultedMethods.add(b.method);
+    }
+    const noDefault = activeMethods.size - defaultedMethods.size;
+
+    // Wallet / bank totals — dedupe by (gl_account_code | cashbox_id)
+    // so accounts that share a bucket don't double-count.
+    const seen = new Set<string>();
+    const sumDedupe = (filter: (b: PaymentAccountBalance) => boolean) => {
+      let s = 0;
+      for (const b of balances) {
+        if (!filter(b)) continue;
+        const key = `${b.gl_account_code}|${b.cashbox_id ?? 'null'}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        s += Number(b.net_debit || 0);
+      }
+      seen.clear();
+      return s;
+    };
+    const walletTotal = sumDedupe((b) => {
+      const k = paymentAccountKind(b.method as PaymentMethodCode);
+      return k === 'wallet' || k === 'instapay';
+    });
+    const bankTotal = sumDedupe((b) => paymentAccountKind(b.method as PaymentMethodCode) === 'bank');
+
+    // "آخر حركة" = max(last_movement across balances, latest cashbox movement)
+    const balanceLast = balances
+      .map((b) => b.last_movement)
+      .filter((s): s is string => !!s)
+      .sort();
+    const latestBalanceMovement = balanceLast[balanceLast.length - 1] ?? null;
+    const latestCashboxMovement = recentMovements[0]?.created_at ?? null;
+    const latestMovement =
+      [latestBalanceMovement, latestCashboxMovement]
+        .filter((s): s is string => !!s)
+        .sort()
+        .pop() ?? null;
+
+    return {
+      total, active, inactive, noDefault,
+      walletTotal, bankTotal,
+      latestMovement,
+    };
+  }, [balances, recentMovements]);
+
+  // ── Warning-strip data (computed from the same balances; no extra fetch) ──
+  const noDefaultMethods = useMemo(() => {
+    const activeByMethod = new Map<string, PaymentAccountBalance[]>();
+    for (const b of balances) {
+      if (!b.active) continue;
+      const arr = activeByMethod.get(b.method) ?? [];
+      arr.push(b);
+      activeByMethod.set(b.method, arr);
+    }
+    return Array.from(activeByMethod.entries())
+      .filter(([, arr]) => !arr.some((b) => b.is_default))
+      .map(([m]) => m);
+  }, [balances]);
+
+  const unlinkedAccounts = useMemo(
+    () =>
+      balances.filter(
+        (b) =>
+          b.active &&
+          !b.cashbox_id &&
+          PIN_RECOMMENDED_METHODS.has(b.method as PaymentMethodCode),
+      ),
+    [balances],
+  );
+
+  // ── Per-row warning resolver (for the "التحذيرات" column) ──────────
+  function rowWarnings(b: PaymentAccountBalance): string[] {
+    const out: string[] = [];
+    if (
+      b.active &&
+      !b.cashbox_id &&
+      PIN_RECOMMENDED_METHODS.has(b.method as PaymentMethodCode)
+    ) {
+      out.push('غير مربوط بخزنة');
+    }
+    if (b.active && noDefaultMethods.includes(b.method)) {
+      out.push('لا يوجد افتراضي');
+    }
+    return out;
+  }
+
+  // ── Mutations on payment_accounts ──────────────────────────────────
   const setDefaultMutation = useMutation({
     mutationFn: (id: string) => paymentsApi.setDefault(id),
     onSuccess: () => {
@@ -329,6 +425,7 @@ export default function Cashboxes() {
     onSuccess: (out) => {
       toast.success(out.mode === 'hard' ? 'تم حذف الحساب' : 'تم تعطيل الحساب');
       qc.invalidateQueries({ queryKey: ['payment-accounts-balances'] });
+      setSelectedId(null);
     },
     onError: (e: any) => toast.error(e?.response?.data?.message || 'فشل الحذف'),
   });
@@ -344,107 +441,56 @@ export default function Cashboxes() {
 
   const cashCashbox = boxes.find((c) => c.kind === 'cash' && c.is_active);
 
-  // ─── Render ───────────────────────────────────────────────────────
+  // ── Render ─────────────────────────────────────────────────────────
   return (
     <div className="space-y-4 pb-8" data-testid="treasury-page">
       {/* Header */}
-      <div className="flex items-center justify-between flex-wrap gap-3">
-        <div>
-          <h2 className="text-2xl font-black text-slate-800 flex items-center gap-2">
-            <Wallet className="text-brand-600" /> الخزائن والحسابات البنكية
-          </h2>
+      <div className="flex items-start justify-between gap-4 flex-wrap" data-testid="treasury-header">
+        <div className="text-right">
+          <div className="text-[11px] text-slate-500 mb-1" data-testid="treasury-breadcrumb">
+            الرئيسية / الإعدادات / حسابات الدفع
+          </div>
+          <h1 className="text-2xl font-black text-slate-900">حسابات الدفع</h1>
           <p className="text-sm text-slate-500 mt-1">
-            نقدي · حسابات بنكية · محافظ إلكترونية · نقاط بيع · شيكات
+            إدارة حسابات الدفع المستخدمة في نقطة البيع ومقبوضات العملاء ومدفوعات الموردين
           </p>
         </div>
-        <div className="flex gap-2 flex-wrap" data-testid="treasury-actions">
+        <div className="flex items-center gap-2 relative" data-testid="treasury-actions">
+          {canManageAccounts && (
+            <button
+              type="button"
+              onClick={() => setPaCreate({ open: true, method: null })}
+              className="px-4 py-2 rounded-lg bg-pink-600 text-white text-sm font-bold hover:bg-pink-700 inline-flex items-center gap-1.5"
+              data-testid="treasury-add-payment-account"
+            >
+              <Plus size={14} /> إضافة حساب دفع
+            </button>
+          )}
           <button
-            className="btn-secondary"
+            type="button"
             onClick={refreshAll}
+            className="px-3 py-2 rounded-lg border border-slate-300 bg-white text-sm font-bold text-slate-700 hover:bg-slate-50 inline-flex items-center gap-1.5"
             data-testid="treasury-refresh"
-            title="تحديث الأرصدة"
           >
             <RefreshCcw size={14} /> تحديث الأرصدة
           </button>
-          <button
-            className="btn-primary"
-            onClick={() => setShowTransfer(true)}
-            disabled={boxes.filter((b) => b.is_active).length < 2}
-            title="تحويل نقدية بين خزنتين"
-            data-testid="treasury-transfer"
-          >
-            <ArrowRightLeft size={16} /> تحويل بين الخزائن
-          </button>
-          {canManageCashboxes && (
-            <>
-              <button
-                className="btn-secondary"
-                onClick={() => setShowCreate('cash')}
-                data-testid="treasury-add-cash"
-              >
-                <Wallet size={14} />
-                <Plus size={12} /> إضافة نقدي
-              </button>
-              <button
-                className="btn-secondary"
-                onClick={() => setShowCreate('bank')}
-                data-testid="treasury-add-bank"
-              >
-                <Building2 size={14} />
-                <Plus size={12} /> إضافة حساب بنكي
-              </button>
-              <button
-                className="btn-secondary"
-                onClick={() => setShowCreate('ewallet')}
-                data-testid="treasury-add-ewallet"
-              >
-                <Smartphone size={14} />
-                <Plus size={12} /> إضافة محفظة إلكترونية
-              </button>
-              <button
-                className="btn-secondary"
-                onClick={() => setShowCreate('check')}
-                data-testid="treasury-add-check-cashbox"
-              >
-                <FileCheck size={14} />
-                <Plus size={12} /> إضافة حساب شيكات
-              </button>
-            </>
-          )}
-          {canManageAccounts && (
-            <button
-              className="btn-secondary"
-              onClick={() => setPaCreate({ open: true, method: 'card_visa' })}
-              data-testid="treasury-add-pos-card"
-            >
-              <CreditCard size={14} />
-              <Plus size={12} /> إضافة جهاز POS / بطاقة
-            </button>
-          )}
+          <OverflowMenu
+            open={showOverflow}
+            onToggle={() => setShowOverflow((v) => !v)}
+            onClose={() => setShowOverflow(false)}
+            disabledTransfer={boxes.filter((b) => b.is_active).length < 2}
+            canManageCashboxes={canManageCashboxes}
+            onTransfer={() => { setShowOverflow(false); setShowTransfer(true); }}
+            onAddCash={() => { setShowOverflow(false); setShowCreateCashbox('cash'); }}
+            onAddBank={() => { setShowOverflow(false); setShowCreateCashbox('bank'); }}
+            onAddEwallet={() => { setShowOverflow(false); setShowCreateCashbox('ewallet'); }}
+            onAddCheck={() => { setShowOverflow(false); setShowCreateCashbox('check'); }}
+          />
         </div>
       </div>
 
-      {/* KPI strip — 8 tiles */}
-      <div
-        className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-2"
-        data-testid="treasury-kpis"
-      >
-        <KpiTile testId="kpi-total"     label="إجمالي الرصيد"        value={EGP(kpis.total)}     tone="pink"    icon={<Wallet size={14} />} />
-        <KpiTile testId="kpi-cash"      label="نقدي"                 value={EGP(kpis.cash)}      tone="emerald" icon={<Wallet size={14} />} />
-        <KpiTile testId="kpi-bank"      label="حسابات بنكية"          value={EGP(kpis.bank)}      tone="indigo"  icon={<Building2 size={14} />} />
-        <KpiTile testId="kpi-wallet"    label="محافظ إلكترونية"        value={EGP(kpis.wallet)}    tone="purple"  icon={<Smartphone size={14} />} />
-        <KpiTile testId="kpi-card"      label="نقاط بيع / بطاقات"     value={EGP(kpis.card)}      tone="sky"     icon={<CreditCard size={14} />} />
-        <KpiTile testId="kpi-check"     label="شيكات"                value={EGP(kpis.check)}     tone="amber"   icon={<FileCheck size={14} />} />
-        <KpiTile testId="kpi-no-default" label="حسابات بدون افتراضي"  value={String(kpis.noDefault)} suffix="طريقة" tone="slate" icon={<Star size={14} />} />
-        <KpiTile testId="kpi-drift"    label="فروق محاسبية"         value={String(kpis.driftCount)} suffix="خزنة"   tone="rose"  icon={<ShieldAlert size={14} />} />
-      </div>
-
-      {/* Right rail (RIGHT in RTL) + main column.
-          RTL invariant: grid children flow right→left, so the FIRST child
-          takes the rightmost slot. We put the rail first → it appears on
-          the right; the main column (1fr) takes the left/wide slot. */}
+      {/* Right rail (RTL: rail is the FIRST grid child → renders RIGHT) + main column */}
       <div className="grid grid-cols-1 xl:grid-cols-[320px_1fr] gap-4" data-testid="treasury-grid">
-        {/* RIGHT RAIL */}
         <aside className="space-y-3 xl:order-first" data-testid="treasury-rail">
           {cashCashbox && (
             <div
@@ -453,16 +499,17 @@ export default function Cashboxes() {
             >
               <div className="flex items-center gap-2 mb-1">
                 <Wallet size={14} className="text-emerald-700" />
-                <span className="font-bold text-sm text-emerald-800">
-                  {cashCashbox.name_ar}
-                </span>
+                <span className="font-bold text-sm text-emerald-800">نقدي</span>
               </div>
-              <div className="text-2xl font-black text-emerald-800 font-mono">
+              <div className="text-[11px] text-emerald-700">{cashCashbox.name_ar}</div>
+              <div className="text-2xl font-black text-emerald-800 font-mono mt-1">
                 {EGP(cashCashbox.current_balance)}
               </div>
               <button
-                onClick={() => setTab('cashboxes')}
+                type="button"
+                onClick={() => setCashboxFilter(cashCashbox.id)}
                 className="text-[11px] text-emerald-700 hover:underline mt-1 block"
+                data-testid="treasury-rail-cash-details"
               >
                 عرض التفاصيل ←
               </button>
@@ -475,11 +522,11 @@ export default function Cashboxes() {
               data-testid="treasury-quick-actions"
             >
               <h3 className="font-bold text-sm text-slate-800 mb-2">إجراءات سريعة</h3>
-              <QuickAction onClick={() => setPaCreate({ open: true, method: 'bank_transfer' })} icon={<Building2 size={14} />} label="إضافة حساب بنكي"          testId="quick-add-bank" />
+              <QuickAction onClick={() => setPaCreate({ open: true, method: 'bank_transfer' })} icon={<Building2 size={14} />}  label="إضافة حساب بنكي"          testId="quick-add-bank" />
               <QuickAction onClick={() => setPaCreate({ open: true, method: 'wallet' })}        icon={<Smartphone size={14} />} label="إضافة محفظة إلكترونية"  testId="quick-add-wallet" />
               <QuickAction onClick={() => setPaCreate({ open: true, method: 'instapay' })}      icon={<Smartphone size={14} />} label="إضافة حساب InstaPay"    testId="quick-add-instapay" />
               <QuickAction onClick={() => setPaCreate({ open: true, method: 'card_visa' })}     icon={<CreditCard size={14} />} label="إضافة جهاز POS / بطاقة" testId="quick-add-card" />
-              <QuickAction onClick={() => setPaCreate({ open: true, method: 'check' })}         icon={<FileCheck size={14} />}  label="إضافة حساب شيكات"      testId="quick-add-check" />
+              <QuickAction onClick={() => setPaCreate({ open: true, method: 'check' })}         icon={<FileCheck size={14} />}  label="إضافة حساب شيكات"       testId="quick-add-check" />
             </div>
           )}
 
@@ -490,82 +537,198 @@ export default function Cashboxes() {
           />
         </aside>
 
-        {/* MAIN COLUMN */}
         <div className="space-y-4 min-w-0">
-          {/* Tabs */}
-          <div className="rounded-2xl border border-slate-200 bg-white overflow-x-auto" data-testid="treasury-tabs">
-            <div className="flex flex-nowrap gap-1 p-2">
-              <Tab tab={tab} setTab={setTab} value="all"              label="الكل"                  testId="tab-all" />
-              <Tab tab={tab} setTab={setTab} value="cashboxes"        label="الخزائن"               testId="tab-cashboxes" />
-              <Tab tab={tab} setTab={setTab} value="payment-accounts" label="حسابات الدفع"           testId="tab-payment-accounts" />
-              <Tab tab={tab} setTab={setTab} value="banks-wallets"   label="البنوك والمحافظ"        testId="tab-banks-wallets" />
-              <Tab tab={tab} setTab={setTab} value="pos-cards"       label="نقاط البيع / البطاقات" testId="tab-pos-cards" />
-              <Tab tab={tab} setTab={setTab} value="cheques"          label="الشيكات"               testId="tab-cheques" />
-              <Tab tab={tab} setTab={setTab} value="today"            label="حركة اليوم"             testId="tab-today" />
-              <Tab tab={tab} setTab={setTab} value="alerts"           label="التنبيهات"              testId="tab-alerts" />
+          {/* KPI row — 7 tiles */}
+          <div
+            className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-2"
+            data-testid="treasury-kpis"
+          >
+            <KpiTile testId="kpi-total"     icon={<Wallet      size={14} className="text-pink-600" />}    tone="pink"    label="كل الحسابات"        value={String(kpis.total)}       suffix="حساب" />
+            <KpiTile testId="kpi-active"    icon={<CheckCheck  size={14} className="text-emerald-600" />} tone="emerald" label="الحسابات النشطة"     value={String(kpis.active)} />
+            <KpiTile testId="kpi-inactive"  icon={<PowerOff    size={14} className="text-slate-500" />}   tone="slate"   label="الحسابات غير النشطة" value={String(kpis.inactive)}    suffix="حساب" />
+            <KpiTile testId="kpi-no-default" icon={<Star        size={14} className="text-amber-600" />}   tone="amber"   label="بدون حساب افتراضي"  value={String(kpis.noDefault)}   suffix="طريقة دفع" />
+            <KpiTile testId="kpi-wallet-balance" icon={<Smartphone size={14} className="text-purple-600" />} tone="purple" label="أرصدة المحافظ" value={EGP(kpis.walletTotal)} valueClass="text-base font-black" />
+            <KpiTile testId="kpi-bank-balance"   icon={<Building2  size={14} className="text-indigo-600" />} tone="indigo" label="أرصدة البنوك"  value={EGP(kpis.bankTotal)}   valueClass="text-base font-black" />
+            <KpiTile
+              testId="kpi-last-movement"
+              icon={<Clock size={14} className="text-rose-600" />}
+              tone="rose"
+              label="آخر حركة"
+              value={
+                kpis.latestMovement
+                  ? `${shortClock(kpis.latestMovement) || ''} ${relativeArabic(kpis.latestMovement)}`.trim()
+                  : '—'
+              }
+              valueClass="text-sm font-black"
+              suffix={kpis.latestMovement ? new Date(kpis.latestMovement).toLocaleDateString('en-CA') : undefined}
+            />
+          </div>
+
+          {/* Warning strips */}
+          {(noDefaultMethods.length > 0 || unlinkedAccounts.length > 0) && (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2" data-testid="treasury-warnings">
+              {noDefaultMethods.map((m) => (
+                <div
+                  key={`nodef-${m}`}
+                  className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 flex items-center justify-between"
+                  data-testid={`warning-no-default-${m}`}
+                >
+                  <div className="flex items-center gap-2">
+                    <AlertTriangle size={14} className="text-amber-600" />
+                    <div className="text-xs text-amber-800">
+                      طريقة <strong>{METHOD_LABEL_AR[m as keyof typeof METHOD_LABEL_AR] ?? m}</strong> لا يوجد لها حساب افتراضي نشط
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="text-[11px] text-amber-800 hover:underline"
+                    onClick={() => { setMethodFilter(m as PaymentMethodCode); setPage(1); }}
+                  >
+                    عرض التفاصيل
+                  </button>
+                </div>
+              ))}
+              {unlinkedAccounts.length > 0 && (
+                <div
+                  className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 flex items-center justify-between"
+                  data-testid="warning-unlinked-accounts"
+                >
+                  <div className="flex items-center gap-2">
+                    <AlertTriangle size={14} className="text-amber-600" />
+                    <div className="text-xs text-amber-800">
+                      {unlinkedAccounts.length} حساب نشط غير مربوط بخزنة
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="text-[11px] text-amber-800 hover:underline"
+                    onClick={() => { setCashboxFilter(''); setPage(1); }}
+                  >
+                    عرض التفاصيل
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Filters */}
+          <div className="rounded-2xl border border-slate-200 bg-white p-4" data-testid="treasury-filters">
+            <div className="grid grid-cols-1 md:grid-cols-7 gap-3 items-end">
+              <Field label="بحث">
+                <input
+                  className="input"
+                  placeholder="بحث باسم الحساب / رقم الحساب / المزود..."
+                  value={search}
+                  onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+                  data-testid="filter-search"
+                />
+              </Field>
+              <Field label="طريقة الدفع">
+                <select
+                  className="input"
+                  value={methodFilter}
+                  onChange={(e) => { setMethodFilter(e.target.value as PaymentMethodCode | ''); setPage(1); }}
+                  data-testid="filter-method"
+                >
+                  <option value="">الكل</option>
+                  {Object.entries(METHOD_LABEL_AR).map(([code, ar]) => (
+                    <option key={code} value={code}>{ar}</option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="النوع">
+                <select
+                  className="input"
+                  value={typeFilter}
+                  onChange={(e) => { setTypeFilter(e.target.value as '' | PaymentAccountKind); setPage(1); }}
+                  data-testid="filter-type"
+                >
+                  <option value="">الكل</option>
+                  <option value="instapay">{KIND_AR_LABEL.instapay}</option>
+                  <option value="wallet">{KIND_AR_LABEL.wallet}</option>
+                  <option value="card">{KIND_AR_LABEL.card}</option>
+                  <option value="bank">{KIND_AR_LABEL.bank}</option>
+                  <option value="check">{KIND_AR_LABEL.check}</option>
+                </select>
+              </Field>
+              <Field label="الحالة">
+                <select
+                  className="input"
+                  value={activeFilter}
+                  onChange={(e) => { setActiveFilter(e.target.value as '' | 'active' | 'inactive'); setPage(1); }}
+                  data-testid="filter-active"
+                >
+                  <option value="">الكل</option>
+                  <option value="active">نشط</option>
+                  <option value="inactive">غير نشط</option>
+                </select>
+              </Field>
+              <Field label="الافتراضي">
+                <select
+                  className="input"
+                  value={defaultFilter}
+                  onChange={(e) => { setDefaultFilter(e.target.value as '' | 'default' | 'non-default'); setPage(1); }}
+                  data-testid="filter-default"
+                >
+                  <option value="">الكل</option>
+                  <option value="default">افتراضي</option>
+                  <option value="non-default">غير افتراضي</option>
+                </select>
+              </Field>
+              <Field label="الخزنة المرتبطة">
+                <select
+                  className="input"
+                  value={cashboxFilter}
+                  onChange={(e) => { setCashboxFilter(e.target.value); setPage(1); }}
+                  data-testid="filter-cashbox"
+                >
+                  <option value="">الكل</option>
+                  {boxes.map((c) => (
+                    <option key={c.id} value={c.id}>{c.name_ar}</option>
+                  ))}
+                </select>
+              </Field>
+              <button
+                type="button"
+                onClick={clearFilters}
+                className="px-3 py-2 rounded-lg border border-slate-300 bg-white text-xs font-bold text-slate-700 hover:bg-slate-50 inline-flex items-center justify-center gap-1.5"
+                data-testid="filter-clear"
+              >
+                <X size={12} /> مسح الفلاتر
+              </button>
             </div>
           </div>
 
-          {/* Tab content */}
-          {tab === 'all' && (
-            <AllOverview
-              boxes={boxes}
-              balances={balances}
-              canManageCashboxes={canManageCashboxes}
-              onCashboxEdit={setEditing}
-              onAccountSelect={(b) => {
-                setTab('payment-accounts');
-                setPaSearch(b.display_name);
-              }}
-            />
-          )}
+          {/* Main table */}
+          <PaymentAccountsTable
+            rows={pagedAccounts}
+            providers={providers}
+            cashboxes={boxes}
+            selectedId={selectedId}
+            onSelect={setSelectedId}
+            canManage={canManageAccounts}
+            onEdit={(b) => setPaEditing(b as unknown as PaymentAccount)}
+            onSetDefault={(b) => canManageAccounts && setDefaultMutation.mutate(b.payment_account_id)}
+            onToggleActive={(b) => canManageAccounts && toggleAccountMutation.mutate(b.payment_account_id)}
+            onDelete={(b) => {
+              if (!canManageAccounts) return;
+              const ok = window.confirm(`هل أنت متأكد من حذف "${b.display_name}"؟`);
+              if (ok) deleteAccountMutation.mutate(b.payment_account_id);
+            }}
+            warningsFor={rowWarnings}
+            totalCount={filteredAccounts.length}
+          />
 
-          {tab === 'cashboxes' && (
-            <CashboxesPanel
-              boxes={filteredBoxes}
-              isLoading={boxesLoading}
-              kindFilter={cashboxKindFilter}
-              setKindFilter={setCashboxKindFilter}
-              search={cashboxSearch}
-              setSearch={setCashboxSearch}
-              canManage={canManageCashboxes}
-              onEdit={setEditing}
-            />
-          )}
+          {/* Pagination */}
+          <Pagination
+            total={filteredAccounts.length}
+            page={page}
+            pageSize={pageSize}
+            onPageChange={setPage}
+            onPageSizeChange={(n) => { setPageSize(n); setPage(1); }}
+          />
 
-          {(tab === 'payment-accounts' || tab === 'banks-wallets' || tab === 'pos-cards' || tab === 'cheques') && (
-            <PaymentAccountsTable
-              tab={tab}
-              accounts={filteredAccounts}
-              providers={providers}
-              cashboxes={boxes}
-              search={paSearch}
-              setSearch={setPaSearch}
-              kindFilter={paFilter}
-              setKindFilter={setPaFilter}
-              canManage={canManageAccounts}
-              onEdit={(b) => setPaEditing(b as unknown as PaymentAccount)}
-              onSetDefault={(b) => canManageAccounts && setDefaultMutation.mutate(b.payment_account_id)}
-              onToggleActive={(b) => canManageAccounts && toggleAccountMutation.mutate(b.payment_account_id)}
-              onDelete={(b) => {
-                if (!canManageAccounts) return;
-                const ok = window.confirm(`هل أنت متأكد من حذف "${b.display_name}"؟`);
-                if (ok) deleteAccountMutation.mutate(b.payment_account_id);
-              }}
-            />
-          )}
-
-          {tab === 'today' && <TodayMovementsPanel rows={todayMovements} />}
-
-          {tab === 'alerts' && (
-            <PaymentAccountAlerts
-              accounts={balances as unknown as PaymentAccount[]}
-              balances={balances}
-              drifts={drifts}
-            />
-          )}
-
-          {/* Bottom dashboard cards (3) */}
+          {/* Bottom 3 dashboard cards */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-3" data-testid="treasury-summary">
             <SummaryCard title="ملخص أرصدة حسابات الدفع" testId="summary-balance" icon={<ListChecks size={14} className="text-slate-600" />}>
               <BalanceSummary balances={balances} />
@@ -580,17 +743,19 @@ export default function Cashboxes() {
         </div>
       </div>
 
-      {/* Cashbox modals (preserved from pre-4D) */}
-      {showCreate && <CashboxFormModal kind={showCreate} onClose={() => setShowCreate(null)} />}
-      {editing &&    <CashboxFormModal kind={editing.kind} editing={editing} onClose={() => setEditing(null)} />}
+      {/* Modals */}
+      {showCreateCashbox && (
+        <CashboxFormModal kind={showCreateCashbox} onClose={() => setShowCreateCashbox(null)} />
+      )}
+      {editingCashbox && (
+        <CashboxFormModal kind={editingCashbox.kind} editing={editingCashbox} onClose={() => setEditingCashbox(null)} />
+      )}
       {showTransfer && (
         <TransferModal
           boxes={boxes.filter((b) => b.is_active)}
           onClose={() => setShowTransfer(false)}
         />
       )}
-
-      {/* Payment-account modals (reused from PR-4B) */}
       {paCreate.open && canManageAccounts && (
         <PaymentAccountModal
           mode="create"
@@ -613,58 +778,27 @@ export default function Cashboxes() {
   );
 }
 
-/* ────────────────────────────────────────────────────────────────────
+/* ════════════════════════════════════════════════════════════════════
  * Sub-components — kept inline so the unified treasury page stays
- * editable as one file. None of these talk to the network on their
- * own; the parent passes already-loaded data in.
- * ──────────────────────────────────────────────────────────────────── */
-
-function Tab({
-  tab,
-  setTab,
-  value,
-  label,
-  testId,
-}: {
-  tab: TabKey;
-  setTab: (v: TabKey) => void;
-  value: TabKey;
-  label: string;
-  testId: string;
-}) {
-  const active = tab === value;
-  return (
-    <button
-      type="button"
-      onClick={() => setTab(value)}
-      data-testid={testId}
-      className={
-        active
-          ? 'px-3 py-1.5 rounded-lg bg-brand-50 text-brand-700 text-xs font-bold whitespace-nowrap'
-          : 'px-3 py-1.5 rounded-lg text-slate-600 hover:bg-slate-50 text-xs font-bold whitespace-nowrap'
-      }
-    >
-      {label}
-    </button>
-  );
-}
+ * editable as one file. None of these talk to the network.
+ * ════════════════════════════════════════════════════════════════════ */
 
 function KpiTile({
-  testId, label, value, tone, suffix, icon,
+  testId, icon, label, value, tone = 'slate', suffix, valueClass,
 }: {
   testId: string;
+  icon?: React.ReactNode;
   label: string;
   value: string;
-  tone: 'pink' | 'emerald' | 'indigo' | 'purple' | 'sky' | 'amber' | 'slate' | 'rose';
+  tone?: 'pink' | 'emerald' | 'indigo' | 'purple' | 'amber' | 'slate' | 'rose';
   suffix?: string;
-  icon?: React.ReactNode;
+  valueClass?: string;
 }) {
   const toneCls: Record<string, string> = {
     pink:    'border-pink-200 bg-pink-50/60',
     emerald: 'border-emerald-200 bg-emerald-50/60',
     indigo:  'border-indigo-200 bg-indigo-50/60',
     purple:  'border-purple-200 bg-purple-50/60',
-    sky:     'border-sky-200 bg-sky-50/60',
     amber:   'border-amber-200 bg-amber-50/60',
     slate:   'border-slate-200 bg-slate-50/60',
     rose:    'border-rose-200 bg-rose-50/60',
@@ -675,7 +809,7 @@ function KpiTile({
         {icon}
         <span className="truncate">{label}</span>
       </div>
-      <div className="font-black text-base text-slate-900 font-mono truncate">{value}</div>
+      <div className={`font-black text-slate-900 truncate ${valueClass ?? 'text-2xl'}`}>{value}</div>
       {suffix && <div className="text-[10px] text-slate-500 mt-0.5">{suffix}</div>}
     </div>
   );
@@ -702,119 +836,68 @@ function QuickAction({
   );
 }
 
-function AllOverview({
-  boxes, balances, canManageCashboxes, onCashboxEdit, onAccountSelect,
+function OverflowMenu({
+  open, onToggle, onClose, disabledTransfer, canManageCashboxes,
+  onTransfer, onAddCash, onAddBank, onAddEwallet, onAddCheck,
 }: {
-  boxes: Cashbox[];
-  balances: PaymentAccountBalance[];
+  open: boolean;
+  onToggle: () => void;
+  onClose: () => void;
+  disabledTransfer: boolean;
   canManageCashboxes: boolean;
-  onCashboxEdit: (b: Cashbox) => void;
-  onAccountSelect: (b: PaymentAccountBalance) => void;
+  onTransfer: () => void;
+  onAddCash: () => void;
+  onAddBank: () => void;
+  onAddEwallet: () => void;
+  onAddCheck: () => void;
 }) {
-  const activeBoxes    = boxes.filter((b) => b.is_active);
-  const activeAccounts = balances.filter((b) => b.active);
-  return (
-    <div className="space-y-4" data-testid="treasury-overview">
-      {/* Cashboxes (top 6) */}
-      <section className="rounded-2xl border border-slate-200 bg-white p-4">
-        <div className="flex items-center justify-between mb-3">
-          <h3 className="font-bold text-sm text-slate-800">الخزائن</h3>
-          <span className="text-xs text-slate-500">{activeBoxes.length} خزنة نشطة</span>
-        </div>
-        {activeBoxes.length === 0 ? (
-          <EmptyState>لا توجد خزائن نشطة بعد.</EmptyState>
-        ) : (
-          <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-3">
-            {activeBoxes.slice(0, 6).map((b) => (
-              <CashboxCard key={b.id} box={b} canManage={canManageCashboxes} onEdit={() => onCashboxEdit(b)} />
-            ))}
-          </div>
-        )}
-      </section>
+  const ref = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    function onDoc(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
+    }
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [open, onClose]);
 
-      {/* Payment accounts (top 8) */}
-      <section className="rounded-2xl border border-slate-200 bg-white p-4">
-        <div className="flex items-center justify-between mb-3">
-          <h3 className="font-bold text-sm text-slate-800">حسابات الدفع النشطة</h3>
-          <span className="text-xs text-slate-500">{activeAccounts.length} حساب</span>
-        </div>
-        {activeAccounts.length === 0 ? (
-          <EmptyState>لا توجد حسابات دفع نشطة بعد.</EmptyState>
-        ) : (
-          <ul className="divide-y divide-slate-100">
-            {activeAccounts.slice(0, 8).map((b) => (
-              <li
-                key={b.payment_account_id}
-                className="py-2 flex items-center gap-3 cursor-pointer hover:bg-slate-50 px-2 rounded"
-                onClick={() => onAccountSelect(b)}
-                data-testid={`overview-account-${b.payment_account_id}`}
-              >
-                <div className="text-xs font-bold text-slate-500 w-24 truncate">
-                  {METHOD_LABEL_AR[b.method as PaymentMethodCode] ?? b.method}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="font-bold text-sm text-slate-800 truncate">{b.display_name}</div>
-                  <div className="text-[11px] text-slate-500 truncate">
-                    {b.identifier ?? '—'} · GL {b.gl_account_code}
-                  </div>
-                </div>
-                <div className="font-mono text-sm text-slate-800">{EGP(b.net_debit)}</div>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-    </div>
-  );
-}
-
-function CashboxesPanel({
-  boxes, isLoading, kindFilter, setKindFilter, search, setSearch, canManage, onEdit,
-}: {
-  boxes: Cashbox[];
-  isLoading: boolean;
-  kindFilter: CashboxKind | '';
-  setKindFilter: (k: CashboxKind | '') => void;
-  search: string;
-  setSearch: (s: string) => void;
-  canManage: boolean;
-  onEdit: (b: Cashbox) => void;
-}) {
   return (
-    <div className="space-y-3" data-testid="cashboxes-panel">
-      <div className="flex items-center gap-3 flex-wrap">
-        <div className="relative flex-1 min-w-[220px]">
-          <Search size={16} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" />
-          <input
-            className="input pr-9"
-            placeholder="بحث باسم الخزنة / البنك / رقم الحساب / المسؤول..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            data-testid="cashboxes-search"
-          />
-        </div>
-        <select
-          className="input w-48"
-          value={kindFilter}
-          onChange={(e) => setKindFilter(e.target.value as CashboxKind | '')}
-          data-testid="cashboxes-kind-filter"
+    <div className="relative" ref={ref}>
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        className="px-2 py-2 rounded-lg border border-slate-300 bg-white text-slate-700 hover:bg-slate-50"
+        data-testid="treasury-overflow"
+        title="المزيد"
+      >
+        <MoreVertical size={14} />
+      </button>
+      {open && (
+        <div
+          className="absolute left-0 mt-1 w-56 rounded-lg border border-slate-200 bg-white shadow-lg z-30"
+          role="menu"
+          data-testid="treasury-overflow-menu"
         >
-          <option value="">كل الأنواع</option>
-          <option value="cash">نقدي</option>
-          <option value="bank">بنكي</option>
-          <option value="ewallet">محفظة إلكترونية</option>
-          <option value="check">شيكات</option>
-        </select>
-      </div>
-      {isLoading ? (
-        <EmptyState>جارٍ التحميل…</EmptyState>
-      ) : boxes.length === 0 ? (
-        <EmptyState>لا توجد خزائن مطابقة.</EmptyState>
-      ) : (
-        <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-3">
-          {boxes.map((b) => (
-            <CashboxCard key={b.id} box={b} canManage={canManage} onEdit={() => onEdit(b)} />
-          ))}
+          <button
+            type="button"
+            onClick={onTransfer}
+            disabled={disabledTransfer}
+            className="w-full text-right px-3 py-2 text-sm hover:bg-slate-50 disabled:opacity-40 inline-flex items-center gap-2"
+            data-testid="overflow-transfer"
+          >
+            <ArrowRightLeft size={14} /> تحويل بين الخزائن
+          </button>
+          {canManageCashboxes && (
+            <>
+              <div className="border-t border-slate-100" />
+              <button type="button" onClick={onAddCash}    className="w-full text-right px-3 py-2 text-sm hover:bg-slate-50 inline-flex items-center gap-2" data-testid="overflow-add-cash">    <Wallet     size={14} /> إضافة نقدي</button>
+              <button type="button" onClick={onAddBank}    className="w-full text-right px-3 py-2 text-sm hover:bg-slate-50 inline-flex items-center gap-2" data-testid="overflow-add-bank">    <Building2  size={14} /> إضافة حساب بنكي</button>
+              <button type="button" onClick={onAddEwallet} className="w-full text-right px-3 py-2 text-sm hover:bg-slate-50 inline-flex items-center gap-2" data-testid="overflow-add-ewallet"> <Smartphone size={14} /> إضافة محفظة إلكترونية</button>
+              <button type="button" onClick={onAddCheck}   className="w-full text-right px-3 py-2 text-sm hover:bg-slate-50 inline-flex items-center gap-2" data-testid="overflow-add-check">   <FileCheck  size={14} /> إضافة حساب شيكات</button>
+            </>
+          )}
         </div>
       )}
     </div>
@@ -822,147 +905,162 @@ function CashboxesPanel({
 }
 
 function PaymentAccountsTable({
-  tab, accounts, providers, cashboxes, search, setSearch, kindFilter, setKindFilter,
-  canManage, onEdit, onSetDefault, onToggleActive, onDelete,
+  rows, providers, cashboxes, selectedId, onSelect, canManage,
+  onEdit, onSetDefault, onToggleActive, onDelete, warningsFor, totalCount,
 }: {
-  tab: TabKey;
-  accounts: PaymentAccountBalance[];
+  rows: PaymentAccountBalance[];
   providers: PaymentProvider[];
   cashboxes: Cashbox[];
-  search: string;
-  setSearch: (s: string) => void;
-  kindFilter: '' | PaymentAccountKind;
-  setKindFilter: (k: '' | PaymentAccountKind) => void;
+  selectedId: string | null;
+  onSelect: (id: string) => void;
   canManage: boolean;
   onEdit: (b: PaymentAccountBalance) => void;
   onSetDefault: (b: PaymentAccountBalance) => void;
   onToggleActive: (b: PaymentAccountBalance) => void;
   onDelete: (b: PaymentAccountBalance) => void;
+  warningsFor: (b: PaymentAccountBalance) => string[];
+  totalCount: number;
 }) {
-  const showInnerKindFilter = tab === 'payment-accounts';
   return (
-    <div className="rounded-2xl border border-slate-200 bg-white overflow-hidden" data-testid="payment-accounts-panel">
-      <div className="flex items-center gap-3 flex-wrap p-3 border-b border-slate-100">
-        <div className="relative flex-1 min-w-[220px]">
-          <Search size={16} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" />
-          <input
-            className="input pr-9"
-            placeholder="بحث باسم الحساب / المعرف / المزود…"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            data-testid="payment-accounts-search"
-          />
-        </div>
-        {showInnerKindFilter && (
-          <select
-            className="input w-48"
-            value={kindFilter}
-            onChange={(e) => setKindFilter(e.target.value as '' | PaymentAccountKind)}
-            data-testid="payment-accounts-kind-filter"
-          >
-            <option value="">كل الأنواع</option>
-            <option value="instapay">InstaPay</option>
-            <option value="wallet">محفظة</option>
-            <option value="card">POS / بطاقة</option>
-            <option value="bank">تحويل بنكي</option>
-            <option value="check">شيكات</option>
-          </select>
-        )}
+    <div
+      className="rounded-2xl border border-slate-200 bg-white overflow-hidden"
+      data-testid="treasury-table-card"
+    >
+      <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+        <h2 className="font-bold text-sm text-slate-800">
+          قائمة حسابات الدفع ({totalCount} حسابات)
+        </h2>
       </div>
-      <div className="overflow-x-auto">
-        <table className="w-full text-sm">
+      <div className="overflow-x-auto" data-testid="treasury-table-scroll">
+        <table className="w-full text-sm" data-testid="payment-accounts-table">
           <thead className="bg-slate-50 text-[11px] text-slate-600">
             <tr>
               <Th>الشعار</Th>
               <Th>اسم الحساب</Th>
               <Th>المزود</Th>
-              <Th>الطريقة</Th>
-              <Th>المعرف</Th>
-              <Th>الأستاذ</Th>
-              <Th>الخزنة</Th>
-              <Th>الرصيد</Th>
-              <Th>القيود</Th>
+              <Th>طريقة الدفع</Th>
+              <Th>النوع</Th>
+              <Th>الرقم المعرف</Th>
+              <Th>حساب الأستاذ</Th>
+              <Th>الخزنة المرتبطة</Th>
+              <Th>الرصيد المحاسبي</Th>
+              <Th>آخر حركة</Th>
+              <Th>عدد الحركات</Th>
+              <Th>الافتراضي</Th>
               <Th>الحالة</Th>
-              <Th>افتراضي</Th>
-              {canManage && <Th>الإجراءات</Th>}
+              <Th>التحذيرات</Th>
+              <Th>الإجراءات</Th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {accounts.length === 0 ? (
+            {rows.length === 0 ? (
               <tr>
-                <td colSpan={canManage ? 12 : 11} className="text-center py-8 text-slate-500 text-sm">
+                <td
+                  colSpan={15}
+                  className="text-center py-8 text-slate-500 text-sm"
+                  data-testid="payment-accounts-empty"
+                >
                   لا توجد حسابات مطابقة للفلتر الحالي
                 </td>
               </tr>
-            ) : (
-              accounts.map((b) => {
-                const provider = providers.find((p) => p.provider_key === b.provider_key);
-                const linkedCb = cashboxes.find((c) => c.id === b.cashbox_id);
-                return (
-                  <tr
-                    key={b.payment_account_id}
-                    data-testid={`payment-account-row-${b.payment_account_id}`}
-                    className="hover:bg-slate-50"
-                  >
-                    <Td>
-                      <PaymentProviderLogo
-                        logoDataUrl={(b.metadata as any)?.logo_data_url}
-                        logoKey={provider?.logo_key}
-                        method={b.method as PaymentMethodCode}
-                        name={b.display_name}
-                        size="sm"
-                        decorative
-                      />
-                    </Td>
-                    <Td><span className="font-bold text-slate-800">{b.display_name}</span></Td>
-                    <Td><span className="text-slate-600">{provider?.name_ar ?? b.provider_key ?? '—'}</span></Td>
-                    <Td>
-                      <span className="px-2 py-0.5 rounded bg-slate-100 text-[11px] font-bold text-slate-700">
-                        {METHOD_LABEL_AR[b.method as PaymentMethodCode] ?? b.method}
-                      </span>
-                    </Td>
-                    <Td className="font-mono text-[11px]">{b.identifier ?? '—'}</Td>
-                    <Td>
-                      <div className="font-mono text-xs text-slate-700">{b.gl_account_code}</div>
-                      <div className="text-[10px] text-slate-500 truncate max-w-32">{b.gl_name_ar ?? ''}</div>
-                    </Td>
-                    <Td>
-                      {linkedCb ? (
-                        <span className="text-xs text-slate-700">{linkedCb.name_ar}</span>
-                      ) : (
-                        <span className="text-[11px] text-amber-700 bg-amber-50 px-2 py-0.5 rounded">غير مربوط</span>
-                      )}
-                    </Td>
-                    <Td className="font-mono text-xs">{EGP(b.net_debit)}</Td>
-                    <Td className="text-center">{b.je_count}</Td>
-                    <Td>
-                      {b.active ? (
-                        <span className="text-[11px] font-bold bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded">نشط</span>
-                      ) : (
-                        <span className="text-[11px] font-bold bg-rose-100 text-rose-700 px-2 py-0.5 rounded">غير نشط</span>
-                      )}
-                    </Td>
-                    <Td className="text-center">
-                      {b.is_default ? (
-                        <span className="text-[10px] font-bold bg-amber-500/20 text-amber-700 px-2 py-0.5 rounded inline-flex items-center gap-0.5">
-                          <Star size={10} /> افتراضي
-                        </span>
-                      ) : '—'}
-                    </Td>
-                    {canManage && (
-                      <Td>
-                        <div className="flex items-center gap-1 justify-end">
-                          <button onClick={() => onEdit(b)}         className="text-[11px] px-2 py-1 rounded bg-slate-100 text-slate-700 hover:bg-slate-200" data-testid="row-action-edit">تعديل</button>
-                          <button onClick={() => onSetDefault(b)}   className="text-[11px] px-2 py-1 rounded bg-amber-100 text-amber-700 hover:bg-amber-200" data-testid="row-action-set-default">افتراضي</button>
-                          <button onClick={() => onToggleActive(b)} className="text-[11px] px-2 py-1 rounded bg-sky-100 text-sky-700 hover:bg-sky-200"       data-testid="row-action-toggle-active">تفعيل/تعطيل</button>
-                          <button onClick={() => onDelete(b)}       className="text-[11px] px-2 py-1 rounded bg-rose-100 text-rose-700 hover:bg-rose-200"   data-testid="row-action-delete">حذف</button>
-                        </div>
-                      </Td>
+            ) : rows.map((b) => {
+              const provider = providers.find((p) => p.provider_key === b.provider_key);
+              const linkedCb = cashboxes.find((c) => c.id === b.cashbox_id);
+              const kind = paymentAccountKind(b.method as PaymentMethodCode);
+              const isSelected = b.payment_account_id === selectedId;
+              const warnings = warningsFor(b);
+              return (
+                <tr
+                  key={b.payment_account_id}
+                  onClick={() => onSelect(b.payment_account_id)}
+                  className={`cursor-pointer hover:bg-slate-50 ${isSelected ? 'bg-pink-50/50' : ''}`}
+                  data-testid={`payment-account-row-${b.payment_account_id}`}
+                >
+                  <Td>
+                    <PaymentProviderLogo
+                      logoDataUrl={(b.metadata as any)?.logo_data_url}
+                      logoKey={provider?.logo_key}
+                      method={b.method as PaymentMethodCode}
+                      name={b.display_name}
+                      size="sm"
+                      decorative
+                    />
+                  </Td>
+                  <Td><span className="font-bold text-slate-800">{b.display_name}</span></Td>
+                  <Td><span className="text-slate-600">{provider?.name_ar ?? b.provider_key ?? '—'}</span></Td>
+                  <Td>
+                    <span className="px-2 py-0.5 rounded bg-slate-100 text-[11px] font-bold text-slate-700">
+                      {METHOD_LABEL_AR[b.method as PaymentMethodCode] ?? b.method}
+                    </span>
+                  </Td>
+                  <Td>
+                    <span className="text-[11px] text-slate-600">
+                      {kind ? KIND_AR_LABEL[kind] : '—'}
+                    </span>
+                  </Td>
+                  <Td className="font-mono text-[11px]">{b.identifier ?? '—'}</Td>
+                  <Td>
+                    <div className="font-mono text-xs text-slate-700">{b.gl_account_code}</div>
+                    <div className="text-[10px] text-slate-500 truncate max-w-32">{b.gl_name_ar ?? ''}</div>
+                  </Td>
+                  <Td>
+                    {linkedCb ? (
+                      <span className="text-xs text-slate-700">{linkedCb.name_ar}</span>
+                    ) : (
+                      <span className="text-[11px] text-amber-700 bg-amber-50 px-2 py-0.5 rounded">غير مربوط</span>
                     )}
-                  </tr>
-                );
-              })
-            )}
+                  </Td>
+                  <Td className="font-mono text-xs">{EGP(b.net_debit)}</Td>
+                  <Td className="text-[11px] text-slate-600">
+                    {b.last_movement
+                      ? <span title={b.last_movement}>{relativeArabic(b.last_movement)}</span>
+                      : '—'}
+                  </Td>
+                  <Td className="text-center">{b.je_count}</Td>
+                  <Td className="text-center">
+                    {b.is_default ? (
+                      <span className="text-[10px] font-bold bg-amber-500/20 text-amber-700 px-2 py-0.5 rounded inline-flex items-center gap-0.5">
+                        <Star size={10} /> افتراضي
+                      </span>
+                    ) : '—'}
+                  </Td>
+                  <Td>
+                    {b.active ? (
+                      <span className="text-[11px] font-bold bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded">نشط</span>
+                    ) : (
+                      <span className="text-[11px] font-bold bg-rose-100 text-rose-700 px-2 py-0.5 rounded">غير نشط</span>
+                    )}
+                  </Td>
+                  <Td>
+                    {warnings.length === 0 ? (
+                      <span className="text-[11px] text-slate-400">—</span>
+                    ) : (
+                      <div className="flex flex-col gap-0.5">
+                        {warnings.map((w) => (
+                          <span
+                            key={w}
+                            className="text-[10px] font-bold bg-amber-100 text-amber-800 px-2 py-0.5 rounded inline-flex items-center gap-1"
+                            data-testid={`row-warning-${w}`}
+                          >
+                            <AlertTriangle size={10} /> {w}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </Td>
+                  <Td>
+                    {canManage && (
+                      <div className="flex items-center gap-1 justify-end">
+                        <button onClick={(e) => { e.stopPropagation(); onEdit(b); }}         className="text-[11px] px-2 py-1 rounded bg-slate-100 text-slate-700 hover:bg-slate-200" data-testid="row-action-edit"          title="تعديل"><Edit3 size={12} /></button>
+                        <button onClick={(e) => { e.stopPropagation(); onSetDefault(b); }}   className="text-[11px] px-2 py-1 rounded bg-amber-100 text-amber-700 hover:bg-amber-200" data-testid="row-action-set-default"  title="تعيين افتراضي"><Star size={12} /></button>
+                        <button onClick={(e) => { e.stopPropagation(); onToggleActive(b); }} className="text-[11px] px-2 py-1 rounded bg-sky-100 text-sky-700 hover:bg-sky-200"       data-testid="row-action-toggle-active" title={b.active ? 'تعطيل' : 'تفعيل'}>{b.active ? <PowerOff size={12} /> : <Power size={12} />}</button>
+                        <button onClick={(e) => { e.stopPropagation(); onDelete(b); }}       className="text-[11px] px-2 py-1 rounded bg-rose-100 text-rose-700 hover:bg-rose-200"   data-testid="row-action-delete"        title="حذف"><Trash2 size={12} /></button>
+                      </div>
+                    )}
+                  </Td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -970,54 +1068,46 @@ function PaymentAccountsTable({
   );
 }
 
-function TodayMovementsPanel({ rows }: { rows: CashboxMovement[] }) {
-  if (rows.length === 0) {
-    return (
-      <div className="rounded-2xl border border-slate-200 bg-white p-4" data-testid="today-movements">
-        <EmptyState>لا توجد حركات اليوم بعد.</EmptyState>
-      </div>
-    );
-  }
+function Pagination({
+  total, page, pageSize, onPageChange, onPageSizeChange,
+}: {
+  total: number;
+  page: number;
+  pageSize: number;
+  onPageChange: (p: number) => void;
+  onPageSizeChange: (n: number) => void;
+}) {
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const from = total === 0 ? 0 : (page - 1) * pageSize + 1;
+  const to = Math.min(total, page * pageSize);
   return (
-    <div className="rounded-2xl border border-slate-200 bg-white overflow-hidden" data-testid="today-movements">
-      <div className="px-4 py-3 border-b border-slate-100">
-        <h3 className="font-bold text-sm text-slate-800">حركة اليوم ({rows.length})</h3>
+    <div
+      className="flex items-center justify-between flex-wrap gap-2"
+      data-testid="treasury-pagination"
+    >
+      <div className="flex items-center gap-2">
+        <span className="text-xs text-slate-500">عرض</span>
+        <select
+          className="input w-20 text-xs"
+          value={pageSize}
+          onChange={(e) => onPageSizeChange(Number(e.target.value) || 10)}
+          data-testid="pagination-size"
+        >
+          <option value={10}>10</option>
+          <option value={25}>25</option>
+          <option value={50}>50</option>
+          <option value={100}>100</option>
+        </select>
       </div>
-      <div className="overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead className="bg-slate-50 text-[11px] text-slate-600">
-            <tr>
-              <Th>الخزنة</Th>
-              <Th>الاتجاه</Th>
-              <Th>المبلغ</Th>
-              <Th>النوع</Th>
-              <Th>المرجع</Th>
-              <Th>الطرف الآخر</Th>
-              <Th>الوقت</Th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100">
-            {rows.map((r) => (
-              <tr key={r.id} data-testid={`today-row-${r.id}`} className="hover:bg-slate-50">
-                <Td>{r.cashbox_name ?? '—'}</Td>
-                <Td>
-                  {r.direction === 'in' ? (
-                    <span className="text-[11px] font-bold bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded">داخل</span>
-                  ) : (
-                    <span className="text-[11px] font-bold bg-rose-100 text-rose-700 px-2 py-0.5 rounded">خارج</span>
-                  )}
-                </Td>
-                <Td className="font-mono">{EGP(r.amount)}</Td>
-                <Td>
-                  <span className="text-[11px] bg-slate-100 text-slate-700 px-2 py-0.5 rounded">{r.kind_ar || r.category}</span>
-                </Td>
-                <Td className="text-[11px] text-slate-600">{r.reference_no ?? r.reference_type ?? '—'}</Td>
-                <Td className="text-[11px] text-slate-600">{r.counterparty_name ?? '—'}</Td>
-                <Td className="text-[11px] text-slate-500">{new Date(r.created_at).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })}</Td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      <div className="text-xs text-slate-600" data-testid="pagination-summary">
+        عرض {from} إلى {to} من {total}
+      </div>
+      <div className="flex items-center gap-1">
+        <button type="button" onClick={() => onPageChange(1)}            disabled={page <= 1}            className="p-1.5 rounded border border-slate-200 hover:bg-slate-50 disabled:opacity-40" data-testid="pagination-first"><ChevronsRight size={14} /></button>
+        <button type="button" onClick={() => onPageChange(page - 1)}     disabled={page <= 1}            className="p-1.5 rounded border border-slate-200 hover:bg-slate-50 disabled:opacity-40" data-testid="pagination-prev"><ChevronRight size={14} /></button>
+        <span className="text-xs text-slate-700 px-2 py-1 rounded bg-slate-100 font-bold" data-testid="pagination-page">{page}</span>
+        <button type="button" onClick={() => onPageChange(page + 1)}     disabled={page >= totalPages}   className="p-1.5 rounded border border-slate-200 hover:bg-slate-50 disabled:opacity-40" data-testid="pagination-next"><ChevronLeft size={14} /></button>
+        <button type="button" onClick={() => onPageChange(totalPages)}   disabled={page >= totalPages}   className="p-1.5 rounded border border-slate-200 hover:bg-slate-50 disabled:opacity-40" data-testid="pagination-last"><ChevronsLeft size={14} /></button>
       </div>
     </div>
   );
@@ -1049,11 +1139,11 @@ function BalanceSummary({ balances }: { balances: PaymentAccountBalance[] }) {
   const jeCount  = balances.reduce((s, b) => s + Number(b.je_count  || 0), 0);
   return (
     <ul className="space-y-1.5 text-sm">
-      <Row label="عدد الحسابات" value={String(balances.length)} />
+      <Row label="عدد الحسابات"  value={String(balances.length)} />
       <Row label="إجمالي الداخل"  value={EGP(totalIn)}  tone="emerald" />
       <Row label="إجمالي الخارج"  value={EGP(totalOut)} tone="rose" />
-      <Row label="إجمالي الرصيد" value={EGP(total)} />
-      <Row label="عدد القيود"    value={String(jeCount)} />
+      <Row label="إجمالي الرصيد"  value={EGP(total)} />
+      <Row label="عدد القيود"     value={String(jeCount)} />
     </ul>
   );
 }
@@ -1068,9 +1158,6 @@ function DistributionCard({ balances }: { balances: PaymentAccountBalance[] }) {
   }
   const total = buckets.wallet + buckets.bank + buckets.card + buckets.check + buckets.instapay;
   if (total === 0) return <EmptyState>لا توجد حسابات دفع لعرض التوزيع.</EmptyState>;
-  const labels: Record<PaymentAccountKind, string> = {
-    wallet: 'محافظ', bank: 'تحويل بنكي', card: 'POS / بطاقات', check: 'شيكات', instapay: 'InstaPay',
-  };
   return (
     <ul className="space-y-1.5 text-sm">
       {(Object.keys(buckets) as PaymentAccountKind[]).map((k) => {
@@ -1078,7 +1165,7 @@ function DistributionCard({ balances }: { balances: PaymentAccountBalance[] }) {
         const pct = total > 0 ? Math.round((n / total) * 100) : 0;
         return (
           <li key={k} className="flex items-center gap-2" data-testid={`dist-${k}`}>
-            <span className="flex-1 text-slate-700">{labels[k]}</span>
+            <span className="flex-1 text-slate-700">{KIND_AR_LABEL[k]}</span>
             <span className="text-slate-500 text-xs">{n} ({pct}%)</span>
           </li>
         );
@@ -1122,7 +1209,13 @@ function MethodMixCard({ rows }: { rows: PaymentMethodMixRow[] }) {
   );
 }
 
-function Row({ label, value, tone }: { label: string; value: string; tone?: 'emerald' | 'rose' }) {
+function Row({
+  label, value, tone,
+}: {
+  label: string;
+  value: string;
+  tone?: 'emerald' | 'rose';
+}) {
   const cls = tone === 'emerald' ? 'text-emerald-700' : tone === 'rose' ? 'text-rose-700' : 'text-slate-800';
   return (
     <li className="flex items-center justify-between">
@@ -1146,6 +1239,7 @@ function Th({ children }: { children: React.ReactNode }) {
 function Td({ children, className }: { children: React.ReactNode; className?: string }) {
   return <td className={`px-3 py-2 text-right whitespace-nowrap ${className ?? ''}`}>{children}</td>;
 }
+
 
 function TransferModal({
   boxes,
@@ -1319,178 +1413,6 @@ function TransferModal({
   );
 }
 
-function CashboxCard({
-  box,
-  canManage,
-  onEdit,
-}: {
-  box: Cashbox;
-  canManage: boolean;
-  onEdit: () => void;
-}) {
-  const qc = useQueryClient();
-  const del = useMutation({
-    mutationFn: () => cashDeskApi.removeCashbox(box.id),
-    onSuccess: (r: any) => {
-      if (r?.soft_deleted) {
-        toast.success('تم تعطيل الخزنة (بها حركات سابقة)');
-      } else {
-        toast.success('تم حذف الخزنة');
-      }
-      qc.invalidateQueries({ queryKey: ['cashboxes'] });
-    },
-    onError: (e: any) =>
-      toast.error(e?.response?.data?.message || 'فشل الحذف'),
-  });
-  const toggleActive = useMutation({
-    mutationFn: () =>
-      cashDeskApi.updateCashbox(box.id, { is_active: !box.is_active }),
-    onSuccess: () => {
-      toast.success(box.is_active ? 'تم تعطيل الخزنة' : 'تم تفعيل الخزنة');
-      qc.invalidateQueries({ queryKey: ['cashboxes'] });
-    },
-  });
-
-  return (
-    <div
-      className={`card p-4 border-2 ${KIND_COLOR[box.kind]} ${
-        !box.is_active ? 'opacity-60' : ''
-      }`}
-    >
-      <div className="flex items-start gap-3">
-        <InstitutionLogo
-          domain={box.institution_domain}
-          kind={box.kind}
-          color={box.institution_color || box.color || undefined}
-          label={box.institution_name || box.name_ar}
-          size="lg"
-        />
-        <div className="flex-1 min-w-0">
-          <div className="flex items-start justify-between gap-2">
-            <div className="min-w-0">
-              <div className="font-black text-slate-800 truncate">
-                {box.name_ar}
-              </div>
-              {box.institution_name && (
-                <div className="text-xs text-slate-600 truncate">
-                  {box.institution_name}
-                </div>
-              )}
-            </div>
-            {!box.is_active && (
-              <span className="chip bg-slate-200 text-slate-600 text-[10px]">
-                معطّل
-              </span>
-            )}
-          </div>
-          <div className="font-black font-mono text-xl text-slate-800 mt-1">
-            {EGP(box.current_balance)}
-          </div>
-        </div>
-      </div>
-
-      {/* Kind-specific details */}
-      <div className="mt-3 space-y-1 text-xs text-slate-700 border-t border-white/50 pt-2">
-        {box.kind === 'bank' && (
-          <>
-            {box.account_number && (
-              <InfoRow icon={<Hash size={11} />} label="رقم الحساب" value={box.account_number} mono />
-            )}
-            {box.iban && (
-              <InfoRow icon={<Hash size={11} />} label="IBAN" value={box.iban} mono />
-            )}
-            {box.bank_branch && (
-              <InfoRow icon={<MapPin size={11} />} label="الفرع" value={box.bank_branch} />
-            )}
-            {box.account_holder_name && (
-              <InfoRow icon={<User size={11} />} label="صاحب الحساب" value={box.account_holder_name} />
-            )}
-            {box.account_manager_name && (
-              <InfoRow icon={<User size={11} />} label="مسؤول الحساب" value={box.account_manager_name} />
-            )}
-            {box.account_manager_phone && (
-              <InfoRow icon={<Phone size={11} />} label="هاتف المسؤول" value={box.account_manager_phone} mono />
-            )}
-            {box.account_manager_email && (
-              <InfoRow icon={<Mail size={11} />} label="بريد المسؤول" value={box.account_manager_email} />
-            )}
-          </>
-        )}
-        {box.kind === 'ewallet' && (
-          <>
-            {box.wallet_phone && (
-              <InfoRow icon={<Phone size={11} />} label="رقم المحفظة" value={box.wallet_phone} mono />
-            )}
-            {box.wallet_owner_name && (
-              <InfoRow icon={<User size={11} />} label="اسم المالك" value={box.wallet_owner_name} />
-            )}
-          </>
-        )}
-        {box.kind === 'check' && box.check_issuer_name && (
-          <InfoRow icon={<User size={11} />} label="الجهة المصدرة" value={box.check_issuer_name} />
-        )}
-      </div>
-
-      {canManage && (
-        <div className="flex gap-1 mt-3 pt-2 border-t border-white/50">
-          <button
-            onClick={onEdit}
-            className="flex-1 py-1.5 rounded-md bg-white/60 hover:bg-white text-xs font-bold flex items-center justify-center gap-1"
-          >
-            <Edit3 size={12} /> تعديل
-          </button>
-          <button
-            onClick={() => toggleActive.mutate()}
-            className="flex-1 py-1.5 rounded-md bg-white/60 hover:bg-white text-xs font-bold flex items-center justify-center gap-1"
-            disabled={toggleActive.isPending}
-          >
-            {box.is_active ? (
-              <>
-                <PowerOff size={12} /> تعطيل
-              </>
-            ) : (
-              <>
-                <Power size={12} /> تفعيل
-              </>
-            )}
-          </button>
-          <button
-            onClick={() => {
-              if (confirm(`حذف الخزنة "${box.name_ar}"؟`)) del.mutate();
-            }}
-            className="py-1.5 px-2 rounded-md bg-rose-100 hover:bg-rose-200 text-rose-700"
-            title="حذف"
-          >
-            <Trash2 size={12} />
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function InfoRow({
-  icon,
-  label,
-  value,
-  mono,
-}: {
-  icon: React.ReactNode;
-  label: string;
-  value: string;
-  mono?: boolean;
-}) {
-  return (
-    <div className="flex items-center justify-between gap-2">
-      <span className="flex items-center gap-1 text-slate-500 shrink-0">
-        {icon} {label}
-      </span>
-      <span className={`truncate text-left ${mono ? 'font-mono' : 'font-bold'}`}>
-        {value}
-      </span>
-    </div>
-  );
-}
 
 // ═══════════════════════════════════════════════════════════════════════
 //  Create / Edit modal

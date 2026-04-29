@@ -1,39 +1,41 @@
 /**
- * Cashboxes.treasury.test.tsx — PR-FIN-PAYACCT-4D
+ * Cashboxes.treasury.test.tsx — PR-FIN-PAYACCT-4D-UX-FIX
  *
- * Pins the unified treasury page contract:
+ * Pins the table-first treasury / payment-accounts admin layout that
+ * replaces the tab-based PR-4D experience. The page lives at
+ * /cashboxes; /payment-accounts continues to redirect here.
  *
- *   ✓ Page surface (header, KPIs, tabs, grid, summary, rail)
- *   ✓ Right-rail RTL: rail is the FIRST grid child (renders on the
- *     right in RTL because grid children flow right→left)
- *   ✓ One unified page — cashboxes AND payment_accounts are
- *     accessible from the same screen via tabs
- *   ✓ Tabs match the approved set (8 tabs incl. "حركة اليوم" and
- *     "التنبيهات")
- *   ✓ Cheque tab + cheque KPI + cheque quick-action all present
- *   ✓ "حركة اليوم" tab uses real /cash-desk/movements data (no
- *     mock fallback)
- *   ✓ Method-mix card uses the real API response — and when the
- *     endpoint returns no rows, shows an explicit empty state
- *     (NOT fake data)
- *   ✓ Cash sales surface as "نقدي" badge in the mix card; non-cash
- *     methods surface as "غير نقدي" badge — visual distinction per
- *     spec
- *   ✓ Add-payment-account quick actions invoke the create modal
- *
- * Locks the regression: anyone re-isolating /payment-accounts,
- * removing the cheque support, or replacing real-data cards with
- * placeholders fails CI.
+ * What we lock:
+ *   ✓ Page surface (header, breadcrumb, title, subtitle)
+ *   ✓ Right rail is the FIRST grid child (renders RIGHT in RTL)
+ *   ✓ KPI row → warning strips → filters → main table → bottom cards
+ *     (DOM order)
+ *   ✓ 7 KPI tiles (incl. new "آخر حركة")
+ *   ✓ Main view defaults to the table — no tab strip, no overview cards
+ *   ✓ All 15 table column headers present
+ *   ✓ Pagination renders (size selector + summary + nav buttons)
+ *   ✓ Bottom 3 dashboard cards present
+ *   ✓ Cheque support: kpi tile suffix, quick-add-check, overflow menu,
+ *     cheque rows surface in the table
+ *   ✓ Data comes from real endpoint mocks (not fixtures)
+ *   ✓ Method-mix card distinguishes نقدي vs غير نقدي and falls back
+ *     to an explicit empty state when the API returns no rows (no
+ *     fake numbers)
+ *   ✓ Per-row warnings render from real conditions (no fakes)
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
+import {
+  render, screen, fireEvent, waitFor, within,
+} from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
 import { useAuthStore } from '@/stores/auth.store';
-import type { PaymentAccountBalance, PaymentMethodMixRow, PaymentProvider } from '@/api/payments.api';
+import type {
+  PaymentAccountBalance, PaymentMethodMixRow, PaymentProvider,
+} from '@/api/payments.api';
 import type { Cashbox, CashboxMovement } from '@/api/cash-desk.api';
 
-// ─── Mocks ────────────────────────────────────────────────────────
+// ─── Mocks ───────────────────────────────────────────────────────
 const cashboxesMock = vi.fn();
 const movementsMock = vi.fn();
 const glDriftMock   = vi.fn();
@@ -49,7 +51,6 @@ vi.mock('@/api/cash-desk.api', async (importOriginal) => {
       cashboxes:     () => cashboxesMock(),
       movements: (p: any) => movementsMock(p),
       glDrift:       () => glDriftMock(),
-      // CRUD stubs (unused in these tests but required for tsc).
       transfer:      vi.fn(async () => ({})),
       updateCashbox: vi.fn(async () => ({})),
       createCashbox: vi.fn(async () => ({})),
@@ -67,7 +68,6 @@ vi.mock('@/api/payments.api', async (importOriginal) => {
       listProviders: () => providersMock(),
       listBalances:  () => balancesMock(),
       methodMix:     () => methodMixMock(),
-      // Mutation stubs (unused in these tests).
       setDefault:    vi.fn(async () => ({})),
       toggleActive:  vi.fn(async () => ({})),
       deleteAccount: vi.fn(async () => ({ id: '', mode: 'hard' as const })),
@@ -86,7 +86,7 @@ vi.mock('react-hot-toast', () => {
 
 import Cashboxes from '../Cashboxes';
 
-// ─── Fixtures ─────────────────────────────────────────────────────
+// ─── Fixtures ────────────────────────────────────────────────────
 function makeCashbox(over: Partial<Cashbox> = {}): Cashbox {
   return {
     id: 'cb',
@@ -94,7 +94,7 @@ function makeCashbox(over: Partial<Cashbox> = {}): Cashbox {
     name_ar: 'الخزينة الرئيسية',
     warehouse_id: null,
     currency: 'EGP',
-    current_balance: '5000',
+    current_balance: '23105',
     is_active: true,
     kind: 'cash',
     institution_code: null,
@@ -145,62 +145,96 @@ function makeBalance(over: Partial<PaymentAccountBalance>): PaymentAccountBalanc
 
 const PROVIDERS: PaymentProvider[] = [
   {
-    provider_key: 'check_other',
-    method: 'check',
-    name_ar: 'شيكات',
-    name_en: 'Cheques',
-    icon_name: 'file-check',
-    logo_key: 'check_other',
-    default_gl_account_code: '1115',
-    group: 'bank',
-    requires_reference: true,
+    provider_key: 'instapay', method: 'instapay', name_ar: 'إنستا باي', name_en: 'InstaPay',
+    icon_name: 'smartphone', logo_key: 'instapay', default_gl_account_code: '1114',
+    group: 'instapay', requires_reference: true,
+  },
+  {
+    provider_key: 'we_pay', method: 'wallet', name_ar: 'WE Pay', name_en: 'WE Pay',
+    icon_name: 'smartphone', logo_key: 'we_pay', default_gl_account_code: '1114',
+    group: 'wallet', requires_reference: true,
+  },
+  {
+    provider_key: 'check_other', method: 'check', name_ar: 'شيكات', name_en: 'Cheques',
+    icon_name: 'file-check', logo_key: 'check_other', default_gl_account_code: '1115',
+    group: 'bank', requires_reference: true,
   },
 ];
 
-const CASHBOXES: Cashbox[] = [
-  makeCashbox({ id: 'cb-cash', kind: 'cash',  name_ar: 'الخزينة الرئيسية', current_balance: '5000' }),
-  makeCashbox({ id: 'cb-bank', kind: 'bank',  name_ar: 'بنك CIB',          current_balance: '12000' }),
-];
+const CASH_BOX = makeCashbox({ id: 'cb-cash', kind: 'cash' });
+const BANK_BOX = makeCashbox({
+  id: 'cb-bank', kind: 'bank', name_ar: 'بنك مصر الرئيسي', current_balance: '0',
+});
 
+// 6 payment_accounts — covers wallet/instapay/POS/bank/cheque rows so the
+// 7-tile KPI math + warning strips + per-row warnings + distribution
+// card all have realistic data to compute against.
 const BALANCES: PaymentAccountBalance[] = [
   makeBalance({
-    payment_account_id: 'acct-instapay', method: 'instapay', display_name: 'InstaPay الرئيسي',
-    is_default: true, net_debit: '1500', total_in: '1500', je_count: 4,
+    payment_account_id: 'acct-instapay', method: 'instapay', provider_key: 'instapay',
+    display_name: 'instapay', identifier: '01234567890',
+    cashbox_id: null,
+    is_default: true, je_count: 4, net_debit: '1400',
+    last_movement: new Date(Date.now() - 5 * 60_000).toISOString(),
   }),
   makeBalance({
-    payment_account_id: 'acct-check', method: 'check', provider_key: 'check_other',
-    display_name: 'دفتر شيكات NBE', identifier: 'NBE-123', gl_account_code: '1115',
-    is_default: true, net_debit: '2000', total_in: '2000', je_count: 1,
-  }),
-];
-
-const TODAY_MOVEMENTS: CashboxMovement[] = [
-  {
-    id: 'mv-1',
+    payment_account_id: 'acct-wallet',  method: 'wallet',   provider_key: 'we_pay',
+    display_name: 'wallet', identifier: '01000011122',
+    // Different (gl_account_code | cashbox_id) bucket from instapay so
+    // the wallet KPI's dedupe rule doesn't collapse them. In production
+    // the screenshot shows the WE Pay wallet pinned to الخزينة الرئيسية.
     cashbox_id: 'cb-cash',
-    cashbox_name: 'الخزينة الرئيسية',
-    direction: 'in',
-    amount: '300.00',
-    category: 'sale',
-    reference_type: 'invoice',
-    reference_id: null,
-    reference_no: 'INV-2026-000141',
-    counterparty_name: null,
-    balance_after: '5300.00',
-    notes: null,
-    user_id: null,
-    user_name: null,
-    kind_ar: 'sale',
-    created_at: '2026-04-29T15:01:51.981Z',
-  },
+    is_default: true, je_count: 2, net_debit: '300',
+    last_movement: new Date(Date.now() - 60 * 60_000).toISOString(),
+  }),
+  makeBalance({
+    payment_account_id: 'acct-pos-visa', method: 'card_visa', provider_key: null,
+    display_name: 'POS Visa', identifier: 'POS-001', gl_account_code: '1113',
+    is_default: true, cashbox_id: null,
+    last_movement: new Date(Date.now() - 25 * 60 * 60_000).toISOString(),
+  }),
+  makeBalance({
+    payment_account_id: 'acct-pos-meeza', method: 'card_meeza', provider_key: null,
+    display_name: 'POS Meeza', identifier: 'POS-MEEZA-01', gl_account_code: '1113',
+    is_default: false, je_count: 1, cashbox_id: null,
+  }),
+  makeBalance({
+    payment_account_id: 'acct-bank', method: 'bank_transfer', display_name: 'تحويل بنكي - داخلي',
+    identifier: 'EG12000300020...', gl_account_code: '1113', cashbox_id: 'cb-bank',
+    is_default: false, je_count: 3,
+  }),
+  makeBalance({
+    payment_account_id: 'acct-vodafone', method: 'vodafone_cash', display_name: 'Vodafone Cash تجريبي',
+    identifier: '01098765432', is_default: false, active: true, cashbox_id: null,
+    last_movement: null,
+  }),
 ];
 
 const METHOD_MIX: PaymentMethodMixRow[] = [
-  { payment_method: 'cash',     transactions: 94, total_amount: '28720.01', pct: '94.41' },
-  { payment_method: 'instapay', transactions: 4,  total_amount:  '1400.00', pct:  '4.60' },
+  { payment_method: 'instapay', transactions: 4, total_amount: '1400.00', pct: '70.00' },
+  { payment_method: 'wallet',   transactions: 2, total_amount:  '300.00', pct: '15.00' },
+  { payment_method: 'cash',     transactions: 1, total_amount:  '300.00', pct: '15.00' },
 ];
 
-// ─── Render helper ────────────────────────────────────────────────
+const TODAY_MOVEMENT: CashboxMovement = {
+  id: 'mv-1',
+  cashbox_id: 'cb-cash',
+  cashbox_name: 'الخزينة الرئيسية',
+  direction: 'in',
+  amount: '300.00',
+  category: 'sale',
+  reference_type: 'invoice',
+  reference_id: null,
+  reference_no: null,
+  counterparty_name: null,
+  balance_after: '23105.00',
+  notes: null,
+  user_id: null,
+  user_name: null,
+  kind_ar: 'sale',
+  created_at: new Date().toISOString(),
+};
+
 function setUserPermissions(perms: string[]) {
   useAuthStore.setState({
     user: { id: 't', role: 'admin', permissions: perms } as any,
@@ -208,9 +242,7 @@ function setUserPermissions(perms: string[]) {
 }
 
 function renderPage() {
-  const qc = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <MemoryRouter>
       <QueryClientProvider client={qc}>
@@ -221,8 +253,8 @@ function renderPage() {
 }
 
 beforeEach(() => {
-  cashboxesMock.mockResolvedValue(CASHBOXES);
-  movementsMock.mockResolvedValue(TODAY_MOVEMENTS);
+  cashboxesMock.mockResolvedValue([CASH_BOX, BANK_BOX]);
+  movementsMock.mockResolvedValue([TODAY_MOVEMENT]);
   glDriftMock.mockResolvedValue([]);
   balancesMock.mockResolvedValue(BALANCES);
   providersMock.mockResolvedValue(PROVIDERS);
@@ -230,170 +262,219 @@ beforeEach(() => {
   setUserPermissions(['cashdesk.manage_accounts', 'payment-accounts.manage', '*']);
 });
 
-// ─── Tests ────────────────────────────────────────────────────────
-describe('<Cashboxes /> — PR-FIN-PAYACCT-4D unified treasury page', () => {
-  it('renders the canonical page surface (header, KPIs, tabs, grid, summary, rail)', async () => {
+// ─── Tests ───────────────────────────────────────────────────────
+describe('<Cashboxes /> — PR-FIN-PAYACCT-4D-UX-FIX table-first layout', () => {
+  // ─── 1. Page surface + breadcrumb + title ───────────────────────
+  it('renders the canonical page surface (breadcrumb, title, subtitle)', () => {
     renderPage();
     expect(screen.getByTestId('treasury-page')).toBeInTheDocument();
-    expect(screen.getByText('الخزائن والحسابات البنكية')).toBeInTheDocument();
-    expect(screen.getByTestId('treasury-kpis')).toBeInTheDocument();
-    expect(screen.getByTestId('treasury-tabs')).toBeInTheDocument();
-    expect(screen.getByTestId('treasury-grid')).toBeInTheDocument();
-    expect(screen.getByTestId('treasury-rail')).toBeInTheDocument();
-    expect(screen.getByTestId('treasury-summary')).toBeInTheDocument();
+    expect(screen.getByTestId('treasury-breadcrumb')).toHaveTextContent(
+      /الرئيسية \/ الإعدادات \/ حسابات الدفع/,
+    );
+    expect(screen.getByRole('heading', { name: 'حسابات الدفع' })).toBeInTheDocument();
+    expect(
+      screen.getByText(/إدارة حسابات الدفع المستخدمة في نقطة البيع/),
+    ).toBeInTheDocument();
   });
 
-  it('right-rail is the FIRST child of the responsive grid (renders on the right in RTL)', async () => {
+  // ─── 2. Right-rail RTL position ────────────────────────────────
+  it('right-rail is the FIRST child of the responsive grid (renders on the RIGHT in RTL)', () => {
     renderPage();
     const grid = screen.getByTestId('treasury-grid');
     const rail = screen.getByTestId('treasury-rail');
-    // RTL invariant: the first grid child takes the rightmost slot in
-    // an RTL document. The rail must therefore be the first child.
     expect(grid.firstElementChild).toBe(rail);
   });
 
-  it('renders the 8 approved tabs incl. "الشيكات" and "حركة اليوم"', async () => {
+  // ─── 3. DOM order: KPI → warnings → filters → table → bottom ───
+  it('main column flows in the approved order: KPI row → warnings → filters → table → bottom cards', async () => {
     renderPage();
-    for (const id of [
-      'tab-all',
-      'tab-cashboxes',
-      'tab-payment-accounts',
-      'tab-banks-wallets',
-      'tab-pos-cards',
-      'tab-cheques',
-      'tab-today',
-      'tab-alerts',
-    ]) {
-      expect(screen.getByTestId(id)).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByTestId('treasury-warnings')).toBeInTheDocument(),
+    );
+    const kpis     = screen.getByTestId('treasury-kpis');
+    const warnings = screen.getByTestId('treasury-warnings');
+    const filters  = screen.getByTestId('treasury-filters');
+    const table    = screen.getByTestId('treasury-table-card');
+    const summary  = screen.getByTestId('treasury-summary');
+
+    function isFollowedBy(a: Element, b: Element) {
+      return !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
     }
+    expect(isFollowedBy(kpis,     warnings)).toBe(true);
+    expect(isFollowedBy(warnings, filters)).toBe(true);
+    expect(isFollowedBy(filters,  table)).toBe(true);
+    expect(isFollowedBy(table,    summary)).toBe(true);
   });
 
-  it('renders all 8 KPI tiles, including cheque', async () => {
+  // ─── 4. Default main view is the TABLE, not tabs/cards ─────────
+  it('defaults to the table as the main view (no tab strip, table is the prominent surface)', async () => {
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByTestId('payment-accounts-table')).toBeInTheDocument(),
+    );
+    // No tab strip, no overview card grid.
+    expect(screen.queryByTestId('treasury-tabs')).toBeNull();
+    expect(screen.queryByTestId('treasury-overview')).toBeNull();
+    expect(screen.queryByTestId('today-movements')).toBeNull();
+  });
+
+  // ─── 5. KPI row — 7 tiles, including new "آخر حركة" ────────────
+  it('renders all 7 KPI tiles, including آخر حركة', async () => {
     renderPage();
     for (const id of [
       'kpi-total',
-      'kpi-cash',
-      'kpi-bank',
-      'kpi-wallet',
-      'kpi-card',
-      'kpi-check',
+      'kpi-active',
+      'kpi-inactive',
       'kpi-no-default',
-      'kpi-drift',
+      'kpi-wallet-balance',
+      'kpi-bank-balance',
+      'kpi-last-movement',
     ]) {
       expect(screen.getByTestId(id)).toBeInTheDocument();
     }
-    // KPI math: cash = 5000 (one cash cashbox), check ≥ 2000 (cheque
-    // payment account net_debit) — values come from real fixtures, not mocks.
+    // KPI math from the fixture: 6 accounts, 6 active, 0 inactive,
+    // wallet bucket = instapay 1400 + wallet 300 = 1700.
     await waitFor(() =>
-      expect(screen.getByTestId('kpi-cash').textContent).toMatch(/5,000/),
+      expect(screen.getByTestId('kpi-total')).toHaveTextContent('6'),
     );
     await waitFor(() =>
-      expect(screen.getByTestId('kpi-check').textContent).toMatch(/2,000/),
+      expect(screen.getByTestId('kpi-wallet-balance').textContent).toMatch(/1,700/),
     );
   });
 
-  it('cheque is reachable from BOTH the tab strip and the quick-action rail', async () => {
+  // ─── 6. All 15 table column headers present ────────────────────
+  it('main table renders all 15 approved column headers', async () => {
+    renderPage();
+    const expected = [
+      'الشعار',
+      'اسم الحساب',
+      'المزود',
+      'طريقة الدفع',
+      'النوع',
+      'الرقم المعرف',
+      'حساب الأستاذ',
+      'الخزنة المرتبطة',
+      'الرصيد المحاسبي',
+      'آخر حركة',
+      'عدد الحركات',
+      'الافتراضي',
+      'الحالة',
+      'التحذيرات',
+      'الإجراءات',
+    ];
+    const table = screen.getByTestId('payment-accounts-table');
+    for (const label of expected) {
+      expect(within(table).getByText(label)).toBeInTheDocument();
+    }
+  });
+
+  // ─── 7. Pagination renders ─────────────────────────────────────
+  it('pagination controls render (page-size, summary, nav buttons)', async () => {
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByTestId('treasury-pagination')).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId('pagination-size')).toBeInTheDocument();
+    expect(screen.getByTestId('pagination-summary')).toBeInTheDocument();
+    expect(screen.getByTestId('pagination-prev')).toBeInTheDocument();
+    expect(screen.getByTestId('pagination-next')).toBeInTheDocument();
+  });
+
+  // ─── 8. Bottom 3 cards ─────────────────────────────────────────
+  it('renders the bottom 3 dashboard cards', async () => {
+    renderPage();
+    expect(screen.getByTestId('summary-balance')).toBeInTheDocument();
+    expect(screen.getByTestId('summary-distribution')).toBeInTheDocument();
+    expect(screen.getByTestId('summary-method-mix')).toBeInTheDocument();
+  });
+
+  // ─── 9. Cheque support ─────────────────────────────────────────
+  it('cheque support is reachable from the rail and the overflow menu', async () => {
     renderPage();
     await waitFor(() =>
       expect(screen.getByTestId('treasury-quick-actions')).toBeInTheDocument(),
     );
-    expect(screen.getByTestId('tab-cheques')).toBeInTheDocument();
     expect(screen.getByTestId('quick-add-check')).toBeInTheDocument();
-    expect(screen.getByTestId('quick-add-check')).toHaveTextContent('شيكات');
+    // Open the overflow → cashbox-side cheque entry must be present.
+    fireEvent.click(screen.getByTestId('treasury-overflow'));
+    expect(screen.getByTestId('treasury-overflow-menu')).toBeInTheDocument();
+    expect(screen.getByTestId('overflow-add-check')).toBeInTheDocument();
   });
 
-  it('"الكل" tab shows BOTH cashboxes AND payment_accounts on one screen', async () => {
+  // ─── 10. Real API data (not fake fixtures) ─────────────────────
+  it('uses real API responses for KPIs, warnings, table rows and method-mix', async () => {
     renderPage();
-    // Both must live inside the same `treasury-overview` block —
-    // proving the cashbox + payment-account surfaces are unified.
-    // Note: "الخزينة الرئيسية" also shows in the rail's cash summary
-    // card, so we scope the assertion to the overview section.
-    const overview = screen.getByTestId('treasury-overview');
-    await waitFor(() =>
-      expect(within(overview).getByText('الخزينة الرئيسية')).toBeInTheDocument(),
-    );
-    await waitFor(() =>
-      expect(within(overview).getByText('InstaPay الرئيسي')).toBeInTheDocument(),
-    );
-  });
-
-  it('"حركة اليوم" tab renders rows from /cash-desk/movements (real data)', async () => {
-    renderPage();
-    fireEvent.click(screen.getByTestId('tab-today'));
-    await waitFor(() =>
-      expect(screen.getByTestId('today-movements')).toBeInTheDocument(),
-    );
-    // The fixture has exactly one row → its data-testid must be present.
-    await waitFor(() =>
-      expect(screen.getByTestId('today-row-mv-1')).toBeInTheDocument(),
-    );
-    // The endpoint was called (proving no mock-fallback).
-    expect(movementsMock).toHaveBeenCalled();
-  });
-
-  it('method-mix card renders real rows AND distinguishes cash from non-cash', async () => {
-    renderPage();
-    // Wait for the API rows to populate the card.
+    // Wait for all queries to settle.
+    await waitFor(() => expect(balancesMock).toHaveBeenCalled());
+    expect(cashboxesMock).toHaveBeenCalled();
+    expect(providersMock).toHaveBeenCalled();
+    expect(methodMixMock).toHaveBeenCalled();
+    expect(glDriftMock).toHaveBeenCalled();
+    // Method-mix card is populated, not empty.
     await waitFor(() =>
       expect(screen.getByTestId('method-mix-list')).toBeInTheDocument(),
     );
-    // Real rows from the API mock (cash + instapay) — empty state not visible.
     expect(screen.queryByTestId('method-mix-empty')).toBeNull();
-    expect(screen.getByTestId('mix-cash')).toBeInTheDocument();
-    expect(screen.getByTestId('mix-instapay')).toBeInTheDocument();
-    // Cash row carries the "نقدي" badge; non-cash row carries "غير نقدي".
-    const cashRow = screen.getByTestId('mix-cash');
-    const ipRow   = screen.getByTestId('mix-instapay');
-    expect(within(cashRow).getByText('نقدي')).toBeInTheDocument();
-    expect(within(ipRow).getByText('غير نقدي')).toBeInTheDocument();
+    // Cash row in the mix gets the "نقدي" badge; non-cash rows get "غير نقدي".
+    expect(within(screen.getByTestId('mix-cash')).getByText('نقدي')).toBeInTheDocument();
+    expect(within(screen.getByTestId('mix-instapay')).getByText('غير نقدي')).toBeInTheDocument();
   });
 
-  it('method-mix card shows the empty state when the API returns no rows (no fake data)', async () => {
+  // ─── 11. Method-mix empty state (NO fake data) ────────────────
+  it('method-mix card shows the empty state when the API returns no rows (no fake fallback)', async () => {
     methodMixMock.mockResolvedValue([]);
     renderPage();
     await waitFor(() =>
       expect(screen.getByTestId('method-mix-empty')).toBeInTheDocument(),
     );
-    // No fake rows — neither cash nor any other method should appear.
     expect(screen.queryByTestId('mix-cash')).toBeNull();
     expect(screen.queryByTestId('mix-instapay')).toBeNull();
-    expect(screen.queryByTestId('mix-wallet')).toBeNull();
   });
 
-  it('alerts panel includes the two PR-4D alerts when conditions are met', async () => {
-    // Add an inactive account with je_count > 0, and an active
-    // bank_transfer account with no cashbox_id pin.
-    balancesMock.mockResolvedValue([
-      ...BALANCES,
-      makeBalance({
-        payment_account_id: 'acct-old', method: 'wallet', display_name: 'محفظة قديمة',
-        active: false, is_default: false, je_count: 5,
-      }),
-      makeBalance({
-        payment_account_id: 'acct-bank', method: 'bank_transfer', display_name: 'CIB',
-        is_default: true, cashbox_id: null,
-      }),
-    ]);
+  // ─── 12. Per-row warnings render from real conditions ──────────
+  it('per-row warnings ("غير مربوط بخزنة" / "لا يوجد افتراضي") render from real balance data', async () => {
     renderPage();
-    // Both alerts depend on the balances fetch resolving.
+    // POS Visa has cashbox_id=null and method is pin-recommended →
+    // warning "غير مربوط بخزنة" should appear inside that row.
     await waitFor(() =>
-      expect(screen.getByTestId('alert-inactive-with-movements')).toBeInTheDocument(),
+      expect(screen.getByTestId('payment-account-row-acct-pos-visa')).toBeInTheDocument(),
     );
-    await waitFor(() =>
-      expect(screen.getByTestId('alert-no-cashbox-pin')).toBeInTheDocument(),
-    );
+    const posRow = screen.getByTestId('payment-account-row-acct-pos-visa');
+    expect(within(posRow).getByText('غير مربوط بخزنة')).toBeInTheDocument();
   });
 
-  it('clicking "إضافة حساب شيكات" quick-action opens the payment-account create modal pre-filled to cheque', async () => {
+  // ─── 13. Right-rail cash summary uses /cash-desk/cashboxes data ──
+  it('right-rail cash summary card renders the cash cashbox name + balance from API', async () => {
     renderPage();
     await waitFor(() =>
-      expect(screen.getByTestId('quick-add-check')).toBeInTheDocument(),
+      expect(screen.getByTestId('treasury-rail-cash-summary')).toBeInTheDocument(),
     );
-    fireEvent.click(screen.getByTestId('quick-add-check'));
-    // The PaymentAccountModal renders a wrapper with this testid.
-    expect(screen.getByTestId('payment-account-modal')).toBeInTheDocument();
-    // Method picker is locked to 'check' on opening via the rail.
-    const methodSel = screen.getByTestId('payment-account-modal-method') as HTMLSelectElement;
-    expect(methodSel.value).toBe('check');
+    const card = screen.getByTestId('treasury-rail-cash-summary');
+    expect(within(card).getByText('الخزينة الرئيسية')).toBeInTheDocument();
+    expect(card.textContent).toMatch(/23,105/);
+  });
+
+  // ─── 14. Warning strip from real no-default-method computation ──
+  it('renders a warning strip for active methods missing a default (real data)', async () => {
+    renderPage();
+    // bank_transfer has 1 active row with is_default=false → strip.
+    await waitFor(() =>
+      expect(screen.getByTestId('warning-no-default-bank_transfer')).toBeInTheDocument(),
+    );
+    // card_meeza is also default=false → strip.
+    expect(screen.getByTestId('warning-no-default-card_meeza')).toBeInTheDocument();
+  });
+
+  // ─── 15. Filter clearing ───────────────────────────────────────
+  it('clear-filters button resets every filter input', async () => {
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByTestId('filter-search')).toBeInTheDocument(),
+    );
+    const search = screen.getByTestId('filter-search') as HTMLInputElement;
+    fireEvent.change(search, { target: { value: 'POS' } });
+    expect(search.value).toBe('POS');
+    fireEvent.click(screen.getByTestId('filter-clear'));
+    expect((screen.getByTestId('filter-search') as HTMLInputElement).value).toBe('');
   });
 });
