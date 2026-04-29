@@ -664,6 +664,11 @@ export class FinancialEngineService {
       shift_variance: 'shift',
       cashbox_transfer: 'cashbox',
       opening_balance: 'cashbox',
+      // PR-FIN-PAYACCT-1: cashbox-opening JEs use reference_type='cashbox_opening'
+      // (free-form string on journal_entries) but the matching cashbox_transactions
+      // row needs reference_type='cashbox' (entity_type enum) — without this alias
+      // the CT row would be tagged 'other' and break per-cashbox reconciliation.
+      cashbox_opening: 'cashbox',
       manual_adjustment: 'cashbox',
       inventory_adjustment: 'stock',
       depreciation: 'other',

@@ -57,60 +57,65 @@ export class CashDeskService {
    * cashbox_id column so the posting service's explicit-link lookup
    * resolves to it. Idempotent: if an account with the same cashbox_id
    * already exists, we skip.
+   *
+   * PR-FIN-PAYACCT-1: takes a query runner (transaction's EntityManager
+   * or the bare DataSource) so the GL sub-account write joins the same
+   * atomic envelope as the cashbox INSERT + the engine-backed opening
+   * movement. Real DB errors now propagate (no more silent swallow):
+   * the user spec is "if any step fails, rollback the whole transaction."
+   * Only the "COA not seeded" early-return is preserved (graceful for
+   * fresh installs without a seeded chart of accounts).
    */
   private async linkOrCreateGLSubAccount(
+    q: { query: (sql: string, params?: any[]) => Promise<any[]> },
     cashbox: any,
     userId: string,
   ): Promise<void> {
-    try {
-      const [existing] = await this.ds.query(
-        `SELECT id FROM chart_of_accounts WHERE cashbox_id = $1 LIMIT 1`,
-        [cashbox.id],
-      );
-      if (existing) return;
+    const [existing] = await q.query(
+      `SELECT id FROM chart_of_accounts WHERE cashbox_id = $1 LIMIT 1`,
+      [cashbox.id],
+    );
+    if (existing) return;
 
-      // Parent code per kind
-      const parentCode: Record<string, string> = {
-        cash: '111',
-        bank: '111',
-        ewallet: '111',
-        check: '111',
-      };
-      const [parent] = await this.ds.query(
-        `SELECT id, code FROM chart_of_accounts WHERE code = $1 LIMIT 1`,
-        [parentCode[cashbox.kind] || '111'],
-      );
-      if (!parent) return; // COA not seeded yet
+    // Parent code per kind
+    const parentCode: Record<string, string> = {
+      cash: '111',
+      bank: '111',
+      ewallet: '111',
+      check: '111',
+    };
+    const [parent] = await q.query(
+      `SELECT id, code FROM chart_of_accounts WHERE code = $1 LIMIT 1`,
+      [parentCode[cashbox.kind] || '111'],
+    );
+    if (!parent) return; // COA not seeded yet — graceful no-op for fresh installs.
 
-      // Find the next available code under the parent.
-      const [{ next_seq }] = await this.ds.query(
-        `SELECT COALESCE(MAX(SUBSTRING(code FROM '[0-9]+$')::int), 0) + 1 AS next_seq
-           FROM chart_of_accounts WHERE parent_id = $1`,
-        [parent.id],
-      );
-      const newCode = `${parent.code}${String(next_seq).padStart(2, '0')}`;
+    // Find the next available code under the parent.
+    const [{ next_seq }] = await q.query(
+      `SELECT COALESCE(MAX(SUBSTRING(code FROM '[0-9]+$')::int), 0) + 1 AS next_seq
+         FROM chart_of_accounts WHERE parent_id = $1`,
+      [parent.id],
+    );
+    const newCode = `${parent.code}${String(next_seq).padStart(2, '0')}`;
 
-      await this.ds.query(
-        `
-        INSERT INTO chart_of_accounts
-          (code, name_ar, name_en, account_type, normal_balance, parent_id,
-           is_leaf, is_system, level, cashbox_id, created_by, description)
-        VALUES ($1, $2, $3, 'asset'::account_type, 'debit'::normal_balance,
-                $4, TRUE, FALSE, 4, $5, $6, 'تم الإنشاء تلقائيًا مع الخزنة')
-        ON CONFLICT (code) DO NOTHING
-        `,
-        [
-          newCode,
-          cashbox.name_ar,
-          cashbox.name_ar,
-          parent.id,
-          cashbox.id,
-          userId,
-        ],
-      );
-    } catch {
-      // Non-blocking — accounting wiring should never fail a cashbox create.
-    }
+    await q.query(
+      `
+      INSERT INTO chart_of_accounts
+        (code, name_ar, name_en, account_type, normal_balance, parent_id,
+         is_leaf, is_system, level, cashbox_id, created_by, description)
+      VALUES ($1, $2, $3, 'asset'::account_type, 'debit'::normal_balance,
+              $4, TRUE, FALSE, 4, $5, $6, 'تم الإنشاء تلقائيًا مع الخزنة')
+      ON CONFLICT (code) DO NOTHING
+      `,
+      [
+        newCode,
+        cashbox.name_ar,
+        cashbox.name_ar,
+        parent.id,
+        cashbox.id,
+        userId,
+      ],
+    );
   }
 
   /** Look up the warehouse_id for a cashbox (NOT NULL on both payment tables). */
@@ -341,7 +346,69 @@ export class CashDeskService {
     );
   }
 
-  async createCashbox(dto: CreateCashboxDto) {
+  /**
+   * Create a cashbox + (optionally) post its opening balance as a real
+   * engine-backed event.
+   *
+   * PR-FIN-PAYACCT-1 — Option B.1 semantics (the "no double-count" fix):
+   *
+   *   Pre-merge contract was broken: the legacy INSERT set both
+   *   `cashboxes.current_balance` and `cashboxes.opening_balance` to
+   *   the user-supplied opening figure with NO offsetting JE and NO
+   *   `cashbox_transactions` row. Production never tripped the bug
+   *   (no row had `opening_balance > 0`) but every future bank or
+   *   wallet creation would have created money out of thin air and
+   *   broken the cashbox-vs-GL invariant.
+   *
+   *   New flow:
+   *
+   *     ds.transaction((em) => {
+   *       1. INSERT cashboxes with current_balance=0, opening_balance=0
+   *          regardless of input. The column is intentionally unused for
+   *          cashboxes created by this flow — the value lives in the CT
+   *          ledger and the GL, not in a denormalised stored field.
+   *       2. linkOrCreateGLSubAccount(em) — give the cashbox its own
+   *          chart_of_accounts row so postings don't pool across boxes.
+   *       3. If dto.opening_balance > 0:
+   *            engine.recordTransaction({
+   *              kind: 'opening_balance',
+   *              reference_type: 'cashbox_opening',
+   *              reference_id: cashbox.id,
+   *              gl_lines: [DR cashbox-GL, CR 31 (capital)],
+   *              cash_movements: [{cashbox_id, dir:'in', amount,
+   *                                 category:'opening'}],
+   *              user_id, em,
+   *            })
+   *            The engine writes JE + JL + (via fn_record_cashbox_txn)
+   *            cashbox_transactions row + UPDATE cashboxes.current_balance
+   *            from 0 to amount. SINGLE writer of current_balance.
+   *       4. Backfill the trace columns:
+   *            UPDATE cashboxes SET opening_journal_entry_id = je_id,
+   *                                  opening_posted_at = NOW()
+   *            (Allowed under the cashbox-balance guard because
+   *             current_balance is unchanged in this UPDATE.)
+   *       5. Commit. Any failure between 1–4 rolls back the whole tx.
+   *     })
+   *
+   * Idempotency & no-double-count proof:
+   *   • Engine.recordTransaction guards on (reference_type, reference_id)
+   *     = ('cashbox_opening', cashbox.id) — replay returns
+   *     {ok:true, skipped:true}, no duplicate JE, no duplicate CT.
+   *   • Migration 119 promotes that guard to a partial unique index.
+   *   • current_balance is mutated solely by `fn_record_cashbox_txn`.
+   *     Step 1 leaves it at 0; only step 3 lifts it. Sum of CT rows ==
+   *     opening amount == GL 1111/1113/1114/1115 net debit.
+   *   • v_cash_position.computed = opening_balance(0) + Σct(opening) =
+   *     opening. drift = stored(opening) − opening = 0. ✅
+   *
+   * @param dto    create payload — `dto.opening_balance` is the user's
+   *               funding amount (NOT stored verbatim into the column).
+   * @param userId actor — threaded through to JE.created_by / posted_by
+   *               and chart_of_accounts.created_by. Falls back to
+   *               'system' (literal kept for backward compat with
+   *               internal callers without an HTTP context).
+   */
+  async createCashbox(dto: CreateCashboxDto, userId: string | null = null) {
     if (!dto.name_ar?.trim())
       throw new BadRequestException('اسم الخزنة مطلوب');
     if (!['cash', 'bank', 'ewallet', 'check'].includes(dto.kind)) {
@@ -353,6 +420,16 @@ export class CashDeskService {
       !dto.institution_code
     ) {
       throw new BadRequestException('يجب اختيار البنك / المحفظة');
+    }
+
+    const opening = Number(dto.opening_balance || 0);
+    if (opening < 0) {
+      throw new BadRequestException('الرصيد الافتتاحي لا يمكن أن يكون سالبًا');
+    }
+    if (opening > 0 && !this.engine) {
+      throw new BadRequestException(
+        'لا يمكن إنشاء خزنة برصيد افتتاحي بدون المحرك المحاسبي',
+      );
     }
 
     // Fall back to a valid warehouse if none given (cashboxes NOT NULL).
@@ -367,43 +444,103 @@ export class CashDeskService {
       throw new BadRequestException('لا يوجد مخزن نشط لربط الخزنة به');
     }
 
-    const [row] = await this.ds.query(
-      `
-      INSERT INTO cashboxes
-        (name_ar, warehouse_id, currency, kind, institution_code,
-         bank_branch, account_number, iban, swift_code,
-         account_holder_name, account_manager_name, account_manager_phone,
-         account_manager_email, wallet_phone, wallet_owner_name,
-         check_issuer_name, color, current_balance, opening_balance,
-         is_active)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$18,TRUE)
-      RETURNING *
-      `,
-      [
-        dto.name_ar.trim(),
-        warehouseId,
-        dto.currency ?? 'EGP',
-        dto.kind,
-        dto.institution_code ?? null,
-        dto.bank_branch ?? null,
-        dto.account_number ?? null,
-        dto.iban ?? null,
-        dto.swift_code ?? null,
-        dto.account_holder_name ?? null,
-        dto.account_manager_name ?? null,
-        dto.account_manager_phone ?? null,
-        dto.account_manager_email ?? null,
-        dto.wallet_phone ?? null,
-        dto.wallet_owner_name ?? null,
-        dto.check_issuer_name ?? null,
-        dto.color ?? null,
-        Number(dto.opening_balance || 0),
-      ],
-    );
-    // Auto-create a GL sub-account for this cashbox so postings don't
-    // merge across all boxes of the same kind.
-    await this.linkOrCreateGLSubAccount(row, 'system');
-    return row;
+    const actorId = userId ?? 'system';
+
+    return this.ds.transaction(async (em) => {
+      // Step 1 — INSERT with current_balance=0, opening_balance=0
+      // regardless of `opening`. The amount lives in the CT/JE ledger
+      // (Option B.1 in the PR-FIN-PAYACCT-1 audit).
+      const [row] = await em.query(
+        `
+        INSERT INTO cashboxes
+          (name_ar, warehouse_id, currency, kind, institution_code,
+           bank_branch, account_number, iban, swift_code,
+           account_holder_name, account_manager_name, account_manager_phone,
+           account_manager_email, wallet_phone, wallet_owner_name,
+           check_issuer_name, color, current_balance, opening_balance,
+           is_active)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,0,0,TRUE)
+        RETURNING *
+        `,
+        [
+          dto.name_ar.trim(),
+          warehouseId,
+          dto.currency ?? 'EGP',
+          dto.kind,
+          dto.institution_code ?? null,
+          dto.bank_branch ?? null,
+          dto.account_number ?? null,
+          dto.iban ?? null,
+          dto.swift_code ?? null,
+          dto.account_holder_name ?? null,
+          dto.account_manager_name ?? null,
+          dto.account_manager_phone ?? null,
+          dto.account_manager_email ?? null,
+          dto.wallet_phone ?? null,
+          dto.wallet_owner_name ?? null,
+          dto.check_issuer_name ?? null,
+          dto.color ?? null,
+        ],
+      );
+
+      // Step 2 — GL sub-account. Errors propagate → rolls back step 1.
+      await this.linkOrCreateGLSubAccount(em, row, actorId);
+
+      // Step 3 — Engine-backed opening movement (only when opening > 0).
+      if (opening > 0) {
+        const result = await this.engine!.recordTransaction({
+          kind: 'opening_balance',
+          reference_type: 'cashbox_opening',
+          reference_id: row.id,
+          description: `رصيد افتتاحي - ${row.name_ar}`,
+          gl_lines: [
+            {
+              resolve_from_cashbox_id: row.id,
+              debit: opening,
+              cashbox_id: row.id,
+            },
+            { account_code: '31', credit: opening },
+          ],
+          cash_movements: [
+            {
+              cashbox_id: row.id,
+              direction: 'in',
+              amount: opening,
+              category: 'opening',
+              notes: `رصيد افتتاحي - ${row.name_ar}`,
+            },
+          ],
+          user_id: userId,
+          em,
+        });
+        if (!result.ok) {
+          throw new BadRequestException(
+            `فشل تسجيل الرصيد الافتتاحي: ${result.error}`,
+          );
+        }
+        // Step 4 — Backfill trace columns. Allowed under
+        // trg_guard_cashbox_balance (current_balance is unchanged in
+        // this UPDATE — only the trace columns move).
+        await em.query(
+          `UPDATE cashboxes
+              SET opening_journal_entry_id = $2,
+                  opening_posted_at = NOW(),
+                  updated_at = NOW()
+            WHERE id = $1`,
+          [row.id, result.entry_id],
+        );
+        // Re-read so the caller sees the populated trace columns +
+        // the engine-driven current_balance (= opening) instead of
+        // the row we returned at step 1 (which was current_balance=0).
+        const [refreshed] = await em.query(
+          `SELECT * FROM cashboxes WHERE id = $1`,
+          [row.id],
+        );
+        return refreshed;
+      }
+
+      return row;
+    });
   }
 
   async updateCashbox(id: string, dto: UpdateCashboxDto) {

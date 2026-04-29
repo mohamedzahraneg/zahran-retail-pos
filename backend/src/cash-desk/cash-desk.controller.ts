@@ -125,8 +125,15 @@ export class CashDeskController {
   @Post('cashboxes')
   @Roles('admin', 'manager', 'accountant')
   @Permissions('cashdesk.manage_accounts')
-  createCashbox(@Body() dto: CashboxCreateDto) {
-    return this.svc.createCashbox(dto);
+  createCashbox(
+    @Body() dto: CashboxCreateDto,
+    @CurrentUser() user: JwtUser,
+  ) {
+    // PR-FIN-PAYACCT-1: userId is threaded through so the engine-backed
+    // opening JE has a real `created_by` / `posted_by` (not the legacy
+    // 'system' literal). The service still falls back to 'system' if
+    // userId is null for internal callers.
+    return this.svc.createCashbox(dto, user.userId);
   }
 
   @Post('cashboxes/:id')
