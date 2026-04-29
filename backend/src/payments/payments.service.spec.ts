@@ -549,7 +549,7 @@ describe('PaymentsService — PR-FIN-PAYACCT-4B', () => {
       expect(sql).toMatch(/FROM customer_payments[\s\S]+WHERE payment_account_id = pa\.id/);
       expect(sql).toMatch(/FROM supplier_payments[\s\S]+WHERE payment_account_id = pa\.id/);
       // Refunds flip to amount_out so the per-account balance reflects money OUT.
-      expect(sql).toMatch(/CASE WHEN kind = 'refund' THEN 0::numeric ELSE amount END/);
+      expect(sql).toMatch(/CASE WHEN kind = 'refund_out' THEN 0::numeric ELSE amount END/);
       // Voided customer/supplier rows are excluded from aggregates.
       expect(sql).toMatch(/COALESCE\(is_void, FALSE\) = FALSE/);
       // No filter clauses when filter is empty.
@@ -645,7 +645,7 @@ describe('PaymentsService — PR-FIN-PAYACCT-4B', () => {
       // gl_account_code never appears as a movement filter.
       expect(sql).not.toMatch(/gl_account_code\s*=\s*/);
       // Customer-payment refund flips to amount_out per the approved decision.
-      expect(sql).toMatch(/cp\.kind = 'refund'[\s\S]+cp\.amount[\s\S]+0::numeric/);
+      expect(sql).toMatch(/cp\.kind = 'refund_out'[\s\S]+cp\.amount[\s\S]+0::numeric/);
       // Pure SELECT — no INSERT/UPDATE/DELETE.
       expect(sql).not.toMatch(/INSERT|UPDATE|DELETE/i);
     });
