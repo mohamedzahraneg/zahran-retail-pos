@@ -78,7 +78,7 @@ describe('CashDeskService — PR-CASH-DESK-REORG-1', () => {
         [{ id: 'pay-1', payment_no: 'CR-000042' }],
       ]);
       const posting = {
-        postInvoicePayment: jest.fn().mockResolvedValue(undefined),
+        postInvoicePayment: jest.fn().mockResolvedValue({ entry_id: "je-1" }),
       };
       const moduleRef = await Test.createTestingModule({
         providers: [
@@ -143,7 +143,7 @@ describe('CashDeskService — PR-CASH-DESK-REORG-1', () => {
         [{}], // allocation 2 INSERT
       ]);
       const posting = {
-        postInvoicePayment: jest.fn().mockResolvedValue(undefined),
+        postInvoicePayment: jest.fn().mockResolvedValue({ entry_id: "je-1" }),
       };
       const moduleRef = await Test.createTestingModule({
         providers: [
@@ -179,7 +179,24 @@ describe('CashDeskService — PR-CASH-DESK-REORG-1', () => {
       expect(allocCalls[1].params).toEqual(['pay-2', 'inv-2', 100]);
     });
 
-    it("swallows posting errors so a missing JE doesn't roll back the payment", async () => {
+    it("PR-FIN-PAYACCT-2: posting failure THROWS so the whole tx rolls back (was: swallowed)", async () => {
+      // Pre-PR-FIN-PAYACCT-2 contract pinned the legacy "best-effort"
+      // posting: if `posting.postInvoicePayment` rejected, the service
+      // discarded the error and returned the payment. That left an
+      // orphan customer_payment + cashbox_transactions + customer_ledger
+      // row with no journal_entry — silent drift between cashbox and GL.
+      //
+      // New contract: posting MUST complete or the whole tx rolls back.
+      // A rejected posting promise propagates through the
+      // `ds.transaction((em) => …)` envelope and surfaces as a
+      // BadRequestException to the caller; the trigger-driven side
+      // effects roll back with it, so no committed state without a JE.
+      //
+      // (Note: in production `posting.service.safe()` always RESOLVES,
+      // never rejects — it converts errors into `{error}` returns.
+      // The legacy test mocked a rejection to exercise the .catch().
+      // The new test exercises the same shape the FE would observe if a
+      // posting promise ever did reject for any reason.)
       const { ds } = makeFakeDataSource([
         [{ seq: 1 }],
         [{ warehouse_id: 'wh-1' }],
@@ -199,9 +216,6 @@ describe('CashDeskService — PR-CASH-DESK-REORG-1', () => {
       }).compile();
       const service = moduleRef.get(CashDeskService);
 
-      // The promise must resolve (NOT throw) — this is the
-      // "post on best-effort" contract that lets imports work
-      // before COA is wired in fresh installs.
       await expect(
         service.receiveFromCustomer(
           {
@@ -213,7 +227,7 @@ describe('CashDeskService — PR-CASH-DESK-REORG-1', () => {
           } as any,
           'user-1',
         ),
-      ).resolves.toEqual({ id: 'pay-3' });
+      ).rejects.toThrow(/GL not seeded/);
     });
   });
 
@@ -225,7 +239,7 @@ describe('CashDeskService — PR-CASH-DESK-REORG-1', () => {
         [{ id: 'sp-1', payment_no: 'CP-000007' }],
       ]);
       const posting = {
-        postSupplierPayment: jest.fn().mockResolvedValue(undefined),
+        postSupplierPayment: jest.fn().mockResolvedValue({ entry_id: "je-1" }),
       };
       const moduleRef = await Test.createTestingModule({
         providers: [
@@ -283,7 +297,7 @@ describe('CashDeskService — PR-CASH-DESK-REORG-1', () => {
         [{}],
       ]);
       const posting = {
-        postSupplierPayment: jest.fn().mockResolvedValue(undefined),
+        postSupplierPayment: jest.fn().mockResolvedValue({ entry_id: "je-1" }),
       };
       const moduleRef = await Test.createTestingModule({
         providers: [
@@ -977,6 +991,372 @@ describe('CashDeskService.createCashbox — PR-FIN-PAYACCT-1', () => {
     expect(
       emCalls.some((c) => /UPDATE cashboxes/.test(c.sql)),
     ).toBe(false);
+  });
+});
+
+/* ============================================================================
+ * PR-FIN-PAYACCT-2 — customer/supplier payment posting hardening
+ * ----------------------------------------------------------------------------
+ * Pins the new atomic-posting contract:
+ *
+ *   • posting MUST be wired (this.posting non-null) — else throw up front.
+ *   • posting return `null`           → throw BadRequestException (Arabic).
+ *   • posting return `{error}`        → throw BadRequestException carrying
+ *                                       the underlying error message.
+ *   • posting return `{skipped:true}` → success (idempotent replay).
+ *   • posting return `{entry_id}`     → success.
+ *
+ * The pre-merge contract was a `.catch(() => undefined)` silent swallow
+ * paired with a no-result-inspection caller — so any posting failure
+ * left an orphan `customer_payments` / `supplier_payments` row with no
+ * GL leg. Production has 0 orphans today (audit verified) because there
+ * are 0 historical payments; the hardening lands BEFORE the new
+ * Customers/Suppliers-page buttons get real production usage.
+ *
+ * The legacy `swallows posting errors so a missing JE doesn't roll back
+ * the payment` test (was at line 182 of this file) has been flipped to
+ * pin the new throw-on-failure contract.
+ * ========================================================================== */
+describe('CashDeskService.{receiveFromCustomer,payToSupplier} — PR-FIN-PAYACCT-2 atomic posting', () => {
+  describe('receiveFromCustomer', () => {
+    it('1) success: posting returns {entry_id} → service returns the payment row', async () => {
+      const { ds } = makeFakeDataSource([
+        [{ seq: 1 }],
+        [{ warehouse_id: 'wh-1' }],
+        [{ id: 'pay-ok', payment_no: 'CR-000001' }],
+      ]);
+      const posting = {
+        postInvoicePayment: jest.fn().mockResolvedValue({ entry_id: 'je-ok' }),
+      };
+      const moduleRef = await Test.createTestingModule({
+        providers: [
+          CashDeskService,
+          { provide: DataSource, useValue: ds },
+          { provide: AccountingPostingService, useValue: posting },
+        ],
+      }).compile();
+      const service = moduleRef.get(CashDeskService);
+
+      const out = await service.receiveFromCustomer(
+        {
+          customer_id: 'cust-1',
+          cashbox_id: 'cb-1',
+          payment_method: 'cash',
+          amount: 100,
+          kind: 'refund',
+        } as any,
+        'user-1',
+      );
+      expect(out).toEqual({ id: 'pay-ok', payment_no: 'CR-000001' });
+      expect(posting.postInvoicePayment).toHaveBeenCalledWith(
+        'pay-ok',
+        'user-1',
+        expect.any(Object),
+      );
+    });
+
+    it('2) posting returns null → BadRequestException, Arabic message about COA, tx rolls back', async () => {
+      const { ds } = makeFakeDataSource([
+        [{ seq: 2 }],
+        [{ warehouse_id: 'wh-1' }],
+        [{ id: 'pay-null' }],
+      ]);
+      const posting = {
+        postInvoicePayment: jest.fn().mockResolvedValue(null),
+      };
+      const moduleRef = await Test.createTestingModule({
+        providers: [
+          CashDeskService,
+          { provide: DataSource, useValue: ds },
+          { provide: AccountingPostingService, useValue: posting },
+        ],
+      }).compile();
+      const service = moduleRef.get(CashDeskService);
+
+      // The Arabic message must surface both the failure phrase AND
+      // the COA codes the operator can act on (1111/1121/212). One
+      // call → two substrings → both must be present in the error.
+      let captured: any;
+      try {
+        await service.receiveFromCustomer(
+          {
+            customer_id: 'cust-1',
+            cashbox_id: 'cb-1',
+            payment_method: 'cash',
+            amount: 100,
+            kind: 'refund',
+          } as any,
+          'user-1',
+        );
+      } catch (err) {
+        captured = err;
+      }
+      expect(captured).toBeDefined();
+      expect(captured.message).toMatch(/فشل ترحيل المقبوضة محاسبياً/);
+      expect(captured.message).toMatch(/1111\/1121\/212/);
+    });
+
+    it('3) posting returns {error} → BadRequestException carries the underlying error', async () => {
+      const { ds } = makeFakeDataSource([
+        [{ seq: 3 }],
+        [{ warehouse_id: 'wh-1' }],
+        [{ id: 'pay-err' }],
+      ]);
+      const posting = {
+        postInvoicePayment: jest
+          .fn()
+          .mockResolvedValue({ error: 'engine_lockdown_engaged' }),
+      };
+      const moduleRef = await Test.createTestingModule({
+        providers: [
+          CashDeskService,
+          { provide: DataSource, useValue: ds },
+          { provide: AccountingPostingService, useValue: posting },
+        ],
+      }).compile();
+      const service = moduleRef.get(CashDeskService);
+
+      await expect(
+        service.receiveFromCustomer(
+          {
+            customer_id: 'cust-1',
+            cashbox_id: 'cb-1',
+            payment_method: 'cash',
+            amount: 100,
+            kind: 'refund',
+          } as any,
+          'user-1',
+        ),
+      ).rejects.toThrow(/engine_lockdown_engaged/);
+    });
+
+    it('4) posting returns {skipped:true} → idempotent success, payment returned, no throw', async () => {
+      const { ds } = makeFakeDataSource([
+        [{ seq: 4 }],
+        [{ warehouse_id: 'wh-1' }],
+        [{ id: 'pay-skip', payment_no: 'CR-000004' }],
+      ]);
+      const posting = {
+        postInvoicePayment: jest
+          .fn()
+          .mockResolvedValue({ skipped: true, entry_id: 'je-existing' }),
+      };
+      const moduleRef = await Test.createTestingModule({
+        providers: [
+          CashDeskService,
+          { provide: DataSource, useValue: ds },
+          { provide: AccountingPostingService, useValue: posting },
+        ],
+      }).compile();
+      const service = moduleRef.get(CashDeskService);
+
+      const out = await service.receiveFromCustomer(
+        {
+          customer_id: 'cust-1',
+          cashbox_id: 'cb-1',
+          payment_method: 'cash',
+          amount: 100,
+          kind: 'refund',
+        } as any,
+        'user-1',
+      );
+      // Skipped is success — the engine's idempotency caught the replay
+      // and the existing JE is reused.
+      expect(out).toEqual({ id: 'pay-skip', payment_no: 'CR-000004' });
+    });
+
+    it('5) posting service unavailable (this.posting === undefined) → BadRequestException up front', async () => {
+      const { ds, emCalls } = makeFakeDataSource([]);
+      const moduleRef = await Test.createTestingModule({
+        providers: [
+          CashDeskService,
+          { provide: DataSource, useValue: ds },
+          // Deliberately NO AccountingPostingService provider — emulates
+          // a misconfigured module wiring.
+        ],
+      }).compile();
+      const service = moduleRef.get(CashDeskService);
+
+      await expect(
+        service.receiveFromCustomer(
+          {
+            customer_id: 'cust-1',
+            cashbox_id: 'cb-1',
+            payment_method: 'cash',
+            amount: 100,
+            kind: 'refund',
+          } as any,
+          'user-1',
+        ),
+      ).rejects.toThrow(/خدمة الترحيل المحاسبي غير متاحة/);
+      // The throw must happen BEFORE the transaction opens — no INSERT
+      // into customer_payments was attempted.
+      expect(
+        emCalls.some((c) => /INSERT INTO customer_payments/.test(c.sql)),
+      ).toBe(false);
+    });
+  });
+
+  describe('payToSupplier', () => {
+    it('6) success: posting returns {entry_id} → service returns the payment row', async () => {
+      const { ds } = makeFakeDataSource([
+        [{ seq: 1 }],
+        [{ warehouse_id: 'wh-1' }],
+        [{ id: 'sp-ok', payment_no: 'CP-000001' }],
+      ]);
+      const posting = {
+        postSupplierPayment: jest.fn().mockResolvedValue({ entry_id: 'je-sup' }),
+      };
+      const moduleRef = await Test.createTestingModule({
+        providers: [
+          CashDeskService,
+          { provide: DataSource, useValue: ds },
+          { provide: AccountingPostingService, useValue: posting },
+        ],
+      }).compile();
+      const service = moduleRef.get(CashDeskService);
+
+      const out = await service.payToSupplier(
+        {
+          supplier_id: 'sup-1',
+          cashbox_id: 'cb-1',
+          payment_method: 'cash',
+          amount: 200,
+        } as any,
+        'user-1',
+      );
+      expect(out).toEqual({ id: 'sp-ok', payment_no: 'CP-000001' });
+    });
+
+    it('7) posting returns null → BadRequestException, Arabic message about COA (1111/211)', async () => {
+      const { ds } = makeFakeDataSource([
+        [{ seq: 2 }],
+        [{ warehouse_id: 'wh-1' }],
+        [{ id: 'sp-null' }],
+      ]);
+      const posting = {
+        postSupplierPayment: jest.fn().mockResolvedValue(null),
+      };
+      const moduleRef = await Test.createTestingModule({
+        providers: [
+          CashDeskService,
+          { provide: DataSource, useValue: ds },
+          { provide: AccountingPostingService, useValue: posting },
+        ],
+      }).compile();
+      const service = moduleRef.get(CashDeskService);
+
+      // One call → two substrings, mirror of the customer test above.
+      let captured: any;
+      try {
+        await service.payToSupplier(
+          {
+            supplier_id: 'sup-1',
+            cashbox_id: 'cb-1',
+            payment_method: 'cash',
+            amount: 200,
+          } as any,
+          'user-1',
+        );
+      } catch (err) {
+        captured = err;
+      }
+      expect(captured).toBeDefined();
+      expect(captured.message).toMatch(/فشل ترحيل الدفعة محاسبياً/);
+      expect(captured.message).toMatch(/1111\/211/);
+    });
+
+    it('8) posting returns {error} → BadRequestException carries the underlying error', async () => {
+      const { ds } = makeFakeDataSource([
+        [{ seq: 3 }],
+        [{ warehouse_id: 'wh-1' }],
+        [{ id: 'sp-err' }],
+      ]);
+      const posting = {
+        postSupplierPayment: jest
+          .fn()
+          .mockResolvedValue({ error: 'COA_211_INACTIVE' }),
+      };
+      const moduleRef = await Test.createTestingModule({
+        providers: [
+          CashDeskService,
+          { provide: DataSource, useValue: ds },
+          { provide: AccountingPostingService, useValue: posting },
+        ],
+      }).compile();
+      const service = moduleRef.get(CashDeskService);
+
+      await expect(
+        service.payToSupplier(
+          {
+            supplier_id: 'sup-1',
+            cashbox_id: 'cb-1',
+            payment_method: 'cash',
+            amount: 200,
+          } as any,
+          'user-1',
+        ),
+      ).rejects.toThrow(/COA_211_INACTIVE/);
+    });
+
+    it('9) posting returns {skipped:true} → idempotent success, payment returned, no throw', async () => {
+      const { ds } = makeFakeDataSource([
+        [{ seq: 4 }],
+        [{ warehouse_id: 'wh-1' }],
+        [{ id: 'sp-skip', payment_no: 'CP-000004' }],
+      ]);
+      const posting = {
+        postSupplierPayment: jest
+          .fn()
+          .mockResolvedValue({ skipped: true, entry_id: 'je-existing-sup' }),
+      };
+      const moduleRef = await Test.createTestingModule({
+        providers: [
+          CashDeskService,
+          { provide: DataSource, useValue: ds },
+          { provide: AccountingPostingService, useValue: posting },
+        ],
+      }).compile();
+      const service = moduleRef.get(CashDeskService);
+
+      const out = await service.payToSupplier(
+        {
+          supplier_id: 'sup-1',
+          cashbox_id: 'cb-1',
+          payment_method: 'cash',
+          amount: 200,
+        } as any,
+        'user-1',
+      );
+      expect(out).toEqual({ id: 'sp-skip', payment_no: 'CP-000004' });
+    });
+
+    it('10) posting service unavailable → BadRequestException up front, no INSERT attempted', async () => {
+      const { ds, emCalls } = makeFakeDataSource([]);
+      const moduleRef = await Test.createTestingModule({
+        providers: [
+          CashDeskService,
+          { provide: DataSource, useValue: ds },
+          // Deliberately NO AccountingPostingService provider.
+        ],
+      }).compile();
+      const service = moduleRef.get(CashDeskService);
+
+      await expect(
+        service.payToSupplier(
+          {
+            supplier_id: 'sup-1',
+            cashbox_id: 'cb-1',
+            payment_method: 'cash',
+            amount: 200,
+          } as any,
+          'user-1',
+        ),
+      ).rejects.toThrow(/خدمة الترحيل المحاسبي غير متاحة/);
+      expect(
+        emCalls.some((c) => /INSERT INTO supplier_payments/.test(c.sql)),
+      ).toBe(false);
+    });
   });
 });
 
