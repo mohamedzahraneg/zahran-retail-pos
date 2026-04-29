@@ -267,6 +267,15 @@ export class PaymentsService {
    * Returns: { rows, total, totals: { in, out, net, count } }
    *
    * SELECT-only. No mutations. No DDL.
+   *
+   * NOTE on column names (PR-4D-UX-FIX-2-HOTFIX-2 lesson): the
+   * customer_payments / supplier_payments tables expose a
+   * `payment_no` column (not `doc_no` — that's the FE-type alias
+   * shape, NOT the DB column). The suppliers table exposes `name`
+   * (not `name_ar`). The original commit shipped with the FE-type
+   * names which Postgres rejected at query time. The aliases
+   * `reference_no` and `counterparty_name` keep the FE response
+   * shape stable while the SELECT references the real columns.
    */
   async listMovements(
     paymentAccountId: string,
@@ -344,7 +353,7 @@ export class PaymentsService {
           'customer_payment'::text,
           'مقبوضة عميل'::text,
           cp.id::text,
-          cp.doc_no,
+          cp.payment_no,
           cp.payment_account_id::text,
           cp.payment_method::text,
           CASE WHEN cp.kind = 'refund_out' THEN 0::numeric ELSE cp.amount::numeric END,
@@ -375,14 +384,14 @@ export class PaymentsService {
           'supplier_payment'::text,
           'دفع مورد'::text,
           sp.id::text,
-          sp.doc_no,
+          sp.payment_no,
           sp.payment_account_id::text,
           sp.payment_method::text,
           0::numeric,
           sp.amount::numeric,
           (-sp.amount)::numeric,
           sp.supplier_id::text,
-          s.name_ar,
+          s.name,
           sp.paid_by::text,
           u.username,
           je.id::text,
