@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   Patch,
@@ -79,5 +80,44 @@ export class PaymentsController {
   @Roles('admin', 'manager')
   setDefault(@Param('id') id: string, @Req() req: any) {
     return this.service.setDefault(id, req.user.sub ?? req.user.id);
+  }
+
+  /**
+   * PR-FIN-PAYACCT-4A — POST alias of the PATCH /set-default route to
+   * match the documented admin API surface. The two routes share the
+   * same handler and behavior; the PATCH form is preserved for
+   * backward compatibility with PR-PAY-1 callers.
+   */
+  @Post('payment-accounts/:id/set-default')
+  @Roles('admin', 'manager')
+  setDefaultPost(@Param('id') id: string, @Req() req: any) {
+    return this.service.setDefault(id, req.user.sub ?? req.user.id);
+  }
+
+  /**
+   * PR-FIN-PAYACCT-4A — symmetric flip of `active`. Activating leaves
+   * `is_default` alone (operator must call set-default to promote);
+   * deactivating force-clears `is_default` so the partial unique index
+   * (method) WHERE is_default AND active stays consistent.
+   */
+  @Post('payment-accounts/:id/toggle-active')
+  @Roles('admin', 'manager')
+  toggleActive(@Param('id') id: string, @Req() req: any) {
+    return this.service.toggleActive(id, req.user.sub ?? req.user.id);
+  }
+
+  /**
+   * PR-FIN-PAYACCT-4A — safe delete:
+   *   • If the account has any non-void invoice / customer / supplier
+   *     payment referencing it → soft-delete (active=FALSE, default=FALSE)
+   *     so historical JEs and snapshots remain readable.
+   *   • Otherwise → hard-delete the row.
+   * Returns `{ id, mode: 'soft' | 'hard' }` so the FE can render the
+   * right Arabic confirmation message.
+   */
+  @Delete('payment-accounts/:id')
+  @Roles('admin', 'manager')
+  deletePaymentAccount(@Param('id') id: string, @Req() req: any) {
+    return this.service.deleteAccount(id, req.user.sub ?? req.user.id);
   }
 }

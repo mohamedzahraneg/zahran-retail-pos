@@ -5,6 +5,7 @@ import {
   IsObject,
   IsOptional,
   IsString,
+  IsUUID,
   Min,
 } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
@@ -72,6 +73,22 @@ export class CreatePaymentAccountDto {
   @IsOptional()
   @IsObject()
   metadata?: Record<string, unknown>;
+
+  /**
+   * PR-FIN-PAYACCT-4A — optional pin to a specific physical cashbox
+   * (drawer / bank record / wallet number). When set, the service-layer
+   * validator enforces method↔cashbox.kind compatibility:
+   *   • card_visa / card_meeza / card_mastercard / bank_transfer → bank
+   *   • instapay / wallet / vodafone_cash / orange_cash             → ewallet
+   *   • cash                                                         → cash
+   *   • check                                                        → check
+   * Leave NULL when the balance should live at gl_account_code level only
+   * (the historical default for InstaPay handles, etc).
+   */
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  cashbox_id?: string | null;
 }
 
 export class UpdatePaymentAccountDto {
@@ -105,4 +122,13 @@ export class UpdatePaymentAccountDto {
   @IsOptional()
   @IsObject()
   metadata?: Record<string, unknown>;
+
+  /**
+   * PR-FIN-PAYACCT-4A — see CreatePaymentAccountDto.cashbox_id.
+   * Pass `null` to clear an existing pin.
+   */
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  cashbox_id?: string | null;
 }
