@@ -863,7 +863,9 @@ export class AccountingPostingService {
     return this.safe('customer_payment', paymentId, em, async (q) => {
       const [p] = await q(
         `SELECT cp.id, cp.payment_no, cp.amount, cp.cashbox_id,
-                cp.customer_id, cp.created_at, cp.is_void, cp.kind
+                cp.customer_id, cp.created_at, cp.is_void, cp.kind,
+                cp.payment_method,
+                cp.payment_account_id, cp.payment_account_snapshot
            FROM customer_payments cp WHERE cp.id = $1`,
         [paymentId],
       );
@@ -871,12 +873,72 @@ export class AccountingPostingService {
       const amt = Number(p.amount || 0);
       if (amt < 0.01) return null;
 
-      const cashAcc = await this.cashboxAccountId(q, p.cashbox_id);
       const recvAcc = await this.accountIdByCode(q, '1121');
       // Deposit (عربون) goes to customer deposits liability, not receivables.
       const liabAcc = await this.accountIdByCode(q, '212');
       const creditAcc = p.kind === 'deposit' ? liabAcc : recvAcc;
-      if (!cashAcc || !creditAcc) return null;
+      if (!creditAcc) return null;
+
+      // PR-FIN-PAYACCT-4C — DR account resolution:
+      //   • cash       → cashbox-GL (resolved via cashboxAccountId)
+      //   • non-cash   → snapshot.gl_account_code (frozen at write
+      //                  time) → live.gl_account_code (back-compat
+      //                  for legacy non-cash rows that pre-date this
+      //                  PR) → THROW (the legacy fall-through to
+      //                  cashbox-GL on non-cash silently routed
+      //                  InstaPay etc to GL 1111 which is what we are
+      //                  fixing).
+      let drAccId: string | null;
+      let drCashboxId: string | undefined;
+      let drDescription = `مقبوضة من عميل ${p.payment_no}`;
+
+      if (isCashMethod(p.payment_method)) {
+        drAccId = await this.cashboxAccountId(q, p.cashbox_id);
+        drCashboxId = p.cashbox_id ?? undefined;
+      } else {
+        let glCode: string | undefined =
+          p.payment_account_snapshot?.gl_account_code ?? undefined;
+        let displayName: string | undefined =
+          p.payment_account_snapshot?.display_name ?? undefined;
+        if (!glCode && p.payment_account_id && this.payments) {
+          // PaymentsService.resolveForPosting expects an object with
+          // a `.query()` method; wrap the bare QueryFn `q` to match.
+          const live = await this.payments.resolveForPosting(
+            p.payment_account_id,
+            { query: q },
+          );
+          if (live) {
+            glCode = live.gl_account_code;
+            displayName = live.display_name;
+          }
+        }
+        if (!glCode) {
+          // Last-resort method default — keeps legacy non-cash rows
+          // posting until a follow-up PR backfills the snapshot.
+          glCode = PAYMENT_METHOD_ACCOUNT_CODE[p.payment_method];
+        }
+        if (!glCode) {
+          throw new Error(
+            `postInvoicePayment: no GL account for payment_method='${p.payment_method}' ` +
+              `(payment ${p.payment_no}). Attach a payment_account_id whose ` +
+              `gl_account_code is set, or seed a method default.`,
+          );
+        }
+        drAccId = await this.accountIdByCode(q, glCode);
+        if (!drAccId) {
+          throw new Error(
+            `postInvoicePayment: chart_of_accounts has no row for code '${glCode}' ` +
+              `(payment ${p.payment_no}).`,
+          );
+        }
+        // Non-cash legs do NOT tag a cashbox_id — they live on the
+        // bank/wallet GL bucket, not on a physical drawer.
+        drCashboxId = undefined;
+        if (displayName) {
+          drDescription = `${displayName} - مقبوضة ${p.payment_no}`;
+        }
+      }
+      if (!drAccId) return null;
 
       return this.createEntry(q, {
         entry_date: this.dateOnly(p.created_at),
@@ -884,12 +946,12 @@ export class AccountingPostingService {
         reference_type: 'customer_payment',
         reference_id: paymentId,
         lines: [
-          // PR-DRIFT-3F — thread cashbox_id through to the cash leg.
           {
-            account_id: cashAcc,
+            account_id: drAccId,
             debit: amt,
             credit: 0,
-            cashbox_id: p.cashbox_id ?? undefined,
+            cashbox_id: drCashboxId,
+            description: drDescription,
           },
           {
             account_id: creditAcc,
@@ -903,7 +965,7 @@ export class AccountingPostingService {
     });
   }
 
-  /** Supplier payment → DR Suppliers Payable  CR Cash/Bank */
+  /** Supplier payment → DR Suppliers Payable  CR Cash/Bank/Wallet */
   async postSupplierPayment(
     paymentId: string,
     userId: string,
@@ -912,7 +974,9 @@ export class AccountingPostingService {
     return this.safe('supplier_payment', paymentId, em, async (q) => {
       const [p] = await q(
         `SELECT sp.id, sp.payment_no, sp.amount, sp.cashbox_id,
-                sp.supplier_id, sp.created_at, sp.is_void
+                sp.supplier_id, sp.created_at, sp.is_void,
+                sp.payment_method,
+                sp.payment_account_id, sp.payment_account_snapshot
            FROM supplier_payments sp WHERE sp.id = $1`,
         [paymentId],
       );
@@ -920,9 +984,56 @@ export class AccountingPostingService {
       const amt = Number(p.amount || 0);
       if (amt < 0.01) return null;
 
-      const cashAcc = await this.cashboxAccountId(q, p.cashbox_id);
       const suppAcc = await this.accountIdByCode(q, '211');
-      if (!cashAcc || !suppAcc) return null;
+      if (!suppAcc) return null;
+
+      // PR-FIN-PAYACCT-4C — CR account resolution mirrors postInvoicePayment.
+      let crAccId: string | null;
+      let crCashboxId: string | undefined;
+      let crDescription = `دفعة لمورد ${p.payment_no}`;
+
+      if (isCashMethod(p.payment_method)) {
+        crAccId = await this.cashboxAccountId(q, p.cashbox_id);
+        crCashboxId = p.cashbox_id ?? undefined;
+      } else {
+        let glCode: string | undefined =
+          p.payment_account_snapshot?.gl_account_code ?? undefined;
+        let displayName: string | undefined =
+          p.payment_account_snapshot?.display_name ?? undefined;
+        if (!glCode && p.payment_account_id && this.payments) {
+          // PaymentsService.resolveForPosting expects an object with
+          // a `.query()` method; wrap the bare QueryFn `q` to match.
+          const live = await this.payments.resolveForPosting(
+            p.payment_account_id,
+            { query: q },
+          );
+          if (live) {
+            glCode = live.gl_account_code;
+            displayName = live.display_name;
+          }
+        }
+        if (!glCode) {
+          glCode = PAYMENT_METHOD_ACCOUNT_CODE[p.payment_method];
+        }
+        if (!glCode) {
+          throw new Error(
+            `postSupplierPayment: no GL account for payment_method='${p.payment_method}' ` +
+              `(payment ${p.payment_no}).`,
+          );
+        }
+        crAccId = await this.accountIdByCode(q, glCode);
+        if (!crAccId) {
+          throw new Error(
+            `postSupplierPayment: chart_of_accounts has no row for code '${glCode}' ` +
+              `(payment ${p.payment_no}).`,
+          );
+        }
+        crCashboxId = undefined;
+        if (displayName) {
+          crDescription = `${displayName} - دفعة ${p.payment_no}`;
+        }
+      }
+      if (!crAccId) return null;
 
       return this.createEntry(q, {
         entry_date: this.dateOnly(p.created_at),
@@ -936,12 +1047,12 @@ export class AccountingPostingService {
             credit: 0,
             supplier_id: p.supplier_id,
           },
-          // PR-DRIFT-3F — thread cashbox_id through to the cash leg.
           {
-            account_id: cashAcc,
+            account_id: crAccId,
             debit: 0,
             credit: amt,
-            cashbox_id: p.cashbox_id ?? undefined,
+            cashbox_id: crCashboxId,
+            description: crDescription,
           },
         ],
         created_by: userId,

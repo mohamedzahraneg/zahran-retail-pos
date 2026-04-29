@@ -40,17 +40,30 @@ import { Modal, Field } from '@/components/cash-desk/Modal';
 const EGP = (n: number | string) =>
   `${Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ج.م`;
 
+// PR-FIN-PAYACCT-4C — `PaymentMethod` is now the full POS-aligned enum.
+// These dicts cover every value so the dashboard can render any
+// historical movement category without falling through.
 const METHOD_LABELS: Record<PaymentMethod, string> = {
   cash: 'نقدي',
-  card: 'بطاقة',
+  card_visa: 'فيزا',
+  card_mastercard: 'ماستركارد',
+  card_meeza: 'ميزة',
   instapay: 'إنستا باي',
+  vodafone_cash: 'فودافون كاش',
+  orange_cash: 'أورانج كاش',
+  wallet: 'محفظة',
   bank_transfer: 'تحويل بنكي',
 };
 
 const METHOD_ICONS: Record<PaymentMethod, any> = {
   cash: Banknote,
-  card: CreditCard,
+  card_visa: CreditCard,
+  card_mastercard: CreditCard,
+  card_meeza: CreditCard,
   instapay: Smartphone,
+  vodafone_cash: Smartphone,
+  orange_cash: Smartphone,
+  wallet: Smartphone,
   bank_transfer: Building2,
 };
 

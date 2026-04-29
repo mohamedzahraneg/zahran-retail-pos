@@ -1,6 +1,17 @@
 import { api, unwrap } from './client';
+import type { PaymentMethodCode } from './payments.api';
 
-export type PaymentMethod = 'cash' | 'card' | 'instapay' | 'bank_transfer';
+/**
+ * PR-FIN-PAYACCT-4C — the cash-desk API now accepts the FULL set of
+ * payment methods (`PaymentMethodCode`) so customer receipts and
+ * supplier payments can pick a specific provider (InstaPay handle,
+ * card network, wallet) the same way POS does. Backwards compat: the
+ * legacy 4 values ('cash','card','instapay','bank_transfer') are still
+ * accepted by the backend DTO, but the frontend canonical type is now
+ * the full enum minus 'credit'/'other' (which don't make sense for
+ * cash-desk operations).
+ */
+export type PaymentMethod = Exclude<PaymentMethodCode, 'credit' | 'other'>;
 export type CustomerPaymentKind = 'settle_invoices' | 'deposit' | 'refund';
 
 export type CashboxKind = 'cash' | 'bank' | 'ewallet' | 'check';
@@ -183,6 +194,14 @@ export interface CreateCustomerPaymentPayload {
   reference?: string;
   notes?: string;
   allocations?: PaymentAllocation[];
+  /**
+   * PR-FIN-PAYACCT-4C — REQUIRED when method ≠ 'cash' AND at least one
+   * active payment_account exists for the chosen method. The backend
+   * service freezes a snapshot at INSERT time and the posting service
+   * routes the JE's DR leg to `snapshot.gl_account_code` (instead of
+   * the cashbox-GL fallback).
+   */
+  payment_account_id?: string | null;
 }
 
 export interface CreateSupplierPaymentPayload {
@@ -193,6 +212,12 @@ export interface CreateSupplierPaymentPayload {
   reference?: string;
   notes?: string;
   allocations?: PaymentAllocation[];
+  /**
+   * PR-FIN-PAYACCT-4C — mirror of CreateCustomerPaymentPayload.
+   * REQUIRED when method ≠ 'cash' AND at least one active
+   * payment_account exists for the chosen method.
+   */
+  payment_account_id?: string | null;
 }
 
 export const cashDeskApi = {

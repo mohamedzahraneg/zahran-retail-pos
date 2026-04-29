@@ -141,3 +141,261 @@ describe('AccountingPostingService.resolveCashboxIdForPosting', () => {
     expect(svc.queries.length).toBe(0); // ds.manager NOT used
   });
 });
+
+/* ============================================================================
+ * PR-FIN-PAYACCT-4C — postInvoicePayment / postSupplierPayment now honor
+ * `payment_account_snapshot.gl_account_code` for non-cash methods.
+ *
+ * Strategy: build a fake `q` (the QueryFn that `safe()` passes into the
+ * inner closure) that returns canned rows for each SELECT the function
+ * issues. The `createEntry` call is what writes JEs in production —
+ * here we capture its `lines` argument by stubbing the method on the
+ * service instance and asserting the recipe.
+ * ========================================================================== */
+describe('AccountingPostingService — PR-FIN-PAYACCT-4C snapshot routing', () => {
+  /**
+   * Build a service instance + a recorder that captures `createEntry`
+   * args. Returns helpers for canned SELECT queue setup.
+   */
+  function makeServiceWithCapturedCreateEntry(opts: {
+    paymentRow: any;
+    /** Map of `code` → `id` returned by `accountIdByCode()`. */
+    coaIds: Record<string, string>;
+    /** Override what payments.resolveForPosting returns (when called). */
+    paymentsResolve?: any;
+  }) {
+    const dsManager = {
+      query: async () => [],
+    };
+    const ds: any = {
+      manager: dsManager,
+      query: async () => [],
+    };
+    const svc = new AccountingPostingService(ds, null as any);
+
+    // Capture createEntry calls.
+    const createEntryCalls: any[] = [];
+    (svc as any).createEntry = async (_q: any, args: any) => {
+      createEntryCalls.push(args);
+      return { entry_id: 'je-mock', entry_no: 'JE-MOCK' };
+    };
+
+    // Stub the GL-id lookups so we don't need a real DB.
+    (svc as any).accountIdByCode = async (_q: any, code: string) =>
+      opts.coaIds[code] ?? null;
+    (svc as any).cashboxAccountId = async (_q: any, cashboxId: string) =>
+      `acc-cashbox-${cashboxId}`;
+    // Stub PaymentsService injection so the snapshot-fallback branch
+    // can be exercised.
+    (svc as any).payments = {
+      resolveForPosting: jest.fn().mockResolvedValue(opts.paymentsResolve ?? null),
+    };
+
+    // The `safe()` wrapper hides em behind a closure — call the inner
+    // function directly via a public test helper. Easier: invoke the
+    // public method but stub `safe()` to call the body with our
+    // canned `q`.
+    (svc as any).safe = async (
+      _refType: string,
+      _refId: string,
+      _em: any,
+      fn: (q: any) => Promise<any>,
+    ) => {
+      const q = async (_sql: string, _params?: any[]) => [opts.paymentRow];
+      return fn(q);
+    };
+
+    return { svc, createEntryCalls };
+  }
+
+  describe('postInvoicePayment', () => {
+    it('cash → DR cashbox-GL (resolved via cashboxAccountId)', async () => {
+      const { svc, createEntryCalls } = makeServiceWithCapturedCreateEntry({
+        paymentRow: {
+          id: 'cp-cash',
+          payment_no: 'CR-000010',
+          amount: 50,
+          cashbox_id: 'cb-1',
+          customer_id: 'cust-1',
+          created_at: '2026-04-29',
+          is_void: false,
+          kind: 'invoice_settlement',
+          payment_method: 'cash',
+          payment_account_id: null,
+          payment_account_snapshot: null,
+        },
+        coaIds: { '1121': 'acc-1121' },
+      });
+
+      await svc.postInvoicePayment('cp-cash', 'user-1');
+      expect(createEntryCalls).toHaveLength(1);
+      const lines = createEntryCalls[0].lines;
+      // DR cashbox-GL
+      expect(lines[0].account_id).toBe('acc-cashbox-cb-1');
+      expect(lines[0].cashbox_id).toBe('cb-1');
+      expect(Number(lines[0].debit)).toBe(50);
+      // CR receivables 1121
+      expect(lines[1].account_id).toBe('acc-1121');
+      expect(Number(lines[1].credit)).toBe(50);
+      expect(lines[1].customer_id).toBe('cust-1');
+    });
+
+    it('non-cash with snapshot.gl_account_code → DR resolves to that code (NOT cashbox-GL)', async () => {
+      const { svc, createEntryCalls } = makeServiceWithCapturedCreateEntry({
+        paymentRow: {
+          id: 'cp-instapay',
+          payment_no: 'CR-000011',
+          amount: 75,
+          cashbox_id: 'cb-1',         // present but should NOT be used
+          customer_id: 'cust-1',
+          created_at: '2026-04-29',
+          is_void: false,
+          kind: 'invoice_settlement',
+          payment_method: 'instapay',
+          payment_account_id: 'pa-instapay-handle-1',
+          payment_account_snapshot: {
+            display_name: 'InstaPay',
+            provider_key: 'instapay',
+            identifier: '0100…',
+            gl_account_code: '1114',
+            cashbox_id: null,
+          },
+        },
+        coaIds: { '1114': 'acc-1114', '1121': 'acc-1121' },
+      });
+
+      await svc.postInvoicePayment('cp-instapay', 'user-1');
+      const lines = createEntryCalls[0].lines;
+      // DR: 1114 (the snapshot-resolved code), NOT cashbox-GL
+      expect(lines[0].account_id).toBe('acc-1114');
+      expect(lines[0].cashbox_id).toBeUndefined(); // non-cash never tags cashbox_id
+      expect(Number(lines[0].debit)).toBe(75);
+      // CR: 1121 receivables
+      expect(lines[1].account_id).toBe('acc-1121');
+    });
+
+    it('non-cash with kind=deposit → CR uses 212 (customer deposits liability)', async () => {
+      const { svc, createEntryCalls } = makeServiceWithCapturedCreateEntry({
+        paymentRow: {
+          id: 'cp-dep',
+          payment_no: 'CR-000012',
+          amount: 100,
+          cashbox_id: 'cb-1',
+          customer_id: 'cust-1',
+          created_at: '2026-04-29',
+          is_void: false,
+          kind: 'deposit',
+          payment_method: 'wallet',
+          payment_account_id: 'pa-w',
+          payment_account_snapshot: {
+            display_name: 'WE Pay',
+            provider_key: 'we_pay',
+            identifier: null,
+            gl_account_code: '1114',
+            cashbox_id: null,
+          },
+        },
+        coaIds: { '1114': 'acc-1114', '212': 'acc-212', '1121': 'acc-1121' },
+      });
+
+      await svc.postInvoicePayment('cp-dep', 'user-1');
+      const lines = createEntryCalls[0].lines;
+      expect(lines[0].account_id).toBe('acc-1114');         // DR wallet
+      expect(lines[1].account_id).toBe('acc-212');          // CR deposits (NOT 1121)
+    });
+
+    it('non-cash WITHOUT snapshot but with payment_account_id → falls back to live resolve', async () => {
+      const { svc, createEntryCalls } = makeServiceWithCapturedCreateEntry({
+        paymentRow: {
+          id: 'cp-legacy',
+          payment_no: 'CR-000013',
+          amount: 25,
+          cashbox_id: 'cb-1',
+          customer_id: 'cust-1',
+          created_at: '2026-04-29',
+          is_void: false,
+          kind: 'invoice_settlement',
+          payment_method: 'instapay',
+          payment_account_id: 'pa-1',
+          payment_account_snapshot: null, // legacy row, no snapshot yet
+        },
+        coaIds: { '1114': 'acc-1114', '1121': 'acc-1121' },
+        paymentsResolve: {
+          id: 'pa-1',
+          method: 'instapay',
+          display_name: 'InstaPay',
+          provider_key: 'instapay',
+          identifier: '0100',
+          gl_account_code: '1114',
+          cashbox_id: null,
+          metadata: {},
+        },
+      });
+      await svc.postInvoicePayment('cp-legacy', 'user-1');
+      const lines = createEntryCalls[0].lines;
+      expect(lines[0].account_id).toBe('acc-1114');
+    });
+  });
+
+  describe('postSupplierPayment', () => {
+    it('cash → CR cashbox-GL', async () => {
+      const { svc, createEntryCalls } = makeServiceWithCapturedCreateEntry({
+        paymentRow: {
+          id: 'sp-cash',
+          payment_no: 'CP-000010',
+          amount: 30,
+          cashbox_id: 'cb-1',
+          supplier_id: 'sup-1',
+          created_at: '2026-04-29',
+          is_void: false,
+          payment_method: 'cash',
+          payment_account_id: null,
+          payment_account_snapshot: null,
+        },
+        coaIds: { '211': 'acc-211' },
+      });
+
+      await svc.postSupplierPayment('sp-cash', 'user-1');
+      const lines = createEntryCalls[0].lines;
+      // DR 211
+      expect(lines[0].account_id).toBe('acc-211');
+      expect(lines[0].supplier_id).toBe('sup-1');
+      // CR cashbox-GL
+      expect(lines[1].account_id).toBe('acc-cashbox-cb-1');
+      expect(lines[1].cashbox_id).toBe('cb-1');
+    });
+
+    it('non-cash with snapshot → CR resolves to snapshot.gl_account_code', async () => {
+      const { svc, createEntryCalls } = makeServiceWithCapturedCreateEntry({
+        paymentRow: {
+          id: 'sp-bank',
+          payment_no: 'CP-000011',
+          amount: 200,
+          cashbox_id: 'cb-1',
+          supplier_id: 'sup-1',
+          created_at: '2026-04-29',
+          is_void: false,
+          payment_method: 'bank_transfer',
+          payment_account_id: 'pa-bank',
+          payment_account_snapshot: {
+            display_name: 'NBE Account',
+            provider_key: 'nbe',
+            identifier: 'EG…IBAN',
+            gl_account_code: '1113',
+            cashbox_id: null,
+          },
+        },
+        coaIds: { '211': 'acc-211', '1113': 'acc-1113' },
+      });
+
+      await svc.postSupplierPayment('sp-bank', 'user-1');
+      const lines = createEntryCalls[0].lines;
+      // DR 211 (unchanged for non-cash supplier path)
+      expect(lines[0].account_id).toBe('acc-211');
+      // CR: 1113 (snapshot), NOT cashbox-GL
+      expect(lines[1].account_id).toBe('acc-1113');
+      expect(lines[1].cashbox_id).toBeUndefined();
+    });
+  });
+});
+

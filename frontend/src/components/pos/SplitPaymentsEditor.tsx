@@ -35,6 +35,11 @@ import {
 } from '@/api/payments.api';
 import { PaymentProviderLogo } from '@/components/payments/PaymentProviderLogo';
 import {
+  PaymentAccountPicker,
+  autoSelectAccountForMethod,
+  visibleMethodsFor as sharedVisibleMethodsFor,
+} from '@/components/payments/PaymentAccountPicker';
+import {
   type SplitPaymentRow,
   summarizeSplitPayments,
   validateSplitPayments,
@@ -49,34 +54,12 @@ const EGP = (n: number) =>
     maximumFractionDigits: 2,
   })} ج.م`;
 
-// PR-PAY-3 fix — the methods the cashier can actually USE. Cash is
-// always shown; non-cash methods only appear if at least one active
-// payment_account exists for them. Hidden methods become visible
-// automatically when admin adds an active account, and disappear
-// automatically on deactivation — no rebuild required.
-//
-// Re-exported here (PR-POS-PAY-2) and from `pages/POS.tsx` for
-// backward compat with `pages/__tests__/POS.payment-visibility.test.ts`.
-const POS_METHODS: PaymentMethodCode[] = [
-  'cash',
-  'instapay',
-  'vodafone_cash',
-  'orange_cash',
-  'wallet', // PR-PAY-3.1: generic wallet umbrella (WE Pay, Bank Wallet, …)
-  'card_visa',
-  'card_mastercard',
-  'card_meeza',
-  'bank_transfer',
-];
-
-export function visibleMethodsFor(
-  accounts: Pick<PaymentAccount, 'method' | 'active'>[],
-): PaymentMethodCode[] {
-  const activeMethods = new Set(
-    accounts.filter((a) => a.active).map((a) => a.method),
-  );
-  return POS_METHODS.filter((m) => m === 'cash' || activeMethods.has(m));
-}
+// PR-FIN-PAYACCT-4C — `visibleMethodsFor` and the auto-default rule
+// are now shared with the customer/supplier modals via
+// `@/components/payments/PaymentAccountPicker`. The re-export keeps
+// `pages/__tests__/POS.payment-visibility.test.ts` (a regression net
+// from PR-PAY-3) green without selector churn.
+export { sharedVisibleMethodsFor as visibleMethodsFor };
 
 /* ─────────────── Theme tokens (dark vs light) ─────────────── */
 
@@ -243,7 +226,7 @@ export function SplitPaymentsEditor({
   // PR-PAY-3 behavior, applied per-row. Same logic as PaymentModal.
   useEffect(() => {
     if (!accountsQuery.dataUpdatedAt) return;
-    const visible = visibleMethodsFor(accounts);
+    const visible = sharedVisibleMethodsFor(accounts);
     let mutated = false;
     const next = rows.map((r) => {
       if (visible.includes(r.method)) return r;
@@ -262,22 +245,12 @@ export function SplitPaymentsEditor({
       rows.map((r) => {
         if (r.uid !== uid) return r;
         const next = { ...r, ...patch };
-        // When the method changes, recompute the account selection
-        // using the same auto-select logic the legacy single-row
-        // modal had: prefer the default-active account, else the
-        // unique active account, else leave blank.
+        // PR-FIN-PAYACCT-4C: shared auto-select rule.
+        // Identical to the inline rule before extraction.
         if (patch.method && patch.method !== r.method) {
-          if (patch.method === 'cash') {
-            next.payment_account_id = null;
-            next.account_display_name = null;
-          } else {
-            const candidates = accountsForMethod(patch.method);
-            const def = candidates.find((a) => a.is_default);
-            const auto =
-              def ?? (candidates.length === 1 ? candidates[0] : null);
-            next.payment_account_id = auto?.id ?? null;
-            next.account_display_name = auto?.display_name ?? null;
-          }
+          const auto = autoSelectAccountForMethod(patch.method, accounts);
+          next.payment_account_id = auto.id;
+          next.account_display_name = auto.display_name;
         }
         return next;
       }),
@@ -414,7 +387,7 @@ function PaymentRow({
   onChange: (patch: Partial<SplitPaymentRow>) => void;
   onRemove: () => void;
 }) {
-  const visibleMethods = visibleMethodsFor(accounts);
+  const visibleMethods = sharedVisibleMethodsFor(accounts);
   const accountsForRow = accounts.filter((a) => a.method === row.method);
   const isCash = row.method === 'cash';
   const blockedNoAccount = !isCash && accountsForRow.length === 0;
@@ -449,20 +422,19 @@ function PaymentRow({
         onSelect={(m) => onChange({ method: m })}
       />
 
-      {/* Account picker for non-cash methods */}
+      {/* Account picker for non-cash methods (PR-FIN-PAYACCT-4C: shared) */}
       {!isCash && visibleMethods.includes(row.method) && (
         <PaymentAccountPicker
           method={row.method}
           providers={providers}
           accounts={accountsForRow}
           selected={row.payment_account_id}
-          theme={theme}
+          variant="dark"
           blocked={blockedNoAccount}
           needsManualPick={
             !isCash && accountsForRow.length > 1 && !row.payment_account_id
           }
-          onSelect={(id) => {
-            const acct = accountsForRow.find((a) => a.id === id) ?? null;
+          onSelect={(id, acct) => {
             onChange({
               payment_account_id: id,
               account_display_name: acct?.display_name ?? null,
@@ -501,7 +473,7 @@ function PaymentMethodGrid({
   theme: Theme;
   onSelect: (m: PaymentMethodCode) => void;
 }) {
-  const visible = visibleMethodsFor(accounts);
+  const visible = sharedVisibleMethodsFor(accounts);
   return (
     <div className="grid grid-cols-2 gap-2">
       {visible.map((m) => {
@@ -535,83 +507,7 @@ function PaymentMethodGrid({
   );
 }
 
-function PaymentAccountPicker({
-  method,
-  providers,
-  accounts,
-  selected,
-  theme,
-  blocked,
-  needsManualPick,
-  onSelect,
-}: {
-  method: PaymentMethodCode;
-  providers: PaymentProvider[];
-  accounts: PaymentAccount[];
-  selected: string | null;
-  theme: Theme;
-  blocked: boolean;
-  needsManualPick: boolean;
-  onSelect: (id: string) => void;
-}) {
-  if (blocked) {
-    return (
-      <div className={theme.accountBlocked}>
-        لا يوجد حساب مفعل لهذه الطريقة. أضفه من إعدادات وسائل الدفع.
-      </div>
-    );
-  }
-  return (
-    <div>
-      <label className={theme.amountLabel}>حساب التحصيل</label>
-      <div className="space-y-2 max-h-48 overflow-auto">
-        {accounts.map((a) => {
-          const provider = providers.find(
-            (p) => p.provider_key === a.provider_key,
-          );
-          const isSelected = selected === a.id;
-          return (
-            <button
-              key={a.id}
-              type="button"
-              onClick={() => onSelect(a.id)}
-              className={`w-full text-right p-2.5 rounded-lg border transition flex items-start gap-2 ${
-                isSelected ? theme.accountSelected : theme.accountIdle
-              }`}
-            >
-              <PaymentProviderLogo
-                logoDataUrl={(a.metadata as any)?.logo_data_url}
-                logoKey={provider?.logo_key}
-                method={a.method}
-                name={a.display_name}
-                size="md"
-                decorative
-              />
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center justify-between">
-                  <span className="font-bold text-sm truncate">
-                    {a.display_name}
-                  </span>
-                  {a.is_default && (
-                    <span className="text-[10px] font-bold bg-amber-500/20 text-amber-700 px-2 py-0.5 rounded shrink-0">
-                      افتراضي
-                    </span>
-                  )}
-                </div>
-                <div className="text-[11px] text-slate-500 mt-0.5 truncate">
-                  {provider?.name_ar ?? METHOD_LABEL_AR[method]}
-                  {a.identifier ? ` · ${a.identifier}` : ''}
-                </div>
-              </div>
-            </button>
-          );
-        })}
-      </div>
-      {needsManualPick && (
-        <div className={theme.accountManualHint}>
-          اختر حساب التحصيل قبل المتابعة.
-        </div>
-      )}
-    </div>
-  );
-}
+// PR-FIN-PAYACCT-4C: PaymentAccountPicker moved to
+// `@/components/payments/PaymentAccountPicker.tsx` and is now shared
+// between POS, ReceiptModal, and SupplierPayModal. The local inline
+// definition was removed; behavior + UI are byte-for-byte equivalent.

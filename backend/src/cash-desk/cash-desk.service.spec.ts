@@ -120,6 +120,11 @@ describe('CashDeskService — PR-CASH-DESK-REORG-1', () => {
         null,                 // reference
         null,                 // notes
         'user-1',             // received_by
+        // PR-FIN-PAYACCT-4C — payment_account_id + snapshot. Both null
+        // because this is a cash receipt; the validateAndFreezeAccount
+        // helper short-circuits cash to {paymentAccountId:null, snapshot:null}.
+        null,                 // payment_account_id
+        null,                 // payment_account_snapshot (jsonb, null when no account)
       ]);
       // 4. The posting service is called with the payment id + the
       //    transaction's `em` so the JE lands inside the same tx.
@@ -278,6 +283,10 @@ describe('CashDeskService — PR-CASH-DESK-REORG-1', () => {
         null,                 // reference
         null,                 // notes
         'user-1',             // paid_by
+        // PR-FIN-PAYACCT-4C — payment_account_id + snapshot. Both null
+        // because this is a cash payment.
+        null,                 // payment_account_id
+        null,                 // payment_account_snapshot
       ]);
       expect(posting.postSupplierPayment).toHaveBeenCalledTimes(1);
       expect(posting.postSupplierPayment).toHaveBeenCalledWith(
@@ -1359,4 +1368,322 @@ describe('CashDeskService.{receiveFromCustomer,payToSupplier} — PR-FIN-PAYACCT
     });
   });
 });
+
+/* ============================================================================
+ * PR-FIN-PAYACCT-4C — payment_account_id + snapshot freezing
+ * ----------------------------------------------------------------------------
+ * Pins the new contract for both `receiveFromCustomer` and `payToSupplier`:
+ *
+ *   • cash + payment_account_id → BadRequestException (Arabic)
+ *   • non-cash + active accounts exist + missing payment_account_id
+ *       → BadRequestException
+ *   • non-cash + valid payment_account_id
+ *       → INSERT carries (paymentAccountId, snapshot-as-JSONB-string)
+ *       → snapshot fields = display_name, provider_key, identifier,
+ *                            gl_account_code, cashbox_id, logo_data_url
+ *   • non-cash + zero active accounts
+ *       → legacy fallback (paymentAccountId=null, snapshot=null) so
+ *         fresh installs without payment_accounts seeded keep working
+ *   • mismatched method (account.method ≠ dto.payment_method)
+ *       → BadRequestException
+ * ========================================================================== */
+describe('CashDeskService — PR-FIN-PAYACCT-4C payment_account_id + snapshot', () => {
+  // Build a fake DataSource that also returns canned results for the
+  // active-accounts SELECT inside validateAndFreezeAccount + the
+  // sequence/warehouse SELECTs the receive/pay flow runs.
+  function buildFakes(opts: {
+    /** Result for `SELECT id FROM payment_accounts WHERE method=$1 AND active`. */
+    activeAccountsForMethod?: any[];
+    /** Result returned by paymentsService.resolveForPosting (mocked separately). */
+    resolveResult?: any;
+  }) {
+    const emCalls: { sql: string; params: any[] }[] = [];
+    let seq = 0;
+    const em = {
+      query: async (sql: string, params: any[] = []) => {
+        emCalls.push({ sql, params });
+        // Sequence
+        if (/seq_(customer|supplier)_payment_no/.test(sql)) {
+          return [{ seq: ++seq }];
+        }
+        // Warehouse for the cashbox
+        if (/SELECT warehouse_id FROM cashboxes/.test(sql)) {
+          return [{ warehouse_id: 'wh-1' }];
+        }
+        // PR-FIN-PAYACCT-4C — active accounts probe
+        if (
+          /SELECT id::text AS id FROM payment_accounts/.test(sql) &&
+          /active = TRUE/.test(sql)
+        ) {
+          return opts.activeAccountsForMethod ?? [];
+        }
+        // INSERT customer_payments / supplier_payments
+        if (/INSERT INTO customer_payments/.test(sql)) {
+          return [{ id: 'cp-x', payment_no: 'CR-000001' }];
+        }
+        if (/INSERT INTO supplier_payments/.test(sql)) {
+          return [{ id: 'sp-x', payment_no: 'CP-000001' }];
+        }
+        return [];
+      },
+    };
+    const ds: any = {
+      query: async () => [],
+      transaction: async (cb: (em: any) => Promise<any>) => cb(em),
+    };
+    const posting = {
+      postInvoicePayment: jest.fn().mockResolvedValue({ entry_id: 'je-1' }),
+      postSupplierPayment: jest.fn().mockResolvedValue({ entry_id: 'je-1' }),
+    };
+    const payments = {
+      resolveForPosting: jest.fn().mockResolvedValue(opts.resolveResult ?? null),
+    };
+    return { ds, em, emCalls, posting, payments };
+  }
+
+  async function makeService({
+    posting,
+    payments,
+    ds,
+  }: {
+    posting: any;
+    payments: any;
+    ds: any;
+  }): Promise<CashDeskService> {
+    const moduleRef = await Test.createTestingModule({
+      providers: [
+        CashDeskService,
+        { provide: DataSource, useValue: ds },
+        { provide: AccountingPostingService, useValue: posting },
+        { provide: 'PaymentsService', useValue: payments },
+      ],
+    }).compile();
+    // PaymentsService is injected by class token in production. The
+    // CashDeskService uses `@Optional() PaymentsService`, so we must
+    // provide it under the actual class. Use .overrideProvider via
+    // useFactory if needed; for this test the simpler approach is to
+    // inject manually after the fact.
+    const service = moduleRef.get(CashDeskService);
+    // The constructor's @Optional payments slot didn't bind through
+    // the string token above, so attach the mock directly. (Tests in
+    // the same file already use this pattern for `posting`.)
+    (service as any).payments = payments;
+    return service;
+  }
+
+  describe('receiveFromCustomer', () => {
+    it('cash + payment_account_id → rejects with Arabic message', async () => {
+      const fakes = buildFakes({});
+      const service = await makeService(fakes);
+
+      await expect(
+        service.receiveFromCustomer(
+          {
+            customer_id: 'c1',
+            cashbox_id: 'cb-1',
+            payment_method: 'cash',
+            amount: 50,
+            payment_account_id: 'pa-1',
+          } as any,
+          'user-1',
+        ),
+      ).rejects.toThrow(/لا يمكن إرفاق حساب دفع مع طريقة "نقدي"/);
+    });
+
+    it('non-cash + active accounts exist + missing payment_account_id → rejects', async () => {
+      const fakes = buildFakes({
+        activeAccountsForMethod: [{ id: 'pa-default' }],
+      });
+      const service = await makeService(fakes);
+
+      await expect(
+        service.receiveFromCustomer(
+          {
+            customer_id: 'c1',
+            cashbox_id: 'cb-1',
+            payment_method: 'instapay',
+            amount: 50,
+            // payment_account_id intentionally omitted
+          } as any,
+          'user-1',
+        ),
+      ).rejects.toThrow(/تتطلب اختيار حساب الدفع/);
+    });
+
+    it('non-cash + valid payment_account_id → INSERT carries snapshot JSON + paymentAccountId', async () => {
+      const fakes = buildFakes({
+        activeAccountsForMethod: [{ id: 'pa-1' }],
+        resolveResult: {
+          id: 'pa-1',
+          method: 'instapay',
+          display_name: 'InstaPay',
+          provider_key: 'instapay',
+          identifier: '0100…',
+          gl_account_code: '1114',
+          cashbox_id: null,
+          metadata: { logo_data_url: 'data:image/png;base64,abc' },
+        },
+      });
+      const service = await makeService(fakes);
+
+      await service.receiveFromCustomer(
+        {
+          customer_id: 'c1',
+          cashbox_id: 'cb-1',
+          payment_method: 'instapay',
+          amount: 50,
+          kind: 'settle_invoices',
+          payment_account_id: 'pa-1',
+        } as any,
+        'user-1',
+      );
+
+      const insert = fakes.emCalls.find((c) =>
+        /INSERT INTO customer_payments/.test(c.sql),
+      )!;
+      expect(insert).toBeDefined();
+      const lastParams = insert.params.slice(-2);
+      // [paymentAccountId, snapshot-JSON-string]
+      expect(lastParams[0]).toBe('pa-1');
+      expect(typeof lastParams[1]).toBe('string');
+      const parsed = JSON.parse(lastParams[1] as string);
+      expect(parsed).toEqual({
+        display_name: 'InstaPay',
+        provider_key: 'instapay',
+        identifier: '0100…',
+        gl_account_code: '1114',
+        cashbox_id: null,
+        logo_data_url: 'data:image/png;base64,abc',
+      });
+    });
+
+    it('non-cash + zero active accounts → legacy fallback (paymentAccountId=null, snapshot=null)', async () => {
+      const fakes = buildFakes({ activeAccountsForMethod: [] });
+      const service = await makeService(fakes);
+
+      await service.receiveFromCustomer(
+        {
+          customer_id: 'c1',
+          cashbox_id: 'cb-1',
+          payment_method: 'instapay',
+          amount: 25,
+        } as any,
+        'user-1',
+      );
+      const insert = fakes.emCalls.find((c) =>
+        /INSERT INTO customer_payments/.test(c.sql),
+      )!;
+      const lastParams = insert.params.slice(-2);
+      expect(lastParams).toEqual([null, null]);
+    });
+
+    it('non-cash + valid payment_account_id of MISMATCHED method → rejects', async () => {
+      const fakes = buildFakes({
+        activeAccountsForMethod: [{ id: 'pa-card' }],
+        resolveResult: {
+          id: 'pa-card',
+          method: 'card_visa',  // mismatched: dto says 'instapay'
+          display_name: 'POS Visa',
+          provider_key: 'pos_terminal',
+          identifier: 'TERM-001',
+          gl_account_code: '1113',
+          cashbox_id: null,
+          metadata: {},
+        },
+      });
+      const service = await makeService(fakes);
+
+      await expect(
+        service.receiveFromCustomer(
+          {
+            customer_id: 'c1',
+            cashbox_id: 'cb-1',
+            payment_method: 'instapay',
+            amount: 50,
+            payment_account_id: 'pa-card',
+          } as any,
+          'user-1',
+        ),
+      ).rejects.toThrow(/طريقته "card_visa".*"instapay"/);
+    });
+  });
+
+  describe('payToSupplier', () => {
+    it('cash + payment_account_id → rejects with Arabic message', async () => {
+      const fakes = buildFakes({});
+      const service = await makeService(fakes);
+
+      await expect(
+        service.payToSupplier(
+          {
+            supplier_id: 's1',
+            cashbox_id: 'cb-1',
+            payment_method: 'cash',
+            amount: 50,
+            payment_account_id: 'pa-1',
+          } as any,
+          'user-1',
+        ),
+      ).rejects.toThrow(/لا يمكن إرفاق حساب دفع مع طريقة "نقدي"/);
+    });
+
+    it('non-cash + valid payment_account_id → INSERT carries snapshot + paymentAccountId', async () => {
+      const fakes = buildFakes({
+        activeAccountsForMethod: [{ id: 'pa-w' }],
+        resolveResult: {
+          id: 'pa-w',
+          method: 'wallet',
+          display_name: 'WE Pay',
+          provider_key: 'we_pay',
+          identifier: '0100123',
+          gl_account_code: '1114',
+          cashbox_id: 'cb-w-1',  // pinned cashbox
+          metadata: {},
+        },
+      });
+      const service = await makeService(fakes);
+
+      await service.payToSupplier(
+        {
+          supplier_id: 's1',
+          cashbox_id: 'cb-1',
+          payment_method: 'wallet',
+          amount: 100,
+          payment_account_id: 'pa-w',
+        } as any,
+        'user-1',
+      );
+
+      const insert = fakes.emCalls.find((c) =>
+        /INSERT INTO supplier_payments/.test(c.sql),
+      )!;
+      const lastParams = insert.params.slice(-2);
+      expect(lastParams[0]).toBe('pa-w');
+      const parsed = JSON.parse(lastParams[1] as string);
+      expect(parsed.gl_account_code).toBe('1114');
+      expect(parsed.cashbox_id).toBe('cb-w-1');
+      expect(parsed.display_name).toBe('WE Pay');
+    });
+
+    it('non-cash + active accounts exist + missing payment_account_id → rejects', async () => {
+      const fakes = buildFakes({
+        activeAccountsForMethod: [{ id: 'pa-default' }],
+      });
+      const service = await makeService(fakes);
+
+      await expect(
+        service.payToSupplier(
+          {
+            supplier_id: 's1',
+            cashbox_id: 'cb-1',
+            payment_method: 'wallet',
+            amount: 100,
+          } as any,
+          'user-1',
+        ),
+      ).rejects.toThrow(/تتطلب اختيار حساب الدفع/);
+    });
+  });
+});
+
 

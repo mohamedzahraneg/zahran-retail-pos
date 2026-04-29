@@ -33,6 +33,16 @@ import toast from 'react-hot-toast';
 import { Plus, X } from 'lucide-react';
 import { cashDeskApi, type Cashbox, type PaymentMethod } from '@/api/cash-desk.api';
 import { customersApi, type Customer } from '@/api/customers.api';
+import {
+  paymentsApi,
+  METHOD_LABEL_AR,
+  type PaymentAccount,
+} from '@/api/payments.api';
+import {
+  PaymentAccountPicker,
+  autoSelectAccountForMethod,
+  visibleMethodsFor,
+} from '@/components/payments/PaymentAccountPicker';
 import { InvoiceHoverCard } from '@/components/InvoiceHoverCard';
 import { Modal, Field } from './Modal';
 
@@ -66,6 +76,7 @@ export function ReceiptModal({
   const [customerQ, setCustomerQ] = useState('');
   const [cashboxId, setCashboxId] = useState(cashboxes[0]?.id || '');
   const [method, setMethod] = useState<PaymentMethod>('cash');
+  const [paymentAccountId, setPaymentAccountId] = useState<string | null>(null);
   const [amount, setAmount] = useState('');
   const [kind, setKind] = useState<'settle_invoices' | 'deposit' | 'refund'>(
     'settle_invoices',
@@ -77,6 +88,28 @@ export function ReceiptModal({
   useEffect(() => {
     if (!cashboxId && cashboxes.length) setCashboxId(cashboxes[0].id);
   }, [cashboxes, cashboxId]);
+
+  // PR-FIN-PAYACCT-4C — pull the payment-account catalog + provider
+  // metadata. The picker only renders when method ≠ cash AND active
+  // accounts exist for that method (mirrors POS).
+  const { data: providers = [] } = useQuery({
+    queryKey: ['payment-providers'],
+    queryFn: () => paymentsApi.listProviders(),
+    staleTime: 5 * 60 * 1000,
+  });
+  const { data: accounts = [] } = useQuery({
+    queryKey: ['payment-accounts', 'all'],
+    queryFn: () => paymentsApi.listAccounts(),
+    staleTime: 60 * 1000,
+  });
+  const visibleMethods = visibleMethodsFor(accounts);
+  const accountsForMethod = (accounts as PaymentAccount[]).filter(
+    (a) => a.method === method && a.active,
+  );
+  const isCash = method === 'cash';
+  const blockedNoAccount = !isCash && accountsForMethod.length === 0;
+  const needsManualPick =
+    !isCash && accountsForMethod.length > 1 && !paymentAccountId;
 
   const { data: customerSearch = { data: [] } } = useQuery({
     queryKey: ['customers-search', customerQ],
@@ -108,6 +141,13 @@ export function ReceiptModal({
     if (kind === 'settle_invoices' && Math.abs(totalAllocated - amt) > 0.01) {
       return toast.error('مجموع التخصيصات لا يساوي المبلغ');
     }
+    // PR-FIN-PAYACCT-4C — non-cash methods MUST carry a payment_account_id
+    // when at least one active account exists for that method. The
+    // picker hides methods that have no active accounts; the only path
+    // to this guard is "method has accounts but none picked yet".
+    if (!isCash && accountsForMethod.length > 0 && !paymentAccountId) {
+      return toast.error('اختر حساب التحصيل قبل المتابعة');
+    }
     mutation.mutate({
       customer_id: customer.id,
       cashbox_id: cashboxId,
@@ -122,8 +162,17 @@ export function ReceiptModal({
               .filter(([, v]) => v > 0)
               .map(([invoice_id, amount]) => ({ invoice_id, amount }))
           : undefined,
+      payment_account_id: isCash ? null : paymentAccountId,
     });
   };
+
+  // PR-FIN-PAYACCT-4C — when the method changes (or the accounts
+  // catalog finally loads), auto-select the default-active account
+  // (or the unique active account) for the new method. Mirrors POS.
+  useEffect(() => {
+    const auto = autoSelectAccountForMethod(method, accounts);
+    setPaymentAccountId(auto.id);
+  }, [method, accounts]);
 
   return (
     <div data-testid="receipt-modal">
@@ -230,18 +279,37 @@ export function ReceiptModal({
             </Field>
 
             <Field label="طريقة الدفع">
+              {/* PR-FIN-PAYACCT-4C — dynamic method picker. Cash is
+                  always shown; non-cash methods only appear when at
+                  least one active payment_account exists for them. */}
               <select
                 className="input"
                 value={method}
                 onChange={(e) => setMethod(e.target.value as PaymentMethod)}
+                data-testid="receipt-modal-method"
               >
-                <option value="cash">نقدي</option>
-                <option value="card">بطاقة</option>
-                <option value="instapay">إنستا باي</option>
-                <option value="bank_transfer">تحويل بنكي</option>
+                {visibleMethods.map((m) => (
+                  <option key={m} value={m}>
+                    {METHOD_LABEL_AR[m]}
+                  </option>
+                ))}
               </select>
             </Field>
           </div>
+
+          {/* PR-FIN-PAYACCT-4C — Payment account picker for non-cash methods. */}
+          {!isCash && (
+            <PaymentAccountPicker
+              method={method}
+              providers={providers}
+              accounts={accountsForMethod}
+              selected={paymentAccountId}
+              variant="light"
+              blocked={blockedNoAccount}
+              needsManualPick={needsManualPick}
+              onSelect={(id) => setPaymentAccountId(id)}
+            />
+          )}
 
           <div className="grid md:grid-cols-2 gap-3">
             <Field label="المبلغ">

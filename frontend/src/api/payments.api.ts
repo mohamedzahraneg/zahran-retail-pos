@@ -44,6 +44,12 @@ export interface PaymentAccount {
   display_name: string;
   identifier: string | null;
   gl_account_code: string;
+  /**
+   * PR-FIN-PAYACCT-4A — optional pin to a physical cashbox so balance
+   * queries can disambiguate accounts that share a `gl_account_code`.
+   * NULL = balance lives at gl_account_code level only.
+   */
+  cashbox_id: string | null;
   is_default: boolean;
   active: boolean;
   sort_order: number;
