@@ -20,7 +20,7 @@
  *     (the validator throws with an Arabic message that the modal
  *     surfaces in `react-hot-toast`).
  */
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import {
@@ -70,6 +70,14 @@ const METHOD_TO_CASHBOX_KIND: Record<PaymentMethodCode, Cashbox['kind'] | null> 
   check: 'check',
   credit: null,
   other: null,
+};
+
+/** Arabic label for a cashbox kind, used in the dropdown options. */
+const KIND_LABEL_AR: Record<Cashbox['kind'], string> = {
+  cash:    'نقدي',
+  bank:    'بنكي',
+  ewallet: 'محفظة إلكترونية',
+  check:   'شيكات',
 };
 
 const DEFAULT_GL_FOR_METHOD: Record<PaymentMethodCode, string> = {
@@ -125,6 +133,14 @@ export interface PaymentAccountModalProps {
   cashboxes: Cashbox[];
   onClose: () => void;
   onSuccess?: () => void;
+  /**
+   * PR-FIN-PAYACCT-4D-UX-FIX-2 — invoked when the operator clicks the
+   * "إنشاء خزنة" button rendered inside the cashbox-empty-state. The
+   * parent should close this modal and open the matching cashbox-create
+   * modal for the requested kind. If unset, the empty-state still
+   * renders the message but without the action button.
+   */
+  onCreateCashbox?: (kind: Cashbox['kind']) => void;
 }
 
 export function PaymentAccountModal({
@@ -135,6 +151,7 @@ export function PaymentAccountModal({
   cashboxes,
   onClose,
   onSuccess,
+  onCreateCashbox,
 }: PaymentAccountModalProps) {
   const qc = useQueryClient();
   const initialMethod: PaymentMethodCode =
@@ -170,9 +187,50 @@ export function PaymentAccountModal({
 
   const providersForMethod = providers.filter((p) => p.method === method);
   const expectedKind = METHOD_TO_CASHBOX_KIND[method];
-  const cashboxesForMethod = cashboxes.filter(
-    (cb) => expectedKind === null || cb.kind === expectedKind,
-  );
+  // PR-FIN-PAYACCT-4D-UX-FIX-2: filter by kind compatibility, but ALSO
+  // include the currently-linked cashbox even when it's inactive — so
+  // an edit doesn't silently lose the link or hide the row from the
+  // dropdown. The kind-mismatch case (e.g. wallet account pointing at
+  // a bank cashbox after a method change) still drops the row; the
+  // backend validator is the final guard.
+  const cashboxesForMethod = useMemo(() => {
+    const compat = cashboxes.filter(
+      (cb) => expectedKind === null || cb.kind === expectedKind,
+    );
+    // Edit-mode preservation: re-add the linked cashbox if filter excluded it
+    // due to active=false (kind mismatch is still excluded — we don't show
+    // a method-incompatible cashbox).
+    if (
+      mode === 'edit' &&
+      account?.cashbox_id &&
+      !compat.some((cb) => cb.id === account.cashbox_id)
+    ) {
+      const linked = cashboxes.find(
+        (cb) => cb.id === account.cashbox_id && cb.kind === expectedKind,
+      );
+      if (linked) return [linked, ...compat];
+    }
+    return compat;
+  }, [cashboxes, expectedKind, mode, account?.cashbox_id]);
+
+  // Empty-state flag: this method supports a linked cashbox (expectedKind != null)
+  // but no compatible cashbox exists in the operator's data.
+  const cashboxEmptyState =
+    expectedKind !== null && cashboxesForMethod.length === 0;
+
+  // PR-FIN-PAYACCT-4D-UX-FIX-2 — auto-select the single compatible
+  // active cashbox in CREATE mode, ONLY on method change (not on every
+  // cashboxId mutation, otherwise manually clearing the dropdown would
+  // immediately re-auto-select). The effect intentionally depends on
+  // `method` only — `cashboxId` is read but not in the dep array.
+  useEffect(() => {
+    if (mode !== 'create') return;
+    const activeCompat = cashboxesForMethod.filter((cb) => cb.is_active);
+    if (activeCompat.length === 1) {
+      setCashboxId(activeCompat[0].id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [method, mode]);
 
   const labels = identifierLabelFor(method);
 
@@ -190,6 +248,10 @@ export function PaymentAccountModal({
         is_default: isDefault,
         active,
         sort_order: sortOrder,
+        // PR-FIN-PAYACCT-4D-UX-FIX-2 — always include cashbox_id so the
+        // backend records it on create. `null` means "intentionally
+        // not linked" (the operator picked "— بدون ربط —").
+        cashbox_id: cashboxId,
       } as any),
     onSuccess: () => {
       toast.success('تم إنشاء حساب الدفع');
@@ -213,6 +275,10 @@ export function PaymentAccountModal({
         identifier: identifier.trim() || null,
         gl_account_code: glAccountCode.trim(),
         sort_order: sortOrder,
+        // PR-FIN-PAYACCT-4D-UX-FIX-2 — include cashbox_id on edit. The
+        // backend treats `null` as "clear the pin" and a UUID as "set
+        // or change to this cashbox".
+        cashbox_id: cashboxId,
       } as any);
     },
     onSuccess: () => {
@@ -334,24 +400,61 @@ export function PaymentAccountModal({
             </Field>
           </div>
 
-          {/* Optional cashbox pin (filtered by kind) */}
+          {/* Optional cashbox pin (filtered by kind compatibility) */}
           <Field label="الخزنة المرتبطة (اختياري)">
             <select
               className="input"
               value={cashboxId ?? ''}
               onChange={(e) => setCashboxId(e.target.value || null)}
               data-testid="payment-account-modal-cashbox"
+              disabled={expectedKind === null}
             >
               <option value="">— بدون ربط —</option>
-              {cashboxesForMethod.map((cb) => (
-                <option key={cb.id} value={cb.id}>
-                  {cb.name_ar} ({cb.kind})
-                </option>
-              ))}
+              {cashboxesForMethod.map((cb) => {
+                const balanceLabel = `${Number(cb.current_balance || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ج.م`;
+                const inactiveBadge = cb.is_active ? '' : ' — غير نشطة';
+                return (
+                  <option key={cb.id} value={cb.id}>
+                    {cb.name_ar} ({KIND_LABEL_AR[cb.kind]} · {balanceLabel}){inactiveBadge}
+                  </option>
+                );
+              })}
             </select>
-            <p className="mt-1 text-[11px] text-slate-500">
-              ربط الحساب بخزنة محددة يفصل أرصدته عن الحسابات الأخرى التي تستخدم نفس كود حساب الأستاذ.
-            </p>
+
+            {/* PR-FIN-PAYACCT-4D-UX-FIX-2: empty-state when no compatible
+                cashbox exists for the chosen method. Never silently
+                hide the selector — always explain WHY it's empty and
+                offer a path to fix it. */}
+            {cashboxEmptyState && (
+              <div
+                className="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-3 space-y-2"
+                data-testid="payment-account-modal-cashbox-empty"
+              >
+                <div className="text-[12px] text-amber-800 font-bold">
+                  لا توجد خزنة مناسبة لهذا النوع. أنشئ خزنة أولاً من صفحة الخزائن.
+                </div>
+                {onCreateCashbox && (
+                  <button
+                    type="button"
+                    onClick={() => onCreateCashbox(expectedKind as Cashbox['kind'])}
+                    className="text-[12px] font-bold bg-amber-600 hover:bg-amber-700 text-white px-3 py-1.5 rounded inline-flex items-center gap-1"
+                    data-testid="payment-account-modal-cashbox-create"
+                  >
+                    إنشاء خزنة
+                  </button>
+                )}
+              </div>
+            )}
+
+            {expectedKind === null ? (
+              <p className="mt-1 text-[11px] text-slate-500">
+                هذه الطريقة لا تدعم ربط خزنة (مثل الآجل / غير ذلك).
+              </p>
+            ) : (
+              <p className="mt-1 text-[11px] text-slate-500">
+                ربط الحساب بخزنة محددة يفصل أرصدته عن الحسابات الأخرى التي تستخدم نفس كود حساب الأستاذ.
+              </p>
+            )}
           </Field>
 
           {/* Settings row */}

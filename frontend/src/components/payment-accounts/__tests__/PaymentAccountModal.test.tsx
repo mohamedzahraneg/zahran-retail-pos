@@ -377,4 +377,109 @@ describe('<PaymentAccountModal /> — PR-FIN-PAYACCT-4B', () => {
     expect(body.method).toBeUndefined();
     expect(createAccountMock).not.toHaveBeenCalled();
   });
+
+  // ─── PR-FIN-PAYACCT-4D-UX-FIX-2: cashbox dropdown ─────────────
+  it('PR-4D-UX-FIX-2: shows the empty-state when no compatible cashbox exists', () => {
+    // No bank-kind cashbox in the fixture — bank_transfer method has none.
+    const cashboxesNoneBank: typeof CASHBOXES = CASHBOXES.filter((cb) => cb.kind !== 'bank');
+    renderModal({
+      prefilledMethod: 'bank_transfer',
+      cashboxes: cashboxesNoneBank,
+    });
+    expect(screen.getByTestId('payment-account-modal-cashbox-empty')).toBeInTheDocument();
+    expect(
+      screen.getByText(/لا توجد خزنة مناسبة لهذا النوع/),
+    ).toBeInTheDocument();
+  });
+
+  it('PR-4D-UX-FIX-2: empty-state action calls onCreateCashbox with the right kind', () => {
+    const onCreateCashbox = vi.fn();
+    const cashboxesNoneBank: typeof CASHBOXES = CASHBOXES.filter((cb) => cb.kind !== 'bank');
+    renderModal({
+      prefilledMethod: 'bank_transfer',
+      cashboxes: cashboxesNoneBank,
+      onCreateCashbox,
+    });
+    fireEvent.click(screen.getByTestId('payment-account-modal-cashbox-create'));
+    expect(onCreateCashbox).toHaveBeenCalledWith('bank');
+  });
+
+  it('PR-4D-UX-FIX-2: create payload includes cashbox_id (null when not linked)', async () => {
+    renderModal({ prefilledMethod: 'wallet' });
+    // Set required fields. Since cashbox auto-selects (one matching ewallet), the
+    // payload's cashbox_id should reflect that.
+    fireEvent.change(screen.getByTestId('payment-account-modal-display-name'), {
+      target: { value: 'My Wallet' },
+    });
+    fireEvent.click(screen.getByTestId('payment-account-modal-submit'));
+    await waitFor(() => expect(createAccountMock).toHaveBeenCalledTimes(1));
+    const body = createAccountMock.mock.calls[0][0];
+    // cashbox_id is on the payload (not undefined) — value is the auto-picked
+    // ewallet cashbox id from the fixture.
+    expect(Object.prototype.hasOwnProperty.call(body, 'cashbox_id')).toBe(true);
+    expect(body.cashbox_id).toBe('cb-ewallet');
+  });
+
+  it('PR-4D-UX-FIX-2: clearing the cashbox sends cashbox_id: null', async () => {
+    renderModal({ prefilledMethod: 'wallet' });
+    fireEvent.change(screen.getByTestId('payment-account-modal-display-name'), {
+      target: { value: 'My Wallet' },
+    });
+    // Auto-pick selected cb-ewallet. Operator manually clears to "— بدون ربط —".
+    fireEvent.change(screen.getByTestId('payment-account-modal-cashbox'), {
+      target: { value: '' },
+    });
+    fireEvent.click(screen.getByTestId('payment-account-modal-submit'));
+    await waitFor(() => expect(createAccountMock).toHaveBeenCalledTimes(1));
+    const body = createAccountMock.mock.calls[0][0];
+    expect(body.cashbox_id).toBeNull();
+  });
+
+  it('PR-4D-UX-FIX-2: edit payload includes cashbox_id (preserves the pin)', async () => {
+    const account: PaymentAccount = {
+      id: 'acct-edit',
+      method: 'bank_transfer',
+      provider_key: null,
+      display_name: 'Bank Account',
+      identifier: 'EG12',
+      gl_account_code: '1113',
+      cashbox_id: 'cb-bank',
+      is_default: true,
+      active: true,
+      sort_order: 1,
+      metadata: {},
+      created_at: '', updated_at: '',
+      created_by: null, updated_by: null,
+    };
+    renderModal({ mode: 'edit', account });
+    fireEvent.click(screen.getByTestId('payment-account-modal-submit'));
+    await waitFor(() => expect(updateAccountMock).toHaveBeenCalledTimes(1));
+    const [, body] = updateAccountMock.mock.calls[0];
+    expect(body.cashbox_id).toBe('cb-bank');
+  });
+
+  it('PR-4D-UX-FIX-2: edit mode keeps an inactive linked cashbox visible in the dropdown', () => {
+    // Mark cb-bank as inactive in the fixtures.
+    const cashboxesInactiveBank = CASHBOXES.map((cb) =>
+      cb.id === 'cb-bank' ? { ...cb, is_active: false } : cb,
+    );
+    const account: PaymentAccount = {
+      id: 'acct-edit', method: 'bank_transfer', provider_key: null,
+      display_name: 'Bank Account', identifier: 'EG12', gl_account_code: '1113',
+      cashbox_id: 'cb-bank', is_default: true, active: true, sort_order: 1,
+      metadata: {}, created_at: '', updated_at: '', created_by: null, updated_by: null,
+    };
+    renderModal({ mode: 'edit', account, cashboxes: cashboxesInactiveBank });
+    const sel = screen.getByTestId('payment-account-modal-cashbox') as HTMLSelectElement;
+    const option = Array.from(sel.options).find((o) => o.value === 'cb-bank');
+    expect(option).toBeDefined();
+    expect(option!.textContent).toMatch(/غير نشطة/);
+  });
+
+  it('PR-4D-UX-FIX-2: bank method shows only bank cashboxes (kind compatibility)', () => {
+    renderModal({ prefilledMethod: 'bank_transfer' });
+    const sel = screen.getByTestId('payment-account-modal-cashbox') as HTMLSelectElement;
+    const values = Array.from(sel.options).map((o) => o.value);
+    expect(values).toEqual(['', 'cb-bank']);
+  });
 });
