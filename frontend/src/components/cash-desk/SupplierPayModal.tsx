@@ -25,6 +25,16 @@ import toast from 'react-hot-toast';
 import { ArrowUpCircle, X } from 'lucide-react';
 import { cashDeskApi, type Cashbox, type PaymentMethod } from '@/api/cash-desk.api';
 import { suppliersApi, type Supplier } from '@/api/suppliers.api';
+import {
+  paymentsApi,
+  METHOD_LABEL_AR,
+  type PaymentAccount,
+} from '@/api/payments.api';
+import {
+  PaymentAccountPicker,
+  autoSelectAccountForMethod,
+  visibleMethodsFor,
+} from '@/components/payments/PaymentAccountPicker';
 import { Modal, Field } from './Modal';
 
 const EGP = (n: number | string) =>
@@ -55,6 +65,7 @@ export function SupplierPayModal({
   const [supplierQ, setSupplierQ] = useState('');
   const [cashboxId, setCashboxId] = useState(cashboxes[0]?.id || '');
   const [method, setMethod] = useState<PaymentMethod>('cash');
+  const [paymentAccountId, setPaymentAccountId] = useState<string | null>(null);
   const [amount, setAmount] = useState('');
   const [reference, setReference] = useState('');
   const [notes, setNotes] = useState('');
@@ -69,6 +80,32 @@ export function SupplierPayModal({
     enabled: supplierQ.length >= 2 && !prefilledSupplier,
   });
 
+  // PR-FIN-PAYACCT-4C — payment-account catalog (mirror of ReceiptModal).
+  const { data: providers = [] } = useQuery({
+    queryKey: ['payment-providers'],
+    queryFn: () => paymentsApi.listProviders(),
+    staleTime: 5 * 60 * 1000,
+  });
+  const { data: accounts = [] } = useQuery({
+    queryKey: ['payment-accounts', 'all'],
+    queryFn: () => paymentsApi.listAccounts(),
+    staleTime: 60 * 1000,
+  });
+  const visibleMethods = visibleMethodsFor(accounts);
+  const accountsForMethod = (accounts as PaymentAccount[]).filter(
+    (a) => a.method === method && a.active,
+  );
+  const isCash = method === 'cash';
+  const blockedNoAccount = !isCash && accountsForMethod.length === 0;
+  const needsManualPick =
+    !isCash && accountsForMethod.length > 1 && !paymentAccountId;
+
+  // Auto-select default/sole account when method changes.
+  useEffect(() => {
+    const auto = autoSelectAccountForMethod(method, accounts);
+    setPaymentAccountId(auto.id);
+  }, [method, accounts]);
+
   const mutation = useMutation({
     mutationFn: cashDeskApi.pay,
     onSuccess: () => {
@@ -82,6 +119,9 @@ export function SupplierPayModal({
     if (!cashboxId) return toast.error('اختر الخزينة');
     const amt = Number(amount);
     if (!amt || amt <= 0) return toast.error('أدخل مبلغاً صحيحاً');
+    if (!isCash && accountsForMethod.length > 0 && !paymentAccountId) {
+      return toast.error('اختر حساب الدفع قبل المتابعة');
+    }
     mutation.mutate({
       supplier_id: supplier.id,
       cashbox_id: cashboxId,
@@ -89,6 +129,7 @@ export function SupplierPayModal({
       amount: amt,
       reference: reference || undefined,
       notes: notes || undefined,
+      payment_account_id: isCash ? null : paymentAccountId,
     });
   };
 
@@ -167,14 +208,31 @@ export function SupplierPayModal({
                 className="input"
                 value={method}
                 onChange={(e) => setMethod(e.target.value as PaymentMethod)}
+                data-testid="supplier-pay-modal-method"
               >
-                <option value="cash">نقدي</option>
-                <option value="card">بطاقة</option>
-                <option value="instapay">إنستا باي</option>
-                <option value="bank_transfer">تحويل بنكي</option>
+                {visibleMethods.map((m) => (
+                  <option key={m} value={m}>
+                    {METHOD_LABEL_AR[m]}
+                  </option>
+                ))}
               </select>
             </Field>
           </div>
+
+          {/* PR-FIN-PAYACCT-4C — Payment account picker for non-cash methods. */}
+          {!isCash && (
+            <PaymentAccountPicker
+              method={method}
+              providers={providers}
+              accounts={accountsForMethod}
+              selected={paymentAccountId}
+              variant="light"
+              blocked={blockedNoAccount}
+              needsManualPick={needsManualPick}
+              onSelect={(id) => setPaymentAccountId(id)}
+              label="حساب الدفع"
+            />
+          )}
 
           <div className="grid md:grid-cols-2 gap-3">
             <Field label="المبلغ">

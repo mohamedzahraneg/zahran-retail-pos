@@ -40,6 +40,23 @@ vi.mock('@/api/customers.api', () => ({
     unpaidInvoices: vi.fn(async () => []),
   },
 }));
+// PR-FIN-PAYACCT-4C — modal now consults payment_account catalog. The
+// listProviders + listAccounts mocks default to empty so existing
+// (cash-only) tests keep passing; new tests below override per-test.
+const listProvidersMock = vi.fn<[], Promise<unknown[]>>(async () => []);
+const listAccountsMock = vi.fn<[], Promise<unknown[]>>(async () => []);
+vi.mock('@/api/payments.api', async () => {
+  const actual = await vi.importActual<typeof import('@/api/payments.api')>(
+    '@/api/payments.api',
+  );
+  return {
+    ...actual,
+    paymentsApi: {
+      listProviders: () => listProvidersMock(),
+      listAccounts: () => listAccountsMock(),
+    },
+  };
+});
 vi.mock('@/components/InvoiceHoverCard', () => ({
   InvoiceHoverCard: () => null,
 }));
@@ -169,5 +186,175 @@ describe('<ReceiptModal /> — PR-CASH-DESK-REORG-1', () => {
     fireEvent.click(screen.getByTestId('receipt-modal-cancel'));
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(receiveMock).not.toHaveBeenCalled();
+  });
+});
+
+/* ============================================================================
+ * PR-FIN-PAYACCT-4C — payment_account picker + non-cash submit
+ * ========================================================================== */
+describe('<ReceiptModal /> — PR-FIN-PAYACCT-4C payment_account_id', () => {
+  beforeEach(() => {
+    receiveMock.mockClear();
+    toastErrorMock.mockClear();
+    listProvidersMock.mockReset();
+    listAccountsMock.mockReset();
+    listProvidersMock.mockResolvedValue([]);
+    listAccountsMock.mockResolvedValue([]);
+  });
+
+  it('non-cash method with active accounts → picker auto-defaults to is_default and submit carries payment_account_id', async () => {
+    listAccountsMock.mockResolvedValue([
+      {
+        id: 'pa-instapay-1',
+        method: 'instapay',
+        provider_key: 'instapay',
+        display_name: 'InstaPay Main',
+        identifier: '0100…',
+        gl_account_code: '1114',
+        cashbox_id: null,
+        is_default: true,
+        active: true,
+        sort_order: 0,
+        metadata: {},
+        created_at: '',
+        updated_at: '',
+        created_by: null,
+        updated_by: null,
+      },
+    ]);
+    renderModal();
+    // Wait for the accounts query to resolve.
+    await screen.findByTestId('receipt-modal-method');
+    // Switch to refund kind so allocation guard doesn't fire.
+    fireEvent.click(screen.getByRole('button', { name: 'استرجاع' }));
+    await new Promise((r) => setTimeout(r, 0));
+    // Switch method to instapay
+    fireEvent.change(screen.getByTestId('receipt-modal-method'), {
+      target: { value: 'instapay' },
+    });
+    // Wait for the picker to render + auto-default to fire
+    await screen.findByTestId('payment-account-picker');
+    fireEvent.change(screen.getByTestId('receipt-modal-amount'), {
+      target: { value: '50' },
+    });
+    fireEvent.click(screen.getByTestId('receipt-modal-submit'));
+    await waitFor(() => {
+      expect(receiveMock).toHaveBeenCalledTimes(1);
+    });
+    const payload = receiveMock.mock.calls[0][0] as Record<string, unknown>;
+    expect(payload.payment_method).toBe('instapay');
+    expect(payload.payment_account_id).toBe('pa-instapay-1');
+  });
+
+  it('non-cash method with multiple accounts and none picked → submit blocked with Arabic toast', async () => {
+    listAccountsMock.mockResolvedValue([
+      {
+        id: 'pa-instapay-1',
+        method: 'instapay',
+        provider_key: 'instapay',
+        display_name: 'InstaPay A',
+        identifier: '0100',
+        gl_account_code: '1114',
+        cashbox_id: null,
+        is_default: false,
+        active: true,
+        sort_order: 0,
+        metadata: {},
+        created_at: '',
+        updated_at: '',
+        created_by: null,
+        updated_by: null,
+      },
+      {
+        id: 'pa-instapay-2',
+        method: 'instapay',
+        provider_key: 'instapay',
+        display_name: 'InstaPay B',
+        identifier: '0101',
+        gl_account_code: '1114',
+        cashbox_id: null,
+        is_default: false,
+        active: true,
+        sort_order: 1,
+        metadata: {},
+        created_at: '',
+        updated_at: '',
+        created_by: null,
+        updated_by: null,
+      },
+    ]);
+    renderModal();
+    await screen.findByTestId('receipt-modal-method');
+    fireEvent.click(screen.getByRole('button', { name: 'استرجاع' }));
+    await new Promise((r) => setTimeout(r, 0));
+    fireEvent.change(screen.getByTestId('receipt-modal-method'), {
+      target: { value: 'instapay' },
+    });
+    await screen.findByTestId('payment-account-picker');
+    // Auto-default left selection NULL because no is_default & multiple
+    fireEvent.change(screen.getByTestId('receipt-modal-amount'), {
+      target: { value: '50' },
+    });
+    fireEvent.click(screen.getByTestId('receipt-modal-submit'));
+    await waitFor(() => {
+      expect(toastErrorMock).toHaveBeenCalled();
+    });
+    expect(toastErrorMock.mock.calls.some((c) => /اختر حساب التحصيل/.test(c[0]))).toBe(
+      true,
+    );
+    expect(receiveMock).not.toHaveBeenCalled();
+  });
+
+  it('cash submit → payment_account_id is null in the payload', async () => {
+    listAccountsMock.mockResolvedValue([]);
+    renderModal();
+    await screen.findByTestId('receipt-modal-method');
+    fireEvent.click(screen.getByRole('button', { name: 'استرجاع' }));
+    await new Promise((r) => setTimeout(r, 0));
+    fireEvent.change(screen.getByTestId('receipt-modal-amount'), {
+      target: { value: '50' },
+    });
+    fireEvent.click(screen.getByTestId('receipt-modal-submit'));
+    await waitFor(() => expect(receiveMock).toHaveBeenCalledTimes(1));
+    const payload = receiveMock.mock.calls[0][0] as Record<string, unknown>;
+    expect(payload.payment_method).toBe('cash');
+    expect(payload.payment_account_id).toBeNull();
+  });
+
+  it('method dropdown only shows methods with active accounts (plus cash)', async () => {
+    listAccountsMock.mockResolvedValue([
+      {
+        id: 'pa-w',
+        method: 'wallet',
+        provider_key: 'we_pay',
+        display_name: 'WE Pay',
+        identifier: null,
+        gl_account_code: '1114',
+        cashbox_id: null,
+        is_default: true,
+        active: true,
+        sort_order: 0,
+        metadata: {},
+        created_at: '',
+        updated_at: '',
+        created_by: null,
+        updated_by: null,
+      },
+    ]);
+    renderModal();
+    const select = (await screen.findByTestId(
+      'receipt-modal-method',
+    )) as HTMLSelectElement;
+    // Wait for accounts query to settle and the visibleMethodsFor
+    // recompute to land.
+    await waitFor(() => {
+      expect(Array.from(select.options).some((o) => o.value === 'wallet')).toBe(true);
+    });
+    const optionValues = Array.from(select.options).map((o) => o.value);
+    expect(optionValues).toContain('cash');
+    expect(optionValues).toContain('wallet');
+    // No instapay account → method should NOT be visible
+    expect(optionValues).not.toContain('instapay');
+    expect(optionValues).not.toContain('card_visa');
   });
 });

@@ -11,6 +11,55 @@ import {
 } from './dto/payment.dto';
 import { AccountingPostingService } from '../chart-of-accounts/posting.service';
 import { FinancialEngineService } from '../chart-of-accounts/financial-engine.service';
+import { PaymentsService } from '../payments/payments.service';
+
+/**
+ * PR-FIN-PAYACCT-4C — central rule used by both `receiveFromCustomer`
+ * and `payToSupplier` to (a) reject `payment_account_id` on cash
+ * payments, (b) require it on non-cash methods that have at least one
+ * active account, and (c) freeze a snapshot of the resolved account
+ * at write time so the JE narrative + posting GL code survive later
+ * admin edits to the underlying payment_accounts row.
+ *
+ * The snapshot mirrors the shape `invoice_payments.payment_account_snapshot`
+ * uses (PR-PAY-1, mig 112) so every place that reads a frozen snapshot
+ * sees the same fields.
+ */
+function isCashMethod(m: string): boolean {
+  return m === 'cash';
+}
+
+interface FrozenAccountSnapshot {
+  display_name: string;
+  provider_key: string | null;
+  identifier: string | null;
+  gl_account_code: string;
+  cashbox_id: string | null;
+  /** PR-PAY-7: per-account uploaded data URL, frozen for offline render. */
+  logo_data_url?: string;
+}
+
+function buildSnapshot(row: {
+  display_name: string;
+  provider_key: string | null;
+  identifier: string | null;
+  gl_account_code: string;
+  cashbox_id: string | null;
+  metadata: Record<string, unknown> | null;
+}): FrozenAccountSnapshot {
+  return {
+    display_name: row.display_name,
+    provider_key: row.provider_key,
+    identifier: row.identifier,
+    gl_account_code: row.gl_account_code,
+    cashbox_id: row.cashbox_id,
+    logo_data_url:
+      typeof (row.metadata as { logo_data_url?: string } | null)?.logo_data_url ===
+      'string'
+        ? ((row.metadata as { logo_data_url: string }).logo_data_url)
+        : undefined,
+  };
+}
 
 export type CashboxKind = 'cash' | 'bank' | 'ewallet' | 'check';
 
@@ -49,7 +98,92 @@ export class CashDeskService {
     private readonly ds: DataSource,
     @Optional() private readonly posting?: AccountingPostingService,
     @Optional() private readonly engine?: FinancialEngineService,
+    @Optional() private readonly payments?: PaymentsService,
   ) {}
+
+  /**
+   * PR-FIN-PAYACCT-4C — Resolve + validate the optional `payment_account_id`
+   * for a customer/supplier payment, then return the frozen snapshot
+   * the service will INSERT into `*_payments.payment_account_snapshot`.
+   *
+   * Rules:
+   *   • cash + payment_account_id → reject (cash never uses an account)
+   *   • non-cash + at least one active account for that method:
+   *       payment_account_id REQUIRED → reject if missing
+   *   • non-cash + zero active accounts:
+   *       payment_account_id stays null → fall through to legacy GL
+   *       resolution in posting (back-compat with bare-COA installs)
+   *   • payment_account_id present:
+   *       resolve via paymentsService.resolveForPosting; if missing
+   *       or method-mismatched → reject
+   *
+   * Returns `{paymentAccountId, snapshot}` so the caller can splice
+   * both into the INSERT param tuple. Trigger `trg_*_payment_account_consistency`
+   * is the DB-side backstop for the same rule.
+   */
+  private async validateAndFreezeAccount(
+    args: {
+      em: { query(sql: string, p?: any[]): Promise<any[]> };
+      method: string;
+      payment_account_id: string | null | undefined;
+    },
+  ): Promise<{
+    paymentAccountId: string | null;
+    snapshot: FrozenAccountSnapshot | null;
+  }> {
+    const { em, method, payment_account_id } = args;
+
+    if (isCashMethod(method)) {
+      if (payment_account_id) {
+        throw new BadRequestException(
+          'لا يمكن إرفاق حساب دفع مع طريقة "نقدي". احذف payment_account_id أو غيّر الطريقة.',
+        );
+      }
+      return { paymentAccountId: null, snapshot: null };
+    }
+
+    // Non-cash path. First inventory active accounts for this method.
+    const activeAccounts = await em.query(
+      `SELECT id::text AS id FROM payment_accounts
+        WHERE method::text = $1 AND active = TRUE`,
+      [method],
+    );
+
+    if (!payment_account_id) {
+      if (activeAccounts.length > 0) {
+        throw new BadRequestException(
+          `طريقة الدفع "${method}" تتطلب اختيار حساب الدفع. ` +
+            `يوجد ${activeAccounts.length} حساب مفعّل لهذه الطريقة.`,
+        );
+      }
+      // Zero active accounts → legacy fallback path (posting service
+      // will route via PAYMENT_METHOD_ACCOUNT_CODE). This keeps fresh
+      // installs that haven't seeded payment_accounts yet able to
+      // accept non-cash receipts.
+      return { paymentAccountId: null, snapshot: null };
+    }
+
+    if (!this.payments) {
+      throw new BadRequestException(
+        'PaymentsService غير متاح لتحقق حساب الدفع.',
+      );
+    }
+    const live = await this.payments.resolveForPosting(payment_account_id, em);
+    if (!live) {
+      throw new BadRequestException(
+        `حساب الدفع غير موجود (${payment_account_id}).`,
+      );
+    }
+    if (live.method !== method) {
+      throw new BadRequestException(
+        `حساب الدفع المختار طريقته "${live.method}" بينما المرسل "${method}". اختر حسابًا متوافقًا.`,
+      );
+    }
+    return {
+      paymentAccountId: live.id,
+      snapshot: buildSnapshot(live),
+    };
+  }
 
   /**
    * Give every new cashbox its own GL sub-account under the matching
@@ -198,13 +332,24 @@ export class CashDeskService {
       const paymentNo = `CR-${String(seq).padStart(6, '0')}`;
       const warehouseId = await this.warehouseForCashbox(em, dto.cashbox_id);
 
+      // PR-FIN-PAYACCT-4C — validate + freeze the optional payment_account
+      // before INSERT. Cash rejects any attached account; non-cash with
+      // active accounts requires one; non-cash without active accounts
+      // falls through to the legacy GL routing in posting.
+      const { paymentAccountId, snapshot } = await this.validateAndFreezeAccount({
+        em,
+        method: dto.payment_method,
+        payment_account_id: dto.payment_account_id ?? null,
+      });
+
       const [payment] = await em.query(
         `
         INSERT INTO customer_payments
           (payment_no, customer_id, cashbox_id, warehouse_id,
            payment_method, amount, kind,
-           reference_number, notes, received_by)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+           reference_number, notes, received_by,
+           payment_account_id, payment_account_snapshot)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
         RETURNING *
         `,
         [
@@ -218,6 +363,8 @@ export class CashDeskService {
           dto.reference ?? null,
           dto.notes ?? null,
           userId,
+          paymentAccountId,
+          snapshot ? JSON.stringify(snapshot) : null,
         ],
       );
 
@@ -277,13 +424,21 @@ export class CashDeskService {
       const paymentNo = `CP-${String(seq).padStart(6, '0')}`;
       const warehouseId = await this.warehouseForCashbox(em, dto.cashbox_id);
 
+      // PR-FIN-PAYACCT-4C — mirror of receiveFromCustomer's freeze step.
+      const { paymentAccountId, snapshot } = await this.validateAndFreezeAccount({
+        em,
+        method: dto.payment_method,
+        payment_account_id: dto.payment_account_id ?? null,
+      });
+
       const [payment] = await em.query(
         `
         INSERT INTO supplier_payments
           (payment_no, supplier_id, cashbox_id, warehouse_id,
            payment_method, amount,
-           reference_number, notes, paid_by)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+           reference_number, notes, paid_by,
+           payment_account_id, payment_account_snapshot)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
         RETURNING *
         `,
         [
@@ -296,6 +451,8 @@ export class CashDeskService {
           dto.reference ?? null,
           dto.notes ?? null,
           userId,
+          paymentAccountId,
+          snapshot ? JSON.stringify(snapshot) : null,
         ],
       );
 
