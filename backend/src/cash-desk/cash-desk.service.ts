@@ -131,8 +131,66 @@ export class CashDeskService {
     return row.warehouse_id as string;
   }
 
-  /** Receive a customer payment — relies on triggers from migration 014 */
+  /**
+   * Receive a customer payment.
+   *
+   * PR-FIN-PAYACCT-2 — atomic posting hardening.
+   *
+   * The flow lives inside `ds.transaction((em) => …)`, so the payment
+   * INSERT, the trigger writes (`fn_customer_payment_apply` updates
+   * cashboxes / cashbox_transactions / customers / customer_ledger),
+   * the allocation INSERTs and the GL post all share one transaction.
+   *
+   * Pre-merge contract was: `posting.postInvoicePayment(...).catch(() =>
+   * undefined)` — but `posting.service.safe()` already turns every
+   * exception into a `{error}` return, and the caller never inspected
+   * the result. Net effect: a customer payment whose JE failed (COA not
+   * seeded, lockdown, engine error, …) would still commit the payment
+   * row + cashbox + ledger writes, leaving an orphan with no GL leg.
+   *
+   * Production has zero orphans today (audit verified) because there
+   * are zero historical customer_payments. The hardening lands before
+   * the new Customers-page button gets real production usage.
+   *
+   * New contract:
+   *   • posting MUST be wired (`this.posting` non-null) — else throw.
+   *   • posting result `null`            → throw (COA missing or other
+   *                                        guard hit). Whole tx rolls
+   *                                        back — payment + trigger
+   *                                        writes never commit.
+   *   • posting result `{error}`         → throw (carry the underlying
+   *                                        message into the Arabic
+   *                                        BadRequestException).
+   *   • posting result `{skipped:true}`  → success — idempotent replay
+   *                                        of an already-posted JE; the
+   *                                        engine's idempotency guard
+   *                                        already caught the duplicate.
+   *   • posting result `{entry_id}`      → success.
+   *
+   * Idempotency on FE retry: the engine's
+   * `(reference_type, reference_id)` guard short-circuits at the SELECT
+   * inside `safe()` (posting.service.ts:1215) → returns `{skipped:true}`
+   * → caller treats as success. No double-post. No double-cashbox-update
+   * (the trigger does not run because the customer_payments INSERT was
+   * the one that fired it the first time; this call's INSERT carries a
+   * different id and a different payment_no, so it is by definition not
+   * a real retry of the same row).
+   *
+   * Note on the trigger: `fn_customer_payment_apply` writes a legacy
+   * `cashbox_transactions.reference_type='other'` row and sets
+   * `app.engine_context = 'on'` — both are documented gaps in the
+   * PR-FIN-PAYACCT-2 audit report (legacy mirror trigger). Out of scope
+   * for this PR; the hardening here is solely about the JE post.
+   */
   async receiveFromCustomer(dto: CreateCustomerPaymentDto, userId: string) {
+    // Capture into a local so TS narrowing carries across the `em` closure
+    // (`this.posting` is `@Optional()` so the type is `… | undefined`).
+    const posting = this.posting;
+    if (!posting) {
+      throw new BadRequestException(
+        'خدمة الترحيل المحاسبي غير متاحة — لا يمكن تسجيل المقبوضة',
+      );
+    }
     return this.ds.transaction(async (em) => {
       const [{ seq }] = await em.query(
         `SELECT nextval('seq_customer_payment_no') AS seq`,
@@ -172,16 +230,46 @@ export class CashDeskService {
           );
         }
       }
+
       // Auto-post the receipt to GL within the same transaction.
-      await this.posting
-        ?.postInvoicePayment(payment.id, userId, em)
-        .catch(() => undefined);
+      // PR-FIN-PAYACCT-2: posting MUST complete or the whole tx
+      // rolls back — no committed payment row without a JE.
+      const post = await posting.postInvoicePayment(
+        payment.id,
+        userId,
+        em,
+      );
+      if (post == null) {
+        throw new BadRequestException(
+          'فشل ترحيل المقبوضة محاسبياً — تأكد من إعداد الحسابات (1111/1121/212)',
+        );
+      }
+      if ((post as { error?: string }).error) {
+        throw new BadRequestException(
+          `فشل ترحيل المقبوضة محاسبياً: ${(post as { error: string }).error}`,
+        );
+      }
+      // {skipped:true} or {entry_id} → success path. Fall through.
       return payment;
     });
   }
 
-  /** Pay a supplier */
+  /**
+   * Pay a supplier.
+   *
+   * PR-FIN-PAYACCT-2 — mirror of `receiveFromCustomer`. See that method's
+   * docblock for the full atomic-posting contract; the only difference
+   * here is the GL recipe (DR 211 suppliers / CR cashbox-GL) handled
+   * inside `posting.postSupplierPayment`.
+   */
   async payToSupplier(dto: CreateSupplierPaymentDto, userId: string) {
+    // Capture into a local — see receiveFromCustomer for rationale.
+    const posting = this.posting;
+    if (!posting) {
+      throw new BadRequestException(
+        'خدمة الترحيل المحاسبي غير متاحة — لا يمكن تسجيل الدفعة',
+      );
+    }
     return this.ds.transaction(async (em) => {
       const [{ seq }] = await em.query(
         `SELECT nextval('seq_supplier_payment_no') AS seq`,
@@ -220,9 +308,25 @@ export class CashDeskService {
           );
         }
       }
-      await this.posting
-        ?.postSupplierPayment(payment.id, userId, em)
-        .catch(() => undefined);
+
+      // PR-FIN-PAYACCT-2: posting MUST complete or the whole tx
+      // rolls back — no committed payment row without a JE.
+      const post = await posting.postSupplierPayment(
+        payment.id,
+        userId,
+        em,
+      );
+      if (post == null) {
+        throw new BadRequestException(
+          'فشل ترحيل الدفعة محاسبياً — تأكد من إعداد الحسابات (1111/211)',
+        );
+      }
+      if ((post as { error?: string }).error) {
+        throw new BadRequestException(
+          `فشل ترحيل الدفعة محاسبياً: ${(post as { error: string }).error}`,
+        );
+      }
+      // {skipped:true} or {entry_id} → success path. Fall through.
       return payment;
     });
   }
