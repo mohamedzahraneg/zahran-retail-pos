@@ -317,6 +317,13 @@ export const cashDeskApi = {
   cashflowToday: () =>
     unwrap<CashflowToday[]>(api.get('/cash-desk/cashflow/today')),
 
+  // PR-FIN-PAYACCT-4B — per-cashbox stored vs GL drift; used by the
+  // Payment Accounts admin page accounting-alerts panel.
+  glDrift: () =>
+    unwrap<import('./payments.api').CashboxGlDrift[]>(
+      api.get('/cash-desk/gl-drift'),
+    ),
+
   shiftVariances: () =>
     unwrap<ShiftVariances>(api.get('/cash-desk/shift-variances')),
 

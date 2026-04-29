@@ -49,6 +49,23 @@ export class PaymentsController {
     return this.service.list({ method, active });
   }
 
+  /**
+   * PR-FIN-PAYACCT-4B — same shape as `list`, plus per-account
+   * running-balance columns from `v_payment_account_balance` (the
+   * view added in mig 121 of PR-4A). Used by the dedicated admin
+   * page at `/payment-accounts` for the KPI cards + per-row balance
+   * column + bottom summary chart. Read-only — any authenticated
+   * user can call (the route at the FE is gated on
+   * `payment-accounts.read`).
+   */
+  @Get('payment-accounts/balances')
+  listBalances(
+    @Query('method') method?: string,
+    @Query('active') active?: string,
+  ) {
+    return this.service.listBalances({ method, active });
+  }
+
   @Get('payment-accounts/:id')
   getById(@Param('id') id: string) {
     return this.service.getById(id);

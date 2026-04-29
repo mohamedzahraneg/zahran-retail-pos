@@ -30,6 +30,7 @@ export type PaymentMethodCode =
   | 'orange_cash'
   | 'wallet'         // PR-PAY-3.1: generic wallet umbrella (WE Pay, Bank Wallet, …)
   | 'bank_transfer'
+  | 'check'          // PR-FIN-PAYACCT-4B: cheque/check accounts in admin UI
   | 'credit'
   | 'other';
 
@@ -281,6 +282,25 @@ export const PAYMENT_PROVIDERS: PaymentProvider[] = [
     group: 'bank',
     requires_reference: true,
   },
+  // PR-FIN-PAYACCT-4B — cheque/check accounts. The Admin UI ships a
+  // generic "شيكات" provider so operators can create cheque-account
+  // rows in payment_accounts (DTO method 'check', GL 1115). Specific
+  // bank-as-cheque-issuer providers will be added in PR-FIN-PAYACCT-4E
+  // with explicit per-source approval for each official logo. Today
+  // the FE renders the initials-avatar fallback when `logo_key` does
+  // not have an asset on disk — that's expected for `check_other`
+  // until an approved cheque logo source lands.
+  {
+    provider_key: 'check_other',
+    logo_key: 'check_other',
+    method: 'check',
+    name_ar: 'شيكات',
+    name_en: 'Cheques',
+    icon_name: 'FileCheck',
+    default_gl_account_code: '1115',
+    group: 'bank',           // closest existing group; check has no dedicated group on the FE side yet
+    requires_reference: true, // cheque book number / serial is required
+  },
 ];
 
 /**
@@ -306,6 +326,7 @@ export const METHOD_DEFAULT_GL_CODE: Record<
   orange_cash: '1114',
   wallet: '1114',         // PR-PAY-3.1: generic wallet umbrella
   bank_transfer: '1113',
+  check: '1115',          // PR-FIN-PAYACCT-4B: الشيكات تحت التحصيل
   credit: '1121',
 };
 

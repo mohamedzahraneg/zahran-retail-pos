@@ -42,6 +42,7 @@ import FinanceDashboard from '@/pages/FinanceDashboard';
 import FinanceStatements from '@/pages/FinanceStatements';
 import CustomerGroups from '@/pages/CustomerGroups';
 import Settings from '@/pages/Settings';
+import PaymentAccounts from '@/pages/PaymentAccounts';
 import Users from '@/pages/Users';
 import Loyalty from '@/pages/Loyalty';
 // PR-ESS-2A — /me now renders the simplified self-service personal
@@ -309,6 +310,18 @@ export default function App() {
           element={<Navigate to="/team?section=accounts" replace />}
         />
         <Route path="settings" element={<Settings />} />
+        {/* PR-FIN-PAYACCT-4B — Payment accounts admin page (split out
+            of the Settings tab). Read gate is `payment-accounts.read`;
+            mutations inside the page additionally check
+            `payment-accounts.manage`. Backend `@Roles` is unchanged. */}
+        <Route
+          path="payment-accounts"
+          element={
+            <ProtectedRoute permissions={['payment-accounts.read']}>
+              <PaymentAccounts />
+            </ProtectedRoute>
+          }
+        />
         <Route
           path="users"
           element={
