@@ -646,6 +646,15 @@ describe('PaymentsService — PR-FIN-PAYACCT-4B', () => {
       expect(sql).not.toMatch(/gl_account_code\s*=\s*/);
       // Customer-payment refund flips to amount_out per the approved decision.
       expect(sql).toMatch(/cp\.kind = 'refund_out'[\s\S]+cp\.amount[\s\S]+0::numeric/);
+      // PR-4D-UX-FIX-2-HOTFIX-2: column references must match the real DB
+      // schema, NOT the FE-type aliases (`doc_no`/`name_ar` are FE shape).
+      expect(sql).toMatch(/cp\.payment_no/);
+      expect(sql).toMatch(/sp\.payment_no/);
+      expect(sql).not.toMatch(/cp\.doc_no/);
+      expect(sql).not.toMatch(/sp\.doc_no/);
+      // Suppliers expose `name`, not `name_ar`.
+      expect(sql).toMatch(/s\.name(?!\w)/);
+      expect(sql).not.toMatch(/s\.name_ar/);
       // Pure SELECT — no INSERT/UPDATE/DELETE.
       expect(sql).not.toMatch(/INSERT|UPDATE|DELETE/i);
     });
