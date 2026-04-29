@@ -66,6 +66,20 @@ export class PaymentsController {
     return this.service.listBalances({ method, active });
   }
 
+  /**
+   * PR-FIN-PAYACCT-4D — payment-method usage in the trailing 30 days.
+   * Wraps `v_dashboard_payment_mix_30d` (already populated; no
+   * migration). Used by the unified treasury page's "أكثر الطرق
+   * استخدامًا آخر 30 يوم" card. The `days` query param is accepted
+   * for forward-compat but currently ignored (view window is fixed
+   * at 30).
+   */
+  @Get('payments/method-mix')
+  methodMix(@Query('days') days?: string) {
+    const n = days ? Number.parseInt(days, 10) : 30;
+    return this.service.methodMix(Number.isFinite(n) && n > 0 ? n : 30);
+  }
+
   @Get('payment-accounts/:id')
   getById(@Param('id') id: string) {
     return this.service.getById(id);

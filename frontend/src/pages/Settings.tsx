@@ -1211,13 +1211,12 @@ function Textarea({
 }
 
 /* ────────────────────────────────────────────────────────────────────
- * PR-FIN-PAYACCT-4B — Payment accounts admin moved to a dedicated
- * page (`/payment-accounts`) so it gets the full-width admin UX
- * (KPIs, filters, dense table, alerts panel, side details, cheque
- * support). This tab now renders a redirect card only — the legacy
- * inline grid + per-group cards lived here through PR-PAY-7 and have
- * been retired in favour of the standalone page.
- * ──────────────────────────────────────────────────────────────────── */
+ * PR-FIN-PAYACCT-4D — Payment-accounts admin is now part of the
+ * unified treasury page at `/cashboxes` ("الخزائن والحسابات
+ * البنكية"). PR-4B's standalone /payment-accounts route still
+ * exists but redirects there. The Settings tab keeps a redirect
+ * card so admins clicking the legacy tab land on the right place.
+ * ──────────────────────────────────────────────────────────────── */
 function PaymentAccountsTab() {
   return (
     <div className="space-y-4" data-testid="payment-accounts-tab-redirect">
@@ -1228,20 +1227,20 @@ function PaymentAccountsTab() {
           </div>
           <div className="flex-1 min-w-0">
             <h2 className="text-lg font-bold text-slate-900">
-              تم نقل إدارة حسابات الدفع إلى صفحة منفصلة
+              تم دمج إدارة حسابات الدفع داخل صفحة الخزائن والحسابات البنكية
             </h2>
             <p className="text-sm text-slate-600 mt-1 leading-relaxed">
-              للوصول إلى مؤشرات الأرصدة، الفلاتر، تنبيهات الفروقات، ودعم
-              الشيكات وكل وسائل التحصيل (InstaPay، محافظ، فيزا، تحويل بنكي،
-              شيكات) — افتح صفحة "حسابات الدفع" المخصصة.
+              للوصول إلى مؤشرات الأرصدة، الفلاتر، تنبيهات الفروقات، الخزائن،
+              الحسابات البنكية، المحافظ، نقاط البيع، InstaPay، والشيكات — كلها
+              في مكان واحد: صفحة "الخزائن والحسابات البنكية".
             </p>
             <div className="mt-4">
               <Link
-                to="/payment-accounts"
+                to="/cashboxes"
                 data-testid="payment-accounts-tab-redirect-link"
                 className="inline-flex items-center gap-2 bg-rose-500 hover:bg-rose-600 text-white text-sm font-semibold px-4 py-2 rounded-lg"
               >
-                فتح صفحة حسابات الدفع
+                فتح صفحة الخزائن والحسابات البنكية
                 <ArrowLeft className="w-4 h-4" />
               </Link>
             </div>

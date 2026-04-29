@@ -141,6 +141,14 @@ export const paymentsApi = {
         },
       }),
     ),
+
+  // PR-FIN-PAYACCT-4D — payment-method usage (last 30d). Wraps
+  // v_dashboard_payment_mix_30d. The `days` param is reserved for
+  // forward-compat and currently has no effect on the response.
+  methodMix: (days = 30) =>
+    unwrap<PaymentMethodMixRow[]>(
+      api.get('/payments/method-mix', { params: { days } }),
+    ),
 };
 
 /**
@@ -174,6 +182,20 @@ export interface PaymentAccountBalance {
   je_count: number;
   /** ISO date YYYY-MM-DD or null when no movements yet. */
   last_movement: string | null;
+}
+
+/**
+ * PR-FIN-PAYACCT-4D — one row per payment_method from
+ * `v_dashboard_payment_mix_30d`. Drives the unified treasury page's
+ * "أكثر الطرق استخدامًا آخر 30 يوم" card. The view's window is fixed
+ * at 30d; we keep the FE shape minimal so future widening (90d, …)
+ * can land without a new type.
+ */
+export interface PaymentMethodMixRow {
+  payment_method: PaymentMethodCode;
+  transactions: number;
+  total_amount: string; // pg numeric → string
+  pct: string;          // 0..100 numeric → string
 }
 
 /**
