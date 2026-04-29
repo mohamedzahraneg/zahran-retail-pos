@@ -222,6 +222,16 @@ export class CashDeskController {
     return this.svc.cashflowToday();
   }
 
+  /**
+   * PR-FIN-PAYACCT-4B — per-cashbox stored vs GL drift, sourced from
+   * `v_cashbox_gl_drift`. Used by the Payment Accounts admin page's
+   * accounting-alerts panel to surface cashbox-vs-GL variances. Read-only.
+   */
+  @Get('gl-drift')
+  glDrift() {
+    return this.svc.getGlDrift();
+  }
+
   @Get('shift-variances')
   shiftVariances() {
     return this.svc.shiftVariances();

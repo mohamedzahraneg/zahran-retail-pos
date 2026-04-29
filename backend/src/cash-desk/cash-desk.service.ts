@@ -1235,6 +1235,32 @@ export class CashDeskService {
    * Computed inline (not from a view) so the endpoint keeps working on
    * DBs where migration 046 hasn't been applied yet.
    */
+  /**
+   * PR-FIN-PAYACCT-4B — per-cashbox stored vs GL drift. Returns rows
+   * from `v_cashbox_gl_drift` (mig 121 of PR-4A): per cashbox, the
+   * stored `current_balance` vs `Σ(jl.debit-jl.credit)` on tagged
+   * journal_lines. Surfaces the historical 2,295 EGP gap (and any
+   * future drift) to the new admin page's accounting-alerts panel.
+   *
+   * Read-only — gated at the FE route level via permissions; backend
+   * stays open to authenticated users like the rest of cash-desk.
+   */
+  async getGlDrift() {
+    return this.ds.query(`
+      SELECT cashbox_id::text   AS cashbox_id,
+             cashbox_name,
+             kind::text          AS kind,
+             is_active,
+             stored_balance::text AS stored_balance,
+             gl_total_dr::text    AS gl_total_dr,
+             gl_total_cr::text    AS gl_total_cr,
+             gl_net::text         AS gl_net,
+             drift_amount::text   AS drift_amount
+        FROM v_cashbox_gl_drift
+       ORDER BY cashbox_name
+    `);
+  }
+
   async shiftVariances() {
     const [row] = await this.ds.query(`
       SELECT

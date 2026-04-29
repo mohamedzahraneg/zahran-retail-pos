@@ -516,3 +516,117 @@ describe('PaymentsService — PR-FIN-PAYACCT-4A admin API', () => {
     });
   });
 });
+
+/* ============================================================================
+ * PR-FIN-PAYACCT-4B — listBalances() + cheque method support
+ * ----------------------------------------------------------------------------
+ * Pins:
+ *   • listBalances composes payment_accounts × v_payment_account_balance
+ *     and returns one row per account (active OR inactive — inactive
+ *     rows fall through the LEFT JOIN to 0/0/0/null).
+ *   • cheque method 'check' is accepted by validateCashboxKindMatch
+ *     when paired with a cashbox of kind='check'.
+ * ========================================================================== */
+describe('PaymentsService — PR-FIN-PAYACCT-4B', () => {
+  describe('listBalances', () => {
+    it('emits a SQL that LEFT JOINs v_payment_account_balance and orders by method/sort_order/display_name', async () => {
+      const { service, dsCalls } = await makeService({
+        dsResults: [[]], // empty result OK; we are asserting the SQL
+      });
+
+      await service.listBalances({});
+      expect(dsCalls).toHaveLength(1);
+      const sql = dsCalls[0].sql;
+      expect(sql).toMatch(/FROM payment_accounts pa/);
+      expect(sql).toMatch(/LEFT JOIN v_payment_account_balance b/);
+      expect(sql).toMatch(/LEFT JOIN chart_of_accounts coa/);
+      expect(sql).toMatch(/ORDER BY pa\.method, pa\.sort_order, pa\.display_name/);
+      // No filter clauses when filter is empty.
+      expect(sql).not.toMatch(/WHERE/);
+    });
+
+    it('applies method + active filters when supplied', async () => {
+      const { service, dsCalls } = await makeService({ dsResults: [[]] });
+      await service.listBalances({ method: 'instapay', active: 'true' });
+      const call = dsCalls[0];
+      expect(call.sql).toMatch(/WHERE pa\.method = \$1::payment_method_code/);
+      expect(call.sql).toMatch(/AND pa\.active = \$2/);
+      expect(call.params).toEqual(['instapay', true]);
+    });
+
+    it('returns the row shape the FE expects (payment_account_id, net_debit, je_count, last_movement, …)', async () => {
+      const fake = [
+        {
+          payment_account_id: 'pa-1',
+          method: 'instapay',
+          provider_key: 'instapay',
+          display_name: 'InstaPay',
+          identifier: '0100…',
+          gl_account_code: '1114',
+          cashbox_id: null,
+          is_default: true,
+          active: true,
+          sort_order: 0,
+          metadata: {},
+          gl_name_ar: 'المحافظ الإلكترونية',
+          normal_balance: 'debit',
+          total_in: '1700.00',
+          total_out: '0.00',
+          net_debit: '1700.00',
+          je_count: 6,
+          last_movement: '2026-04-29',
+        },
+      ];
+      const { service } = await makeService({ dsResults: [fake] });
+      const out = await service.listBalances();
+      expect(out).toHaveLength(1);
+      expect(out[0].payment_account_id).toBe('pa-1');
+      expect(out[0].net_debit).toBe('1700.00');
+      expect(out[0].je_count).toBe(6);
+      expect(out[0].last_movement).toBe('2026-04-29');
+    });
+  });
+
+  describe('cheque method support', () => {
+    it('accepts cashbox_id when method=check + cashbox.kind=check', async () => {
+      const { service, emCalls } = await makeService({
+        emResults: [
+          [{ id: 'cb-check-1', kind: 'check' }], // validator SELECT
+          [{ id: 'pa-check' }],                   // INSERT RETURNING id
+          [{ id: 'pa-check', method: 'check' }],  // SELECT for getById
+        ],
+      });
+
+      await service.create(
+        {
+          method: 'check',
+          display_name: 'دفتر شيكات NBE',
+          gl_account_code: '1115',
+          cashbox_id: 'cb-check-1',
+        } as any,
+        'user-1',
+      );
+
+      const insert = emCalls.find((c) => /INSERT INTO payment_accounts/.test(c.sql))!;
+      expect(insert.params).toContain('cb-check-1');
+    });
+
+    it('rejects mismatched kind (check method paired with non-check cashbox)', async () => {
+      const { service } = await makeService({
+        emResults: [[{ id: 'cb-bank-1', kind: 'bank' }]], // validator SELECT
+      });
+
+      await expect(
+        service.create(
+          {
+            method: 'check',
+            display_name: 'دفتر شيكات',
+            gl_account_code: '1115',
+            cashbox_id: 'cb-bank-1', // mismatched kind
+          } as any,
+          'user-1',
+        ),
+      ).rejects.toThrow(/غير متوافقة|check/);
+    });
+  });
+});

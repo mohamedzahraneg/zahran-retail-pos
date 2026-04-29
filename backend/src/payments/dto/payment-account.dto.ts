@@ -20,6 +20,7 @@ const PAYMENT_METHODS = [
   'orange_cash',
   'wallet',         // PR-PAY-3.1
   'bank_transfer',
+  'check',          // PR-FIN-PAYACCT-4B — cheque accounts in admin UI
   'credit',
   'other',
 ] as const;

@@ -39,6 +39,7 @@ import {
   Activity,
   Users2,
   Settings,
+  CreditCard,
   UserCog,
   LogOut,
   ChevronsRight,
@@ -217,6 +218,10 @@ const groups: NavGroup[] = [
       // workspace and pick a section from inside it.
       { to: '/team', label: 'إدارة فريق العمل', icon: Users2, roles: ['admin', 'manager', 'accountant'], permission: 'employee.team.view' },
       { to: '/settings', label: 'الإعدادات', icon: Settings, roles: ['admin'], permission: 'settings.view' },
+      // PR-FIN-PAYACCT-4B — Payment accounts admin page split out of
+      // the Settings tab. Sits under "الإدارة" right after settings so
+      // admins still find it where they expect.
+      { to: '/payment-accounts', label: 'حسابات الدفع', icon: CreditCard, roles: ['admin', 'manager', 'accountant'], permission: 'payment-accounts.read' },
       { to: '/import', label: 'استيراد Excel', icon: FileUp, roles: ['admin', 'manager'], permission: 'import.run' },
       { to: '/notifications', label: 'الإشعارات (واتساب)', icon: MessageCircle, roles: ['admin', 'manager'], permission: 'notifications.manage' },
       { to: '/audit-log', label: 'سجل التدقيق', icon: History, roles: ['admin', 'manager'], permission: 'audit.view' },

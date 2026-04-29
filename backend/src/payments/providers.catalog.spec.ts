@@ -31,6 +31,7 @@ describe('PR-PAY-1 payment method routing contract', () => {
     'orange_cash',
     'wallet',         // PR-PAY-3.1
     'bank_transfer',
+    'check',          // PR-FIN-PAYACCT-4B: cheque/check accounts
     'credit',
     'other',
   ];

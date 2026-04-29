@@ -53,6 +53,7 @@ const METHOD_LABELS: Record<PaymentMethod, string> = {
   orange_cash: 'أورانج كاش',
   wallet: 'محفظة',
   bank_transfer: 'تحويل بنكي',
+  check: 'شيك',
 };
 
 const METHOD_ICONS: Record<PaymentMethod, any> = {
@@ -65,6 +66,7 @@ const METHOD_ICONS: Record<PaymentMethod, any> = {
   orange_cash: Smartphone,
   wallet: Smartphone,
   bank_transfer: Building2,
+  check: Building2,
 };
 
 /**

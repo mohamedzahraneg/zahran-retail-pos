@@ -1,0 +1,380 @@
+/**
+ * PaymentAccountModal.test.tsx — PR-FIN-PAYACCT-4B
+ *
+ * Pins the create / edit modal behavior:
+ *
+ *   ✓ method dropdown lists 10 admin-relevant methods including 'check'
+ *   ✓ method dropdown is disabled in edit mode
+ *   ✓ the identifier label changes per method (IBAN / Terminal ID /
+ *     رقم الهاتف / رقم دفتر الشيكات / …)
+ *   ✓ the cashbox dropdown is filtered by the kind the method maps to
+ *     (cash → 'cash', bank_transfer → 'bank', wallet → 'ewallet',
+ *     check → 'check')
+ *   ✓ create submit POSTs the right payload
+ *   ✓ edit submit PATCHes the right payload
+ *   ✓ Arabic validation: missing display_name shows toast and does
+ *     NOT call the API
+ *
+ * Locks the regression: anyone trimming the cheque flow or the
+ * cashbox-kind filter fails CI.
+ */
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { PaymentAccountModal } from '../PaymentAccountModal';
+import type {
+  PaymentAccount,
+  PaymentProvider,
+} from '@/api/payments.api';
+import type { Cashbox } from '@/api/cash-desk.api';
+
+const createAccountMock = vi.fn(async (_body: any) => ({}));
+const updateAccountMock = vi.fn(async (_id: string, _body: any) => ({}));
+
+vi.mock('@/api/payments.api', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return {
+    ...actual,
+    paymentsApi: {
+      createAccount: (body: any) => createAccountMock(body),
+      updateAccount: (id: string, body: any) => updateAccountMock(id, body),
+    },
+  };
+});
+
+vi.mock('react-hot-toast', () => {
+  const fn = vi.fn();
+  return {
+    default: Object.assign(fn, { error: vi.fn(), success: vi.fn() }),
+  };
+});
+
+// We import the mocked toast to inspect calls (vi.mock is hoisted).
+import toast from 'react-hot-toast';
+import type React from 'react';
+
+const PROVIDERS: PaymentProvider[] = [
+  {
+    provider_key: 'instapay',
+    method: 'instapay',
+    name_ar: 'إنستا باي',
+    name_en: 'InstaPay',
+    icon_name: 'smartphone',
+    logo_key: 'instapay',
+    default_gl_account_code: '1114',
+    group: 'instapay',
+    requires_reference: true,
+  },
+  {
+    provider_key: 'cib',
+    method: 'bank_transfer',
+    name_ar: 'CIB',
+    name_en: 'CIB',
+    icon_name: 'building',
+    logo_key: 'cib',
+    default_gl_account_code: '1113',
+    group: 'bank',
+    requires_reference: true,
+  },
+  {
+    provider_key: 'check_other',
+    method: 'check',
+    name_ar: 'شيكات',
+    name_en: 'Cheques',
+    icon_name: 'file-check',
+    logo_key: 'check_other',
+    default_gl_account_code: '1115',
+    group: 'bank',
+    requires_reference: true,
+  },
+];
+
+const CASHBOXES: Cashbox[] = [
+  {
+    id: 'cb-cash',
+    name: 'الخزينة الرئيسية',
+    name_ar: 'الخزينة الرئيسية',
+    warehouse_id: null,
+    currency: 'EGP',
+    current_balance: '5000',
+    is_active: true,
+    kind: 'cash',
+    institution_code: null,
+    institution_name: null,
+    institution_name_en: null,
+    institution_domain: null,
+    institution_color: null,
+    institution_kind: null,
+    bank_branch: null,
+    account_number: null,
+    iban: null,
+    swift_code: null,
+    account_holder_name: null,
+    account_manager_name: null,
+    account_manager_phone: null,
+    account_manager_email: null,
+    wallet_phone: null,
+    wallet_owner_name: null,
+    check_issuer_name: null,
+    color: null,
+  },
+  {
+    id: 'cb-bank',
+    name: 'بنك CIB',
+    name_ar: 'بنك CIB',
+    warehouse_id: null,
+    currency: 'EGP',
+    current_balance: '0',
+    is_active: true,
+    kind: 'bank',
+    institution_code: 'cib',
+    institution_name: 'CIB',
+    institution_name_en: 'CIB',
+    institution_domain: null,
+    institution_color: null,
+    institution_kind: 'bank',
+    bank_branch: null,
+    account_number: null,
+    iban: null,
+    swift_code: null,
+    account_holder_name: null,
+    account_manager_name: null,
+    account_manager_phone: null,
+    account_manager_email: null,
+    wallet_phone: null,
+    wallet_owner_name: null,
+    check_issuer_name: null,
+    color: null,
+  },
+  {
+    id: 'cb-ewallet',
+    name: 'محفظة WE',
+    name_ar: 'محفظة WE',
+    warehouse_id: null,
+    currency: 'EGP',
+    current_balance: '0',
+    is_active: true,
+    kind: 'ewallet',
+    institution_code: null,
+    institution_name: null,
+    institution_name_en: null,
+    institution_domain: null,
+    institution_color: null,
+    institution_kind: null,
+    bank_branch: null,
+    account_number: null,
+    iban: null,
+    swift_code: null,
+    account_holder_name: null,
+    account_manager_name: null,
+    account_manager_phone: null,
+    account_manager_email: null,
+    wallet_phone: null,
+    wallet_owner_name: null,
+    check_issuer_name: null,
+    color: null,
+  },
+  {
+    id: 'cb-check',
+    name: 'دفتر الشيكات',
+    name_ar: 'دفتر الشيكات',
+    warehouse_id: null,
+    currency: 'EGP',
+    current_balance: '0',
+    is_active: true,
+    kind: 'check',
+    institution_code: null,
+    institution_name: null,
+    institution_name_en: null,
+    institution_domain: null,
+    institution_color: null,
+    institution_kind: null,
+    bank_branch: null,
+    account_number: null,
+    iban: null,
+    swift_code: null,
+    account_holder_name: null,
+    account_manager_name: null,
+    account_manager_phone: null,
+    account_manager_email: null,
+    wallet_phone: null,
+    wallet_owner_name: null,
+    check_issuer_name: null,
+    color: null,
+  },
+];
+
+function renderModal(props: Partial<React.ComponentProps<typeof PaymentAccountModal>> = {}) {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(
+    <QueryClientProvider client={qc}>
+      <PaymentAccountModal
+        mode="create"
+        providers={PROVIDERS}
+        cashboxes={CASHBOXES}
+        onClose={vi.fn()}
+        {...props}
+      />
+    </QueryClientProvider>,
+  );
+}
+
+beforeEach(() => {
+  createAccountMock.mockClear();
+  updateAccountMock.mockClear();
+  vi.mocked(toast.error).mockClear();
+  vi.mocked(toast.success).mockClear();
+});
+
+describe('<PaymentAccountModal /> — PR-FIN-PAYACCT-4B', () => {
+  it('renders the method dropdown with 10 admin methods including check', () => {
+    renderModal();
+    const sel = screen.getByTestId('payment-account-modal-method') as HTMLSelectElement;
+    expect(sel.options.length).toBe(10);
+    const values = Array.from(sel.options).map((o) => o.value);
+    expect(values).toContain('cash');
+    expect(values).toContain('check');
+    expect(values).toContain('instapay');
+    expect(values).toContain('wallet');
+    expect(values).toContain('bank_transfer');
+    expect(values).toContain('card_visa');
+    expect(values).not.toContain('credit');
+    expect(values).not.toContain('other');
+  });
+
+  it('disables the method dropdown in edit mode', () => {
+    const account: PaymentAccount = {
+      id: 'acct-edit',
+      method: 'instapay',
+      provider_key: 'instapay',
+      display_name: 'InstaPay Existing',
+      identifier: '01000000000',
+      gl_account_code: '1114',
+      cashbox_id: null,
+      is_default: true,
+      active: true,
+      sort_order: 1,
+      metadata: {},
+      created_at: '',
+      updated_at: '',
+      created_by: null,
+      updated_by: null,
+    };
+    renderModal({ mode: 'edit', account });
+    const sel = screen.getByTestId('payment-account-modal-method') as HTMLSelectElement;
+    expect(sel.disabled).toBe(true);
+  });
+
+  it('changes the identifier label per method', () => {
+    renderModal({ prefilledMethod: 'instapay' });
+    expect(
+      screen.getByText(/رقم الهاتف \/ Handle/),
+    ).toBeInTheDocument();
+
+    fireEvent.change(screen.getByTestId('payment-account-modal-method'), {
+      target: { value: 'bank_transfer' },
+    });
+    expect(screen.getByText(/IBAN \/ رقم الحساب/)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByTestId('payment-account-modal-method'), {
+      target: { value: 'card_visa' },
+    });
+    expect(screen.getByText(/Terminal ID/)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByTestId('payment-account-modal-method'), {
+      target: { value: 'check' },
+    });
+    expect(
+      screen.getByText(/رقم دفتر الشيكات \/ البنك/),
+    ).toBeInTheDocument();
+  });
+
+  it('filters the cashbox dropdown by the method group', () => {
+    renderModal({ prefilledMethod: 'bank_transfer' });
+    const sel = screen.getByTestId('payment-account-modal-cashbox') as HTMLSelectElement;
+    const values = Array.from(sel.options).map((o) => o.value);
+    // Only the empty option + the one bank cashbox should be present.
+    expect(values).toEqual(['', 'cb-bank']);
+
+    fireEvent.change(screen.getByTestId('payment-account-modal-method'), {
+      target: { value: 'check' },
+    });
+    const sel2 = screen.getByTestId('payment-account-modal-cashbox') as HTMLSelectElement;
+    const values2 = Array.from(sel2.options).map((o) => o.value);
+    expect(values2).toEqual(['', 'cb-check']);
+
+    fireEvent.change(screen.getByTestId('payment-account-modal-method'), {
+      target: { value: 'wallet' },
+    });
+    const sel3 = screen.getByTestId('payment-account-modal-cashbox') as HTMLSelectElement;
+    const values3 = Array.from(sel3.options).map((o) => o.value);
+    expect(values3).toEqual(['', 'cb-ewallet']);
+  });
+
+  it('blocks save when display_name is empty (Arabic toast, no API call)', () => {
+    renderModal({ prefilledMethod: 'wallet' });
+    fireEvent.click(screen.getByTestId('payment-account-modal-submit'));
+    expect(toast.error).toHaveBeenCalledWith(expect.stringContaining('اسم الحساب'));
+    expect(createAccountMock).not.toHaveBeenCalled();
+  });
+
+  it('POSTs the right payload on create submit', async () => {
+    renderModal({ prefilledMethod: 'check' });
+    fireEvent.change(screen.getByTestId('payment-account-modal-display-name'), {
+      target: { value: 'دفتر شيكات NBE' },
+    });
+    fireEvent.change(screen.getByTestId('payment-account-modal-identifier'), {
+      target: { value: 'NBE-123' },
+    });
+    fireEvent.change(screen.getByTestId('payment-account-modal-cashbox'), {
+      target: { value: 'cb-check' },
+    });
+    fireEvent.click(screen.getByTestId('payment-account-modal-submit'));
+
+    await waitFor(() => {
+      expect(createAccountMock).toHaveBeenCalledTimes(1);
+    });
+    const body = createAccountMock.mock.calls[0][0];
+    expect(body.method).toBe('check');
+    expect(body.display_name).toBe('دفتر شيكات NBE');
+    expect(body.identifier).toBe('NBE-123');
+    expect(body.gl_account_code).toBe('1115');
+    expect(body.active).toBe(true);
+  });
+
+  it('PATCHes the right payload on edit submit (method is locked)', async () => {
+    const account: PaymentAccount = {
+      id: 'acct-edit',
+      method: 'instapay',
+      provider_key: 'instapay',
+      display_name: 'InstaPay Old',
+      identifier: '01000000000',
+      gl_account_code: '1114',
+      cashbox_id: null,
+      is_default: true,
+      active: true,
+      sort_order: 1,
+      metadata: {},
+      created_at: '',
+      updated_at: '',
+      created_by: null,
+      updated_by: null,
+    };
+    renderModal({ mode: 'edit', account });
+
+    fireEvent.change(screen.getByTestId('payment-account-modal-display-name'), {
+      target: { value: 'InstaPay New' },
+    });
+    fireEvent.click(screen.getByTestId('payment-account-modal-submit'));
+
+    await waitFor(() => {
+      expect(updateAccountMock).toHaveBeenCalledTimes(1);
+    });
+    const [id, body] = updateAccountMock.mock.calls[0];
+    expect(id).toBe('acct-edit');
+    expect(body.display_name).toBe('InstaPay New');
+    // method is intentionally NOT in the PATCH payload — it cannot change.
+    expect(body.method).toBeUndefined();
+    expect(createAccountMock).not.toHaveBeenCalled();
+  });
+});

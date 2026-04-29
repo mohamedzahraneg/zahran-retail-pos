@@ -1686,4 +1686,44 @@ describe('CashDeskService — PR-FIN-PAYACCT-4C payment_account_id + snapshot', 
   });
 });
 
+/* ============================================================================
+ * PR-FIN-PAYACCT-4B — getGlDrift exposes v_cashbox_gl_drift
+ * ========================================================================== */
+describe('CashDeskService.getGlDrift — PR-FIN-PAYACCT-4B', () => {
+  it('SELECTs from v_cashbox_gl_drift and returns string-cast numerics', async () => {
+    const calls: Array<{ sql: string; params: any[] }> = [];
+    const dsObj: any = {
+      query: async (sql: string, params: any[] = []) => {
+        calls.push({ sql, params });
+        return [
+          {
+            cashbox_id: '524646d5-…',
+            cashbox_name: 'الخزينة الرئيسية',
+            kind: 'cash',
+            is_active: true,
+            stored_balance: '23905.00',
+            gl_total_dr: '28098.00',
+            gl_total_cr: '3743.00',
+            gl_net: '24355.00',
+            drift_amount: '-450.00',
+          },
+        ];
+      },
+      transaction: async (cb: any) => cb({ query: dsObj.query }),
+    };
+    const moduleRef = await Test.createTestingModule({
+      providers: [CashDeskService, { provide: DataSource, useValue: dsObj }],
+    }).compile();
+    const service = moduleRef.get(CashDeskService);
+
+    const out = await service.getGlDrift();
+    expect(out).toHaveLength(1);
+    expect(out[0].cashbox_name).toBe('الخزينة الرئيسية');
+    expect(out[0].drift_amount).toBe('-450.00');
+    // Sanity: SELECT hits the view name expected by mig 121.
+    expect(calls[0].sql).toMatch(/FROM v_cashbox_gl_drift/);
+    expect(calls[0].sql).toMatch(/ORDER BY cashbox_name/);
+  });
+});
+
 

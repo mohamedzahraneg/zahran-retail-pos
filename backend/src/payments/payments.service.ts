@@ -38,6 +38,8 @@ const METHOD_TO_CASHBOX_KIND: Record<string, string> = {
   wallet: 'ewallet',
   vodafone_cash: 'ewallet',
   orange_cash: 'ewallet',
+  // PR-FIN-PAYACCT-4B — cheque accounts route to cashboxes.kind='check'.
+  check: 'check',
   // 'credit' and 'other' don't map to a physical cashbox — caller must
   // not pass cashbox_id with them. The validator throws.
 };
@@ -107,6 +109,60 @@ export class PaymentsService {
         FROM payment_accounts
        ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
        ORDER BY method, sort_order, display_name
+    `;
+    return this.ds.query(sql, args);
+  }
+
+  /**
+   * PR-FIN-PAYACCT-4B — list each payment_account with its running
+   * balance from `v_payment_account_balance` (mig 121 of PR-4A). Used
+   * by the new admin page's KPI cards + per-row balance column +
+   * bottom summary chart. Read-only.
+   *
+   * Returns one row per ACTIVE payment_account by default. Pass
+   * `?active=false` to include deactivated accounts (the view itself
+   * filters to active=TRUE — for inactive rows we fall through to a
+   * left-join so the FE can still display them with `je_count=0`).
+   */
+  async listBalances(filter: { method?: string; active?: string } = {}) {
+    const where: string[] = [];
+    const args: any[] = [];
+    if (filter.method) {
+      args.push(filter.method);
+      where.push(`pa.method = $${args.length}::payment_method_code`);
+    }
+    if (typeof filter.active !== 'undefined') {
+      args.push(filter.active === 'true' || filter.active === '1');
+      where.push(`pa.active = $${args.length}`);
+    }
+    // Compose by joining payment_accounts → v_payment_account_balance.
+    // The view restricts itself to active rows, so for inactive
+    // accounts we LEFT JOIN and return 0/0/0/null for the balance
+    // columns — gives the FE a single shape regardless of `active`.
+    const sql = `
+      SELECT pa.id::text                        AS payment_account_id,
+             pa.method::text                    AS method,
+             pa.provider_key,
+             pa.display_name,
+             pa.identifier,
+             pa.gl_account_code,
+             pa.cashbox_id::text                AS cashbox_id,
+             pa.is_default,
+             pa.active,
+             pa.sort_order,
+             pa.metadata,
+             coa.name_ar                        AS gl_name_ar,
+             coa.normal_balance,
+             COALESCE(b.total_in, 0)::numeric   AS total_in,
+             COALESCE(b.total_out, 0)::numeric  AS total_out,
+             COALESCE(b.net_debit, 0)::numeric  AS net_debit,
+             COALESCE(b.je_count, 0)::int       AS je_count,
+             b.last_movement
+        FROM payment_accounts pa
+        LEFT JOIN chart_of_accounts coa ON coa.code = pa.gl_account_code
+        LEFT JOIN v_payment_account_balance b ON b.payment_account_id = pa.id
+       ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+       ORDER BY pa.method, pa.sort_order, pa.display_name
     `;
     return this.ds.query(sql, args);
   }
