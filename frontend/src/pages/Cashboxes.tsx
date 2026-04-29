@@ -167,7 +167,7 @@ const PIN_RECOMMENDED_METHODS = new Set<PaymentMethodCode>([
  * launches the cashbox-create flow from inside the PaymentAccountModal
  * empty-state. Helps avoid empty inputs and conveys intent at a glance.
  */
-function suggestedCashboxName(
+export function suggestedCashboxName(
   method: PaymentMethodCode | null,
   kind: CashboxKind,
 ): string {
@@ -851,9 +851,11 @@ export default function Cashboxes() {
           // matching cashbox-create modal directly when the operator
           // hits "إنشاء خزنة" inside the cashbox-empty-state.
           // PR-FIN-PAYACCT-4D-UX-FIX-4 — also pass a sensible suggested
-          // name based on the originating payment method.
-          onCreateCashbox={(kind) => {
-            setCashboxSuggestedName(suggestedCashboxName(paCreate.method, kind));
+          // name based on the originating payment method. The modal
+          // hands back its CURRENT method (operator may have changed
+          // it after opening) so the suggestion stays in sync.
+          onCreateCashbox={(kind, method) => {
+            setCashboxSuggestedName(suggestedCashboxName(method, kind));
             setPaCreate({ open: false, method: null });
             setShowCreateCashbox(kind);
           }}
@@ -866,8 +868,8 @@ export default function Cashboxes() {
           providers={providers}
           cashboxes={boxes}
           onClose={() => setPaEditing(null)}
-          onCreateCashbox={(kind) => {
-            setCashboxSuggestedName(suggestedCashboxName(paEditing.method, kind));
+          onCreateCashbox={(kind, method) => {
+            setCashboxSuggestedName(suggestedCashboxName(method, kind));
             setPaEditing(null);
             setShowCreateCashbox(kind);
           }}
@@ -1713,8 +1715,14 @@ function CashboxFormModal({
   return (
     <div className="fixed inset-0 bg-slate-900/50 z-50 flex items-center justify-center p-4">
       <div className="bg-white rounded-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
-        <div className="flex items-center justify-between p-5 border-b border-slate-100 sticky top-0 bg-white z-10">
-          <h3 className="font-black text-lg text-slate-800 flex items-center gap-2">
+        <div
+          className="flex items-center justify-between p-5 border-b border-slate-100 sticky top-0 bg-white z-10"
+          data-testid="cashbox-form-modal"
+        >
+          <h3
+            className="font-black text-lg text-slate-800 flex items-center gap-2"
+            data-testid="cashbox-form-title"
+          >
             <Icon size={20} />
             {isEdit ? `تعديل ${editing.name_ar}` : `إضافة ${KIND_LABEL[kind]}`}
           </h3>
@@ -1736,6 +1744,7 @@ function CashboxFormModal({
                 onChange={(e) => setForm({ ...form, name_ar: e.target.value })}
                 placeholder="مثال: الخزينة الرئيسية"
                 autoFocus
+                data-testid="cashbox-form-name"
               />
             </Field>
             <Field label="العملة">

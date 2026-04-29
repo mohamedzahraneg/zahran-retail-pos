@@ -1218,7 +1218,7 @@ function Textarea({
  * The Cashboxes page consumes the query string on mount and pops the
  * params after acting so a reload doesn't re-fire.
  * ──────────────────────────────────────────────────────────────── */
-function PaymentAccountsTab() {
+export function PaymentAccountsTab() {
   return (
     <div className="space-y-4" data-testid="payment-accounts-tab-redirect">
       {/* Primary redirect card */}
