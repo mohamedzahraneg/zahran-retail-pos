@@ -149,6 +149,33 @@ export const paymentsApi = {
     unwrap<PaymentMethodMixRow[]>(
       api.get('/payments/method-mix', { params: { days } }),
     ),
+
+  // PR-FIN-PAYACCT-4D-UX-FIX-2 — read-only feed of operations for the
+  // selected payment_account. Strictly filtered by payment_account_id;
+  // never reads gl_account_code-shared rows.
+  movements: (
+    id: string,
+    filter: {
+      from?: string;
+      to?: string;
+      type?: PaymentAccountMovementType;
+      q?: string;
+      limit?: number;
+      offset?: number;
+    } = {},
+  ) =>
+    unwrap<PaymentAccountMovementsResponse>(
+      api.get(`/payment-accounts/${id}/movements`, {
+        params: {
+          from: filter.from,
+          to: filter.to,
+          type: filter.type,
+          q: filter.q,
+          limit: filter.limit,
+          offset: filter.offset,
+        },
+      }),
+    ),
 };
 
 /**
@@ -182,6 +209,51 @@ export interface PaymentAccountBalance {
   je_count: number;
   /** ISO date YYYY-MM-DD or null when no movements yet. */
   last_movement: string | null;
+}
+
+/**
+ * PR-FIN-PAYACCT-4D-UX-FIX-2 — operation type discriminator on a
+ * payment-account movement row. The Arabic label is computed
+ * server-side (operation_type_ar) so the FE doesn't have to maintain
+ * a parallel mapping.
+ */
+export type PaymentAccountMovementType =
+  | 'invoice_payment'
+  | 'customer_payment'
+  | 'supplier_payment';
+
+export interface PaymentAccountMovementRow {
+  id: string;
+  operation_type: PaymentAccountMovementType;
+  /** "بيع" | "مقبوضة عميل" | "دفع مورد" — server-rendered. */
+  operation_type_ar: string;
+  reference_id: string | null;
+  reference_no: string | null;
+  payment_account_id: string;
+  payment_method: PaymentMethodCode;
+  /** pg numeric → string. */
+  amount_in: string;
+  amount_out: string;
+  net_amount: string;
+  counterparty_id: string | null;
+  counterparty_name: string | null;
+  user_id: string | null;
+  user_name: string | null;
+  journal_entry_id: string | null;
+  journal_entry_no: string | null;
+  occurred_at: string;
+  notes: string | null;
+}
+
+export interface PaymentAccountMovementsResponse {
+  rows: PaymentAccountMovementRow[];
+  total: number;
+  totals: {
+    in: string;
+    out: string;
+    net: string;
+    count: number;
+  };
 }
 
 /**

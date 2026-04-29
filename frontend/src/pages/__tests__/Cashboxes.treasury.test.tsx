@@ -477,4 +477,98 @@ describe('<Cashboxes /> — PR-FIN-PAYACCT-4D-UX-FIX table-first layout', () => 
     fireEvent.click(screen.getByTestId('filter-clear'));
     expect((screen.getByTestId('filter-search') as HTMLInputElement).value).toBe('');
   });
+
+  // ─── PR-FIN-PAYACCT-4D-UX-FIX-2: per-account balance semantics ──────
+  it('PR-4D-UX-FIX-2: each row renders ITS OWN account-specific balance from the API (no shared bucket duplication)', async () => {
+    // 3 accounts share GL=1114 with cashbox_id=null in production. The
+    // bug surfaced 1690 EGP on each row. After the SQL fix, each row
+    // shows its own account-specific aggregate. Use distinct fixtures
+    // per row to prove the FE renders per-row data, not a shared value.
+    balancesMock.mockResolvedValue([
+      makeBalance({
+        payment_account_id: 'acct-instapay', method: 'instapay',
+        display_name: 'InstaPay الرئيسي', gl_account_code: '1114', cashbox_id: null,
+        is_default: true, je_count: 3, net_debit: '365.00',
+      }),
+      makeBalance({
+        payment_account_id: 'acct-wepay', method: 'wallet',
+        display_name: 'WE Pay', gl_account_code: '1114', cashbox_id: null,
+        is_default: true, je_count: 3, net_debit: '305.00',
+      }),
+      makeBalance({
+        payment_account_id: 'acct-vodafone', method: 'vodafone_cash',
+        display_name: 'Vodafone Cash تجريبي', gl_account_code: '1114', cashbox_id: null,
+        // Inactive + zero rows — must render 0 / 0 / null, NOT a bucket total.
+        active: false, is_default: false, je_count: 0, net_debit: '0.00',
+        last_movement: null,
+      }),
+    ]);
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByTestId('payment-account-row-acct-instapay')).toBeInTheDocument(),
+    );
+
+    const ipRow   = screen.getByTestId('payment-account-row-acct-instapay');
+    const wpRow   = screen.getByTestId('payment-account-row-acct-wepay');
+    const vdRow   = screen.getByTestId('payment-account-row-acct-vodafone');
+
+    // Each row carries DIFFERENT balance values — no bucket duplication.
+    expect(ipRow.textContent).toMatch(/365\.00/);
+    expect(wpRow.textContent).toMatch(/305\.00/);
+    expect(vdRow.textContent).toMatch(/0\.00/);
+    // Vodafone (inactive, zero rows) has the new "لا توجد حركات" warning chip.
+    expect(within(vdRow).getByText('لا توجد حركات')).toBeInTheDocument();
+  });
+
+  // ─── DetailsPanel interaction ──────────────────────────────────
+  it('PR-4D-UX-FIX-2: clicking a row opens the centered details modal', async () => {
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByTestId('payment-account-row-acct-instapay')).toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId('payment-account-details-modal')).toBeNull();
+    fireEvent.click(screen.getByTestId('payment-account-row-acct-instapay'));
+    await waitFor(() =>
+      expect(screen.getByTestId('payment-account-details-modal')).toBeInTheDocument(),
+    );
+  });
+
+  it('PR-4D-UX-FIX-2: "عرض التفاصيل" action opens the same details modal', async () => {
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByTestId('payment-account-row-acct-instapay')).toBeInTheDocument(),
+    );
+    const row = screen.getByTestId('payment-account-row-acct-instapay');
+    const viewBtn = within(row).getByTestId('row-action-view-details');
+    fireEvent.click(viewBtn);
+    await waitFor(() =>
+      expect(screen.getByTestId('payment-account-details-modal')).toBeInTheDocument(),
+    );
+  });
+
+  it('PR-4D-UX-FIX-2: "عرض التفاصيل" is visible to read-only users (no manage perm required)', async () => {
+    setUserPermissions(['payment-accounts.read']); // no .manage
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByTestId('payment-account-row-acct-instapay')).toBeInTheDocument(),
+    );
+    // Mutation actions are hidden, but view-details remains visible.
+    const row = screen.getByTestId('payment-account-row-acct-instapay');
+    expect(within(row).getByTestId('row-action-view-details')).toBeInTheDocument();
+    expect(within(row).queryByTestId('row-action-edit')).toBeNull();
+    expect(within(row).queryByTestId('row-action-delete')).toBeNull();
+  });
+
+  // ─── Bottom card relabel ───────────────────────────────────────
+  it('PR-4D-UX-FIX-2: bottom balance card includes explicit GL-bucket labels', async () => {
+    renderPage();
+    // Wait for the balances query to resolve so the GL-bucket section renders.
+    await waitFor(() =>
+      expect(screen.getByTestId('summary-gl-buckets')).toBeInTheDocument(),
+    );
+    const buckets = screen.getByTestId('summary-gl-buckets');
+    // The fixture has rows on GL 1114 (instapay+wallet) and 1113 (POS+bank).
+    expect(within(buckets).getByText(/إجمالي المحافظ الإلكترونية 1114/)).toBeInTheDocument();
+    expect(within(buckets).getByText(/إجمالي البنوك 1113/)).toBeInTheDocument();
+  });
 });

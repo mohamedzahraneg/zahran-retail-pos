@@ -85,6 +85,46 @@ export class PaymentsController {
     return this.service.getById(id);
   }
 
+  /**
+   * PR-FIN-PAYACCT-4D-UX-FIX-2 — read-only feed of operations for the
+   * specified payment account. Strictly filtered by payment_account_id
+   * (never by gl_account_code), so accounts that share a GL bucket
+   * don't see each other's rows. Source is the union of
+   * `invoice_payments`, `customer_payments`, and `supplier_payments`
+   * tagged with this account, joined to `journal_entries` for the
+   * linked posting reference.
+   *
+   * Query params:
+   *   from, to    — ISO dates (inclusive) on `created_at`
+   *   type        — 'invoice_payment' | 'customer_payment' | 'supplier_payment'
+   *   q           — free-text search over `reference_no` + `counterparty_name`
+   *   limit       — page size (default 20, max 200)
+   *   offset      — page offset (default 0)
+   *
+   * Response: `{ rows, total, totals: { in, out, net, count } }`.
+   */
+  @Get('payment-accounts/:id/movements')
+  listMovements(
+    @Param('id') id: string,
+    @Query('from')   from?: string,
+    @Query('to')     to?: string,
+    @Query('type')   type?: string,
+    @Query('q')      q?: string,
+    @Query('limit')  limit?: string,
+    @Query('offset') offset?: string,
+  ) {
+    const lim = limit  ? Number.parseInt(limit,  10) : undefined;
+    const off = offset ? Number.parseInt(offset, 10) : undefined;
+    return this.service.listMovements(id, {
+      from,
+      to,
+      type,
+      q,
+      limit:  Number.isFinite(lim) ? (lim as number) : undefined,
+      offset: Number.isFinite(off) ? (off as number) : undefined,
+    });
+  }
+
   @Post('payment-accounts')
   @Roles('admin', 'manager')
   create(@Body() dto: CreatePaymentAccountDto, @Req() req: any) {

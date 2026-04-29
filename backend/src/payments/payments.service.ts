@@ -150,6 +150,36 @@ export class PaymentsService {
     return this.ds.query(sql);
   }
 
+  /**
+   * PR-FIN-PAYACCT-4D-UX-FIX-2 — `listBalances` semantics overhaul.
+   *
+   * Previous behavior (PR-4B): joined `v_payment_account_balance`,
+   * which aggregates by `gl_account_code` (and optionally `cashbox_id`).
+   * When N accounts shared the same GL with `cashbox_id IS NULL`, the
+   * view returned the SAME bucket total for all N rows — misleading.
+   *
+   * New behavior: aggregate strictly per `payment_account_id` by
+   * unioning the three account-tagged source tables:
+   *   - invoice_payments  (POS sales)
+   *   - customer_payments (receipts; refunds flip to amount_out)
+   *   - supplier_payments (supplier disbursements)
+   *
+   * Refund handling: customer_payments with `kind='refund'` count as
+   * money OUT of the account (the operator returned cash to the
+   * customer through this account). All other kinds = money IN.
+   *
+   * Void handling: rows with `is_void=true` are excluded from totals
+   * AND from the count. invoice_payments has no void column so all of
+   * its rows count.
+   *
+   * Result: each row's `total_in / total_out / net_debit / je_count /
+   * last_movement` is strictly account-specific. Vodafone Cash with no
+   * tagged rows correctly returns 0/0/0/0/null. The shared-GL bucket
+   * total is still available via `v_payment_account_balance` for
+   * callers that explicitly want it (we left that view intact).
+   *
+   * Read-only: pure SELECT. No DDL. No mutations.
+   */
   async listBalances(filter: { method?: string; active?: string } = {}) {
     const where: string[] = [];
     const args: any[] = [];
@@ -161,10 +191,6 @@ export class PaymentsService {
       args.push(filter.active === 'true' || filter.active === '1');
       where.push(`pa.active = $${args.length}`);
     }
-    // Compose by joining payment_accounts → v_payment_account_balance.
-    // The view restricts itself to active rows, so for inactive
-    // accounts we LEFT JOIN and return 0/0/0/null for the balance
-    // columns — gives the FE a single shape regardless of `active`.
     const sql = `
       SELECT pa.id::text                        AS payment_account_id,
              pa.method::text                    AS method,
@@ -179,18 +205,236 @@ export class PaymentsService {
              pa.metadata,
              coa.name_ar                        AS gl_name_ar,
              coa.normal_balance,
-             COALESCE(b.total_in, 0)::numeric   AS total_in,
-             COALESCE(b.total_out, 0)::numeric  AS total_out,
-             COALESCE(b.net_debit, 0)::numeric  AS net_debit,
-             COALESCE(b.je_count, 0)::int       AS je_count,
-             b.last_movement
+             COALESCE(agg.total_in, 0)::numeric  AS total_in,
+             COALESCE(agg.total_out, 0)::numeric AS total_out,
+             (COALESCE(agg.total_in, 0) - COALESCE(agg.total_out, 0))::numeric AS net_debit,
+             COALESCE(agg.movement_count, 0)::int AS je_count,
+             agg.last_movement::date            AS last_movement
         FROM payment_accounts pa
         LEFT JOIN chart_of_accounts coa ON coa.code = pa.gl_account_code
-        LEFT JOIN v_payment_account_balance b ON b.payment_account_id = pa.id
+        LEFT JOIN LATERAL (
+          SELECT
+            SUM(amount_in)   AS total_in,
+            SUM(amount_out)  AS total_out,
+            COUNT(*)         AS movement_count,
+            MAX(occurred_at) AS last_movement
+          FROM (
+            SELECT amount AS amount_in, 0::numeric AS amount_out, created_at AS occurred_at
+              FROM invoice_payments
+             WHERE payment_account_id = pa.id
+            UNION ALL
+            SELECT CASE WHEN kind = 'refund' THEN 0::numeric ELSE amount END,
+                   CASE WHEN kind = 'refund' THEN amount      ELSE 0::numeric END,
+                   created_at
+              FROM customer_payments
+             WHERE payment_account_id = pa.id
+               AND COALESCE(is_void, FALSE) = FALSE
+            UNION ALL
+            SELECT 0::numeric, amount, created_at
+              FROM supplier_payments
+             WHERE payment_account_id = pa.id
+               AND COALESCE(is_void, FALSE) = FALSE
+          ) m
+        ) agg ON TRUE
        ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
        ORDER BY pa.method, pa.sort_order, pa.display_name
     `;
     return this.ds.query(sql, args);
+  }
+
+  /**
+   * PR-FIN-PAYACCT-4D-UX-FIX-2 — read-only feed of account-specific
+   * operations for the DetailsPanel modal. Strictly filters by
+   * `payment_account_id = :id`; never by `gl_account_code` alone (that
+   * was the bug we're fixing). Reads from the three account-tagged
+   * source tables, joins to `journal_entries` via reference_type +
+   * reference_id, and to `customers` / `suppliers` / `users` /
+   * `invoices` for human-readable labels.
+   *
+   * Filters:
+   *   - from / to: ISO date range on `created_at`
+   *   - type: 'invoice_payment' | 'customer_payment' | 'supplier_payment'
+   *   - q: free-text over reference_no + counterparty_name
+   *   - limit / offset: pagination (default limit 20, max 200)
+   *
+   * Returns: { rows, total, totals: { in, out, net, count } }
+   *
+   * SELECT-only. No mutations. No DDL.
+   */
+  async listMovements(
+    paymentAccountId: string,
+    filter: {
+      from?: string;
+      to?: string;
+      type?: string;
+      q?: string;
+      limit?: number;
+      offset?: number;
+    } = {},
+  ) {
+    const limit = Math.min(Math.max(filter.limit ?? 20, 1), 200);
+    const offset = Math.max(filter.offset ?? 0, 0);
+    const args: any[] = [paymentAccountId];
+    const whereExtra: string[] = [];
+
+    if (filter.from) {
+      args.push(filter.from);
+      whereExtra.push(`m.occurred_at::date >= $${args.length}::date`);
+    }
+    if (filter.to) {
+      args.push(filter.to);
+      whereExtra.push(`m.occurred_at::date <= $${args.length}::date`);
+    }
+    if (filter.type) {
+      args.push(filter.type);
+      whereExtra.push(`m.operation_type = $${args.length}`);
+    }
+    if (filter.q && filter.q.trim()) {
+      args.push(`%${filter.q.trim().toLowerCase()}%`);
+      whereExtra.push(
+        `(LOWER(COALESCE(m.reference_no, '')) LIKE $${args.length}
+          OR LOWER(COALESCE(m.counterparty_name, '')) LIKE $${args.length})`,
+      );
+    }
+
+    // The CTE union is identical between the totals and the paged-rows
+    // query — define it once and reuse.
+    const baseCte = `
+      WITH ops AS (
+        SELECT
+          ip.id::text                                  AS id,
+          'invoice_payment'::text                      AS operation_type,
+          'بيع'::text                                  AS operation_type_ar,
+          ip.invoice_id::text                          AS reference_id,
+          inv.invoice_no                               AS reference_no,
+          ip.payment_account_id::text                  AS payment_account_id,
+          ip.payment_method::text                      AS payment_method,
+          ip.amount::numeric                           AS amount_in,
+          0::numeric                                   AS amount_out,
+          ip.amount::numeric                           AS net_amount,
+          inv.customer_id::text                        AS counterparty_id,
+          c.full_name                                  AS counterparty_name,
+          ip.received_by::text                         AS user_id,
+          u.username                                   AS user_name,
+          je.id::text                                  AS journal_entry_id,
+          je.entry_no                                  AS journal_entry_no,
+          ip.created_at                                AS occurred_at,
+          ip.notes                                     AS notes
+        FROM invoice_payments ip
+        LEFT JOIN invoices inv         ON inv.id = ip.invoice_id
+        LEFT JOIN customers c          ON c.id = inv.customer_id
+        LEFT JOIN users u              ON u.id = ip.received_by
+        LEFT JOIN journal_entries je
+               ON je.reference_type = 'invoice'
+              AND je.reference_id = ip.invoice_id
+              AND je.is_void = FALSE
+        WHERE ip.payment_account_id = $1::uuid
+
+        UNION ALL
+
+        SELECT
+          cp.id::text,
+          'customer_payment'::text,
+          'مقبوضة عميل'::text,
+          cp.id::text,
+          cp.doc_no,
+          cp.payment_account_id::text,
+          cp.payment_method::text,
+          CASE WHEN cp.kind = 'refund' THEN 0::numeric ELSE cp.amount::numeric END,
+          CASE WHEN cp.kind = 'refund' THEN cp.amount::numeric ELSE 0::numeric END,
+          CASE WHEN cp.kind = 'refund' THEN -cp.amount::numeric ELSE cp.amount::numeric END,
+          cp.customer_id::text,
+          c.full_name,
+          cp.received_by::text,
+          u.username,
+          je.id::text,
+          je.entry_no,
+          cp.created_at,
+          cp.notes
+        FROM customer_payments cp
+        LEFT JOIN customers c          ON c.id = cp.customer_id
+        LEFT JOIN users u              ON u.id = cp.received_by
+        LEFT JOIN journal_entries je
+               ON je.reference_type = 'customer_payment'
+              AND je.reference_id = cp.id
+              AND je.is_void = FALSE
+        WHERE cp.payment_account_id = $1::uuid
+          AND COALESCE(cp.is_void, FALSE) = FALSE
+
+        UNION ALL
+
+        SELECT
+          sp.id::text,
+          'supplier_payment'::text,
+          'دفع مورد'::text,
+          sp.id::text,
+          sp.doc_no,
+          sp.payment_account_id::text,
+          sp.payment_method::text,
+          0::numeric,
+          sp.amount::numeric,
+          (-sp.amount)::numeric,
+          sp.supplier_id::text,
+          s.name_ar,
+          sp.paid_by::text,
+          u.username,
+          je.id::text,
+          je.entry_no,
+          sp.created_at,
+          sp.notes
+        FROM supplier_payments sp
+        LEFT JOIN suppliers s          ON s.id = sp.supplier_id
+        LEFT JOIN users u              ON u.id = sp.paid_by
+        LEFT JOIN journal_entries je
+               ON je.reference_type = 'supplier_payment'
+              AND je.reference_id = sp.id
+              AND je.is_void = FALSE
+        WHERE sp.payment_account_id = $1::uuid
+          AND COALESCE(sp.is_void, FALSE) = FALSE
+      ),
+      filtered AS (
+        SELECT * FROM ops m
+        ${whereExtra.length ? 'WHERE ' + whereExtra.join(' AND ') : ''}
+      )
+    `;
+
+    args.push(limit);
+    const limitParamIdx = args.length;
+    args.push(offset);
+    const offsetParamIdx = args.length;
+
+    const sql = `
+      ${baseCte}
+      SELECT
+        (SELECT COUNT(*) FROM filtered)                                       AS total_count,
+        (SELECT COALESCE(SUM(amount_in),  0)::numeric FROM filtered)          AS sum_in,
+        (SELECT COALESCE(SUM(amount_out), 0)::numeric FROM filtered)          AS sum_out,
+        (SELECT (COALESCE(SUM(amount_in),0) - COALESCE(SUM(amount_out),0))::numeric FROM filtered) AS sum_net,
+        COALESCE(
+          (SELECT json_agg(row_json ORDER BY occurred_at DESC)
+             FROM (
+               SELECT to_jsonb(p) AS row_json, p.occurred_at
+                 FROM (
+                   SELECT * FROM filtered
+                   ORDER BY occurred_at DESC
+                   LIMIT $${limitParamIdx} OFFSET $${offsetParamIdx}
+                 ) p
+             ) j),
+          '[]'::json
+        ) AS rows;
+    `;
+
+    const [agg] = await this.ds.query(sql, args);
+    return {
+      rows: agg?.rows ?? [],
+      total: Number(agg?.total_count ?? 0),
+      totals: {
+        in: agg?.sum_in ?? '0',
+        out: agg?.sum_out ?? '0',
+        net: agg?.sum_net ?? '0',
+        count: Number(agg?.total_count ?? 0),
+      },
+    };
   }
 
   // PR-PAY-2 hotfix — `getById` accepts an optional EntityManager so

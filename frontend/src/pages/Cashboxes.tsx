@@ -96,6 +96,7 @@ import {
 import { PaymentProviderLogo } from '@/components/payments/PaymentProviderLogo';
 import { PaymentAccountModal } from '@/components/payment-accounts/PaymentAccountModal';
 import { PaymentAccountAlerts } from '@/components/payment-accounts/PaymentAccountAlerts';
+import { PaymentAccountDetailsPanel } from '@/components/payment-accounts/PaymentAccountDetailsPanel';
 import { InstitutionLogo } from '@/components/InstitutionLogo';
 import { useAuthStore } from '@/stores/auth.store';
 
@@ -227,6 +228,10 @@ export default function Cashboxes() {
 
   // ── Selected row (visual highlight) ────────────────────────────────
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // PR-FIN-PAYACCT-4D-UX-FIX-2: separate state for the details modal.
+  // selectedId stays as the row-highlight indicator; detailsId controls
+  // whether the centered DetailsPanel is mounted.
+  const [detailsId, setDetailsId] = useState<string | null>(null);
 
   // ── Live data (no mocks, no fallbacks) ─────────────────────────────
   const { data: boxes = [] } = useQuery({
@@ -399,6 +404,13 @@ export default function Cashboxes() {
     }
     if (b.active && noDefaultMethods.includes(b.method)) {
       out.push('لا يوجد افتراضي');
+    }
+    // PR-FIN-PAYACCT-4D-UX-FIX-2 — per-row "no movements" warning when
+    // the account has zero account-specific operations. After the
+    // listBalances SQL fix, je_count is now strictly per-account, so
+    // 0 here means there really are no operations on THIS account.
+    if (Number(b.je_count || 0) === 0) {
+      out.push('لا توجد حركات');
     }
     return out;
   }
@@ -705,7 +717,17 @@ export default function Cashboxes() {
             providers={providers}
             cashboxes={boxes}
             selectedId={selectedId}
-            onSelect={setSelectedId}
+            onSelect={(id) => {
+              // PR-FIN-PAYACCT-4D-UX-FIX-2 — row click both highlights
+              // AND opens the details modal. The two states stay
+              // separate so the highlight survives modal close.
+              setSelectedId(id);
+              setDetailsId(id);
+            }}
+            onOpenDetails={(b) => {
+              setSelectedId(b.payment_account_id);
+              setDetailsId(b.payment_account_id);
+            }}
             canManage={canManageAccounts}
             onEdit={(b) => setPaEditing(b as unknown as PaymentAccount)}
             onSetDefault={(b) => canManageAccounts && setDefaultMutation.mutate(b.payment_account_id)}
@@ -763,6 +785,13 @@ export default function Cashboxes() {
           providers={providers}
           cashboxes={boxes}
           onClose={() => setPaCreate({ open: false, method: null })}
+          // PR-FIN-PAYACCT-4D-UX-FIX-2 — close the modal and open the
+          // matching cashbox-create modal directly when the operator
+          // hits "إنشاء خزنة" inside the cashbox-empty-state.
+          onCreateCashbox={(kind) => {
+            setPaCreate({ open: false, method: null });
+            setShowCreateCashbox(kind);
+          }}
         />
       )}
       {paEditing && canManageAccounts && (
@@ -772,8 +801,49 @@ export default function Cashboxes() {
           providers={providers}
           cashboxes={boxes}
           onClose={() => setPaEditing(null)}
+          onCreateCashbox={(kind) => {
+            setPaEditing(null);
+            setShowCreateCashbox(kind);
+          }}
         />
       )}
+
+      {/* PR-FIN-PAYACCT-4D-UX-FIX-2 — Account details modal */}
+      {detailsId && (() => {
+        const account = balances.find((b) => b.payment_account_id === detailsId);
+        if (!account) {
+          // Detail target not found in the current balances list (e.g.
+          // it was just deleted). Close the modal silently.
+          setDetailsId(null);
+          return null;
+        }
+        const provider = providers.find((p) => p.provider_key === account.provider_key) ?? null;
+        const linkedCb = boxes.find((c) => c.id === account.cashbox_id) ?? null;
+        return (
+          <PaymentAccountDetailsPanel
+            account={account}
+            provider={provider}
+            cashbox={linkedCb}
+            warnings={rowWarnings(account)}
+            canManage={canManageAccounts}
+            onClose={() => setDetailsId(null)}
+            onEdit={() => {
+              setDetailsId(null);
+              setPaEditing(account as unknown as PaymentAccount);
+            }}
+            onSetDefault={() => canManageAccounts && setDefaultMutation.mutate(account.payment_account_id)}
+            onToggleActive={() => canManageAccounts && toggleAccountMutation.mutate(account.payment_account_id)}
+            onDelete={() => {
+              if (!canManageAccounts) return;
+              const ok = window.confirm(`هل أنت متأكد من حذف "${account.display_name}"؟`);
+              if (ok) {
+                deleteAccountMutation.mutate(account.payment_account_id);
+                setDetailsId(null);
+              }
+            }}
+          />
+        );
+      })()}
     </div>
   );
 }
@@ -905,7 +975,7 @@ function OverflowMenu({
 }
 
 function PaymentAccountsTable({
-  rows, providers, cashboxes, selectedId, onSelect, canManage,
+  rows, providers, cashboxes, selectedId, onSelect, onOpenDetails, canManage,
   onEdit, onSetDefault, onToggleActive, onDelete, warningsFor, totalCount,
 }: {
   rows: PaymentAccountBalance[];
@@ -913,6 +983,8 @@ function PaymentAccountsTable({
   cashboxes: Cashbox[];
   selectedId: string | null;
   onSelect: (id: string) => void;
+  /** PR-FIN-PAYACCT-4D-UX-FIX-2 — opens the centered details modal. */
+  onOpenDetails: (b: PaymentAccountBalance) => void;
   canManage: boolean;
   onEdit: (b: PaymentAccountBalance) => void;
   onSetDefault: (b: PaymentAccountBalance) => void;
@@ -1049,14 +1121,28 @@ function PaymentAccountsTable({
                     )}
                   </Td>
                   <Td>
-                    {canManage && (
-                      <div className="flex items-center gap-1 justify-end">
-                        <button onClick={(e) => { e.stopPropagation(); onEdit(b); }}         className="text-[11px] px-2 py-1 rounded bg-slate-100 text-slate-700 hover:bg-slate-200" data-testid="row-action-edit"          title="تعديل"><Edit3 size={12} /></button>
-                        <button onClick={(e) => { e.stopPropagation(); onSetDefault(b); }}   className="text-[11px] px-2 py-1 rounded bg-amber-100 text-amber-700 hover:bg-amber-200" data-testid="row-action-set-default"  title="تعيين افتراضي"><Star size={12} /></button>
-                        <button onClick={(e) => { e.stopPropagation(); onToggleActive(b); }} className="text-[11px] px-2 py-1 rounded bg-sky-100 text-sky-700 hover:bg-sky-200"       data-testid="row-action-toggle-active" title={b.active ? 'تعطيل' : 'تفعيل'}>{b.active ? <PowerOff size={12} /> : <Power size={12} />}</button>
-                        <button onClick={(e) => { e.stopPropagation(); onDelete(b); }}       className="text-[11px] px-2 py-1 rounded bg-rose-100 text-rose-700 hover:bg-rose-200"   data-testid="row-action-delete"        title="حذف"><Trash2 size={12} /></button>
-                      </div>
-                    )}
+                    <div className="flex items-center gap-1 justify-end">
+                      {/* PR-FIN-PAYACCT-4D-UX-FIX-2 — visible "عرض التفاصيل"
+                          action available to all readers (no manage perm).
+                          Opens the same details modal as a row click. */}
+                      <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); onOpenDetails(b); }}
+                        className="text-[11px] px-2 py-1 rounded bg-pink-100 text-pink-700 hover:bg-pink-200 inline-flex items-center gap-1"
+                        data-testid="row-action-view-details"
+                        title="عرض التفاصيل"
+                      >
+                        عرض التفاصيل
+                      </button>
+                      {canManage && (
+                        <>
+                          <button onClick={(e) => { e.stopPropagation(); onEdit(b); }}         className="text-[11px] px-2 py-1 rounded bg-slate-100 text-slate-700 hover:bg-slate-200" data-testid="row-action-edit"          title="تعديل"><Edit3 size={12} /></button>
+                          <button onClick={(e) => { e.stopPropagation(); onSetDefault(b); }}   className="text-[11px] px-2 py-1 rounded bg-amber-100 text-amber-700 hover:bg-amber-200" data-testid="row-action-set-default"  title="تعيين افتراضي"><Star size={12} /></button>
+                          <button onClick={(e) => { e.stopPropagation(); onToggleActive(b); }} className="text-[11px] px-2 py-1 rounded bg-sky-100 text-sky-700 hover:bg-sky-200"       data-testid="row-action-toggle-active" title={b.active ? 'تعطيل' : 'تفعيل'}>{b.active ? <PowerOff size={12} /> : <Power size={12} />}</button>
+                          <button onClick={(e) => { e.stopPropagation(); onDelete(b); }}       className="text-[11px] px-2 py-1 rounded bg-rose-100 text-rose-700 hover:bg-rose-200"   data-testid="row-action-delete"        title="حذف"><Trash2 size={12} /></button>
+                        </>
+                      )}
+                    </div>
                   </Td>
                 </tr>
               );
@@ -1137,14 +1223,44 @@ function BalanceSummary({ balances }: { balances: PaymentAccountBalance[] }) {
   const totalOut = balances.reduce((s, b) => s + Number(b.total_out || 0), 0);
   const total    = balances.reduce((s, b) => s + Number(b.net_debit || 0), 0);
   const jeCount  = balances.reduce((s, b) => s + Number(b.je_count  || 0), 0);
+  // PR-FIN-PAYACCT-4D-UX-FIX-2 — per-GL roll-up of the per-account
+  // balances. Explicit labels make it clear these aggregate per-account
+  // values grouped by GL (NOT the true ledger bucket totals — the
+  // legacy untagged journal lines are not included).
+  const byGl = balances.reduce<Record<string, number>>((acc, b) => {
+    if (!b.gl_account_code) return acc;
+    acc[b.gl_account_code] = (acc[b.gl_account_code] ?? 0) + Number(b.net_debit || 0);
+    return acc;
+  }, {});
   return (
-    <ul className="space-y-1.5 text-sm">
-      <Row label="عدد الحسابات"  value={String(balances.length)} />
-      <Row label="إجمالي الداخل"  value={EGP(totalIn)}  tone="emerald" />
-      <Row label="إجمالي الخارج"  value={EGP(totalOut)} tone="rose" />
-      <Row label="إجمالي الرصيد"  value={EGP(total)} />
-      <Row label="عدد القيود"     value={String(jeCount)} />
-    </ul>
+    <div className="space-y-2 text-sm">
+      <ul className="space-y-1.5">
+        <Row label="عدد الحسابات"  value={String(balances.length)} />
+        <Row label="إجمالي الداخل"  value={EGP(totalIn)}  tone="emerald" />
+        <Row label="إجمالي الخارج"  value={EGP(totalOut)} tone="rose" />
+        <Row label="إجمالي الرصيد"  value={EGP(total)} />
+        <Row label="عدد القيود"     value={String(jeCount)} />
+      </ul>
+      {(byGl['1114'] !== undefined || byGl['1113'] !== undefined || byGl['1115'] !== undefined) && (
+        <>
+          <div className="border-t border-slate-100 my-2" />
+          <div className="text-[11px] text-slate-500 mb-1">
+            إجمالي مجمع لكل حساب أستاذ
+          </div>
+          <ul className="space-y-1.5" data-testid="summary-gl-buckets">
+            {byGl['1114'] !== undefined && (
+              <Row label="إجمالي المحافظ الإلكترونية 1114" value={EGP(byGl['1114'])} />
+            )}
+            {byGl['1113'] !== undefined && (
+              <Row label="إجمالي البنوك 1113" value={EGP(byGl['1113'])} />
+            )}
+            {byGl['1115'] !== undefined && (
+              <Row label="إجمالي الشيكات 1115" value={EGP(byGl['1115'])} />
+            )}
+          </ul>
+        </>
+      )}
+    </div>
   );
 }
 

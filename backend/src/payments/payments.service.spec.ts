@@ -529,20 +529,31 @@ describe('PaymentsService — PR-FIN-PAYACCT-4A admin API', () => {
  * ========================================================================== */
 describe('PaymentsService — PR-FIN-PAYACCT-4B', () => {
   describe('listBalances', () => {
-    it('emits a SQL that LEFT JOINs v_payment_account_balance and orders by method/sort_order/display_name', async () => {
+    it('PR-4D-UX-FIX-2: emits an account-specific aggregation (no longer joins v_payment_account_balance)', async () => {
       const { service, dsCalls } = await makeService({
-        dsResults: [[]], // empty result OK; we are asserting the SQL
+        dsResults: [[]],
       });
 
       await service.listBalances({});
       expect(dsCalls).toHaveLength(1);
       const sql = dsCalls[0].sql;
       expect(sql).toMatch(/FROM payment_accounts pa/);
-      expect(sql).toMatch(/LEFT JOIN v_payment_account_balance b/);
       expect(sql).toMatch(/LEFT JOIN chart_of_accounts coa/);
       expect(sql).toMatch(/ORDER BY pa\.method, pa\.sort_order, pa\.display_name/);
+      // The shared-bucket view is GONE from listBalances — that was the bug.
+      expect(sql).not.toMatch(/v_payment_account_balance/);
+      // The new aggregation reads strictly from account-tagged source tables,
+      // each filtered by `payment_account_id = pa.id`.
+      expect(sql).toMatch(/LEFT JOIN LATERAL/);
+      expect(sql).toMatch(/FROM invoice_payments[\s\S]+WHERE payment_account_id = pa\.id/);
+      expect(sql).toMatch(/FROM customer_payments[\s\S]+WHERE payment_account_id = pa\.id/);
+      expect(sql).toMatch(/FROM supplier_payments[\s\S]+WHERE payment_account_id = pa\.id/);
+      // Refunds flip to amount_out so the per-account balance reflects money OUT.
+      expect(sql).toMatch(/CASE WHEN kind = 'refund' THEN 0::numeric ELSE amount END/);
+      // Voided customer/supplier rows are excluded from aggregates.
+      expect(sql).toMatch(/COALESCE\(is_void, FALSE\) = FALSE/);
       // No filter clauses when filter is empty.
-      expect(sql).not.toMatch(/WHERE/);
+      expect(sql).not.toMatch(/WHERE pa\./);
     });
 
     it('applies method + active filters when supplied', async () => {
@@ -584,6 +595,132 @@ describe('PaymentsService — PR-FIN-PAYACCT-4B', () => {
       expect(out[0].net_debit).toBe('1700.00');
       expect(out[0].je_count).toBe(6);
       expect(out[0].last_movement).toBe('2026-04-29');
+    });
+
+    it('PR-4D-UX-FIX-2: each account row gets its own aggregate (the LATERAL join is per-account)', async () => {
+      // The DB result is what the SQL would produce — the test simply
+      // asserts the service passes it through unmodified, proving the
+      // FE sees per-account values rather than the previous shared
+      // bucket (when 3 accounts shared GL=1114 they all read 1690).
+      const fake = [
+        // InstaPay — 3 account-specific rows totaling 365.
+        { payment_account_id: 'pa-instapay', display_name: 'InstaPay',     gl_account_code: '1114', total_in: '365.00', total_out: '0.00', net_debit: '365.00', je_count: 3, last_movement: '2026-04-29' },
+        // WE Pay — 3 account-specific rows totaling 305 (different from InstaPay!).
+        { payment_account_id: 'pa-wepay',    display_name: 'WE Pay',       gl_account_code: '1114', total_in: '305.00', total_out: '0.00', net_debit: '305.00', je_count: 3, last_movement: '2026-04-28' },
+        // Vodafone Cash — INACTIVE, zero account-specific rows → 0/0/0/null.
+        { payment_account_id: 'pa-vodafone', display_name: 'Vodafone Cash تجريبي', gl_account_code: '1114', total_in:   '0.00', total_out: '0.00', net_debit:   '0.00', je_count: 0, last_movement: null },
+      ];
+      const { service } = await makeService({ dsResults: [fake] });
+      const out = await service.listBalances();
+      expect(out).toHaveLength(3);
+      const byName = Object.fromEntries(out.map((r: any) => [r.display_name, r]));
+      // CRITICAL: each row carries DIFFERENT totals — no bucket duplication.
+      expect(byName['InstaPay'].net_debit).toBe('365.00');
+      expect(byName['WE Pay'].net_debit).toBe('305.00');
+      expect(byName['Vodafone Cash تجريبي'].net_debit).toBe('0.00');
+      expect(byName['Vodafone Cash تجريبي'].je_count).toBe(0);
+      expect(byName['Vodafone Cash تجريبي'].last_movement).toBeNull();
+    });
+  });
+
+  /* ════════════════════════════════════════════════════════════════════
+   * PR-FIN-PAYACCT-4D-UX-FIX-2 — listMovements (per-account operations
+   * feed for the DetailsPanel modal). Strictly account-tagged data;
+   * never reads from gl_account_code alone.
+   * ════════════════════════════════════════════════════════════════════ */
+  describe('listMovements', () => {
+    it('emits a SQL that filters strictly by payment_account_id (never by gl_account_code)', async () => {
+      const { service, dsCalls } = await makeService({
+        dsResults: [[{ rows: [], total_count: 0, sum_in: '0', sum_out: '0', sum_net: '0' }]],
+      });
+      await service.listMovements('pa-1', {});
+      const sql = dsCalls[0].sql;
+      // All three source tables filter by payment_account_id, NOT by GL code.
+      expect(sql).toMatch(/FROM invoice_payments ip[\s\S]+WHERE ip\.payment_account_id = \$1::uuid/);
+      expect(sql).toMatch(/FROM customer_payments cp[\s\S]+WHERE cp\.payment_account_id = \$1::uuid/);
+      expect(sql).toMatch(/FROM supplier_payments sp[\s\S]+WHERE sp\.payment_account_id = \$1::uuid/);
+      // Voided rows excluded from cp/sp.
+      expect(sql).toMatch(/cp[\s\S]+COALESCE\(cp\.is_void, FALSE\) = FALSE/);
+      expect(sql).toMatch(/sp[\s\S]+COALESCE\(sp\.is_void, FALSE\) = FALSE/);
+      // gl_account_code never appears as a movement filter.
+      expect(sql).not.toMatch(/gl_account_code\s*=\s*/);
+      // Customer-payment refund flips to amount_out per the approved decision.
+      expect(sql).toMatch(/cp\.kind = 'refund'[\s\S]+cp\.amount[\s\S]+0::numeric/);
+      // Pure SELECT — no INSERT/UPDATE/DELETE.
+      expect(sql).not.toMatch(/INSERT|UPDATE|DELETE/i);
+    });
+
+    it('binds from/to/type/q and limit/offset', async () => {
+      const { service, dsCalls } = await makeService({
+        dsResults: [[{ rows: [], total_count: 0, sum_in: '0', sum_out: '0', sum_net: '0' }]],
+      });
+      await service.listMovements('pa-1', {
+        from: '2026-04-01',
+        to: '2026-04-30',
+        type: 'invoice_payment',
+        q: 'INV-2026',
+        limit: 50,
+        offset: 100,
+      });
+      const call = dsCalls[0];
+      expect(call.sql).toMatch(/m\.occurred_at::date >= \$2::date/);
+      expect(call.sql).toMatch(/m\.occurred_at::date <= \$3::date/);
+      expect(call.sql).toMatch(/m\.operation_type = \$4/);
+      expect(call.sql).toMatch(/LOWER\(COALESCE\(m\.reference_no/);
+      // params: id, from, to, type, q, limit, offset
+      expect(call.params[0]).toBe('pa-1');
+      expect(call.params[1]).toBe('2026-04-01');
+      expect(call.params[2]).toBe('2026-04-30');
+      expect(call.params[3]).toBe('invoice_payment');
+      expect(call.params[4]).toBe('%inv-2026%');
+      expect(call.params[5]).toBe(50);
+      expect(call.params[6]).toBe(100);
+    });
+
+    it('clamps limit to [1, 200] and offset to >= 0', async () => {
+      const { service, dsCalls } = await makeService({
+        dsResults: [[{ rows: [], total_count: 0, sum_in: '0', sum_out: '0', sum_net: '0' }]],
+      });
+      await service.listMovements('pa-1', { limit: 9999, offset: -50 });
+      const call = dsCalls[0];
+      // limit param is at the end (after the id). Value should be 200, not 9999.
+      const limitParam = call.params[call.params.length - 2];
+      const offsetParam = call.params[call.params.length - 1];
+      expect(limitParam).toBe(200);
+      expect(offsetParam).toBe(0);
+    });
+
+    it('returns { rows, total, totals } shape the FE consumes', async () => {
+      const fake = [
+        {
+          rows: [
+            { id: 'op-1', operation_type: 'invoice_payment', operation_type_ar: 'بيع',
+              reference_no: 'INV-001', amount_in: '300.00', amount_out: '0.00',
+              net_amount: '300.00', occurred_at: '2026-04-29T10:00:00Z' },
+          ],
+          total_count: 1,
+          sum_in: '300.00',
+          sum_out: '0.00',
+          sum_net: '300.00',
+        },
+      ];
+      const { service } = await makeService({ dsResults: [fake] });
+      const out = await service.listMovements('pa-1', {});
+      expect(out.rows).toHaveLength(1);
+      expect(out.total).toBe(1);
+      expect(out.totals.in).toBe('300.00');
+      expect(out.totals.out).toBe('0.00');
+      expect(out.totals.net).toBe('300.00');
+      expect(out.totals.count).toBe(1);
+    });
+
+    it('returns empty rows + zero totals when the account has no movements', async () => {
+      const fake = [{ rows: [], total_count: 0, sum_in: '0', sum_out: '0', sum_net: '0' }];
+      const { service } = await makeService({ dsResults: [fake] });
+      const out = await service.listMovements('pa-vodafone', {});
+      expect(out.rows).toEqual([]);
+      expect(out.total).toBe(0);
+      expect(out.totals.count).toBe(0);
     });
   });
 
