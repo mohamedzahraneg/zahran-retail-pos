@@ -591,4 +591,116 @@ describe('<Cashboxes /> — PR-FIN-PAYACCT-4D-UX-FIX table-first layout', () => 
       expect(screen.getByTestId('cashbox-details-modal')).toBeInTheDocument(),
     );
   });
+
+  // ─── PR-FIN-PAYACCT-4D-UX-FIX-4: end-to-end cashbox-create flow ───
+  // The PaymentAccountModal "إنشاء خزنة" button must:
+  //   1. close the payment-account modal,
+  //   2. open the cashbox-form modal with the kind matching the method,
+  //   3. pre-fill `name_ar` with a method-specific suggestion.
+  // These tests pin the integration end-to-end so a regression in
+  // either the kind mapping or the suggested-name plumbing is caught.
+
+  it('PR-4D-UX-FIX-4: instapay quick-add → "إنشاء خزنة" opens kind=ewallet pre-filled "خزنة InstaPay"', async () => {
+    // No ewallet cashbox in fixtures → empty-state will appear.
+    cashboxesMock.mockResolvedValue([CASH_BOX, BANK_BOX]);
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByTestId('quick-add-instapay')).toBeInTheDocument(),
+    );
+    // Open PaymentAccountModal pre-filled to instapay.
+    fireEvent.click(screen.getByTestId('quick-add-instapay'));
+    await waitFor(() =>
+      expect(screen.getByTestId('payment-account-modal-cashbox-empty')).toBeInTheDocument(),
+    );
+    // Click "إنشاء خزنة" inside the empty-state.
+    fireEvent.click(screen.getByTestId('payment-account-modal-cashbox-create'));
+    // CashboxFormModal appears with kind=ewallet (title "إضافة محفظة إلكترونية")
+    // and the name input pre-filled with "خزنة InstaPay".
+    await waitFor(() =>
+      expect(screen.getByTestId('cashbox-form-modal')).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId('cashbox-form-title').textContent).toMatch(/إضافة محفظة إلكترونية/);
+    expect((screen.getByTestId('cashbox-form-name') as HTMLInputElement).value).toBe('خزنة InstaPay');
+  });
+
+  it('PR-4D-UX-FIX-4: vodafone_cash → kind=ewallet pre-filled "خزنة Vodafone Cash"', async () => {
+    cashboxesMock.mockResolvedValue([CASH_BOX, BANK_BOX]);
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByTestId('quick-add-wallet')).toBeInTheDocument(),
+    );
+    // Open the create-account modal first (no quick-add for vodafone_cash;
+    // we use the generic "add payment account" and switch method).
+    fireEvent.click(screen.getByTestId('treasury-add-payment-account'));
+    await waitFor(() =>
+      expect(screen.getByTestId('payment-account-modal-method')).toBeInTheDocument(),
+    );
+    fireEvent.change(screen.getByTestId('payment-account-modal-method'), {
+      target: { value: 'vodafone_cash' },
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId('payment-account-modal-cashbox-empty')).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByTestId('payment-account-modal-cashbox-create'));
+    await waitFor(() =>
+      expect(screen.getByTestId('cashbox-form-modal')).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId('cashbox-form-title').textContent).toMatch(/إضافة محفظة إلكترونية/);
+    expect((screen.getByTestId('cashbox-form-name') as HTMLInputElement).value).toBe('خزنة Vodafone Cash');
+  });
+
+  it('PR-4D-UX-FIX-4: card_visa quick-add → kind=bank pre-filled "حساب POS Visa"', async () => {
+    // Remove the bank cashbox so the empty-state appears for card_visa.
+    cashboxesMock.mockResolvedValue([CASH_BOX]);
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByTestId('quick-add-card')).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByTestId('quick-add-card'));
+    await waitFor(() =>
+      expect(screen.getByTestId('payment-account-modal-cashbox-empty')).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByTestId('payment-account-modal-cashbox-create'));
+    await waitFor(() =>
+      expect(screen.getByTestId('cashbox-form-modal')).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId('cashbox-form-title').textContent).toMatch(/إضافة بنكي/);
+    expect((screen.getByTestId('cashbox-form-name') as HTMLInputElement).value).toBe('حساب POS Visa');
+  });
+
+  it('PR-4D-UX-FIX-4: bank_transfer quick-add → kind=bank pre-filled "حساب بنكي"', async () => {
+    cashboxesMock.mockResolvedValue([CASH_BOX]); // no bank → empty-state
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByTestId('quick-add-bank')).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByTestId('quick-add-bank'));
+    await waitFor(() =>
+      expect(screen.getByTestId('payment-account-modal-cashbox-empty')).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByTestId('payment-account-modal-cashbox-create'));
+    await waitFor(() =>
+      expect(screen.getByTestId('cashbox-form-modal')).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId('cashbox-form-title').textContent).toMatch(/إضافة بنكي/);
+    expect((screen.getByTestId('cashbox-form-name') as HTMLInputElement).value).toBe('حساب بنكي');
+  });
+
+  it('PR-4D-UX-FIX-4: check quick-add → kind=check pre-filled "حساب شيكات"', async () => {
+    cashboxesMock.mockResolvedValue([CASH_BOX]); // no check cashbox → empty-state
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByTestId('quick-add-check')).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByTestId('quick-add-check'));
+    await waitFor(() =>
+      expect(screen.getByTestId('payment-account-modal-cashbox-empty')).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByTestId('payment-account-modal-cashbox-create'));
+    await waitFor(() =>
+      expect(screen.getByTestId('cashbox-form-modal')).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId('cashbox-form-title').textContent).toMatch(/إضافة شيكات/);
+    expect((screen.getByTestId('cashbox-form-name') as HTMLInputElement).value).toBe('حساب شيكات');
+  });
 });

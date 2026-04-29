@@ -392,7 +392,7 @@ describe('<PaymentAccountModal /> — PR-FIN-PAYACCT-4B', () => {
     ).toBeInTheDocument();
   });
 
-  it('PR-4D-UX-FIX-2: empty-state action calls onCreateCashbox with the right kind', () => {
+  it('PR-4D-UX-FIX-2: empty-state action calls onCreateCashbox with the right kind + method', () => {
     const onCreateCashbox = vi.fn();
     const cashboxesNoneBank: typeof CASHBOXES = CASHBOXES.filter((cb) => cb.kind !== 'bank');
     renderModal({
@@ -401,7 +401,9 @@ describe('<PaymentAccountModal /> — PR-FIN-PAYACCT-4B', () => {
       onCreateCashbox,
     });
     fireEvent.click(screen.getByTestId('payment-account-modal-cashbox-create'));
-    expect(onCreateCashbox).toHaveBeenCalledWith('bank');
+    // PR-4D-UX-FIX-4: callback now also receives the current method so
+    // the parent can pre-fill a method-specific suggested name.
+    expect(onCreateCashbox).toHaveBeenCalledWith('bank', 'bank_transfer');
   });
 
   it('PR-4D-UX-FIX-2: create payload includes cashbox_id (null when not linked)', async () => {
