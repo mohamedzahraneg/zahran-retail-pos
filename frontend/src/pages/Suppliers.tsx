@@ -22,6 +22,11 @@ import {
 } from 'lucide-react';
 import { suppliersApi, Supplier, SupplierOutstanding } from '@/api/suppliers.api';
 import { cashDeskApi } from '@/api/cash-desk.api';
+// PR-CASH-DESK-REORG-1 — pay-supplier entry point uses the shared
+// `<SupplierPayModal />` lifted from CashDesk.tsx so both pages call
+// the same backend (POST /cash-desk/supplier-payments) with the same
+// payload contract.
+import { SupplierPayModal } from '@/components/cash-desk/SupplierPayModal';
 
 const EGP = (n: number | string) =>
   `${Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ج.م`;
@@ -73,6 +78,14 @@ export default function Suppliers() {
     queryKey: ['suppliers-analytics'],
     queryFn: suppliersApi.analytics,
     refetchInterval: 120_000,
+  });
+
+  // PR-CASH-DESK-REORG-1 — cashboxes query for the shared
+  // `<SupplierPayModal />` mount. Same key the cash-desk page uses,
+  // so React Query caches across mounts.
+  const { data: cashboxes = [] } = useQuery({
+    queryKey: ['cashboxes'],
+    queryFn: () => cashDeskApi.cashboxes(),
   });
 
   const { data: upcoming = [] } = useQuery({
@@ -402,8 +415,9 @@ export default function Suppliers() {
                     setPayTarget(s);
                   }}
                   className="flex-1 text-xs py-1.5 bg-emerald-100 text-emerald-700 rounded-lg hover:bg-emerald-200 font-bold flex items-center justify-center gap-1"
+                  data-testid={`suppliers-pay-button-${s.id}`}
                 >
-                  <CreditCard size={12} /> دفعة
+                  <CreditCard size={12} /> دفع لمورد
                 </button>
               </div>
             </div>
@@ -432,13 +446,21 @@ export default function Suppliers() {
       )}
 
       {payTarget && (
-        <QuickPayModal
-          supplier={payTarget}
+        // PR-CASH-DESK-REORG-1 — replaced inline `QuickPayModal` with
+        // the shared `<SupplierPayModal />` so this page and (future)
+        // supplier-profile pages call the same modal + the same
+        // backend with the same payload contract.
+        <SupplierPayModal
+          cashboxes={cashboxes}
+          prefilledSupplier={payTarget}
           onClose={() => setPayTarget(null)}
           onSuccess={() => {
             setPayTarget(null);
+            qc.invalidateQueries({ queryKey: ['suppliers'] });
             qc.invalidateQueries({ queryKey: ['suppliers-outstanding'] });
             qc.invalidateQueries({ queryKey: ['supplier-payments'] });
+            qc.invalidateQueries({ queryKey: ['cashflow-today'] });
+            qc.invalidateQueries({ queryKey: ['cashboxes'] });
           }}
         />
       )}
@@ -1294,125 +1316,6 @@ function LedgerModal({
   );
 }
 
-function QuickPayModal({
-  supplier,
-  onClose,
-  onSuccess,
-}: {
-  supplier: Supplier;
-  onClose: () => void;
-  onSuccess: () => void;
-}) {
-  const [amount, setAmount] = useState('');
-  const [method, setMethod] = useState<
-    'cash' | 'card' | 'instapay' | 'bank_transfer'
-  >('cash');
-  const [reference, setReference] = useState('');
-  const [notes, setNotes] = useState('');
-
-  const { data: cashboxes = [] } = useQuery({
-    queryKey: ['cashboxes'],
-    queryFn: () => cashDeskApi.cashboxes(),
-  });
-  const [cashboxId, setCashboxId] = useState('');
-
-  const mutation = useMutation({
-    mutationFn: cashDeskApi.pay,
-    onSuccess: () => {
-      toast.success('تم حفظ الدفعة');
-      onSuccess();
-    },
-  });
-
-  const cbId = cashboxId || cashboxes[0]?.id;
-
-  return (
-    <Modal title={`دفعة للمورد: ${supplier.name}`} onClose={onClose}>
-      <div className="space-y-3">
-        <div className="grid md:grid-cols-2 gap-3">
-          <Field label="الخزينة">
-            <select
-              className="input"
-              value={cbId || ''}
-              onChange={(e) => setCashboxId(e.target.value)}
-            >
-              <option value="">-- اختر --</option>
-              {cashboxes.map((cb) => (
-                <option key={cb.id} value={cb.id}>
-                  {cb.name}
-                </option>
-              ))}
-            </select>
-          </Field>
-          <Field label="طريقة الدفع">
-            <select
-              className="input"
-              value={method}
-              onChange={(e) => setMethod(e.target.value as any)}
-            >
-              <option value="cash">نقدي</option>
-              <option value="card">بطاقة</option>
-              <option value="instapay">إنستا باي</option>
-              <option value="bank_transfer">تحويل بنكي</option>
-            </select>
-          </Field>
-        </div>
-        <div className="grid md:grid-cols-2 gap-3">
-          <Field label="المبلغ">
-            <input
-              type="number"
-              step="0.01"
-              className="input"
-              value={amount}
-              onChange={(e) => setAmount(e.target.value)}
-              placeholder="0.00"
-            />
-          </Field>
-          <Field label="المرجع">
-            <input
-              className="input"
-              value={reference}
-              onChange={(e) => setReference(e.target.value)}
-            />
-          </Field>
-        </div>
-        <Field label="ملاحظات">
-          <textarea
-            rows={2}
-            className="input"
-            value={notes}
-            onChange={(e) => setNotes(e.target.value)}
-          />
-        </Field>
-
-        <div className="flex gap-2 pt-2">
-          <button
-            className="btn-primary flex-1"
-            disabled={mutation.isPending}
-            onClick={() => {
-              if (!cbId) return toast.error('اختر الخزينة');
-              const amt = Number(amount);
-              if (!amt || amt <= 0) return toast.error('أدخل مبلغاً');
-              mutation.mutate({
-                supplier_id: supplier.id,
-                cashbox_id: cbId,
-                payment_method: method,
-                amount: amt,
-                reference: reference || undefined,
-                notes: notes || undefined,
-              });
-            }}
-          >
-            <CreditCard size={18} /> حفظ الدفعة
-          </button>
-          <button className="btn-secondary" onClick={onClose}>
-            إلغاء
-          </button>
-        </div>
-      </div>
-    </Modal>
-  );
-}
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
