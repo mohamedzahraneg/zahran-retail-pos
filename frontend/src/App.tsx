@@ -310,10 +310,14 @@ export default function App() {
           element={<Navigate to="/team?section=accounts" replace />}
         />
         <Route path="settings" element={<Settings />} />
-        {/* PR-FIN-PAYACCT-4B — Payment accounts admin page (split out
-            of the Settings tab). Read gate is `payment-accounts.read`;
-            mutations inside the page additionally check
-            `payment-accounts.manage`. Backend `@Roles` is unchanged. */}
+        {/* PR-FIN-PAYACCT-4D — `/payment-accounts` was the dedicated
+            admin page shipped in PR-4B. The treasury work has since
+            been unified under `/cashboxes`, so this route is now a
+            redirect (the PaymentAccounts component renders <Navigate
+            to="/cashboxes" replace />). The `payment-accounts.read`
+            gate remains on the redirect target so users without it
+            still bounce to the auth fallback rather than silently
+            land on the unified page. */}
         <Route
           path="payment-accounts"
           element={

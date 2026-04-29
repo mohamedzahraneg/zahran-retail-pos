@@ -73,8 +73,14 @@ describe('<PaymentAccountAlerts /> — PR-FIN-PAYACCT-4B', () => {
   it('renders the all-clear banner when there are no alerts', () => {
     render(
       <PaymentAccountAlerts
-        accounts={[makeAccount({ is_default: true })]}
-        balances={[makeBalance({ is_default: true, last_movement: null })]}
+        accounts={[makeAccount({ is_default: true, cashbox_id: 'cb-x' })]}
+        balances={[
+          makeBalance({
+            is_default: true,
+            last_movement: null,
+            cashbox_id: 'cb-x', // PR-4D: pinned, so no-cashbox-pin won't fire.
+          }),
+        ]}
         drifts={[]}
       />,
     );
@@ -213,6 +219,129 @@ describe('<PaymentAccountAlerts /> — PR-FIN-PAYACCT-4B', () => {
       />,
     );
     expect(screen.queryByTestId('alert-no-default-instapay')).toBeNull();
+    expect(screen.getByTestId('alert-all-clear')).toBeInTheDocument();
+  });
+
+  // ─── PR-FIN-PAYACCT-4D: two new alert types ─────────────────────
+  it('PR-4D: surfaces "inactive accounts with movements" when an inactive account has je_count > 0', () => {
+    render(
+      <PaymentAccountAlerts
+        accounts={[
+          // Active default — keeps the no-default + drift checks clean.
+          makeAccount({ id: 'a-active', is_default: true }),
+          // Inactive account with historical movements — should fire.
+          makeAccount({
+            id: 'a-old',
+            method: 'wallet',
+            active: false,
+            is_default: false,
+          }),
+        ]}
+        balances={[
+          makeBalance({
+            payment_account_id: 'a-active',
+            is_default: true,
+          }),
+          makeBalance({
+            payment_account_id: 'a-old',
+            method: 'wallet',
+            active: false,
+            is_default: false,
+            je_count: 7,
+          }),
+        ]}
+        drifts={[]}
+      />,
+    );
+    const banner = screen.getByTestId('alert-inactive-with-movements');
+    expect(banner).toBeInTheDocument();
+    expect(banner).toHaveTextContent('1');
+    // All-clear must NOT render when this alert fires.
+    expect(screen.queryByTestId('alert-all-clear')).toBeNull();
+  });
+
+  it('PR-4D: does NOT fire "inactive-with-movements" when the inactive account has je_count = 0', () => {
+    render(
+      <PaymentAccountAlerts
+        accounts={[
+          makeAccount({ id: 'a-active', is_default: true }),
+          makeAccount({
+            id: 'a-old',
+            method: 'wallet',
+            active: false,
+            is_default: false,
+          }),
+        ]}
+        balances={[
+          makeBalance({
+            payment_account_id: 'a-active',
+            is_default: true,
+          }),
+          // je_count = 0 (default) → not surfaced.
+          makeBalance({
+            payment_account_id: 'a-old',
+            method: 'wallet',
+            active: false,
+            is_default: false,
+          }),
+        ]}
+        drifts={[]}
+      />,
+    );
+    expect(screen.queryByTestId('alert-inactive-with-movements')).toBeNull();
+  });
+
+  it('PR-4D: surfaces "no cashbox pin" for active accounts on pin-recommended methods', () => {
+    // Active bank_transfer account with no cashbox_id pin → should fire.
+    render(
+      <PaymentAccountAlerts
+        accounts={[
+          makeAccount({
+            id: 'a-bank',
+            method: 'bank_transfer',
+            is_default: true,
+            cashbox_id: null,
+          }),
+        ]}
+        balances={[
+          makeBalance({
+            payment_account_id: 'a-bank',
+            method: 'bank_transfer',
+            is_default: true,
+            cashbox_id: null,
+          }),
+        ]}
+        drifts={[]}
+      />,
+    );
+    const banner = screen.getByTestId('alert-no-cashbox-pin');
+    expect(banner).toBeInTheDocument();
+    expect(banner).toHaveTextContent('1');
+  });
+
+  it('PR-4D: does NOT fire "no-cashbox-pin" for accounts that already have a cashbox_id', () => {
+    render(
+      <PaymentAccountAlerts
+        accounts={[
+          makeAccount({
+            id: 'a-bank',
+            method: 'bank_transfer',
+            is_default: true,
+            cashbox_id: 'cb-bank',
+          }),
+        ]}
+        balances={[
+          makeBalance({
+            payment_account_id: 'a-bank',
+            method: 'bank_transfer',
+            is_default: true,
+            cashbox_id: 'cb-bank',
+          }),
+        ]}
+        drifts={[]}
+      />,
+    );
+    expect(screen.queryByTestId('alert-no-cashbox-pin')).toBeNull();
     expect(screen.getByTestId('alert-all-clear')).toBeInTheDocument();
   });
 });

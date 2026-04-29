@@ -630,3 +630,59 @@ describe('PaymentsService — PR-FIN-PAYACCT-4B', () => {
     });
   });
 });
+
+/* ============================================================================
+ * PR-FIN-PAYACCT-4D — methodMix() over v_dashboard_payment_mix_30d
+ * ----------------------------------------------------------------------------
+ * Pins:
+ *   • methodMix issues a SELECT against v_dashboard_payment_mix_30d.
+ *   • The result is ordered by total_amount DESC NULLS LAST so the FE
+ *     gets dominant methods first.
+ *   • The `days` parameter is accepted but does NOT mutate the SQL —
+ *     today the view ships with a fixed 30-day window. Forward-compat
+ *     contract: any positive `days` returns the same payload (the
+ *     controller defaults non-positive to 30).
+ *   • The row shape is exactly { payment_method, transactions,
+ *     total_amount, pct } — what the FE's "آخر 30 يوم" card consumes.
+ * ========================================================================== */
+describe('PaymentsService — PR-FIN-PAYACCT-4D methodMix', () => {
+  it('selects from v_dashboard_payment_mix_30d ordered by total_amount DESC', async () => {
+    const { service, dsCalls } = await makeService({ dsResults: [[]] });
+
+    await service.methodMix(30);
+    expect(dsCalls).toHaveLength(1);
+    const sql = dsCalls[0].sql;
+    expect(sql).toMatch(/FROM v_dashboard_payment_mix_30d/);
+    expect(sql).toMatch(/ORDER BY total_amount DESC NULLS LAST/);
+    // Read-only: no filter parameters bound — the SQL has no $N placeholders.
+    expect(sql).not.toMatch(/\$\d/);
+  });
+
+  it('returns the row shape the FE consumes (payment_method, transactions, total_amount, pct)', async () => {
+    const fake = [
+      { payment_method: 'cash',     transactions: 94, total_amount: '28720.01', pct: '94.41' },
+      { payment_method: 'instapay', transactions: 4,  total_amount:  '1400.00', pct:  '4.60' },
+      { payment_method: 'wallet',   transactions: 2,  total_amount:   '300.00', pct:  '0.99' },
+    ];
+    const { service } = await makeService({ dsResults: [fake] });
+
+    const out = await service.methodMix();
+    expect(out).toHaveLength(3);
+    expect(out[0]).toMatchObject({
+      payment_method: 'cash',
+      transactions: 94,
+      total_amount: '28720.01',
+      pct: '94.41',
+    });
+    expect(out[2].payment_method).toBe('wallet');
+  });
+
+  it('does not mutate the SQL when called with non-30 days (forward-compat contract)', async () => {
+    const { service, dsCalls } = await makeService({ dsResults: [[]] });
+    await service.methodMix(60);
+    await service.methodMix(7);
+    expect(dsCalls).toHaveLength(2);
+    expect(dsCalls[0].sql).toBe(dsCalls[1].sql);
+    expect(dsCalls[0].sql).toMatch(/v_dashboard_payment_mix_30d/);
+  });
+});

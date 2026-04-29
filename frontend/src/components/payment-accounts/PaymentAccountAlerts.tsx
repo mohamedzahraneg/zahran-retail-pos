@@ -17,16 +17,33 @@ import {
   ShieldCheck,
   CalendarDays,
   Link2Off,
+  Archive,
+  AlertTriangle,
 } from 'lucide-react';
 import {
   type PaymentAccount,
   type PaymentAccountBalance,
+  type PaymentMethodCode,
   type CashboxGlDrift,
   METHOD_LABEL_AR,
 } from '@/api/payments.api';
 
 const DRIFT_THRESHOLD_EGP = 0.01;
 const STALE_DAYS = 30;
+
+/**
+ * PR-FIN-PAYACCT-4D — methods where pinning a `cashbox_id` is
+ * recommended for unambiguous balance attribution. Excludes `cash`
+ * (it doesn't have payment_account rows in practice), `credit`, and
+ * `other` (no physical mapping).
+ */
+const PIN_RECOMMENDED_METHODS = new Set<PaymentMethodCode>([
+  'bank_transfer',
+  'card_visa', 'card_mastercard', 'card_meeza',
+  'instapay',
+  'wallet', 'vodafone_cash', 'orange_cash',
+  'check',
+]);
 
 function daysSince(iso: string | null): number | null {
   if (!iso) return null;
@@ -74,10 +91,31 @@ export function PaymentAccountAlerts({
     return days !== null && days > STALE_DAYS;
   });
 
+  // 4. PR-FIN-PAYACCT-4D — inactive accounts that still carry historical
+  //    movements. Not necessarily a problem (deactivation by design keeps
+  //    the audit trail), but operators want this surfaced so they don't
+  //    forget the row exists.
+  const inactiveWithMovements = balances.filter(
+    (b) => !b.active && Number(b.je_count || 0) > 0,
+  );
+
+  // 5. PR-FIN-PAYACCT-4D — active accounts on methods where pinning a
+  //    `cashbox_id` is recommended but the pin is missing. This makes
+  //    GL-vs-cashbox reconciliation ambiguous when multiple accounts
+  //    share the same gl_account_code.
+  const noCashboxPin = balances.filter(
+    (b) =>
+      b.active &&
+      !b.cashbox_id &&
+      PIN_RECOMMENDED_METHODS.has(b.method as PaymentMethodCode),
+  );
+
   const allClear =
     driftAlerts.length === 0 &&
     noDefaultMethods.length === 0 &&
-    staleAccounts.length === 0;
+    staleAccounts.length === 0 &&
+    inactiveWithMovements.length === 0 &&
+    noCashboxPin.length === 0;
 
   return (
     <div
@@ -146,6 +184,46 @@ export function PaymentAccountAlerts({
               </div>
               <div className="text-xs text-slate-700">
                 {staleAccounts.length} حساب
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* PR-FIN-PAYACCT-4D — inactive accounts with movements */}
+      {inactiveWithMovements.length > 0 && (
+        <div
+          className="rounded-lg border border-slate-200 bg-slate-50 p-3"
+          data-testid="alert-inactive-with-movements"
+        >
+          <div className="flex items-start gap-2">
+            <Archive size={14} className="text-slate-600 mt-0.5 shrink-0" />
+            <div className="flex-1 min-w-0">
+              <div className="text-[11px] font-bold text-slate-700">
+                حسابات معطّلة بها حركات سابقة
+              </div>
+              <div className="text-xs text-slate-700">
+                {inactiveWithMovements.length} حساب
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* PR-FIN-PAYACCT-4D — accounts without cashbox pin (where pinning is recommended) */}
+      {noCashboxPin.length > 0 && (
+        <div
+          className="rounded-lg border border-amber-200 bg-amber-50 p-3"
+          data-testid="alert-no-cashbox-pin"
+        >
+          <div className="flex items-start gap-2">
+            <AlertTriangle size={14} className="text-amber-700 mt-0.5 shrink-0" />
+            <div className="flex-1 min-w-0">
+              <div className="text-[11px] font-bold text-amber-800">
+                حسابات بلا ربط بخزنة
+              </div>
+              <div className="text-xs text-amber-800">
+                {noCashboxPin.length} حساب — يُستحسن ربطه بخزنة محددة لفصل الأرصدة
               </div>
             </div>
           </div>

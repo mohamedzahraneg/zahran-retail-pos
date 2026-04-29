@@ -124,6 +124,32 @@ export class PaymentsService {
    * filters to active=TRUE — for inactive rows we fall through to a
    * left-join so the FE can still display them with `je_count=0`).
    */
+  /**
+   * PR-FIN-PAYACCT-4D — read-only wrapper over `v_dashboard_payment_mix_30d`.
+   *
+   * The view ships per-method usage for the trailing 30 days
+   * (transactions / total_amount / pct). The FE renders this on the
+   * unified treasury page's "أكثر الطرق استخدامًا آخر 30 يوم" card.
+   *
+   * Today the view's window is hard-coded at 30 days (see migration
+   * that created it); the `days` query param is accepted for forward
+   * compatibility but ignored when not 30 — we surface the view as-is
+   * without trying to re-aggregate (which would fork the source of
+   * truth). If `days != 30` is passed, we still return the 30-day mix;
+   * the caller can show "آخر 30 يوم" copy regardless.
+   */
+  async methodMix(_days = 30) {
+    const sql = `
+      SELECT payment_method::text       AS payment_method,
+             COALESCE(transactions, 0)  AS transactions,
+             COALESCE(total_amount, 0)::numeric AS total_amount,
+             COALESCE(pct, 0)::numeric  AS pct
+        FROM v_dashboard_payment_mix_30d
+       ORDER BY total_amount DESC NULLS LAST, payment_method
+    `;
+    return this.ds.query(sql);
+  }
+
   async listBalances(filter: { method?: string; active?: string } = {}) {
     const where: string[] = [];
     const args: any[] = [];
