@@ -30,9 +30,34 @@
 --   7. View v_cashbox_gl_drift — per-cashbox variance between
 --      `cashboxes.current_balance` and Σ(jl.debit-jl.credit) on
 --      its tagged journal_lines (PR-DRIFT-3F threading).
---   8. permissions seed: payment-accounts.read + payment-accounts.manage,
---      mapped onto admin/manager/accountant via role_permissions.
---   9. DO $verify$ self-validation block. Pattern matches mig 119/120.
+--   8. permissions seed: payment-accounts.read + payment-accounts.manage.
+--      The two permission catalog rows are inserted into the `permissions`
+--      table; the grants land on the `roles.permissions` text[] array
+--      column (the canonical mechanism in this schema — the legacy
+--      `role_permissions` join table is vestigial and is NOT touched).
+--      admin + manager get both read and manage; cashier gets read only.
+--   9. DO $verify$ self-validation block. Pattern matches mig 119/120;
+--      additionally asserts the array grants on the three roles.
+--
+-- Hotfix history (PR-FIN-PAYACCT-4A-HOTFIX-1)
+-- -------------------------------------------
+-- The first cut of this migration (PR #196 squash 7425f12, merged
+-- 2026-04-29 11:48Z) used `INSERT INTO role_permissions ... WHERE
+-- roles.name IN ('admin','manager','accountant')`. Two compounding
+-- defects:
+--   • the column is `roles.code`, not `roles.name`
+--   • the production DB has no `accountant` role
+-- The migration raised `column "name" does not exist`, the
+-- MigrationsService caught the error per-file, and the entire atomic
+-- BEGIN/COMMIT block rolled back — no schema artefacts landed. The
+-- API container booted with the new TypeScript code (the new routes
+-- 401-respond) but with the old DB schema. The hotfix replaces the
+-- broken role_permissions INSERT with a `roles.permissions[]` array
+-- update keyed off `roles.code`, removes the accountant reference, and
+-- adds three array-grant assertions to the verify block. The file is
+-- patched in place rather than superseded by mig 122 because the
+-- broken cut was never recorded in `schema_migrations` — re-deploy
+-- runs the corrected file from scratch.
 --
 -- What this migration does NOT do
 -- -------------------------------
@@ -284,9 +309,21 @@ COMMENT ON VIEW v_cashbox_gl_drift IS
   'the upcoming admin dashboard (PR-FIN-PAYACCT-4D) without altering data.';
 
 -- ── 8 — permission seeds ───────────────────────────────────────────────────
--- New permissions for the admin endpoints. Mapped onto the same roles
--- that already have cashdesk.manage_accounts. Skipped if rows already
--- exist (idempotent re-apply on dev databases).
+-- Two halves:
+--   8.a  Insert the two permission catalog rows (idempotent via ON CONFLICT)
+--   8.b  Grant them on the relevant roles via the canonical mechanism
+--        — `roles.permissions` text[] array column. Production reads its
+--        permission set from this array; the legacy `role_permissions`
+--        join table is vestigial in this schema and is NOT touched here.
+--
+-- Hotfix history: the first cut of mig 121 (PR #196 squash 7425f12) used
+-- `INSERT INTO role_permissions` with `WHERE roles.name IN (...)`, but
+-- the column is `roles.code` (not `name`) and there is no `accountant`
+-- role in production. The migration raised `column "name" does not
+-- exist`, the MigrationsService caught the error per-file, and the
+-- whole atomic block rolled back — no schema artefacts landed. The
+-- patch below replaces the broken join-table seed with the array-column
+-- update that actually grants permissions in this system.
 
 INSERT INTO permissions (code, module, name_ar, name_en, description)
 VALUES
@@ -294,7 +331,7 @@ VALUES
    'payments',
    'عرض حسابات الدفع',
    'View payment accounts',
-   'List + read payment accounts (admin / manager / accountant).'),
+   'List + read payment accounts (admin / manager / cashier).'),
   ('payment-accounts.manage',
    'payments',
    'إدارة حسابات الدفع',
@@ -302,23 +339,32 @@ VALUES
    'Create / update / activate / set-default / delete payment accounts.')
 ON CONFLICT (code) DO NOTHING;
 
--- Map onto the existing roles. We pull role ids by name so the seed
--- works on dev DBs that may have different uuids.
-WITH role_ids AS (
-  SELECT id, name FROM roles WHERE name IN ('admin','manager','accountant')
-), perm_ids AS (
-  SELECT id, code FROM permissions
-  WHERE code IN ('payment-accounts.read','payment-accounts.manage')
-)
-INSERT INTO role_permissions (role_id, permission_id)
-SELECT r.id, p.id
-FROM role_ids r CROSS JOIN perm_ids p
-WHERE
-  -- admin + manager get both
-  (r.name IN ('admin','manager'))
-  -- accountant gets read only
-  OR (r.name = 'accountant' AND p.code = 'payment-accounts.read')
-ON CONFLICT (role_id, permission_id) DO NOTHING;
+-- Grant `payment-accounts.read` and `payment-accounts.manage` to admin
+-- and manager via the `roles.permissions` array column. DISTINCT unnest
+-- prevents duplicates when this migration is re-applied on a dev DB.
+UPDATE roles
+   SET permissions = ARRAY(
+       SELECT DISTINCT unnest(
+         COALESCE(permissions, ARRAY[]::text[])
+         || ARRAY['payment-accounts.read', 'payment-accounts.manage']
+       )
+     ),
+       updated_at = NOW()
+ WHERE code IN ('admin', 'manager');
+
+-- Grant only `payment-accounts.read` to cashier — the operator who
+-- needs to see which channel a payment landed on without being able
+-- to create or edit accounts. Mirrors the existing read-only
+-- permissions cashier already has.
+UPDATE roles
+   SET permissions = ARRAY(
+       SELECT DISTINCT unnest(
+         COALESCE(permissions, ARRAY[]::text[])
+         || ARRAY['payment-accounts.read']
+       )
+     ),
+       updated_at = NOW()
+ WHERE code = 'cashier';
 
 -- ── 9 — DO $verify$ self-validation block ──────────────────────────────────
 -- Refuses to commit if any of the schema artefacts is missing.
@@ -393,7 +439,7 @@ BEGIN
     RAISE EXCEPTION 'PR-FIN-PAYACCT-4A: v_cashbox_gl_drift missing';
   END IF;
 
-  -- Permissions
+  -- Permissions catalog
   IF NOT EXISTS (
     SELECT 1 FROM permissions WHERE code='payment-accounts.read'
   ) THEN
@@ -403,6 +449,51 @@ BEGIN
     SELECT 1 FROM permissions WHERE code='payment-accounts.manage'
   ) THEN
     RAISE EXCEPTION 'PR-FIN-PAYACCT-4A: permission payment-accounts.manage not seeded';
+  END IF;
+
+  -- Permissions array grants — the canonical mechanism in this schema.
+  -- admin + manager get both read AND manage; cashier gets read only.
+  -- No reference to `accountant` (the role does not exist in this DB).
+  -- No reference to `role_permissions` (the join table is vestigial).
+  IF NOT EXISTS (
+    SELECT 1 FROM roles
+     WHERE code = 'admin'
+       AND 'payment-accounts.manage' = ANY(permissions)
+  ) THEN
+    RAISE EXCEPTION
+      'PR-FIN-PAYACCT-4A: role admin missing payment-accounts.manage';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM roles
+     WHERE code = 'admin'
+       AND 'payment-accounts.read' = ANY(permissions)
+  ) THEN
+    RAISE EXCEPTION
+      'PR-FIN-PAYACCT-4A: role admin missing payment-accounts.read';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM roles
+     WHERE code = 'manager'
+       AND 'payment-accounts.manage' = ANY(permissions)
+  ) THEN
+    RAISE EXCEPTION
+      'PR-FIN-PAYACCT-4A: role manager missing payment-accounts.manage';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM roles
+     WHERE code = 'manager'
+       AND 'payment-accounts.read' = ANY(permissions)
+  ) THEN
+    RAISE EXCEPTION
+      'PR-FIN-PAYACCT-4A: role manager missing payment-accounts.read';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM roles
+     WHERE code = 'cashier'
+       AND 'payment-accounts.read' = ANY(permissions)
+  ) THEN
+    RAISE EXCEPTION
+      'PR-FIN-PAYACCT-4A: role cashier missing payment-accounts.read';
   END IF;
 
   -- Indexes
