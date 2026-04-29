@@ -1726,4 +1726,133 @@ describe('CashDeskService.getGlDrift — PR-FIN-PAYACCT-4B', () => {
   });
 });
 
+/* ════════════════════════════════════════════════════════════════════
+ * PR-FIN-PAYACCT-4D-UX-FIX-4 — cashboxMovementsUnified
+ * ----------------------------------------------------------------------------
+ * Pins:
+ *   • Unions cashbox_transactions + invoice/customer/supplier_payments
+ *     where the linked PA's cashbox_id matches the target.
+ *   • NEVER infers via gl_account_code alone.
+ *   • Branches B/C/D dedupe against A on (reference_type, reference_id).
+ *   • Filters from/to/type/q + paginates limit/offset.
+ *   • Pure SELECT.
+ * ========================================================================== */
+describe('CashDeskService.cashboxMovementsUnified — PR-FIN-PAYACCT-4D-UX-FIX-4', () => {
+  type Call = { sql: string; params?: any[] };
+  async function makeService(rowsPayload?: any) {
+    const calls: Call[] = [];
+    const dsObj: any = {
+      query: async (sql: string, params?: any[]) => {
+        calls.push({ sql, params });
+        return [rowsPayload ?? {
+          rows: [],
+          total_count: 0,
+          sum_in: '0',
+          sum_out: '0',
+          sum_net: '0',
+        }];
+      },
+      transaction: async (cb: any) => cb({ query: dsObj.query }),
+    };
+    const moduleRef = await Test.createTestingModule({
+      providers: [CashDeskService, { provide: DataSource, useValue: dsObj }],
+    }).compile();
+    return { service: moduleRef.get(CashDeskService), calls };
+  }
+
+  it('emits a SQL that unions all 4 sources, filters by cashbox_id, and never reads gl_account_code', async () => {
+    const { service, calls } = await makeService();
+    await service.cashboxMovementsUnified('cb-1', {});
+    const sql = calls[0].sql;
+
+    // Linked PAs are derived from payment_accounts.cashbox_id — never from GL.
+    expect(sql).toMatch(/payment_accounts WHERE cashbox_id = \$1::uuid/);
+    expect(sql).not.toMatch(/gl_account_code\s*=\s*/);
+
+    // All 4 sources unioned.
+    expect(sql).toMatch(/FROM cashbox_transactions t[\s\S]+WHERE t\.cashbox_id = \$1::uuid/);
+    expect(sql).toMatch(/FROM invoice_payments ip[\s\S]+payment_account_id IN \(SELECT id FROM linked_pas\)/);
+    expect(sql).toMatch(/FROM customer_payments cp[\s\S]+payment_account_id IN \(SELECT id FROM linked_pas\)/);
+    expect(sql).toMatch(/FROM supplier_payments sp[\s\S]+payment_account_id IN \(SELECT id FROM linked_pas\)/);
+
+    // Branches B/C/D dedupe against cashbox_transactions on (reference_type, reference_id).
+    expect(sql).toMatch(/NOT EXISTS \([\s\S]+ct\.reference_type = 'invoice'[\s\S]+ct\.reference_id\s*=\s*ip\.invoice_id/);
+    expect(sql).toMatch(/NOT EXISTS \([\s\S]+ct\.reference_type = 'customer_payment'[\s\S]+ct\.reference_id\s*=\s*cp\.id/);
+    expect(sql).toMatch(/NOT EXISTS \([\s\S]+ct\.reference_type = 'supplier_payment'[\s\S]+ct\.reference_id\s*=\s*sp\.id/);
+
+    // Refunds flip to amount_out (carried over from PR-4D-UX-FIX-2).
+    expect(sql).toMatch(/cp\.kind = 'refund_out'/);
+
+    // Pure SELECT.
+    expect(sql).not.toMatch(/INSERT|UPDATE|DELETE/i);
+  });
+
+  it('binds from/to/type/q and limit/offset', async () => {
+    const { service, calls } = await makeService();
+    await service.cashboxMovementsUnified('cb-1', {
+      from: '2026-04-01', to: '2026-04-30',
+      type: 'customer_payment',
+      q: 'CR-000',
+      limit: 50,
+      offset: 100,
+    });
+    const c = calls[0];
+    expect(c.sql).toMatch(/m\.occurred_at::date >= \$2::date/);
+    expect(c.sql).toMatch(/m\.occurred_at::date <= \$3::date/);
+    expect(c.sql).toMatch(/m\.source = \$4/);
+    expect(c.sql).toMatch(/LOWER\(COALESCE\(m\.reference_no/);
+    expect(c.params![0]).toBe('cb-1');
+    expect(c.params![1]).toBe('2026-04-01');
+    expect(c.params![2]).toBe('2026-04-30');
+    expect(c.params![3]).toBe('customer_payment');
+    expect(c.params![4]).toBe('%cr-000%');
+    expect(c.params![5]).toBe(50);
+    expect(c.params![6]).toBe(100);
+  });
+
+  it('clamps limit to [1, 200] and offset to >= 0', async () => {
+    const { service, calls } = await makeService();
+    await service.cashboxMovementsUnified('cb-1', { limit: 9999, offset: -50 });
+    const params = calls[0].params!;
+    const limitParam = params[params.length - 2];
+    const offsetParam = params[params.length - 1];
+    expect(limitParam).toBe(200);
+    expect(offsetParam).toBe(0);
+  });
+
+  it('returns the FE-compatible { rows, total, totals } shape', async () => {
+    const { service } = await makeService({
+      rows: [
+        {
+          source: 'cashbox_txn', id: 't-1',
+          direction: 'in', amount_in: '300.00', amount_out: '0.00',
+          net_amount: '300.00', kind_ar: 'مبيعات كاش',
+          reference_type: 'invoice', reference_no: 'INV-2026-000142',
+          counterparty_name: null,
+        },
+      ],
+      total_count: 1,
+      sum_in: '300.00',
+      sum_out: '0.00',
+      sum_net: '300.00',
+    });
+    const out = await service.cashboxMovementsUnified('cb-1', {});
+    expect(out.rows).toHaveLength(1);
+    expect(out.rows[0].source).toBe('cashbox_txn');
+    expect(out.total).toBe(1);
+    expect(out.totals.in).toBe('300.00');
+    expect(out.totals.out).toBe('0.00');
+    expect(out.totals.net).toBe('300.00');
+    expect(out.totals.count).toBe(1);
+  });
+
+  it('returns empty rows + zero totals when the cashbox has no movements', async () => {
+    const { service } = await makeService();
+    const out = await service.cashboxMovementsUnified('cb-empty', {});
+    expect(out.rows).toEqual([]);
+    expect(out.total).toBe(0);
+    expect(out.totals.count).toBe(0);
+  });
+});
+
 

@@ -131,6 +131,52 @@ export interface ReconciliationRow {
   statement_reference: string | null;
 }
 
+/**
+ * PR-FIN-PAYACCT-4D-UX-FIX-4 — discriminator on a unified-movement row.
+ * `cashbox_txn` = direct cash flow recorded in cashbox_transactions.
+ * The other 3 = non-cash account flows surfaced for cashboxes whose
+ * PAs are linked.
+ */
+export type CashboxMovementSource =
+  | 'cashbox_txn'
+  | 'invoice_payment'
+  | 'customer_payment'
+  | 'supplier_payment';
+
+export interface CashboxMovementUnifiedRow {
+  source: CashboxMovementSource;
+  id: string;
+  direction: 'in' | 'out';
+  amount_in: string;       // pg numeric → string
+  amount_out: string;
+  net_amount: string;
+  kind_ar: string;         // Arabic operation label
+  reference_type: string | null;
+  reference_id: string | null;
+  reference_no: string | null;
+  counterparty_name: string | null;
+  payment_account_id: string | null;
+  payment_method: string | null;
+  balance_after: string | null;
+  user_id: string | null;
+  user_name: string | null;
+  journal_entry_id: string | null;
+  journal_entry_no: string | null;
+  occurred_at: string;
+  notes: string | null;
+}
+
+export interface CashboxMovementsUnifiedResponse {
+  rows: CashboxMovementUnifiedRow[];
+  total: number;
+  totals: {
+    in: string;
+    out: string;
+    net: string;
+    count: number;
+  };
+}
+
 export interface CashboxMovement {
   id: string;
   cashbox_id: string;
@@ -337,6 +383,34 @@ export const cashDeskApi = {
     offset?: number;
   }) =>
     unwrap<CashboxMovement[]>(api.get('/cash-desk/movements', { params })),
+
+  // PR-FIN-PAYACCT-4D-UX-FIX-4 — unified per-cashbox movements feed.
+  // Reads from cashbox_transactions PLUS invoice/customer/supplier
+  // payments routed through PAs linked to this cashbox. SELECT-only;
+  // never reads gl_account_code alone.
+  cashboxMovementsUnified: (
+    cashboxId: string,
+    filter: {
+      from?: string;
+      to?: string;
+      type?: CashboxMovementSource;
+      q?: string;
+      limit?: number;
+      offset?: number;
+    } = {},
+  ) =>
+    unwrap<CashboxMovementsUnifiedResponse>(
+      api.get(`/cash-desk/cashboxes/${cashboxId}/movements-unified`, {
+        params: {
+          from: filter.from,
+          to: filter.to,
+          type: filter.type,
+          q: filter.q,
+          limit: filter.limit,
+          offset: filter.offset,
+        },
+      }),
+    ),
 
   // Customer receipts
   receive: (payload: CreateCustomerPaymentPayload) =>

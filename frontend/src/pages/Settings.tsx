@@ -1211,15 +1211,17 @@ function Textarea({
 }
 
 /* ────────────────────────────────────────────────────────────────────
- * PR-FIN-PAYACCT-4D — Payment-accounts admin is now part of the
- * unified treasury page at `/cashboxes` ("الخزائن والحسابات
- * البنكية"). PR-4B's standalone /payment-accounts route still
- * exists but redirects there. The Settings tab keeps a redirect
- * card so admins clicking the legacy tab land on the right place.
+ * PR-FIN-PAYACCT-4D-UX-FIX-4 — Settings tab is no longer a dead-end
+ * message. The redirect link to `/cashboxes` stays, and we add a row
+ * of quick-add buttons that open the appropriate create modal on the
+ * unified page via `?action=create-account&method=...` deep-link.
+ * The Cashboxes page consumes the query string on mount and pops the
+ * params after acting so a reload doesn't re-fire.
  * ──────────────────────────────────────────────────────────────── */
 function PaymentAccountsTab() {
   return (
     <div className="space-y-4" data-testid="payment-accounts-tab-redirect">
+      {/* Primary redirect card */}
       <div className="rounded-2xl border border-slate-200 bg-white p-6">
         <div className="flex items-start gap-4">
           <div className="w-12 h-12 rounded-xl bg-rose-50 text-rose-600 flex items-center justify-center shrink-0">
@@ -1227,12 +1229,13 @@ function PaymentAccountsTab() {
           </div>
           <div className="flex-1 min-w-0">
             <h2 className="text-lg font-bold text-slate-900">
-              تم دمج إدارة حسابات الدفع داخل صفحة الخزائن والحسابات البنكية
+              إدارة حسابات الدفع تتم من صفحة الخزائن والحسابات البنكية
             </h2>
             <p className="text-sm text-slate-600 mt-1 leading-relaxed">
               للوصول إلى مؤشرات الأرصدة، الفلاتر، تنبيهات الفروقات، الخزائن،
               الحسابات البنكية، المحافظ، نقاط البيع، InstaPay، والشيكات — كلها
-              في مكان واحد: صفحة "الخزائن والحسابات البنكية".
+              في مكان واحد. تستطيع الانتقال للصفحة الكاملة، أو فتح أحد إجراءات
+              الإضافة السريعة بالأسفل.
             </p>
             <div className="mt-4">
               <Link
@@ -1246,6 +1249,53 @@ function PaymentAccountsTab() {
             </div>
           </div>
         </div>
+      </div>
+
+      {/* Quick-add deep-links — opens the right create modal on /cashboxes */}
+      <div
+        className="rounded-2xl border border-slate-200 bg-white p-5"
+        data-testid="payment-accounts-tab-quick-actions"
+      >
+        <h3 className="font-bold text-sm text-slate-800 mb-3">إجراءات سريعة</h3>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+          <Link
+            to="/cashboxes?action=create-account"
+            className="px-3 py-2 rounded-lg border border-slate-200 bg-white text-sm font-bold text-slate-800 hover:bg-slate-50 inline-flex items-center justify-between"
+            data-testid="settings-quick-add-payment-account"
+          >
+            <span className="inline-flex items-center gap-2">
+              <Plus className="w-4 h-4 text-rose-600" /> إضافة حساب دفع
+            </span>
+            <ArrowLeft className="w-4 h-4 text-slate-400" />
+          </Link>
+          <Link
+            to="/cashboxes?action=create-account&method=wallet"
+            className="px-3 py-2 rounded-lg border border-slate-200 bg-white text-sm font-bold text-slate-800 hover:bg-slate-50 inline-flex items-center justify-between"
+            data-testid="settings-quick-add-wallet"
+          >
+            <span>إضافة محفظة إلكترونية</span>
+            <ArrowLeft className="w-4 h-4 text-slate-400" />
+          </Link>
+          <Link
+            to="/cashboxes?action=create-account&method=bank_transfer"
+            className="px-3 py-2 rounded-lg border border-slate-200 bg-white text-sm font-bold text-slate-800 hover:bg-slate-50 inline-flex items-center justify-between"
+            data-testid="settings-quick-add-bank"
+          >
+            <span>إضافة حساب بنكي</span>
+            <ArrowLeft className="w-4 h-4 text-slate-400" />
+          </Link>
+          <Link
+            to="/cashboxes?action=create-account&method=check"
+            className="px-3 py-2 rounded-lg border border-slate-200 bg-white text-sm font-bold text-slate-800 hover:bg-slate-50 inline-flex items-center justify-between"
+            data-testid="settings-quick-add-check"
+          >
+            <span>إضافة حساب شيكات</span>
+            <ArrowLeft className="w-4 h-4 text-slate-400" />
+          </Link>
+        </div>
+        <p className="text-[11px] text-slate-500 mt-3">
+          النقر على أي إجراء يفتح صفحة الخزائن والحسابات ويفتح نموذج الإنشاء المناسب تلقائيًا.
+        </p>
       </div>
     </div>
   );

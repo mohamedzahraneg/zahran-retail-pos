@@ -51,6 +51,12 @@ vi.mock('@/api/cash-desk.api', async (importOriginal) => {
       cashboxes:     () => cashboxesMock(),
       movements: (p: any) => movementsMock(p),
       glDrift:       () => glDriftMock(),
+      // PR-FIN-PAYACCT-4D-UX-FIX-4 — stub unified-movements so the
+      // CashboxDetailsModal can render without exploding when opened
+      // from the treasury rail's "عرض التفاصيل" button.
+      cashboxMovementsUnified: vi.fn(async () => ({
+        rows: [], total: 0, totals: { in: '0', out: '0', net: '0', count: 0 },
+      })),
       transfer:      vi.fn(async () => ({})),
       updateCashbox: vi.fn(async () => ({})),
       createCashbox: vi.fn(async () => ({})),
@@ -570,5 +576,19 @@ describe('<Cashboxes /> — PR-FIN-PAYACCT-4D-UX-FIX table-first layout', () => 
     // The fixture has rows on GL 1114 (instapay+wallet) and 1113 (POS+bank).
     expect(within(buckets).getByText(/إجمالي المحافظ الإلكترونية 1114/)).toBeInTheDocument();
     expect(within(buckets).getByText(/إجمالي البنوك 1113/)).toBeInTheDocument();
+  });
+
+  // ─── PR-FIN-PAYACCT-4D-UX-FIX-4: cashbox details + deep-link ────
+  it('PR-4D-UX-FIX-4: rail "عرض التفاصيل" opens the cashbox-details modal (not just a filter)', async () => {
+    renderPage();
+    // Rail cash-summary card renders for the active cash cashbox.
+    await waitFor(() =>
+      expect(screen.getByTestId('treasury-rail-cash-summary')).toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId('cashbox-details-modal')).toBeNull();
+    fireEvent.click(screen.getByTestId('treasury-rail-cash-details'));
+    await waitFor(() =>
+      expect(screen.getByTestId('cashbox-details-modal')).toBeInTheDocument(),
+    );
   });
 });

@@ -1292,6 +1292,302 @@ export class CashDeskService {
    * optional cashbox, date range, direction and limit filters so the
    * UI can paginate without extra queries.
    */
+  /**
+   * PR-FIN-PAYACCT-4D-UX-FIX-4 — unified per-cashbox movements feed.
+   *
+   * The classic `movements()` reads `cashbox_transactions` only — that's
+   * cash-side flows. When a non-cash payment_account is linked to a
+   * cashbox via `payment_accounts.cashbox_id`, the operator wants its
+   * operations to surface in that cashbox's details too. This method
+   * unions four sources:
+   *
+   *   A) `cashbox_transactions` for this cashbox            (direct)
+   *   B) `invoice_payments`     where PA.cashbox_id = target (linked)
+   *   C) `customer_payments`    where PA.cashbox_id = target (linked)
+   *   D) `supplier_payments`    where PA.cashbox_id = target (linked)
+   *
+   * Branch B/C/D rows are EXCLUDED when the same operation already
+   * appears via Branch A (e.g. a cash-side row in cashbox_transactions
+   * with matching `reference_type` + `reference_id`) — prevents the
+   * same logical event from being counted twice in totals.
+   *
+   * Strict filtering rule: branches B/C/D filter by `payment_account_id`
+   * → the PA's `cashbox_id`. NEVER by `gl_account_code` alone — that
+   * was the bug PR-FIN-PAYACCT-4D-UX-FIX-2 fixed for the per-account
+   * panel, applied here too.
+   *
+   * Pure SELECT. No DDL. No mutations.
+   *
+   * Returns: `{ rows, total, totals: { in, out, net, count } }` —
+   * mirroring the FE shape the `PaymentAccountDetailsPanel` already
+   * understands so frontend code can share components.
+   */
+  async cashboxMovementsUnified(
+    cashboxId: string,
+    filter: {
+      from?: string;
+      to?: string;
+      type?: string; // 'cashbox_txn' | 'invoice_payment' | 'customer_payment' | 'supplier_payment'
+      q?: string;
+      limit?: number;
+      offset?: number;
+    } = {},
+  ) {
+    const limit = Math.min(Math.max(filter.limit ?? 20, 1), 200);
+    const offset = Math.max(filter.offset ?? 0, 0);
+    const args: any[] = [cashboxId];
+    const whereExtra: string[] = [];
+
+    if (filter.from) {
+      args.push(filter.from);
+      whereExtra.push(`m.occurred_at::date >= $${args.length}::date`);
+    }
+    if (filter.to) {
+      args.push(filter.to);
+      whereExtra.push(`m.occurred_at::date <= $${args.length}::date`);
+    }
+    if (filter.type) {
+      args.push(filter.type);
+      whereExtra.push(`m.source = $${args.length}`);
+    }
+    if (filter.q && filter.q.trim()) {
+      args.push(`%${filter.q.trim().toLowerCase()}%`);
+      whereExtra.push(
+        `(LOWER(COALESCE(m.reference_no, '')) LIKE $${args.length}
+          OR LOWER(COALESCE(m.counterparty_name, '')) LIKE $${args.length})`,
+      );
+    }
+
+    const baseCte = `
+      WITH linked_pas AS (
+        SELECT id::uuid FROM payment_accounts WHERE cashbox_id = $1::uuid
+      ),
+      ops AS (
+        -- A) Direct cashbox_transactions for this cashbox
+        SELECT
+          'cashbox_txn'::text                         AS source,
+          t.id::text                                  AS id,
+          t.direction::text                           AS direction,
+          (CASE WHEN t.direction='in'  THEN t.amount ELSE 0::numeric END)::numeric AS amount_in,
+          (CASE WHEN t.direction='out' THEN t.amount ELSE 0::numeric END)::numeric AS amount_out,
+          (CASE WHEN t.direction='in'  THEN t.amount ELSE -t.amount END)::numeric AS net_amount,
+          CASE t.category
+            WHEN 'customer_receipt' THEN 'قبض من عميل'
+            WHEN 'supplier_payment' THEN 'صرف لمورد'
+            WHEN 'expense'          THEN 'مصروف'
+            WHEN 'invoice_cash'     THEN 'مبيعات كاش'
+            WHEN 'invoice_refund'   THEN 'مرتجع'
+            WHEN 'opening_balance'  THEN 'رصيد افتتاحي'
+            WHEN 'owner_topup'      THEN 'تمويل من المالك'
+            WHEN 'bank_deposit'     THEN 'إيداع بنكي'
+            WHEN 'manual_deposit'   THEN 'إيداع يدوي'
+            WHEN 'manual_withdraw'  THEN 'سحب يدوي'
+            WHEN 'adjustment'       THEN 'تسوية'
+            WHEN 'transfer_in'      THEN 'تحويل وارد'
+            WHEN 'transfer_out'     THEN 'تحويل صادر'
+            WHEN 'payment'          THEN 'دفعة'
+            WHEN 'receipt'          THEN 'سند قبض'
+            WHEN 'purchase'         THEN 'شراء'
+            ELSE COALESCE(t.category, 'أخرى')
+          END                                         AS kind_ar,
+          t.reference_type::text                      AS reference_type,
+          t.reference_id::text                        AS reference_id,
+          COALESCE(
+            (SELECT i.invoice_no  FROM invoices          i  WHERE i.id  = t.reference_id),
+            (SELECT e.expense_no  FROM expenses          e  WHERE e.id  = t.reference_id),
+            (SELECT cp.payment_no FROM customer_payments cp WHERE cp.id = t.reference_id),
+            (SELECT sp.payment_no FROM supplier_payments sp WHERE sp.id = t.reference_id),
+            (SELECT p.purchase_no FROM purchases         p  WHERE p.id  = t.reference_id)
+          )                                           AS reference_no,
+          COALESCE(
+            (SELECT c.full_name FROM customers c
+               JOIN customer_payments cp ON cp.customer_id = c.id
+              WHERE cp.id = t.reference_id),
+            (SELECT s.name      FROM suppliers s
+               JOIN supplier_payments sp ON sp.supplier_id = s.id
+              WHERE sp.id = t.reference_id),
+            (SELECT s.name      FROM suppliers s
+               JOIN purchases p ON p.supplier_id = s.id
+              WHERE p.id  = t.reference_id)
+          )                                           AS counterparty_name,
+          NULL::text                                  AS payment_account_id,
+          NULL::text                                  AS payment_method,
+          t.balance_after::numeric                    AS balance_after,
+          t.user_id::text                             AS user_id,
+          u.full_name                                 AS user_name,
+          NULL::text                                  AS journal_entry_id,
+          NULL::text                                  AS journal_entry_no,
+          t.created_at                                AS occurred_at,
+          t.notes                                     AS notes
+        FROM cashbox_transactions t
+        LEFT JOIN users u ON u.id = t.user_id
+        WHERE t.cashbox_id = $1::uuid
+
+        UNION ALL
+
+        -- B) Invoice payments routed via PAs linked to this cashbox
+        SELECT
+          'invoice_payment'::text,
+          ip.id::text,
+          'in'::text,
+          ip.amount::numeric,
+          0::numeric,
+          ip.amount::numeric,
+          'بيع'::text,
+          'invoice'::text,
+          ip.invoice_id::text,
+          inv.invoice_no,
+          c.full_name,
+          ip.payment_account_id::text,
+          ip.payment_method::text,
+          NULL::numeric,
+          ip.received_by::text,
+          u.username,
+          je.id::text,
+          je.entry_no,
+          ip.created_at,
+          ip.notes
+        FROM invoice_payments ip
+        LEFT JOIN invoices  inv ON inv.id = ip.invoice_id
+        LEFT JOIN customers c   ON c.id = inv.customer_id
+        LEFT JOIN users     u   ON u.id = ip.received_by
+        LEFT JOIN journal_entries je
+               ON je.reference_type = 'invoice'
+              AND je.reference_id   = ip.invoice_id
+              AND je.is_void        = FALSE
+        WHERE ip.payment_account_id IN (SELECT id FROM linked_pas)
+          AND NOT EXISTS (
+            SELECT 1 FROM cashbox_transactions ct
+            WHERE ct.cashbox_id     = $1::uuid
+              AND ct.reference_type = 'invoice'
+              AND ct.reference_id   = ip.invoice_id
+          )
+
+        UNION ALL
+
+        -- C) Customer payments routed via PAs linked to this cashbox
+        SELECT
+          'customer_payment'::text,
+          cp.id::text,
+          (CASE WHEN cp.kind = 'refund_out' THEN 'out' ELSE 'in' END)::text,
+          (CASE WHEN cp.kind = 'refund_out' THEN 0::numeric ELSE cp.amount::numeric END)::numeric,
+          (CASE WHEN cp.kind = 'refund_out' THEN cp.amount::numeric ELSE 0::numeric END)::numeric,
+          (CASE WHEN cp.kind = 'refund_out' THEN -cp.amount::numeric ELSE cp.amount::numeric END)::numeric,
+          (CASE WHEN cp.kind = 'refund_out' THEN 'مرتجع للعميل' ELSE 'مقبوضة عميل' END)::text,
+          'customer_payment'::text,
+          cp.id::text,
+          cp.payment_no,
+          c.full_name,
+          cp.payment_account_id::text,
+          cp.payment_method::text,
+          NULL::numeric,
+          cp.received_by::text,
+          u.username,
+          je.id::text,
+          je.entry_no,
+          cp.created_at,
+          cp.notes
+        FROM customer_payments cp
+        LEFT JOIN customers c ON c.id = cp.customer_id
+        LEFT JOIN users     u ON u.id = cp.received_by
+        LEFT JOIN journal_entries je
+               ON je.reference_type = 'customer_payment'
+              AND je.reference_id   = cp.id
+              AND je.is_void        = FALSE
+        WHERE cp.payment_account_id IN (SELECT id FROM linked_pas)
+          AND COALESCE(cp.is_void, FALSE) = FALSE
+          AND NOT EXISTS (
+            SELECT 1 FROM cashbox_transactions ct
+            WHERE ct.cashbox_id     = $1::uuid
+              AND ct.reference_type = 'customer_payment'
+              AND ct.reference_id   = cp.id
+          )
+
+        UNION ALL
+
+        -- D) Supplier payments routed via PAs linked to this cashbox
+        SELECT
+          'supplier_payment'::text,
+          sp.id::text,
+          'out'::text,
+          0::numeric,
+          sp.amount::numeric,
+          (-sp.amount)::numeric,
+          'دفع مورد'::text,
+          'supplier_payment'::text,
+          sp.id::text,
+          sp.payment_no,
+          s.name,
+          sp.payment_account_id::text,
+          sp.payment_method::text,
+          NULL::numeric,
+          sp.paid_by::text,
+          u.username,
+          je.id::text,
+          je.entry_no,
+          sp.created_at,
+          sp.notes
+        FROM supplier_payments sp
+        LEFT JOIN suppliers s ON s.id = sp.supplier_id
+        LEFT JOIN users     u ON u.id = sp.paid_by
+        LEFT JOIN journal_entries je
+               ON je.reference_type = 'supplier_payment'
+              AND je.reference_id   = sp.id
+              AND je.is_void        = FALSE
+        WHERE sp.payment_account_id IN (SELECT id FROM linked_pas)
+          AND COALESCE(sp.is_void, FALSE) = FALSE
+          AND NOT EXISTS (
+            SELECT 1 FROM cashbox_transactions ct
+            WHERE ct.cashbox_id     = $1::uuid
+              AND ct.reference_type = 'supplier_payment'
+              AND ct.reference_id   = sp.id
+          )
+      ),
+      filtered AS (
+        SELECT * FROM ops m
+        ${whereExtra.length ? 'WHERE ' + whereExtra.join(' AND ') : ''}
+      )
+    `;
+
+    args.push(limit);
+    const limitParamIdx = args.length;
+    args.push(offset);
+    const offsetParamIdx = args.length;
+
+    const sql = `
+      ${baseCte}
+      SELECT
+        (SELECT COUNT(*) FROM filtered)                                             AS total_count,
+        (SELECT COALESCE(SUM(amount_in),  0)::numeric FROM filtered)                AS sum_in,
+        (SELECT COALESCE(SUM(amount_out), 0)::numeric FROM filtered)                AS sum_out,
+        (SELECT (COALESCE(SUM(amount_in),0) - COALESCE(SUM(amount_out),0))::numeric FROM filtered) AS sum_net,
+        COALESCE(
+          (SELECT json_agg(row_json ORDER BY occurred_at DESC)
+             FROM (
+               SELECT to_jsonb(p) AS row_json, p.occurred_at
+                 FROM (
+                   SELECT * FROM filtered
+                   ORDER BY occurred_at DESC
+                   LIMIT $${limitParamIdx} OFFSET $${offsetParamIdx}
+                 ) p
+             ) j),
+          '[]'::json
+        ) AS rows;
+    `;
+
+    const [agg] = await this.ds.query(sql, args);
+    return {
+      rows: agg?.rows ?? [],
+      total: Number(agg?.total_count ?? 0),
+      totals: {
+        in: agg?.sum_in ?? '0',
+        out: agg?.sum_out ?? '0',
+        net: agg?.sum_net ?? '0',
+        count: Number(agg?.total_count ?? 0),
+      },
+    };
+  }
+
   movements(params: {
     cashbox_id?: string;
     from?: string;

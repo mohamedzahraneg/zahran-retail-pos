@@ -295,4 +295,45 @@ describe('<PaymentAccountDetailsPanel /> — PR-FIN-PAYACCT-4D-UX-FIX-2', () => 
     fireEvent.click(screen.getByTestId('details-action-set-default'));
     expect(onSetDefault).not.toHaveBeenCalled();
   });
+
+  // ─── PR-FIN-PAYACCT-4D-UX-FIX-4: smart-range chips ─────────────
+  it('PR-4D-UX-FIX-4: renders the 4 smart-range chips above the date inputs', async () => {
+    movementsMock.mockResolvedValue({
+      rows: [], total: 0, totals: { in: '0', out: '0', net: '0', count: 0 },
+    });
+    renderPanel();
+    expect(screen.getByTestId('details-range-chips')).toBeInTheDocument();
+    expect(screen.getByTestId('details-range-today')).toBeInTheDocument();
+    expect(screen.getByTestId('details-range-week')).toBeInTheDocument();
+    expect(screen.getByTestId('details-range-month')).toBeInTheDocument();
+    expect(screen.getByTestId('details-range-custom')).toBeInTheDocument();
+  });
+
+  it('PR-4D-UX-FIX-4: clicking "اليوم" applies a from=to=today range and re-fires the query', async () => {
+    movementsMock.mockResolvedValue({
+      rows: [], total: 0, totals: { in: '0', out: '0', net: '0', count: 0 },
+    });
+    renderPanel();
+    await waitFor(() => expect(movementsMock).toHaveBeenCalled());
+    fireEvent.click(screen.getByTestId('details-range-today'));
+    await waitFor(() => {
+      const last = movementsMock.mock.calls[movementsMock.mock.calls.length - 1];
+      expect(last[1].from).toBe(last[1].to);
+    });
+  });
+
+  it('PR-4D-UX-FIX-4: "هذا الأسبوع" snaps from to a Saturday', async () => {
+    movementsMock.mockResolvedValue({
+      rows: [], total: 0, totals: { in: '0', out: '0', net: '0', count: 0 },
+    });
+    renderPanel();
+    await waitFor(() => expect(movementsMock).toHaveBeenCalled());
+    fireEvent.click(screen.getByTestId('details-range-week'));
+    await waitFor(() => {
+      const last = movementsMock.mock.calls[movementsMock.mock.calls.length - 1];
+      expect(last[1].from).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      // 6 = Saturday in JS (Sunday=0).
+      expect(new Date(last[1].from).getDay()).toBe(6);
+    });
+  });
 });

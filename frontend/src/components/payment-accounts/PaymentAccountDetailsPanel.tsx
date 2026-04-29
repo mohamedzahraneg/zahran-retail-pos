@@ -47,6 +47,11 @@ import {
 } from '@/api/payments.api';
 import type { Cashbox } from '@/api/cash-desk.api';
 import { PaymentProviderLogo } from '@/components/payments/PaymentProviderLogo';
+import {
+  resolveSmartRange,
+  SMART_RANGE_LABELS_AR,
+  type SmartRangeKey,
+} from '@/lib/smart-date-range';
 
 const EGP = (n: number | string) =>
   `${Number(n || 0).toLocaleString('en-US', {
@@ -81,10 +86,23 @@ export function PaymentAccountDetailsPanel({
   onDelete,
 }: PaymentAccountDetailsPanelProps) {
   // Filters
+  // PR-FIN-PAYACCT-4D-UX-FIX-4 — smart-range chip + from/to inputs.
+  // Picking a chip writes the resolved range into from/to and switches
+  // `rangeKey`. 'custom' leaves the inputs free for the operator.
+  const [rangeKey, setRangeKey] = useState<SmartRangeKey | null>(null);
   const [from, setFrom] = useState<string>('');
   const [to, setTo] = useState<string>('');
   const [type, setType] = useState<PaymentAccountMovementType | ''>('');
   const [q, setQ] = useState<string>('');
+
+  function applyRange(k: SmartRangeKey) {
+    setRangeKey(k);
+    if (k === 'custom') return; // operator types from/to themselves
+    const range = resolveSmartRange(k);
+    setFrom(range.from);
+    setTo(range.to);
+    setPage(1);
+  }
   // Pagination
   const [page, setPage] = useState<number>(1);
   const [pageSize, setPageSize] = useState<number>(20);
@@ -119,6 +137,7 @@ export function PaymentAccountDetailsPanel({
   }, [movementsQuery.data, pageSize]);
 
   function clearFilters() {
+    setRangeKey(null);
     setFrom('');
     setTo('');
     setType('');
@@ -233,6 +252,28 @@ export function PaymentAccountDetailsPanel({
             >
               <X size={12} /> مسح الفلاتر
             </button>
+          </div>
+
+          {/* PR-FIN-PAYACCT-4D-UX-FIX-4 — smart-range chips */}
+          <div className="flex flex-wrap gap-2 mb-3" data-testid="details-range-chips">
+            {(['today', 'week', 'month', 'custom'] as SmartRangeKey[]).map((k) => {
+              const active = rangeKey === k;
+              return (
+                <button
+                  key={k}
+                  type="button"
+                  onClick={() => applyRange(k)}
+                  data-testid={`details-range-${k}`}
+                  className={
+                    active
+                      ? 'px-3 py-1.5 rounded-lg bg-pink-600 text-white text-xs font-bold'
+                      : 'px-3 py-1.5 rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 text-xs font-bold'
+                  }
+                >
+                  {SMART_RANGE_LABELS_AR[k]}
+                </button>
+              );
+            })}
           </div>
 
           {/* Filters */}

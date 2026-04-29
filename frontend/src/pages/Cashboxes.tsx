@@ -40,6 +40,7 @@
  * down this file untouched).
  */
 import { useMemo, useState, useEffect, useRef } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import {
@@ -97,6 +98,7 @@ import { PaymentProviderLogo } from '@/components/payments/PaymentProviderLogo';
 import { PaymentAccountModal } from '@/components/payment-accounts/PaymentAccountModal';
 import { PaymentAccountAlerts } from '@/components/payment-accounts/PaymentAccountAlerts';
 import { PaymentAccountDetailsPanel } from '@/components/payment-accounts/PaymentAccountDetailsPanel';
+import { CashboxDetailsModal } from '@/components/cashboxes/CashboxDetailsModal';
 import { InstitutionLogo } from '@/components/InstitutionLogo';
 import { useAuthStore } from '@/stores/auth.store';
 
@@ -160,6 +162,33 @@ const PIN_RECOMMENDED_METHODS = new Set<PaymentMethodCode>([
   'check',
 ]);
 
+/**
+ * PR-FIN-PAYACCT-4D-UX-FIX-4 — suggested `name_ar` when the operator
+ * launches the cashbox-create flow from inside the PaymentAccountModal
+ * empty-state. Helps avoid empty inputs and conveys intent at a glance.
+ */
+function suggestedCashboxName(
+  method: PaymentMethodCode | null,
+  kind: CashboxKind,
+): string {
+  if (method === 'instapay')      return 'خزنة InstaPay';
+  if (method === 'wallet')        return 'خزنة محفظة WE Pay';
+  if (method === 'vodafone_cash') return 'خزنة Vodafone Cash';
+  if (method === 'orange_cash')   return 'خزنة Orange Cash';
+  if (method === 'card_visa')     return 'حساب POS Visa';
+  if (method === 'card_mastercard') return 'حساب POS Mastercard';
+  if (method === 'card_meeza')    return 'حساب POS Meeza';
+  if (method === 'bank_transfer') return 'حساب بنكي';
+  if (method === 'check')         return 'حساب شيكات';
+  if (method === 'cash')          return 'خزنة نقدية';
+  // Fallback when method is null (shouldn't happen via the empty-state
+  // path, but the API allows it). Use the kind label.
+  if (kind === 'bank')    return 'حساب بنكي';
+  if (kind === 'ewallet') return 'خزنة محفظة إلكترونية';
+  if (kind === 'check')   return 'حساب شيكات';
+  return 'خزنة نقدية';
+}
+
 /** Arabic relative-time helper for the "آخر حركة" KPI/column. */
 function relativeArabic(iso: string | null): string {
   if (!iso) return '—';
@@ -222,9 +251,33 @@ export default function Cashboxes() {
   });
   const [paEditing, setPaEditing] = useState<PaymentAccount | null>(null);
   const [showCreateCashbox, setShowCreateCashbox] = useState<CashboxKind | null>(null);
+  // PR-FIN-PAYACCT-4D-UX-FIX-4 — name pre-fill for "إنشاء خزنة" flow
+  // launched from PaymentAccountModal. Cleared when the modal closes.
+  const [cashboxSuggestedName, setCashboxSuggestedName] = useState<string | null>(null);
   const [editingCashbox, setEditingCashbox]       = useState<Cashbox | null>(null);
   const [showTransfer, setShowTransfer]           = useState(false);
   const [showOverflow, setShowOverflow]           = useState(false);
+
+  // PR-FIN-PAYACCT-4D-UX-FIX-4 — Settings deep-link consumer.
+  // The Settings page links here with `?action=create-account&method=...`
+  // to open the matching create modal. We pop the params after acting
+  // so a reload doesn't re-trigger.
+  const [searchParams, setSearchParams] = useSearchParams();
+  useEffect(() => {
+    const action = searchParams.get('action');
+    if (!action) return;
+    if (action === 'create-account' && canManageAccounts) {
+      const m = searchParams.get('method') as PaymentMethodCode | null;
+      setPaCreate({ open: true, method: m ?? null });
+    }
+    // Clear consumed params (preserves the rest of the URL).
+    const next = new URLSearchParams(searchParams);
+    next.delete('action');
+    next.delete('method');
+    setSearchParams(next, { replace: true });
+    // We intentionally only run this effect on mount + when canManage flips.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canManageAccounts]);
 
   // ── Selected row (visual highlight) ────────────────────────────────
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -232,6 +285,8 @@ export default function Cashboxes() {
   // selectedId stays as the row-highlight indicator; detailsId controls
   // whether the centered DetailsPanel is mounted.
   const [detailsId, setDetailsId] = useState<string | null>(null);
+  // PR-FIN-PAYACCT-4D-UX-FIX-4: cashbox-details modal state.
+  const [cashboxDetailsId, setCashboxDetailsId] = useState<string | null>(null);
 
   // ── Live data (no mocks, no fallbacks) ─────────────────────────────
   const { data: boxes = [] } = useQuery({
@@ -519,7 +574,7 @@ export default function Cashboxes() {
               </div>
               <button
                 type="button"
-                onClick={() => setCashboxFilter(cashCashbox.id)}
+                onClick={() => setCashboxDetailsId(cashCashbox.id)}
                 className="text-[11px] text-emerald-700 hover:underline mt-1 block"
                 data-testid="treasury-rail-cash-details"
               >
@@ -767,7 +822,14 @@ export default function Cashboxes() {
 
       {/* Modals */}
       {showCreateCashbox && (
-        <CashboxFormModal kind={showCreateCashbox} onClose={() => setShowCreateCashbox(null)} />
+        <CashboxFormModal
+          kind={showCreateCashbox}
+          suggestedName={cashboxSuggestedName}
+          onClose={() => {
+            setShowCreateCashbox(null);
+            setCashboxSuggestedName(null);
+          }}
+        />
       )}
       {editingCashbox && (
         <CashboxFormModal kind={editingCashbox.kind} editing={editingCashbox} onClose={() => setEditingCashbox(null)} />
@@ -788,7 +850,10 @@ export default function Cashboxes() {
           // PR-FIN-PAYACCT-4D-UX-FIX-2 — close the modal and open the
           // matching cashbox-create modal directly when the operator
           // hits "إنشاء خزنة" inside the cashbox-empty-state.
+          // PR-FIN-PAYACCT-4D-UX-FIX-4 — also pass a sensible suggested
+          // name based on the originating payment method.
           onCreateCashbox={(kind) => {
+            setCashboxSuggestedName(suggestedCashboxName(paCreate.method, kind));
             setPaCreate({ open: false, method: null });
             setShowCreateCashbox(kind);
           }}
@@ -802,6 +867,7 @@ export default function Cashboxes() {
           cashboxes={boxes}
           onClose={() => setPaEditing(null)}
           onCreateCashbox={(kind) => {
+            setCashboxSuggestedName(suggestedCashboxName(paEditing.method, kind));
             setPaEditing(null);
             setShowCreateCashbox(kind);
           }}
@@ -840,6 +906,33 @@ export default function Cashboxes() {
                 deleteAccountMutation.mutate(account.payment_account_id);
                 setDetailsId(null);
               }
+            }}
+          />
+        );
+      })()}
+
+      {/* PR-FIN-PAYACCT-4D-UX-FIX-4 — Cashbox details modal */}
+      {cashboxDetailsId && (() => {
+        const target = boxes.find((c) => c.id === cashboxDetailsId);
+        if (!target) {
+          // Cashbox vanished (deleted while modal was open). Close silently.
+          setCashboxDetailsId(null);
+          return null;
+        }
+        return (
+          <CashboxDetailsModal
+            cashbox={target}
+            allBalances={balances}
+            drifts={drifts}
+            providers={providers}
+            onClose={() => setCashboxDetailsId(null)}
+            onOpenLinkedAccount={(account) => {
+              // Drill into the linked account's per-account details panel.
+              // Both modals can be open simultaneously — the inner one is
+              // higher z-index so the operator returns to the cashbox view
+              // when they close it.
+              setSelectedId(account.payment_account_id);
+              setDetailsId(account.payment_account_id);
             }}
           />
         );
@@ -1538,16 +1631,24 @@ function CashboxFormModal({
   kind,
   editing,
   onClose,
+  suggestedName,
 }: {
   kind: CashboxKind;
   editing?: Cashbox;
   onClose: () => void;
+  /**
+   * PR-FIN-PAYACCT-4D-UX-FIX-4 — pre-fill `name_ar` when the modal is
+   * opened from the PaymentAccountModal "إنشاء خزنة" empty-state, so
+   * the operator gets a sensible default like "خزنة InstaPay" instead
+   * of an empty input. Ignored in edit mode.
+   */
+  suggestedName?: string | null;
 }) {
   const qc = useQueryClient();
   const isEdit = !!editing;
 
   const [form, setForm] = useState<CreateCashboxPayload>(() => ({
-    name_ar: editing?.name_ar || '',
+    name_ar: editing?.name_ar || suggestedName || '',
     kind,
     currency: editing?.currency || 'EGP',
     opening_balance: Number(editing?.opening_balance || 0),
