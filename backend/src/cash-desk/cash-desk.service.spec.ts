@@ -449,3 +449,534 @@ describe('CashDeskService — PR-CASH-DESK-REORG-1', () => {
     });
   });
 });
+
+/* ============================================================================
+ * PR-FIN-PAYACCT-1 — createCashbox opening-balance semantics
+ * ----------------------------------------------------------------------------
+ * Pins Option B.1 from the audit:
+ *
+ *   • opening = 0  → INSERT only, no engine call, no JE/CT, current_balance=0
+ *   • opening > 0  → INSERT (current=0, opening_col=0) + engine.recordTransaction
+ *                    (ref_type='cashbox_opening', cash_movement category='opening')
+ *                    + UPDATE cashboxes SET opening_journal_entry_id, opening_posted_at
+ *
+ * No double-count: cashboxes.opening_balance column is left at 0 in the new flow
+ * so v_cash_position.computed = 0 + Σct(opening) = opening_amount, matching
+ * GL 1111 net debit (= opening_amount). Drift = 0. Verified at the SQL level
+ * by the integration tests; this unit-level spec verifies the call shapes.
+ * ========================================================================== */
+describe('CashDeskService.createCashbox — PR-FIN-PAYACCT-1', () => {
+  /**
+   * Build the canonical emResults queue for createCashbox. Order MUST
+   * match the service's actual SQL flow:
+   *   [0] INSERT INTO cashboxes RETURNING *  → cashbox row
+   *   [1] SELECT existing GL where cashbox_id → empty (forces the link
+   *       function to look up parent next)
+   *   [2] SELECT parent COA where code='111'  → empty (graceful early
+   *       return inside linkOrCreateGLSubAccount — keeps the queue
+   *       short for tests that don't care about COA seeding)
+   * If opening > 0, the queue continues with:
+   *   [3] UPDATE cashboxes (trace columns)    → empty
+   *   [4] SELECT * FROM cashboxes WHERE id    → refreshed row
+   */
+  function buildEmResults(opts: {
+    cashbox_id: string;
+    refreshed?: any; // only used when opening > 0
+  }) {
+    const cashbox = {
+      id: opts.cashbox_id,
+      name_ar: 'الخزينة الرئيسية',
+      kind: 'cash',
+      current_balance: '0.00',
+      opening_balance: '0.00',
+      is_active: true,
+    };
+    const queue: any[][] = [
+      [cashbox],   // [0] INSERT cashboxes RETURNING *
+      [],          // [1] SELECT existing GL → none
+      [],          // [2] SELECT parent COA → none (early return)
+    ];
+    if (opts.refreshed) {
+      queue.push([]);              // [3] UPDATE cashboxes (trace cols)
+      queue.push([opts.refreshed]); // [4] re-SELECT for caller
+    }
+    return queue;
+  }
+
+  function withWarehouseSeed(ds: any) {
+    // dto.warehouse_id is supplied in tests so the warehouse fallback
+    // SELECT (`this.ds.query`) is never hit. The empty array returned
+    // from the default `ds.query` mock is therefore irrelevant.
+    return ds;
+  }
+
+  it('1) opening=0 → INSERT only, no engine call, no JE/CT, current_balance stays 0', async () => {
+    const { ds, emCalls } = makeFakeDataSource(
+      buildEmResults({ cashbox_id: 'cb-1' }),
+    );
+    withWarehouseSeed(ds);
+    const engine = { recordTransaction: jest.fn() };
+    const moduleRef = await Test.createTestingModule({
+      providers: [
+        CashDeskService,
+        { provide: DataSource, useValue: ds },
+        { provide: FinancialEngineService, useValue: engine },
+      ],
+    }).compile();
+    const service = moduleRef.get(CashDeskService);
+
+    const out = await service.createCashbox(
+      {
+        name_ar: 'الخزينة الرئيسية',
+        kind: 'cash',
+        warehouse_id: 'wh-1',
+        opening_balance: 0,
+      } as any,
+      'user-1',
+    );
+
+    // 1a. INSERT happened with current_balance=0, opening_balance=0
+    //     (the literal `0,0` in the VALUES clause — NOT $18,$18).
+    const insert = emCalls.find((c) => /INSERT INTO cashboxes/.test(c.sql))!;
+    expect(insert).toBeDefined();
+    expect(insert.sql).toMatch(/current_balance,\s*opening_balance,\s*\n?\s*is_active\)/);
+    // The new INSERT does NOT carry an $18 placeholder for opening — the
+    // values are literal 0,0 in the SQL.
+    expect(insert.sql).toMatch(/VALUES\s*\([^)]*,0,0,TRUE\)/);
+    expect(insert.params).not.toContain(0); // params end before the literal zeros
+
+    // 1b. Engine NEVER called.
+    expect(engine.recordTransaction).not.toHaveBeenCalled();
+
+    // 1c. No UPDATE on cashboxes (no trace columns to backfill).
+    const updateCalls = emCalls.filter((c) => /UPDATE cashboxes/.test(c.sql));
+    expect(updateCalls).toHaveLength(0);
+
+    // 1d. Returned row carries current_balance=0.
+    expect(out.current_balance).toBe('0.00');
+    expect(out.opening_balance).toBe('0.00');
+  });
+
+  it('2) opening=1000 → engine.recordTransaction called with the canonical opening spec', async () => {
+    const { ds, emCalls } = makeFakeDataSource(
+      buildEmResults({
+        cashbox_id: 'cb-2',
+        refreshed: {
+          id: 'cb-2',
+          name_ar: 'بنك الأهلي',
+          kind: 'bank',
+          // After the engine returns, fn_record_cashbox_txn has lifted
+          // current_balance from 0 to 1000. opening_balance column STAYS
+          // at 0 — the value lives in the CT/JE ledger now.
+          current_balance: '1000.00',
+          opening_balance: '0.00',
+          opening_journal_entry_id: 'je-1',
+          opening_posted_at: '2026-04-29T10:00:00.000Z',
+          is_active: true,
+        },
+      }),
+    );
+    const engine = {
+      recordTransaction: jest.fn().mockResolvedValue({
+        ok: true,
+        entry_id: 'je-1',
+        entry_no: 'JE-2026-000001',
+        cash_txn_ids: [42],
+      }),
+    };
+    const moduleRef = await Test.createTestingModule({
+      providers: [
+        CashDeskService,
+        { provide: DataSource, useValue: ds },
+        { provide: FinancialEngineService, useValue: engine },
+      ],
+    }).compile();
+    const service = moduleRef.get(CashDeskService);
+
+    const out = await service.createCashbox(
+      {
+        name_ar: 'بنك الأهلي',
+        kind: 'bank',
+        institution_code: 'nbe',
+        warehouse_id: 'wh-1',
+        opening_balance: 1000,
+      } as any,
+      'user-1',
+    );
+
+    // 2a. Engine called exactly once with the canonical opening spec.
+    expect(engine.recordTransaction).toHaveBeenCalledTimes(1);
+    const spec = engine.recordTransaction.mock.calls[0][0];
+    expect(spec).toMatchObject({
+      kind: 'opening_balance',
+      reference_type: 'cashbox_opening',
+      reference_id: 'cb-2',
+      user_id: 'user-1',
+    });
+
+    // 2b. GL legs balanced: DR cashbox 1000 / CR 31 1000.
+    expect(spec.gl_lines).toHaveLength(2);
+    const dr = spec.gl_lines.find((l: any) => l.debit > 0);
+    const cr = spec.gl_lines.find((l: any) => l.credit > 0);
+    expect(dr).toMatchObject({
+      resolve_from_cashbox_id: 'cb-2',
+      cashbox_id: 'cb-2',
+      debit: 1000,
+    });
+    expect(cr).toMatchObject({ account_code: '31', credit: 1000 });
+
+    // 2c. Cash movement carries category='opening' on the dest cashbox.
+    expect(spec.cash_movements).toHaveLength(1);
+    expect(spec.cash_movements[0]).toMatchObject({
+      cashbox_id: 'cb-2',
+      direction: 'in',
+      amount: 1000,
+      category: 'opening',
+    });
+
+    // 2d. Transaction's em was threaded through.
+    expect(spec.em).toBeDefined();
+
+    // 2e. UPDATE cashboxes set the trace columns with je-1.
+    const update = emCalls.find((c) => /UPDATE cashboxes/.test(c.sql))!;
+    expect(update).toBeDefined();
+    expect(update.sql).toMatch(/opening_journal_entry_id\s*=\s*\$2/);
+    expect(update.sql).toMatch(/opening_posted_at\s*=\s*NOW\(\)/);
+    expect(update.params).toEqual(['cb-2', 'je-1']);
+
+    // 2f. Returned row reflects engine-driven current_balance.
+    expect(out.current_balance).toBe('1000.00');
+    expect(out.opening_balance).toBe('0.00'); // intentionally NOT stored
+    expect(out.opening_journal_entry_id).toBe('je-1');
+  });
+
+  it('3) opening=1000 → exactly ONE CT row (category=opening) and ONE JE (ref=cashbox_opening)', async () => {
+    // The CT row + JE are written by the engine, not by the service. We
+    // assert the SHAPE of what the engine receives — the engine's own
+    // contract (`recordTransaction` writes 1 JE with the spec.reference_*
+    // and 1 CT row per cash_movements entry) is covered by the engine's
+    // own spec. Combined, this proves "exactly one of each" from
+    // createCashbox's perspective.
+    const { ds } = makeFakeDataSource(
+      buildEmResults({
+        cashbox_id: 'cb-3',
+        refreshed: { id: 'cb-3', current_balance: '500.00' },
+      }),
+    );
+    const engine = {
+      recordTransaction: jest
+        .fn()
+        .mockResolvedValue({ ok: true, entry_id: 'je-3' }),
+    };
+    const moduleRef = await Test.createTestingModule({
+      providers: [
+        CashDeskService,
+        { provide: DataSource, useValue: ds },
+        { provide: FinancialEngineService, useValue: engine },
+      ],
+    }).compile();
+    const service = moduleRef.get(CashDeskService);
+
+    await service.createCashbox(
+      {
+        name_ar: 'الخزينة',
+        kind: 'cash',
+        warehouse_id: 'wh-1',
+        opening_balance: 500,
+      } as any,
+      'user-1',
+    );
+
+    // The engine call MUST be a single envelope (one JE, one CT).
+    const spec = engine.recordTransaction.mock.calls[0][0];
+    expect(spec.gl_lines).toHaveLength(2);          // 2 GL legs = 1 JE
+    expect(spec.cash_movements).toHaveLength(1);    // 1 cash movement = 1 CT
+    expect(spec.cash_movements[0].category).toBe('opening');
+    expect(spec.reference_type).toBe('cashbox_opening');
+  });
+
+  it('4) v_cash_position drift stays 0 — opening_balance column is NOT set verbatim', async () => {
+    // The new flow's invariant: cashboxes.opening_balance column is
+    // ALWAYS 0 at INSERT, regardless of the user-supplied opening
+    // amount. v_cash_position.computed = opening + Σct = 0 + opening
+    // (via the engine's CT row), and current_balance = 0 + opening
+    // (via fn_record_cashbox_txn's UPDATE). drift = 0.
+    const { ds, emCalls } = makeFakeDataSource(
+      buildEmResults({
+        cashbox_id: 'cb-4',
+        refreshed: { id: 'cb-4' },
+      }),
+    );
+    const engine = {
+      recordTransaction: jest
+        .fn()
+        .mockResolvedValue({ ok: true, entry_id: 'je-4' }),
+    };
+    const moduleRef = await Test.createTestingModule({
+      providers: [
+        CashDeskService,
+        { provide: DataSource, useValue: ds },
+        { provide: FinancialEngineService, useValue: engine },
+      ],
+    }).compile();
+    const service = moduleRef.get(CashDeskService);
+
+    await service.createCashbox(
+      {
+        name_ar: 'بنك',
+        kind: 'bank',
+        institution_code: 'cib',
+        warehouse_id: 'wh-1',
+        opening_balance: 7777,
+      } as any,
+      'user-1',
+    );
+
+    const insert = emCalls.find((c) => /INSERT INTO cashboxes/.test(c.sql))!;
+    // The literal `0,0` (current_balance, opening_balance) is the proof
+    // that the user-supplied 7777 was NOT written into either column at
+    // INSERT time. The number lives in the CT row + GL JE only.
+    expect(insert.sql).toMatch(/VALUES\s*\([^)]*,0,0,TRUE\)/);
+    // 7777 must NOT appear in the INSERT params either.
+    expect(insert.params).not.toContain(7777);
+  });
+
+  it('5) idempotent replay: engine returns skipped → no double JE/CT, no double UPDATE', async () => {
+    // The engine's contract is: a replay against the same
+    // (reference_type, reference_id) returns
+    // {ok:true, skipped:true, entry_id, reason:'idempotent-replay'}.
+    // Migration 119's partial unique index promotes this to a DB
+    // constraint. The service MUST handle the skipped path the same
+    // way as the first call — only the trace-column UPDATE distinction
+    // changes (since the JE already existed before this call, the
+    // UPDATE would re-write the same entry_id, which is harmless).
+    const { ds, emCalls } = makeFakeDataSource(
+      buildEmResults({
+        cashbox_id: 'cb-5',
+        refreshed: { id: 'cb-5', current_balance: '1500.00' },
+      }),
+    );
+    const engine = {
+      recordTransaction: jest.fn().mockResolvedValue({
+        ok: true,
+        skipped: true,
+        entry_id: 'je-existing',
+        reason: 'idempotent-replay',
+      }),
+    };
+    const moduleRef = await Test.createTestingModule({
+      providers: [
+        CashDeskService,
+        { provide: DataSource, useValue: ds },
+        { provide: FinancialEngineService, useValue: engine },
+      ],
+    }).compile();
+    const service = moduleRef.get(CashDeskService);
+
+    await service.createCashbox(
+      {
+        name_ar: 'الخزينة',
+        kind: 'cash',
+        warehouse_id: 'wh-1',
+        opening_balance: 1500,
+      } as any,
+      'user-1',
+    );
+
+    // Engine called once (the service does not retry on its own).
+    expect(engine.recordTransaction).toHaveBeenCalledTimes(1);
+    // The skipped path does NOT trigger a second engine call.
+    // (current_balance is incremented at most once because
+    // `fn_record_cashbox_txn` is invoked at most once per JE entry.)
+    const updateCalls = emCalls.filter((c) => /UPDATE cashboxes/.test(c.sql));
+    expect(updateCalls).toHaveLength(1); // just the trace columns
+  });
+
+  it('6) engine_bypass_alerts contract: NO direct cashboxes.current_balance UPDATE', async () => {
+    // Cross-check: the service must never UPDATE cashboxes.current_balance
+    // outside the engine. If we ever regressed, the safety greps in CI
+    // would catch it; this unit test pins the invariant at the call-shape
+    // layer.
+    const { ds, emCalls } = makeFakeDataSource(
+      buildEmResults({
+        cashbox_id: 'cb-6',
+        refreshed: { id: 'cb-6' },
+      }),
+    );
+    const engine = {
+      recordTransaction: jest
+        .fn()
+        .mockResolvedValue({ ok: true, entry_id: 'je-6' }),
+    };
+    const moduleRef = await Test.createTestingModule({
+      providers: [
+        CashDeskService,
+        { provide: DataSource, useValue: ds },
+        { provide: FinancialEngineService, useValue: engine },
+      ],
+    }).compile();
+    const service = moduleRef.get(CashDeskService);
+
+    await service.createCashbox(
+      {
+        name_ar: 'محفظة WE',
+        kind: 'ewallet',
+        institution_code: 'we_pay',
+        warehouse_id: 'wh-1',
+        opening_balance: 250,
+      } as any,
+      'user-1',
+    );
+
+    // No UPDATE of `current_balance` from the service. Only the trace
+    // UPDATE which never touches that column.
+    const balanceUpdates = emCalls.filter((c) =>
+      /UPDATE cashboxes[\s\S]*current_balance\s*=/.test(c.sql),
+    );
+    expect(balanceUpdates).toHaveLength(0);
+  });
+
+  it('7) frontend-style payload still accepted: opening_balance field reinterpreted as funding amount', async () => {
+    // The FE form (Cashboxes.tsx) keeps sending `{opening_balance: N}`.
+    // The new contract: backend accepts the same field but routes it
+    // through the engine instead of dropping it into the column. This
+    // test pins that contract — same DTO shape, new semantics.
+    const { ds } = makeFakeDataSource(
+      buildEmResults({
+        cashbox_id: 'cb-7',
+        refreshed: {
+          id: 'cb-7',
+          current_balance: '300.00',
+          opening_balance: '0.00',
+        },
+      }),
+    );
+    const engine = {
+      recordTransaction: jest
+        .fn()
+        .mockResolvedValue({ ok: true, entry_id: 'je-7' }),
+    };
+    const moduleRef = await Test.createTestingModule({
+      providers: [
+        CashDeskService,
+        { provide: DataSource, useValue: ds },
+        { provide: FinancialEngineService, useValue: engine },
+      ],
+    }).compile();
+    const service = moduleRef.get(CashDeskService);
+
+    // Mimic the FE payload exactly.
+    const out = await service.createCashbox(
+      {
+        name_ar: 'الخزينة',
+        kind: 'cash',
+        warehouse_id: 'wh-1',
+        currency: 'EGP',
+        opening_balance: 300, // <-- this is what the FE sends today
+      } as any,
+      'user-1',
+    );
+
+    // Engine got the 300 as the funding amount.
+    const spec = engine.recordTransaction.mock.calls[0][0];
+    expect(spec.gl_lines[0].debit).toBe(300);
+    expect(spec.cash_movements[0].amount).toBe(300);
+
+    // The stored `opening_balance` column stays at 0 (no double-count).
+    expect(out.opening_balance).toBe('0.00');
+    // The stored `current_balance` reflects the engine-driven movement.
+    expect(out.current_balance).toBe('300.00');
+  });
+
+  it('8) negative opening rejected (defensive)', async () => {
+    const { ds } = makeFakeDataSource([]);
+    const engine = { recordTransaction: jest.fn() };
+    const moduleRef = await Test.createTestingModule({
+      providers: [
+        CashDeskService,
+        { provide: DataSource, useValue: ds },
+        { provide: FinancialEngineService, useValue: engine },
+      ],
+    }).compile();
+    const service = moduleRef.get(CashDeskService);
+
+    await expect(
+      service.createCashbox(
+        {
+          name_ar: 'X',
+          kind: 'cash',
+          warehouse_id: 'wh-1',
+          opening_balance: -50,
+        } as any,
+        'user-1',
+      ),
+    ).rejects.toThrow(/سالب/);
+    expect(engine.recordTransaction).not.toHaveBeenCalled();
+  });
+
+  it('9) opening>0 with engine missing (no engine wired) is rejected up front', async () => {
+    const { ds } = makeFakeDataSource([]);
+    // No FinancialEngineService provider — emulates a legacy setup
+    // where the engine module wasn't registered.
+    const moduleRef = await Test.createTestingModule({
+      providers: [
+        CashDeskService,
+        { provide: DataSource, useValue: ds },
+      ],
+    }).compile();
+    const service = moduleRef.get(CashDeskService);
+
+    await expect(
+      service.createCashbox(
+        {
+          name_ar: 'X',
+          kind: 'cash',
+          warehouse_id: 'wh-1',
+          opening_balance: 100,
+        } as any,
+        'user-1',
+      ),
+    ).rejects.toThrow(/المحرك المحاسبي/);
+  });
+
+  it('10) engine returns ok:false → BadRequestException rolls back the whole transaction', async () => {
+    // If the engine returns {ok:false, error}, the service must throw
+    // so the outer `ds.transaction` rolls back the cashbox INSERT (and
+    // the GL sub-account if any). We assert the throw + the post-
+    // rollback contract that the trace UPDATE was never issued.
+    const { ds, emCalls } = makeFakeDataSource(
+      buildEmResults({ cashbox_id: 'cb-rb' }),
+    );
+    const engine = {
+      recordTransaction: jest
+        .fn()
+        .mockResolvedValue({ ok: false, error: 'GL_ACCOUNT_31_MISSING' }),
+    };
+    const moduleRef = await Test.createTestingModule({
+      providers: [
+        CashDeskService,
+        { provide: DataSource, useValue: ds },
+        { provide: FinancialEngineService, useValue: engine },
+      ],
+    }).compile();
+    const service = moduleRef.get(CashDeskService);
+
+    await expect(
+      service.createCashbox(
+        {
+          name_ar: 'X',
+          kind: 'cash',
+          warehouse_id: 'wh-1',
+          opening_balance: 100,
+        } as any,
+        'user-1',
+      ),
+    ).rejects.toThrow(/GL_ACCOUNT_31_MISSING/);
+
+    // No trace UPDATE landed.
+    expect(
+      emCalls.some((c) => /UPDATE cashboxes/.test(c.sql)),
+    ).toBe(false);
+  });
+});
+
