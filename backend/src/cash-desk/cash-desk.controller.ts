@@ -258,6 +258,43 @@ export class CashDeskController {
     });
   }
 
+  /**
+   * PR-FIN-PAYACCT-4D-UX-FIX-4 — unified per-cashbox movements feed.
+   *
+   * Read-only union of:
+   *   A) cashbox_transactions for this cashbox (direct cash flows)
+   *   B) invoice_payments     where PA.cashbox_id = :id (linked)
+   *   C) customer_payments    where PA.cashbox_id = :id (linked)
+   *   D) supplier_payments    where PA.cashbox_id = :id (linked)
+   *
+   * Branches B/C/D dedupe against A by `(reference_type, reference_id)`
+   * so the same logical operation is never counted twice. Filters
+   * strictly by `payment_account_id → payment_accounts.cashbox_id`;
+   * never by `gl_account_code` alone.
+   *
+   * Query params: from / to (ISO date), type
+   * ('cashbox_txn' | 'invoice_payment' | 'customer_payment' | 'supplier_payment'),
+   * q (free-text over reference_no + counterparty_name), limit / offset.
+   */
+  @Get('cashboxes/:id/movements-unified')
+  cashboxMovementsUnified(
+    @Param('id') id: string,
+    @Query('from')   from?: string,
+    @Query('to')     to?: string,
+    @Query('type')   type?: string,
+    @Query('q')      q?: string,
+    @Query('limit')  limit?: string,
+    @Query('offset') offset?: string,
+  ) {
+    const lim = limit  ? Number.parseInt(limit,  10) : undefined;
+    const off = offset ? Number.parseInt(offset, 10) : undefined;
+    return this.svc.cashboxMovementsUnified(id, {
+      from, to, type, q,
+      limit:  Number.isFinite(lim) ? (lim as number) : undefined,
+      offset: Number.isFinite(off) ? (off as number) : undefined,
+    });
+  }
+
   // ── Customer receipts ────────────────────────────────────────────────
   @Post('customer-payments')
   @Roles('admin', 'manager', 'cashier', 'accountant')
