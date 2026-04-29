@@ -1,8 +1,22 @@
 import { useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
-import { Plus, Search, Phone, Mail, Award, X, ArrowUpDown } from 'lucide-react';
-import { customersApi } from '@/api/customers.api';
+import {
+  Plus,
+  Search,
+  Phone,
+  Mail,
+  Award,
+  X,
+  ArrowUpDown,
+  ArrowDownCircle,
+} from 'lucide-react';
+import { customersApi, type Customer } from '@/api/customers.api';
+// PR-CASH-DESK-REORG-1 — receive-from-customer entry point lives on
+// this page now (lifted from CashDesk.tsx). We mount the shared
+// `<ReceiptModal />` with the picked customer pre-filled.
+import { cashDeskApi } from '@/api/cash-desk.api';
+import { ReceiptModal } from '@/components/cash-desk/ReceiptModal';
 
 const EGP = (n: number) => `${Number(n).toFixed(0)} EGP`;
 
@@ -29,14 +43,25 @@ type CustomerSort =
   | 'created_desc';
 
 export default function Customers() {
+  const qc = useQueryClient();
   const [q, setQ] = useState('');
   const [tier, setTier] = useState<string>('');
   const [sort, setSort] = useState<CustomerSort>('created_desc');
   const [showCreate, setShowCreate] = useState(false);
+  // PR-CASH-DESK-REORG-1 — when set, opens `<ReceiptModal />` with
+  // this customer pre-filled. `null` means the modal is closed.
+  const [receiptTarget, setReceiptTarget] = useState<Customer | null>(null);
 
   const { data, isLoading } = useQuery({
     queryKey: ['customers', q],
     queryFn: () => customersApi.list({ q: q || undefined, limit: 200 }),
+  });
+
+  // PR-CASH-DESK-REORG-1 — cashboxes query for the lifted ReceiptModal.
+  // React Query caches across mounts so this share key with CashDesk.
+  const { data: cashboxes = [] } = useQuery({
+    queryKey: ['cashboxes'],
+    queryFn: () => cashDeskApi.cashboxes(),
   });
 
   const customers = useMemo(() => {
@@ -166,6 +191,20 @@ export default function Customers() {
                 </div>
               </div>
             </div>
+
+            {/* PR-CASH-DESK-REORG-1 — per-card receive button. Opens
+                the shared `<ReceiptModal />` with this customer
+                already selected (no re-search). Same backend
+                endpoint (`POST /cash-desk/customer-payments`) the
+                Cash Desk page used to call. */}
+            <button
+              type="button"
+              className="btn-secondary w-full mt-3 text-sm"
+              onClick={() => setReceiptTarget(c)}
+              data-testid={`customers-receipt-button-${c.id}`}
+            >
+              <ArrowDownCircle size={16} /> استلام مقبوضة
+            </button>
           </div>
         ))}
 
@@ -180,6 +219,25 @@ export default function Customers() {
         <CreateCustomerModal
           onClose={() => setShowCreate(false)}
           onSuccess={() => setShowCreate(false)}
+        />
+      )}
+
+      {/* PR-CASH-DESK-REORG-1 — receive-from-customer entry point. */}
+      {receiptTarget && (
+        <ReceiptModal
+          cashboxes={cashboxes}
+          prefilledCustomer={receiptTarget}
+          onClose={() => setReceiptTarget(null)}
+          onSuccess={() => {
+            setReceiptTarget(null);
+            // Refresh the customer balance + everything the cash desk
+            // used to refresh, so the operator sees the new balance
+            // immediately.
+            qc.invalidateQueries({ queryKey: ['customers'] });
+            qc.invalidateQueries({ queryKey: ['customer-payments'] });
+            qc.invalidateQueries({ queryKey: ['cashflow-today'] });
+            qc.invalidateQueries({ queryKey: ['cashboxes'] });
+          }}
         />
       )}
     </div>

@@ -28,8 +28,14 @@ import {
 import { AlertCircle, ArrowLeftRight, Printer } from 'lucide-react';
 import { InstitutionLogo } from '@/components/InstitutionLogo';
 import { printVoucher } from '@/lib/printVoucher';
-import { customersApi, Customer } from '@/api/customers.api';
-import { suppliersApi, Supplier } from '@/api/suppliers.api';
+// PR-CASH-DESK-REORG-1 — `customersApi` / `suppliersApi` imports
+// removed; their lookups live inside `ReceiptModal` /
+// `SupplierPayModal` which now reside in `components/cash-desk/`
+// and are mounted from the Customers / Suppliers pages instead of
+// here. The shared `Modal` + `Field` primitives live in the same
+// directory as the lifted modals so DepositModal (still defined
+// below) can re-use them.
+import { Modal, Field } from '@/components/cash-desk/Modal';
 
 const EGP = (n: number | string) =>
   `${Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ج.م`;
@@ -48,20 +54,31 @@ const METHOD_ICONS: Record<PaymentMethod, any> = {
   bank_transfer: Building2,
 };
 
-type Tab = 'receipts' | 'payments' | 'movements';
+/**
+ * PR-CASH-DESK-REORG-1 — Tab union narrowed to `movements` only.
+ * The dedicated `receipts` and `payments` tabs (customer + supplier
+ * payment list views) moved to the Customers + Suppliers pages.
+ * Cash desk now keeps the master cashbox-movements feed which
+ * already includes those rows when they exist (via the
+ * cashbox_transactions reference_type fan-out). Same goes for the
+ * action buttons — استلام من عميل + دفع لمورد moved to those pages,
+ * the modals are now reusable components under `components/cash-desk`.
+ */
+type Tab = 'movements';
 
 /**
  * `embedded=true` is used when CashDesk is rendered inside the
  * /cashboxes page. It hides the big page header / KPI grid / "active
  * cashboxes" list (the host page already shows better versions of
- * those) and keeps only the action buttons + the 3 tabs.
+ * those) and keeps only the action button (deposit) + the master
+ * movements feed.
  */
 export default function CashDesk({ embedded = false }: { embedded?: boolean }) {
-  const [tab, setTab] = useState<Tab>('receipts');
-  const [showReceipt, setShowReceipt] = useState(false);
-  const [showSupplierPay, setShowSupplierPay] = useState(false);
+  const [tab, _setTab] = useState<Tab>('movements');
+  // PR-CASH-DESK-REORG-1 — single-tab view; setter retained for API
+  // symmetry with future tab additions but not currently called.
+  void _setTab;
   const [showDeposit, setShowDeposit] = useState(false);
-  const [voidTarget, setVoidTarget] = useState<CustomerPayment | null>(null);
   const [q, setQ] = useState('');
 
   const qc = useQueryClient();
@@ -91,15 +108,10 @@ export default function CashDesk({ embedded = false }: { embedded?: boolean }) {
     refetchInterval: tab === 'movements' ? 30_000 : false,
   });
 
-  const { data: receipts = [], isLoading: loadingReceipts } = useQuery({
-    queryKey: ['customer-payments'],
-    queryFn: () => cashDeskApi.listCustomerPayments(),
-  });
-
-  const { data: payments = [], isLoading: loadingPayments } = useQuery({
-    queryKey: ['supplier-payments'],
-    queryFn: () => cashDeskApi.listSupplierPayments(),
-  });
+  // PR-CASH-DESK-REORG-1 — `customer-payments` + `supplier-payments`
+  // queries removed; their dedicated tabs moved to the Customers and
+  // Suppliers pages. The master movements feed below still surfaces
+  // the underlying cashbox_transactions when those payments occur.
 
   const totals = useMemo(() => {
     // Prefer new column names (cash_in_today/cash_out_today); fall back
@@ -120,27 +132,11 @@ export default function CashDesk({ embedded = false }: { embedded?: boolean }) {
     };
   }, [cashflow]);
 
-  const filteredReceipts = useMemo(() => {
-    if (!q) return receipts;
-    const s = q.toLowerCase();
-    return receipts.filter(
-      (r) =>
-        r.doc_no.toLowerCase().includes(s) ||
-        (r.reference || '').toLowerCase().includes(s) ||
-        (r.notes || '').toLowerCase().includes(s),
-    );
-  }, [receipts, q]);
-
-  const filteredPayments = useMemo(() => {
-    if (!q) return payments;
-    const s = q.toLowerCase();
-    return payments.filter(
-      (r) =>
-        r.doc_no.toLowerCase().includes(s) ||
-        (r.reference || '').toLowerCase().includes(s) ||
-        (r.notes || '').toLowerCase().includes(s),
-    );
-  }, [payments, q]);
+  // PR-CASH-DESK-REORG-1 — `filteredReceipts` and `filteredPayments`
+  // memos removed alongside the customer/supplier-payments queries.
+  // The `q` search field still powers the master `MovementsTable`
+  // below (it filters cashbox movements client-side via the same
+  // input).
 
   // Suppress unused-var warnings when embedded — they still power the
   // KPI / cashbox-list sections that are hidden below.
@@ -158,23 +154,19 @@ export default function CashDesk({ embedded = false }: { embedded?: boolean }) {
               <Wallet className="text-brand-600" /> الصندوق
             </h2>
             <p className="text-sm text-slate-500 mt-1">
-              استلام مقبوضات العملاء ودفع مستحقات الموردين
+              {/* PR-CASH-DESK-REORG-1 — page is now treasury-focused
+                  (rصيد/إيداع + حركة الخزنة + ملخصات). Customer
+                  receipts moved to the Customers page; supplier
+                  payments moved to the Suppliers page. */}
+              رصيد الخزنة وحركتها اليومية
             </p>
           </div>
           <div className="flex gap-2">
-            <button className="btn-primary" onClick={() => setShowReceipt(true)}>
-              <ArrowDownCircle size={18} /> استلام من عميل
-            </button>
-            <button
-              className="btn-secondary"
-              onClick={() => setShowSupplierPay(true)}
-            >
-              <ArrowUpCircle size={18} /> دفع لمورد
-            </button>
             <button
               className="btn-secondary"
               onClick={() => setShowDeposit(true)}
               title="إيداع يدوي — رصيد افتتاحي أو تمويل"
+              data-testid="cash-desk-deposit-button"
             >
               <Plus size={18} /> إيداع/رصيد افتتاحي
             </button>
@@ -188,19 +180,11 @@ export default function CashDesk({ embedded = false }: { embedded?: boolean }) {
           <div className="text-sm font-bold text-slate-700 mr-auto self-center">
             عمليات سريعة:
           </div>
-          <button className="btn-primary" onClick={() => setShowReceipt(true)}>
-            <ArrowDownCircle size={16} /> استلام من عميل
-          </button>
-          <button
-            className="btn-secondary"
-            onClick={() => setShowSupplierPay(true)}
-          >
-            <ArrowUpCircle size={16} /> دفع لمورد
-          </button>
           <button
             className="btn-secondary"
             onClick={() => setShowDeposit(true)}
             title="إيداع يدوي — رصيد افتتاحي أو تمويل"
+            data-testid="cash-desk-deposit-button-embedded"
           >
             <Plus size={16} /> إيداع يدوي
           </button>
@@ -281,26 +265,19 @@ export default function CashDesk({ embedded = false }: { embedded?: boolean }) {
         </div>
       )}
 
-      {/* Tabs */}
+      {/* PR-CASH-DESK-REORG-1 — single-tab master movements feed.
+          Dedicated مقبوضات العملاء + مدفوعات الموردين tabs moved to
+          the Customers and Suppliers pages respectively. */}
       <div className="card p-0 overflow-hidden">
-        <div className="flex border-b border-slate-200 bg-slate-50/60">
+        <div
+          className="flex border-b border-slate-200 bg-slate-50/60"
+          data-testid="cash-desk-tabs"
+        >
           <TabBtn
             active={tab === 'movements'}
-            onClick={() => setTab('movements')}
+            onClick={() => undefined}
             label="حركة الخزنة"
             count={movements.length || undefined}
-          />
-          <TabBtn
-            active={tab === 'receipts'}
-            onClick={() => setTab('receipts')}
-            label="مقبوضات العملاء"
-            count={receipts.length}
-          />
-          <TabBtn
-            active={tab === 'payments'}
-            onClick={() => setTab('payments')}
-            label="مدفوعات الموردين"
-            count={payments.length}
           />
         </div>
 
@@ -320,63 +297,16 @@ export default function CashDesk({ embedded = false }: { embedded?: boolean }) {
           </div>
         </div>
 
-        {/* Table */}
-        <div className="overflow-x-auto">
-          {tab === 'receipts' && (
-            <ReceiptsTable
-              rows={filteredReceipts}
-              loading={loadingReceipts}
-              onVoid={setVoidTarget}
-            />
-          )}
-          {tab === 'payments' && (
-            <PaymentsTable rows={filteredPayments} loading={loadingPayments} />
-          )}
-          {tab === 'movements' && (
-            <MovementsTable rows={movements} loading={loadingMovements} q={q} />
-          )}
+        {/* Table — master movements feed only */}
+        <div className="overflow-x-auto" data-testid="cash-desk-movements">
+          <MovementsTable rows={movements} loading={loadingMovements} q={q} />
         </div>
       </div>
 
-      {/* Modals */}
-      {showReceipt && (
-        <ReceiptModal
-          cashboxes={cashboxes}
-          onClose={() => setShowReceipt(false)}
-          onSuccess={() => {
-            setShowReceipt(false);
-            qc.invalidateQueries({ queryKey: ['customer-payments'] });
-            qc.invalidateQueries({ queryKey: ['cashflow-today'] });
-            qc.invalidateQueries({ queryKey: ['cashboxes'] });
-          }}
-        />
-      )}
-
-      {showSupplierPay && (
-        <SupplierPayModal
-          cashboxes={cashboxes}
-          onClose={() => setShowSupplierPay(false)}
-          onSuccess={() => {
-            setShowSupplierPay(false);
-            qc.invalidateQueries({ queryKey: ['supplier-payments'] });
-            qc.invalidateQueries({ queryKey: ['cashflow-today'] });
-            qc.invalidateQueries({ queryKey: ['cashboxes'] });
-          }}
-        />
-      )}
-
-      {voidTarget && (
-        <VoidReceiptModal
-          payment={voidTarget}
-          onClose={() => setVoidTarget(null)}
-          onSuccess={() => {
-            setVoidTarget(null);
-            qc.invalidateQueries({ queryKey: ['customer-payments'] });
-            qc.invalidateQueries({ queryKey: ['cashflow-today'] });
-          }}
-        />
-      )}
-
+      {/* Modals — only Deposit remains on the cash desk page.
+          ReceiptModal + SupplierPayModal moved to
+          `components/cash-desk/` and are mounted from Customers.tsx
+          and Suppliers.tsx respectively (PR-CASH-DESK-REORG-1). */}
       {showDeposit && (
         <DepositModal
           cashboxes={cashboxes}
@@ -636,225 +566,7 @@ function TabBtn({
   );
 }
 
-function ReceiptsTable({
-  rows,
-  loading,
-  onVoid,
-}: {
-  rows: CustomerPayment[];
-  loading: boolean;
-  onVoid: (p: CustomerPayment) => void;
-}) {
-  if (loading) {
-    return (
-      <div className="text-center py-12 text-slate-400">
-        <RefreshCw className="animate-spin mx-auto mb-2" /> جارٍ التحميل...
-      </div>
-    );
-  }
-  if (!rows.length) {
-    return (
-      <div className="text-center py-12 text-slate-400">
-        لا توجد مقبوضات
-      </div>
-    );
-  }
-  return (
-    <table className="min-w-full text-sm">
-      <thead className="bg-slate-50/60 text-slate-600 text-xs font-bold">
-        <tr>
-          <Th>رقم السند</Th>
-          <Th>التاريخ</Th>
-          <Th>الطريقة</Th>
-          <Th>النوع</Th>
-          <Th>المبلغ</Th>
-          <Th>المرجع</Th>
-          <Th>الحالة</Th>
-          <Th></Th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((r) => {
-          const Icon = METHOD_ICONS[r.payment_method] || Banknote;
-          const isVoid = r.status === 'void';
-          return (
-            <tr
-              key={r.id}
-              className={`border-t border-slate-100 ${isVoid ? 'opacity-50 bg-rose-50/30' : 'hover:bg-slate-50/60'}`}
-            >
-              <Td className="font-mono font-bold text-brand-700">{r.doc_no}</Td>
-              <Td>
-                {new Date(r.created_at).toLocaleDateString('en-US', {
-                  year: 'numeric',
-                  month: 'short',
-                  day: 'numeric',
-                })}
-              </Td>
-              <Td>
-                <span className="chip bg-slate-100 text-slate-700">
-                  <Icon size={12} /> {METHOD_LABELS[r.payment_method]}
-                </span>
-              </Td>
-              <Td>
-                <span className="text-xs text-slate-600">
-                  {r.kind === 'deposit'
-                    ? 'عربون'
-                    : r.kind === 'refund'
-                      ? 'استرجاع'
-                      : 'سداد فواتير'}
-                </span>
-              </Td>
-              <Td className="font-bold text-emerald-700">{EGP(r.amount)}</Td>
-              <Td className="text-xs text-slate-500">{r.reference || '—'}</Td>
-              <Td>
-                {isVoid ? (
-                  <span className="chip bg-rose-100 text-rose-700">ملغى</span>
-                ) : (
-                  <span className="chip bg-emerald-100 text-emerald-700">مُرحّل</span>
-                )}
-              </Td>
-              <Td>
-                <div className="flex gap-1">
-                  <button
-                    onClick={() =>
-                      printVoucher({
-                        kind: 'receipt',
-                        doc_no: r.doc_no,
-                        date: new Date(r.created_at).toLocaleDateString(
-                          'en-GB',
-                          { timeZone: 'Africa/Cairo' },
-                        ),
-                        party_name: (r as any).customer_name || '—',
-                        amount: Number(r.amount),
-                        method: r.payment_method,
-                        reference: r.reference || undefined,
-                        notes: r.notes || undefined,
-                      })
-                    }
-                    className="text-slate-600 hover:text-slate-800 p-1"
-                    title="طباعة سند قبض"
-                  >
-                    <Printer size={16} />
-                  </button>
-                  {!isVoid && (
-                    <button
-                      onClick={() => onVoid(r)}
-                      className="text-rose-600 hover:text-rose-800 p-1"
-                      title="إلغاء المقبوضة"
-                    >
-                      <Ban size={16} />
-                    </button>
-                  )}
-                </div>
-              </Td>
-            </tr>
-          );
-        })}
-      </tbody>
-    </table>
-  );
-}
 
-function PaymentsTable({
-  rows,
-  loading,
-  onVoid,
-}: {
-  rows: SupplierPayment[];
-  loading: boolean;
-  onVoid?: (p: SupplierPayment) => void;
-}) {
-  if (loading) {
-    return (
-      <div className="text-center py-12 text-slate-400">
-        <RefreshCw className="animate-spin mx-auto mb-2" /> جارٍ التحميل...
-      </div>
-    );
-  }
-  if (!rows.length) {
-    return (
-      <div className="text-center py-12 text-slate-400">
-        لا توجد مدفوعات
-      </div>
-    );
-  }
-  return (
-    <table className="min-w-full text-sm">
-      <thead className="bg-slate-50/60 text-slate-600 text-xs font-bold">
-        <tr>
-          <Th>رقم السند</Th>
-          <Th>التاريخ</Th>
-          <Th>الطريقة</Th>
-          <Th>المبلغ</Th>
-          <Th>المرجع</Th>
-          <Th>الملاحظات</Th>
-          <Th></Th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((r) => {
-          const Icon = METHOD_ICONS[r.payment_method] || Banknote;
-          return (
-            <tr key={r.id} className="border-t border-slate-100 hover:bg-slate-50/60">
-              <Td className="font-mono font-bold text-brand-700">{r.doc_no}</Td>
-              <Td>
-                {new Date(r.created_at).toLocaleDateString('en-US', {
-                  year: 'numeric',
-                  month: 'short',
-                  day: 'numeric',
-                })}
-              </Td>
-              <Td>
-                <span className="chip bg-slate-100 text-slate-700">
-                  <Icon size={12} /> {METHOD_LABELS[r.payment_method]}
-                </span>
-              </Td>
-              <Td className="font-bold text-rose-700">{EGP(r.amount)}</Td>
-              <Td className="text-xs text-slate-500">{r.reference || '—'}</Td>
-              <Td className="text-xs text-slate-500 max-w-xs truncate">
-                {r.notes || '—'}
-              </Td>
-              <Td>
-                <div className="flex gap-1">
-                  <button
-                    onClick={() =>
-                      printVoucher({
-                        kind: 'payment',
-                        doc_no: r.doc_no,
-                        date: new Date(r.created_at).toLocaleDateString(
-                          'en-GB',
-                          { timeZone: 'Africa/Cairo' },
-                        ),
-                        party_name: (r as any).supplier_name || '—',
-                        amount: Number(r.amount),
-                        method: r.payment_method,
-                        reference: r.reference || undefined,
-                        notes: r.notes || undefined,
-                      })
-                    }
-                    className="text-slate-600 hover:text-slate-800 p-1"
-                    title="طباعة سند صرف"
-                  >
-                    <Printer size={16} />
-                  </button>
-                  {onVoid && (r as any).status !== 'void' && (
-                    <button
-                      onClick={() => onVoid(r)}
-                      className="text-rose-600 hover:text-rose-800 p-1"
-                      title="إلغاء الدفعة"
-                    >
-                      <Ban size={16} />
-                    </button>
-                  )}
-                </div>
-              </Td>
-            </tr>
-          );
-        })}
-      </tbody>
-    </table>
-  );
-}
 
 function Th({ children }: { children?: React.ReactNode }) {
   return <th className="text-right px-3 py-2">{children}</th>;
@@ -872,566 +584,10 @@ function Td({
 
 // ─── Modals ──────────────────────────────────────────────────────────────
 
-function Modal({
-  title,
-  onClose,
-  children,
-  size = 'md',
-}: {
-  title: string;
-  onClose: () => void;
-  children: React.ReactNode;
-  size?: 'md' | 'lg';
-}) {
-  const w = size === 'lg' ? 'max-w-3xl' : 'max-w-xl';
-  return (
-    <div className="fixed inset-0 bg-slate-900/50 z-50 flex items-center justify-center p-4">
-      <div className={`bg-white rounded-2xl w-full ${w} max-h-[90vh] overflow-y-auto`}>
-        <div className="flex items-center justify-between p-5 border-b border-slate-100 sticky top-0 bg-white z-10">
-          <h3 className="font-black text-lg text-slate-800">{title}</h3>
-          <button onClick={onClose} className="p-1 hover:bg-slate-100 rounded">
-            <X size={20} />
-          </button>
-        </div>
-        <div className="p-5">{children}</div>
-      </div>
-    </div>
-  );
-}
 
-function ReceiptModal({
-  cashboxes,
-  onClose,
-  onSuccess,
-}: {
-  cashboxes: Cashbox[];
-  onClose: () => void;
-  onSuccess: () => void;
-}) {
-  const [customer, setCustomer] = useState<Customer | null>(null);
-  const [customerQ, setCustomerQ] = useState('');
-  const [cashboxId, setCashboxId] = useState(cashboxes[0]?.id || '');
-  const [method, setMethod] = useState<PaymentMethod>('cash');
-  const [amount, setAmount] = useState('');
-  const [kind, setKind] = useState<'settle_invoices' | 'deposit' | 'refund'>(
-    'settle_invoices',
-  );
-  const [reference, setReference] = useState('');
-  const [notes, setNotes] = useState('');
-  const [allocations, setAllocations] = useState<Record<string, number>>({});
 
-  useEffect(() => {
-    if (!cashboxId && cashboxes.length) setCashboxId(cashboxes[0].id);
-  }, [cashboxes, cashboxId]);
 
-  const { data: customerSearch = { data: [] } } = useQuery({
-    queryKey: ['customers-search', customerQ],
-    queryFn: () => customersApi.list({ q: customerQ, limit: 8 }),
-    enabled: customerQ.length >= 2,
-  });
 
-  const { data: unpaid = [] } = useQuery({
-    queryKey: ['unpaid-invoices', customer?.id],
-    queryFn: () => customersApi.unpaidInvoices(customer!.id),
-    enabled: !!customer && kind === 'settle_invoices',
-  });
-
-  const mutation = useMutation({
-    mutationFn: cashDeskApi.receive,
-    onSuccess: () => {
-      toast.success('تم تسجيل المقبوضة');
-      onSuccess();
-    },
-  });
-
-  const totalAllocated = Object.values(allocations).reduce((s, v) => s + v, 0);
-
-  const submit = () => {
-    if (!customer) return toast.error('اختر عميلاً');
-    if (!cashboxId) return toast.error('اختر الخزينة');
-    const amt = Number(amount);
-    if (!amt || amt <= 0) return toast.error('أدخل مبلغاً صحيحاً');
-    if (kind === 'settle_invoices' && Math.abs(totalAllocated - amt) > 0.01) {
-      return toast.error('مجموع التخصيصات لا يساوي المبلغ');
-    }
-    mutation.mutate({
-      customer_id: customer.id,
-      cashbox_id: cashboxId,
-      payment_method: method,
-      amount: amt,
-      kind,
-      reference: reference || undefined,
-      notes: notes || undefined,
-      allocations:
-        kind === 'settle_invoices'
-          ? Object.entries(allocations)
-              .filter(([, v]) => v > 0)
-              .map(([invoice_id, amount]) => ({ invoice_id, amount }))
-          : undefined,
-    });
-  };
-
-  return (
-    <Modal title="استلام مقبوضة من عميل" onClose={onClose} size="lg">
-      <div className="space-y-4">
-        {/* Customer search */}
-        <Field label="العميل">
-          {customer ? (
-            <div className="flex items-center justify-between p-3 bg-brand-50 rounded-lg">
-              <div>
-                <div className="font-bold">{customer.full_name}</div>
-                <div className="text-xs text-slate-600 font-mono">{customer.code}</div>
-                {typeof customer.current_balance !== 'undefined' && (
-                  <div className="text-xs text-rose-600 font-bold mt-1">
-                    مستحق: {EGP(customer.current_balance)}
-                  </div>
-                )}
-              </div>
-              <button onClick={() => setCustomer(null)} className="text-rose-600">
-                <X size={18} />
-              </button>
-            </div>
-          ) : (
-            <>
-              <input
-                autoFocus
-                className="input"
-                placeholder="ابحث بالاسم أو الرقم..."
-                value={customerQ}
-                onChange={(e) => setCustomerQ(e.target.value)}
-              />
-              {customerQ.length >= 2 && customerSearch.data.length > 0 && (
-                <div className="mt-2 border border-slate-200 rounded-lg max-h-48 overflow-y-auto">
-                  {customerSearch.data.map((c: Customer) => (
-                    <button
-                      key={c.id}
-                      className="w-full text-right px-3 py-2 hover:bg-slate-50 border-b border-slate-100 last:border-0"
-                      onClick={() => {
-                        setCustomer(c);
-                        setCustomerQ('');
-                      }}
-                    >
-                      <div className="font-bold">{c.full_name}</div>
-                      <div className="text-xs text-slate-500">
-                        {c.phone} · {c.code}
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </>
-          )}
-        </Field>
-
-        {/* Type */}
-        <div className="grid grid-cols-3 gap-2">
-          {(['settle_invoices', 'deposit', 'refund'] as const).map((k) => (
-            <button
-              key={k}
-              type="button"
-              onClick={() => setKind(k)}
-              className={`py-2 rounded-lg font-bold text-sm ${
-                kind === k
-                  ? 'bg-brand-600 text-white'
-                  : 'bg-slate-100 text-slate-600'
-              }`}
-            >
-              {k === 'settle_invoices'
-                ? 'سداد فواتير'
-                : k === 'deposit'
-                  ? 'عربون/مقدم'
-                  : 'استرجاع'}
-            </button>
-          ))}
-        </div>
-
-        {/* Cashbox + method */}
-        <div className="grid md:grid-cols-2 gap-3">
-          <Field label="الخزينة">
-            <select
-              className="input"
-              value={cashboxId}
-              onChange={(e) => setCashboxId(e.target.value)}
-            >
-              {cashboxes.map((cb) => (
-                <option key={cb.id} value={cb.id}>
-                  {cb.name} ({EGP(cb.current_balance)})
-                </option>
-              ))}
-            </select>
-          </Field>
-
-          <Field label="طريقة الدفع">
-            <select
-              className="input"
-              value={method}
-              onChange={(e) => setMethod(e.target.value as PaymentMethod)}
-            >
-              <option value="cash">نقدي</option>
-              <option value="card">بطاقة</option>
-              <option value="instapay">إنستا باي</option>
-              <option value="bank_transfer">تحويل بنكي</option>
-            </select>
-          </Field>
-        </div>
-
-        <div className="grid md:grid-cols-2 gap-3">
-          <Field label="المبلغ">
-            <input
-              type="number"
-              step="0.01"
-              className="input"
-              value={amount}
-              onChange={(e) => setAmount(e.target.value)}
-              placeholder="0.00"
-            />
-          </Field>
-          <Field label="المرجع (اختياري)">
-            <input
-              className="input"
-              value={reference}
-              onChange={(e) => setReference(e.target.value)}
-              placeholder="رقم إيصال/تحويل"
-            />
-          </Field>
-        </div>
-
-        {/* Allocations */}
-        {kind === 'settle_invoices' && customer && unpaid.length > 0 && (
-          <div className="border border-slate-200 rounded-lg p-3">
-            <div className="flex items-center justify-between mb-2">
-              <div className="text-sm font-bold">توزيع على الفواتير المستحقة</div>
-              <button
-                type="button"
-                className="text-xs text-brand-600 hover:underline"
-                onClick={() => {
-                  let left = Number(amount) || 0;
-                  const next: Record<string, number> = {};
-                  for (const inv of unpaid) {
-                    if (left <= 0) break;
-                    const rem = Number(inv.remaining);
-                    const take = Math.min(rem, left);
-                    next[inv.id] = take;
-                    left -= take;
-                  }
-                  setAllocations(next);
-                }}
-              >
-                توزيع تلقائي (الأقدم أولاً)
-              </button>
-            </div>
-            <div className="space-y-1 max-h-60 overflow-y-auto">
-              {unpaid.map((inv) => (
-                <div
-                  key={inv.id}
-                  className="grid grid-cols-[1fr_100px_120px] gap-2 items-center text-sm"
-                >
-                  <div>
-                    <div className="font-mono font-bold text-xs">
-                      <InvoiceHoverCard
-                        invoiceId={inv.id}
-                        label={inv.invoice_no}
-                        className="font-mono font-bold text-xs text-slate-800 hover:text-indigo-700 hover:underline"
-                      />
-                    </div>
-                    <div className="text-[11px] text-slate-500">
-                      {new Date(inv.completed_at).toLocaleDateString('en-US')}
-                    </div>
-                  </div>
-                  <div className="text-xs text-rose-600 font-bold text-left">
-                    متبقي {EGP(inv.remaining)}
-                  </div>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    max={inv.remaining}
-                    className="input text-sm"
-                    placeholder="0.00"
-                    value={allocations[inv.id] || ''}
-                    onChange={(e) => {
-                      const v = Number(e.target.value) || 0;
-                      setAllocations({ ...allocations, [inv.id]: v });
-                    }}
-                  />
-                </div>
-              ))}
-            </div>
-            <div className="mt-2 pt-2 border-t border-slate-100 flex justify-between text-sm">
-              <span>إجمالي التخصيص</span>
-              <span
-                className={`font-black ${
-                  Math.abs(totalAllocated - Number(amount || 0)) < 0.01
-                    ? 'text-emerald-600'
-                    : 'text-rose-600'
-                }`}
-              >
-                {EGP(totalAllocated)}
-              </span>
-            </div>
-          </div>
-        )}
-
-        <Field label="ملاحظات">
-          <textarea
-            rows={2}
-            className="input"
-            value={notes}
-            onChange={(e) => setNotes(e.target.value)}
-          />
-        </Field>
-
-        <div className="flex gap-2 pt-2">
-          <button
-            className="btn-primary flex-1"
-            onClick={submit}
-            disabled={mutation.isPending}
-          >
-            <Plus size={18} /> حفظ المقبوضة
-          </button>
-          <button className="btn-secondary" onClick={onClose}>
-            إلغاء
-          </button>
-        </div>
-      </div>
-    </Modal>
-  );
-}
-
-function SupplierPayModal({
-  cashboxes,
-  onClose,
-  onSuccess,
-}: {
-  cashboxes: Cashbox[];
-  onClose: () => void;
-  onSuccess: () => void;
-}) {
-  const [supplier, setSupplier] = useState<Supplier | null>(null);
-  const [supplierQ, setSupplierQ] = useState('');
-  const [cashboxId, setCashboxId] = useState(cashboxes[0]?.id || '');
-  const [method, setMethod] = useState<PaymentMethod>('cash');
-  const [amount, setAmount] = useState('');
-  const [reference, setReference] = useState('');
-  const [notes, setNotes] = useState('');
-
-  useEffect(() => {
-    if (!cashboxId && cashboxes.length) setCashboxId(cashboxes[0].id);
-  }, [cashboxes, cashboxId]);
-
-  const { data: supplierSearch = [] } = useQuery({
-    queryKey: ['suppliers-search', supplierQ],
-    queryFn: () => suppliersApi.list(supplierQ),
-    enabled: supplierQ.length >= 2,
-  });
-
-  const mutation = useMutation({
-    mutationFn: cashDeskApi.pay,
-    onSuccess: () => {
-      toast.success('تم تسجيل الدفعة');
-      onSuccess();
-    },
-  });
-
-  const submit = () => {
-    if (!supplier) return toast.error('اختر المورد');
-    if (!cashboxId) return toast.error('اختر الخزينة');
-    const amt = Number(amount);
-    if (!amt || amt <= 0) return toast.error('أدخل مبلغاً صحيحاً');
-    mutation.mutate({
-      supplier_id: supplier.id,
-      cashbox_id: cashboxId,
-      payment_method: method,
-      amount: amt,
-      reference: reference || undefined,
-      notes: notes || undefined,
-    });
-  };
-
-  return (
-    <Modal title="دفعة لمورد" onClose={onClose}>
-      <div className="space-y-4">
-        <Field label="المورد">
-          {supplier ? (
-            <div className="flex items-center justify-between p-3 bg-brand-50 rounded-lg">
-              <div>
-                <div className="font-bold">{supplier.name}</div>
-                <div className="text-xs text-slate-600 font-mono">{supplier.code}</div>
-              </div>
-              <button onClick={() => setSupplier(null)} className="text-rose-600">
-                <X size={18} />
-              </button>
-            </div>
-          ) : (
-            <>
-              <input
-                autoFocus
-                className="input"
-                placeholder="ابحث باسم المورد..."
-                value={supplierQ}
-                onChange={(e) => setSupplierQ(e.target.value)}
-              />
-              {supplierQ.length >= 2 && supplierSearch.length > 0 && (
-                <div className="mt-2 border border-slate-200 rounded-lg max-h-48 overflow-y-auto">
-                  {supplierSearch.map((s) => (
-                    <button
-                      key={s.id}
-                      className="w-full text-right px-3 py-2 hover:bg-slate-50 border-b border-slate-100 last:border-0"
-                      onClick={() => {
-                        setSupplier(s);
-                        setSupplierQ('');
-                      }}
-                    >
-                      <div className="font-bold">{s.name}</div>
-                      <div className="text-xs text-slate-500">
-                        {s.phone || '—'} · {s.code}
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </>
-          )}
-        </Field>
-
-        <div className="grid md:grid-cols-2 gap-3">
-          <Field label="الخزينة">
-            <select
-              className="input"
-              value={cashboxId}
-              onChange={(e) => setCashboxId(e.target.value)}
-            >
-              {cashboxes.map((cb) => (
-                <option key={cb.id} value={cb.id}>
-                  {cb.name} ({EGP(cb.current_balance)})
-                </option>
-              ))}
-            </select>
-          </Field>
-          <Field label="طريقة الدفع">
-            <select
-              className="input"
-              value={method}
-              onChange={(e) => setMethod(e.target.value as PaymentMethod)}
-            >
-              <option value="cash">نقدي</option>
-              <option value="card">بطاقة</option>
-              <option value="instapay">إنستا باي</option>
-              <option value="bank_transfer">تحويل بنكي</option>
-            </select>
-          </Field>
-        </div>
-
-        <div className="grid md:grid-cols-2 gap-3">
-          <Field label="المبلغ">
-            <input
-              type="number"
-              step="0.01"
-              className="input"
-              value={amount}
-              onChange={(e) => setAmount(e.target.value)}
-              placeholder="0.00"
-            />
-          </Field>
-          <Field label="المرجع (اختياري)">
-            <input
-              className="input"
-              value={reference}
-              onChange={(e) => setReference(e.target.value)}
-              placeholder="رقم إيصال"
-            />
-          </Field>
-        </div>
-
-        <Field label="ملاحظات">
-          <textarea
-            rows={2}
-            className="input"
-            value={notes}
-            onChange={(e) => setNotes(e.target.value)}
-          />
-        </Field>
-
-        <div className="flex gap-2 pt-2">
-          <button
-            className="btn-primary flex-1"
-            onClick={submit}
-            disabled={mutation.isPending}
-          >
-            <ArrowUpCircle size={18} /> حفظ الدفعة
-          </button>
-          <button className="btn-secondary" onClick={onClose}>
-            إلغاء
-          </button>
-        </div>
-      </div>
-    </Modal>
-  );
-}
-
-function VoidReceiptModal({
-  payment,
-  onClose,
-  onSuccess,
-}: {
-  payment: CustomerPayment;
-  onClose: () => void;
-  onSuccess: () => void;
-}) {
-  const [reason, setReason] = useState('');
-
-  const mutation = useMutation({
-    mutationFn: (r: string) => cashDeskApi.voidCustomerPayment(payment.id, r),
-    onSuccess: () => {
-      toast.success('تم إلغاء المقبوضة');
-      onSuccess();
-    },
-  });
-
-  return (
-    <Modal title={`إلغاء المقبوضة ${payment.doc_no}`} onClose={onClose}>
-      <div className="space-y-4">
-        <div className="p-3 bg-rose-50 border border-rose-200 rounded-lg text-sm">
-          <div className="font-bold text-rose-700">تنبيه</div>
-          <div className="text-rose-600">
-            سيتم عكس القيد على الخزينة ورصيد العميل ودفتر الأستاذ.
-          </div>
-        </div>
-        <Field label="سبب الإلغاء">
-          <textarea
-            rows={3}
-            className="input"
-            autoFocus
-            value={reason}
-            onChange={(e) => setReason(e.target.value)}
-            placeholder="اشرح سبب الإلغاء..."
-          />
-        </Field>
-        <div className="flex gap-2">
-          <button
-            className="flex-1 bg-rose-600 text-white font-bold px-4 py-2 rounded-lg hover:bg-rose-700 disabled:opacity-50"
-            onClick={() => reason.length >= 3 && mutation.mutate(reason)}
-            disabled={reason.length < 3 || mutation.isPending}
-          >
-            تأكيد الإلغاء
-          </button>
-          <button className="btn-secondary" onClick={onClose}>
-            رجوع
-          </button>
-        </div>
-      </div>
-    </Modal>
-  );
-}
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <label className="block">
-      <span className="text-xs font-bold text-slate-600 mb-1 block">{label}</span>
-      {children}
-    </label>
-  );
-}
 
 function DepositModal({
   cashboxes,
