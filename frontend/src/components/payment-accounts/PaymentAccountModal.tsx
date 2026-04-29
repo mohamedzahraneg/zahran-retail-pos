@@ -140,7 +140,14 @@ export interface PaymentAccountModalProps {
    * modal for the requested kind. If unset, the empty-state still
    * renders the message but without the action button.
    */
-  onCreateCashbox?: (kind: Cashbox['kind']) => void;
+  /**
+   * Invoked when the operator clicks "إنشاء خزنة" inside the empty-state.
+   * Receives the cashbox `kind` matching the currently-selected method,
+   * AND the method itself so the parent can pre-fill a method-specific
+   * suggested name (PR-FIN-PAYACCT-4D-UX-FIX-4). The parent should
+   * close this modal and open the cashbox-create form.
+   */
+  onCreateCashbox?: (kind: Cashbox['kind'], method: PaymentMethodCode) => void;
 }
 
 export function PaymentAccountModal({
@@ -436,7 +443,9 @@ export function PaymentAccountModal({
                 {onCreateCashbox && (
                   <button
                     type="button"
-                    onClick={() => onCreateCashbox(expectedKind as Cashbox['kind'])}
+                    onClick={() =>
+                      onCreateCashbox(expectedKind as Cashbox['kind'], method)
+                    }
                     className="text-[12px] font-bold bg-amber-600 hover:bg-amber-700 text-white px-3 py-1.5 rounded inline-flex items-center gap-1"
                     data-testid="payment-account-modal-cashbox-create"
                   >
