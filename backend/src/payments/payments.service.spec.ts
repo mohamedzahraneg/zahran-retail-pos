@@ -1071,4 +1071,28 @@ describe('PaymentsService.listBalances — PR-FIN-PAYACCT-4D-UX-FIX-8 unattached
     expect(sql).toMatch(/pa\.method = \$1::payment_method_code/);
     expect(sql).toMatch(/AND ip\.payment_method = \$1::payment_method_code/);
   });
+
+  /**
+   * PR-FIN-PAYACCT-4D-UX-FIX-8-HOTFIX-1 — UNION ALL type alignment.
+   *
+   * Production threw `UNION types normal_balance and text cannot be
+   * matched` opening /cashboxes after #210. Root cause:
+   * `chart_of_accounts.normal_balance` is the `normal_balance` enum
+   * (USER-DEFINED) on the attached side, but the unattached side used
+   * `NULL::text`. Postgres won't auto-coerce enum ⊕ text. Same risk
+   * applied to `coa.name_ar` (varchar) vs `NULL::text`. Hotfix: cast
+   * both attached-side columns to `::text` so types align.
+   */
+  it('HOTFIX-1: casts coa.normal_balance and coa.name_ar to ::text for UNION ALL alignment', async () => {
+    const { service, dsCalls } = await makeService({ dsResults: [[]] });
+    await service.listBalances();
+    const sql = dsCalls[0].sql;
+    // Both columns must carry an explicit ::text cast on the
+    // attached_balances SELECT.
+    expect(sql).toMatch(/coa\.normal_balance::text\s+AS normal_balance/);
+    expect(sql).toMatch(/coa\.name_ar::text\s+AS gl_name_ar/);
+    // Regression guard: the bare reference (no cast) must NOT reappear.
+    expect(sql).not.toMatch(/coa\.normal_balance,\s/);
+    expect(sql).not.toMatch(/coa\.name_ar\s+AS gl_name_ar/);
+  });
 });

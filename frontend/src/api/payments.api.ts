@@ -201,7 +201,13 @@ export interface PaymentAccountBalance {
   metadata: Record<string, unknown>;
   /** Arabic GL account name from chart_of_accounts (joined). */
   gl_name_ar: string | null;
-  /** "debit" | "credit" — for sign-aware UI. */
+  /**
+   * "debit" | "credit" — for sign-aware UI. Synthetic unattached rows
+   * (PR-FIN-PAYACCT-4D-UX-FIX-8) carry null. The backend casts the
+   * underlying `normal_balance` enum column to `text` so the UNION ALL
+   * with the unattached CTE type-aligns; the actual values remain the
+   * canonical enum strings.
+   */
   normal_balance: 'debit' | 'credit' | null;
   total_in: string;       // pg numeric → string
   total_out: string;
