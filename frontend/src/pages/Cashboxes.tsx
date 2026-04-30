@@ -123,6 +123,52 @@ const EGP = (n: number | string) =>
     maximumFractionDigits: 2,
   })} ج.م`;
 
+/**
+ * PR-FIN-PAYACCT-4D-UX-FIX-10 — `PaymentAccountBalance` ⇒ `PaymentAccount`.
+ *
+ * The balance row shape and the editable-account shape disagree on
+ * one critical field: the balance carries the id under
+ * `payment_account_id`, the editable account carries it under `id`.
+ * Earlier code did `b as unknown as PaymentAccount` to bypass the
+ * type system, which left `paEditing.id` as `undefined` at runtime
+ * → `paymentsApi.updateAccount(undefined, ...)` → PATCH path
+ * `/payment-accounts/undefined` → ParseUUIDPipe (HOTFIX-1) returned
+ * `Validation failed (uuid is expected)` → operator saw the toast
+ * and couldn't link a cashbox.
+ *
+ * This helper does the safe field mapping AND refuses synthetic
+ * "unattached" rows (sentinel id `unattached:<method>` from FIX-9
+ * — they are aggregations, not real accounts, and have no row to
+ * UPDATE). Both call sites (table-row edit + DetailsPanel edit) go
+ * through this helper instead of the unsafe cast.
+ *
+ * Returns `null` for synthetic rows so the caller can early-out
+ * cleanly. The audit-trail fields (`created_at` / `updated_at` /
+ * `created_by` / `updated_by`) aren't read by `PaymentAccountModal`,
+ * but TypeScript needs them present — they're populated as empty
+ * strings / nulls; the modal never displays them.
+ */
+function balanceToAccount(b: PaymentAccountBalance): PaymentAccount | null {
+  if (b.is_unattached) return null;
+  return {
+    id: b.payment_account_id,
+    method: b.method,
+    provider_key: b.provider_key,
+    display_name: b.display_name,
+    identifier: b.identifier,
+    gl_account_code: b.gl_account_code,
+    cashbox_id: b.cashbox_id,
+    is_default: b.is_default,
+    active: b.active,
+    sort_order: b.sort_order,
+    metadata: b.metadata,
+    created_at: '',
+    updated_at: '',
+    created_by: null,
+    updated_by: null,
+  };
+}
+
 const KIND_LABEL: Record<CashboxKind, string> = {
   cash: 'نقدي',
   bank: 'بنكي',
@@ -792,7 +838,13 @@ export default function Cashboxes() {
               setDetailsId(b.payment_account_id);
             }}
             canManage={canManageAccounts}
-            onEdit={(b) => setPaEditing(b as unknown as PaymentAccount)}
+            onEdit={(b) => {
+              // PR-FIN-PAYACCT-4D-UX-FIX-10 — use the safe helper so
+              // payment_account_id maps to id and synthetic rows are
+              // refused (they have no row to UPDATE).
+              const acc = balanceToAccount(b);
+              if (acc) setPaEditing(acc);
+            }}
             onSetDefault={(b) => canManageAccounts && setDefaultMutation.mutate(b.payment_account_id)}
             onToggleActive={(b) => canManageAccounts && toggleAccountMutation.mutate(b.payment_account_id)}
             onDelete={(b) => {
@@ -912,8 +964,15 @@ export default function Cashboxes() {
             canManage={canManageAccounts}
             onClose={() => setDetailsId(null)}
             onEdit={() => {
+              // PR-FIN-PAYACCT-4D-UX-FIX-10 — same safe mapping as the
+              // table-row edit handler (above). DetailsPanel is only
+              // opened for non-synthetic rows, so the helper should
+              // always return a real account; the early-return is
+              // defense in depth.
+              const acc = balanceToAccount(account);
+              if (!acc) return;
               setDetailsId(null);
-              setPaEditing(account as unknown as PaymentAccount);
+              setPaEditing(acc);
             }}
             onSetDefault={() => canManageAccounts && setDefaultMutation.mutate(account.payment_account_id)}
             onToggleActive={() => canManageAccounts && toggleAccountMutation.mutate(account.payment_account_id)}
