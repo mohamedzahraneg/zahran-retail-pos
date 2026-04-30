@@ -160,7 +160,9 @@ export function UnattachedReconciliationPanel({
                   <LinkIcon size={12} />
                   {isBusy
                     ? 'جارِ الربط...'
-                    : `ربط بـ ${row.target_account.display_name}`}
+                    : row.payment_method === 'instapay'
+                      ? 'ربط عمليات InstaPay التاريخية'
+                      : `ربط بـ ${row.target_account.display_name}`}
                 </button>
               )}
             </div>
