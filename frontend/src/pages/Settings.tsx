@@ -27,6 +27,7 @@ import {
 } from '@/api/settings.api';
 import { useAuthStore } from '@/stores/auth.store';
 import { ReceiptTemplatesTab } from './ReceiptTemplatesTab';
+import { PaymentAccountLogoManager } from '@/components/payment-accounts/PaymentAccountLogoManager';
 
 type TabKey =
   | 'company'
@@ -1217,6 +1218,14 @@ function Textarea({
  * unified page via `?action=create-account&method=...` deep-link.
  * The Cashboxes page consumes the query string on mount and pops the
  * params after acting so a reload doesn't re-fire.
+ *
+ * PR-FIN-PAYACCT-4D-UX-FIX-5 — restore the per-account logo/image
+ * management UI that was orphaned during the unification work.
+ * `<PaymentAccountLogoManager />` re-wires the existing LogoPicker
+ * (drag-drop, raster-only, 80KB cap, sanitized at upload AND render)
+ * into a new "صور وشعارات وسائل الدفع" section below the quick
+ * actions. Save path: paymentsApi.updateAccount(id, { metadata }).
+ * No new backend, no new sanitizer, no new image asset files.
  * ──────────────────────────────────────────────────────────────── */
 export function PaymentAccountsTab() {
   return (
@@ -1297,6 +1306,9 @@ export function PaymentAccountsTab() {
           النقر على أي إجراء يفتح صفحة الخزائن والحسابات ويفتح نموذج الإنشاء المناسب تلقائيًا.
         </p>
       </div>
+
+      {/* PR-FIN-PAYACCT-4D-UX-FIX-5 — restored per-account logo manager. */}
+      <PaymentAccountLogoManager />
     </div>
   );
 }
