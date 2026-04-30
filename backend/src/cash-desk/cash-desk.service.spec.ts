@@ -1775,10 +1775,31 @@ describe('CashDeskService.cashboxMovementsUnified — PR-FIN-PAYACCT-4D-UX-FIX-4
     expect(sql).toMatch(/FROM customer_payments cp[\s\S]+payment_account_id IN \(SELECT id FROM linked_pas\)/);
     expect(sql).toMatch(/FROM supplier_payments sp[\s\S]+payment_account_id IN \(SELECT id FROM linked_pas\)/);
 
-    // Branches B/C/D dedupe against cashbox_transactions on (reference_type, reference_id).
+    // Branches B/C/D dedupe against cashbox_transactions.
+    // Branch B keeps `reference_type = 'invoice'` — `invoice` IS a valid
+    // entity_type enum value AND matches what the invoice-payment
+    // trigger writes to cashbox_transactions.reference_type.
     expect(sql).toMatch(/NOT EXISTS \([\s\S]+ct\.reference_type = 'invoice'[\s\S]+ct\.reference_id\s*=\s*ip\.invoice_id/);
-    expect(sql).toMatch(/NOT EXISTS \([\s\S]+ct\.reference_type = 'customer_payment'[\s\S]+ct\.reference_id\s*=\s*cp\.id/);
-    expect(sql).toMatch(/NOT EXISTS \([\s\S]+ct\.reference_type = 'supplier_payment'[\s\S]+ct\.reference_id\s*=\s*sp\.id/);
+
+    // PR-FIN-PAYACCT-4D-UX-FIX-7 — Branches C and D MUST dedupe by
+    // `category` (text), NOT by `reference_type` (enum). The legacy
+    // mirror triggers write `reference_type='other'` + `category=
+    // 'customer_payment' | 'supplier_payment'`; comparing the enum
+    // against `customer_payment` / `supplier_payment` (which are NOT
+    // members of `entity_type`) was the production bug.
+    expect(sql).toMatch(/NOT EXISTS \([\s\S]+ct\.reference_id\s*=\s*cp\.id[\s\S]+ct\.category\s*=\s*'customer_payment'/);
+    expect(sql).toMatch(/NOT EXISTS \([\s\S]+ct\.reference_id\s*=\s*sp\.id[\s\S]+ct\.category\s*=\s*'supplier_payment'/);
+
+    // Regression guards: the invalid enum literals MUST NOT reappear
+    // on the `ct` (cashbox_transactions) alias — that column IS the
+    // entity_type enum and the comparison would throw. The same
+    // strings DO appear on the `je` (journal_entries) alias, which
+    // is fine: journal_entries.reference_type is `varchar`, not the
+    // enum, and `customer_payment` / `supplier_payment` are the
+    // legitimate stored values there.
+    expect(sql).not.toMatch(/\bct\.reference_type\s*=\s*'customer_payment'/);
+    expect(sql).not.toMatch(/\bct\.reference_type\s*=\s*'supplier_payment'/);
+    expect(sql).not.toMatch(/\bct\.reference_type\s*=\s*'invoice_payment'/);
 
     // Refunds flip to amount_out (carried over from PR-4D-UX-FIX-2).
     expect(sql).toMatch(/cp\.kind = 'refund_out'/);
@@ -1852,6 +1873,111 @@ describe('CashDeskService.cashboxMovementsUnified — PR-FIN-PAYACCT-4D-UX-FIX-4
     expect(out.rows).toEqual([]);
     expect(out.total).toBe(0);
     expect(out.totals.count).toBe(0);
+  });
+});
+
+/* ============================================================================
+ * PR-FIN-PAYACCT-4D-UX-FIX-7 — entity_type enum regression guards
+ * ----------------------------------------------------------------------------
+ * Production threw `invalid input value for enum entity_type:
+ * "customer_payment"` when an operator opened CashboxDetailsModal,
+ * because the dedup `NOT EXISTS` for branches C/D in
+ * cashboxMovementsUnified compared `cashbox_transactions.reference_type`
+ * (entity_type enum) against the literal text `'customer_payment'` /
+ * `'supplier_payment'` — neither of which is a member of the enum.
+ *
+ * The legacy mirror triggers `fn_customer_payment_apply` and
+ * `fn_supplier_payment_apply` write CT rows with
+ * `reference_type='other'` and store the discriminator in
+ * `category='customer_payment' | 'supplier_payment'`. The fix is to
+ * dedup by `(reference_id, category)` — the `category` column is plain
+ * text so no enum coercion path is hit.
+ *
+ * These tests are dedicated regression guards for FIX-7. If anyone
+ * reintroduces the bad enum literals, these tests fail with a clear
+ * FIX-7-tagged failure.
+ * ========================================================================== */
+describe('CashDeskService.cashboxMovementsUnified — PR-FIN-PAYACCT-4D-UX-FIX-7', () => {
+  type Call = { sql: string; params?: any[] };
+  async function makeService() {
+    const calls: Call[] = [];
+    const dsObj: any = {
+      query: async (sql: string, params?: any[]) => {
+        calls.push({ sql, params });
+        return [{ rows: [], total_count: 0, sum_in: '0', sum_out: '0', sum_net: '0' }];
+      },
+      transaction: async (cb: any) => cb({ query: dsObj.query }),
+    };
+    const moduleRef = await Test.createTestingModule({
+      providers: [CashDeskService, { provide: DataSource, useValue: dsObj }],
+    }).compile();
+    return { service: moduleRef.get(CashDeskService), calls };
+  }
+
+  it('emits NO comparisons against invalid entity_type enum literals on ct alias', async () => {
+    const { service, calls } = await makeService();
+    await service.cashboxMovementsUnified('cb-fix7', {});
+    const sql = calls[0].sql;
+
+    // The three known footguns — every one of these is NOT a member of
+    // the entity_type enum and would throw at the SQL boundary.
+    // Scoped to the `ct` alias (cashbox_transactions, the enum column);
+    // `je.reference_type = 'customer_payment'` is fine because
+    // journal_entries.reference_type is varchar.
+    expect(sql).not.toMatch(/\bct\.reference_type\s*=\s*'customer_payment'/);
+    expect(sql).not.toMatch(/\bct\.reference_type\s*=\s*'supplier_payment'/);
+    expect(sql).not.toMatch(/\bct\.reference_type\s*=\s*'invoice_payment'/);
+  });
+
+  it('dedups branch C (customer_payments) by category, not by reference_type', async () => {
+    const { service, calls } = await makeService();
+    await service.cashboxMovementsUnified('cb-fix7', {});
+    const sql = calls[0].sql;
+    expect(sql).toMatch(
+      /NOT EXISTS \([\s\S]+ct\.reference_id\s*=\s*cp\.id[\s\S]+ct\.category\s*=\s*'customer_payment'/,
+    );
+  });
+
+  it('dedups branch D (supplier_payments) by category, not by reference_type', async () => {
+    const { service, calls } = await makeService();
+    await service.cashboxMovementsUnified('cb-fix7', {});
+    const sql = calls[0].sql;
+    expect(sql).toMatch(
+      /NOT EXISTS \([\s\S]+ct\.reference_id\s*=\s*sp\.id[\s\S]+ct\.category\s*=\s*'supplier_payment'/,
+    );
+  });
+
+  it('preserves branch B (invoice_payments) reference_type=invoice — that IS a valid enum member', async () => {
+    const { service, calls } = await makeService();
+    await service.cashboxMovementsUnified('cb-fix7', {});
+    const sql = calls[0].sql;
+    // Regression guard: don't over-correct — branch B is fine as-is
+    // because `invoice` is a real entity_type enum value AND is what
+    // the invoice-payment trigger writes.
+    expect(sql).toMatch(
+      /NOT EXISTS \([\s\S]+ct\.reference_type\s*=\s*'invoice'[\s\S]+ct\.reference_id\s*=\s*ip\.invoice_id/,
+    );
+  });
+
+  it('SQL is still SELECT-only (no INSERT/UPDATE/DELETE introduced by the fix)', async () => {
+    const { service, calls } = await makeService();
+    await service.cashboxMovementsUnified('cb-fix7', {});
+    const sql = calls[0].sql;
+    expect(sql).not.toMatch(/\b(INSERT|UPDATE|DELETE)\b/i);
+  });
+
+  it('still scopes branches B/C/D to linked payment-accounts of THIS cashbox (no sibling-PA leakage)', async () => {
+    const { service, calls } = await makeService();
+    await service.cashboxMovementsUnified('cb-fix7', {});
+    const sql = calls[0].sql;
+    // linked_pas CTE is derived strictly from payment_accounts.cashbox_id.
+    expect(sql).toMatch(/payment_accounts WHERE cashbox_id = \$1::uuid/);
+    // All three payment-source branches restrict to that linked_pas set.
+    expect(sql).toMatch(/FROM invoice_payments[\s\S]+payment_account_id IN \(SELECT id FROM linked_pas\)/);
+    expect(sql).toMatch(/FROM customer_payments[\s\S]+payment_account_id IN \(SELECT id FROM linked_pas\)/);
+    expect(sql).toMatch(/FROM supplier_payments[\s\S]+payment_account_id IN \(SELECT id FROM linked_pas\)/);
+    // And the inferred-by-gl path is NOT used.
+    expect(sql).not.toMatch(/gl_account_code\s*=\s*/);
   });
 });
 

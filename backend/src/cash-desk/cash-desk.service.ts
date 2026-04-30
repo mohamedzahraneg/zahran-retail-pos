@@ -1529,10 +1529,20 @@ export class CashDeskService {
         WHERE cp.payment_account_id IN (SELECT id FROM linked_pas)
           AND COALESCE(cp.is_void, FALSE) = FALSE
           AND NOT EXISTS (
+            -- PR-FIN-PAYACCT-4D-UX-FIX-7 — dedup by (reference_id, category),
+            -- NOT by reference_type. The legacy mirror trigger
+            -- fn_customer_payment_apply writes the CT row with
+            -- reference_type=other (because customer_payment is NOT a
+            -- member of the entity_type enum) and stores the
+            -- discriminator in category=customer_payment. Comparing
+            -- reference_type = customer_payment triggered the enum-
+            -- coercion path and threw "invalid input value for enum
+            -- entity_type" (PR #205 regression). category is plain
+            -- text — safe + matches production.
             SELECT 1 FROM cashbox_transactions ct
             WHERE ct.cashbox_id     = $1::uuid
-              AND ct.reference_type = 'customer_payment'
               AND ct.reference_id   = cp.id
+              AND ct.category       = 'customer_payment'
           )
 
         UNION ALL
@@ -1569,10 +1579,15 @@ export class CashDeskService {
         WHERE sp.payment_account_id IN (SELECT id FROM linked_pas)
           AND COALESCE(sp.is_void, FALSE) = FALSE
           AND NOT EXISTS (
+            -- PR-FIN-PAYACCT-4D-UX-FIX-7 — same fix as branch C above:
+            -- dedup by category (text), not reference_type (enum).
+            -- fn_supplier_payment_apply writes reference_type=other
+            -- and category=supplier_payment. supplier_payment is NOT a
+            -- member of the entity_type enum.
             SELECT 1 FROM cashbox_transactions ct
             WHERE ct.cashbox_id     = $1::uuid
-              AND ct.reference_type = 'supplier_payment'
               AND ct.reference_id   = sp.id
+              AND ct.category       = 'supplier_payment'
           )
       ),
       filtered AS (
