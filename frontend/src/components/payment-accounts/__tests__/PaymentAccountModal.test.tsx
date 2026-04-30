@@ -484,4 +484,62 @@ describe('<PaymentAccountModal /> — PR-FIN-PAYACCT-4B', () => {
     const values = Array.from(sel.options).map((o) => o.value);
     expect(values).toEqual(['', 'cb-bank']);
   });
+
+  /* PR-FIN-PAYACCT-4D-UX-FIX-8 — defensive cashbox_id sanitization
+   * ------------------------------------------------------------------
+   * Production threw `invalid input syntax for type uuid: "undefined"`
+   * on the payment_accounts UPDATE path. The PaymentAccountModal sends
+   * `cashbox_id` on every save; the new mutationFn sanitizes via
+   * `uuidOrNull` so the literal strings `"undefined"` / `"null"` /
+   * whitespace can never reach the backend even if upstream form
+   * state corrupts. */
+  it('PR-FIN-PAYACCT-4D-UX-FIX-8: create payload — cashbox_id sentinel never reaches the wire', async () => {
+    // Wallet method with the auto-selected cashbox manually cleared
+    // so cashboxId state is null. Then assert the payload sends null,
+    // never the literal string "undefined" / "null".
+    renderModal({ prefilledMethod: 'wallet' });
+    fireEvent.change(screen.getByTestId('payment-account-modal-display-name'), {
+      target: { value: 'My Wallet' },
+    });
+    fireEvent.change(screen.getByTestId('payment-account-modal-cashbox'), {
+      target: { value: '' },
+    });
+    fireEvent.click(screen.getByTestId('payment-account-modal-submit'));
+    await waitFor(() => expect(createAccountMock).toHaveBeenCalledTimes(1));
+    const body = createAccountMock.mock.calls[0][0];
+    expect(body.cashbox_id).toBeNull();
+    // No payload value anywhere can be the literal sentinel.
+    for (const v of Object.values(body)) {
+      expect(v).not.toBe('undefined');
+      expect(v).not.toBe('null');
+    }
+  });
+
+  it('PR-FIN-PAYACCT-4D-UX-FIX-8: edit payload — cashbox_id sentinel never reaches the wire', async () => {
+    const account: PaymentAccount = {
+      id: 'acct-fix8',
+      method: 'wallet',
+      provider_key: 'we_pay',
+      display_name: 'WE Pay',
+      identifier: '0100',
+      gl_account_code: '1114',
+      cashbox_id: null,
+      is_default: false,
+      active: true,
+      sort_order: 0,
+      metadata: {},
+      created_at: '', updated_at: '',
+      created_by: null, updated_by: null,
+    };
+    renderModal({ mode: 'edit', account });
+    // Save without changing anything — cashboxId stays null.
+    fireEvent.click(screen.getByTestId('payment-account-modal-submit'));
+    await waitFor(() => expect(updateAccountMock).toHaveBeenCalledTimes(1));
+    const [, body] = updateAccountMock.mock.calls[0];
+    expect(body.cashbox_id).toBeNull();
+    for (const v of Object.values(body)) {
+      expect(v).not.toBe('undefined');
+      expect(v).not.toBe('null');
+    }
+  });
 });

@@ -209,6 +209,16 @@ export interface PaymentAccountBalance {
   je_count: number;
   /** ISO date YYYY-MM-DD or null when no movements yet. */
   last_movement: string | null;
+  /**
+   * PR-FIN-PAYACCT-4D-UX-FIX-8 — synthetic row flag. When TRUE this
+   * row aggregates `invoice_payments` whose `payment_account_id IS
+   * NULL` (historical receipts that pre-date the payment_accounts
+   * table OR were posted without picking an account). Synthetic rows
+   * carry a sentinel `payment_account_id` of `unattached:<method>`,
+   * have no `provider_key` / `identifier` / `cashbox_id`, and the FE
+   * MUST NOT offer edit / delete / set-default actions on them.
+   */
+  is_unattached?: boolean;
 }
 
 /**

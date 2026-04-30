@@ -10,6 +10,7 @@ import {
   UpdatePaymentAccountDto,
 } from './dto/payment-account.dto';
 import { PAYMENT_PROVIDERS } from './providers.catalog';
+import { sanitizeUuidInput } from '../common/uuid-or-null';
 
 /**
  * PR-PAY-1 — payment_accounts CRUD + provider catalog facade.
@@ -190,15 +191,45 @@ export class PaymentsService {
   async listBalances(filter: { method?: string; active?: string } = {}) {
     const where: string[] = [];
     const args: any[] = [];
+    let methodArgIdx: number | null = null;
     if (filter.method) {
       args.push(filter.method);
-      where.push(`pa.method = $${args.length}::payment_method_code`);
+      methodArgIdx = args.length;
+      where.push(`pa.method = $${methodArgIdx}::payment_method_code`);
     }
     if (typeof filter.active !== 'undefined') {
       args.push(filter.active === 'true' || filter.active === '1');
       where.push(`pa.active = $${args.length}`);
     }
+
+    /*
+     * PR-FIN-PAYACCT-4D-UX-FIX-8 — synthetic "unattached" rows.
+     *
+     * The page-level "detailed payment-method report" shows
+     * `invoice_payments` grouped by `(payment_method, payment_account_id)`,
+     * including a row where `payment_account_id IS NULL` (3 InstaPay
+     * payments from before payment_accounts were seeded, totalling
+     * 1,050 EGP in production). The /cashboxes treasury page only
+     * surfaced rows from registered `payment_accounts`, so the
+     * unattached money was invisible — operators couldn't see they had
+     * 1,050 EGP of InstaPay receipts not linked to any account.
+     *
+     * Fix: UNION ALL with a per-`(payment_method)` aggregation of
+     * `invoice_payments WHERE payment_account_id IS NULL`. The synthetic
+     * row carries a sentinel `payment_account_id` of `unattached:<method>`
+     * so the FE can render it visually distinct (no edit / delete /
+     * set-default actions; clear "غير مرتبط" label) and so cache
+     * invalidation can ignore it.
+     *
+     * Customer/supplier payments are usually attached (the new flows
+     * require it); we'd surface their unattached aggregates the same
+     * way if/when they appear, but for now invoice_payments is the
+     * only source with historical NULL `payment_account_id` rows.
+     *
+     * Read-only: pure SELECT + UNION ALL. No DDL. No mutations.
+     */
     const sql = `
+      WITH attached_balances AS (
       SELECT pa.id::text                        AS payment_account_id,
              pa.method::text                    AS method,
              pa.provider_key,
@@ -216,7 +247,8 @@ export class PaymentsService {
              COALESCE(agg.total_out, 0)::numeric AS total_out,
              (COALESCE(agg.total_in, 0) - COALESCE(agg.total_out, 0))::numeric AS net_debit,
              COALESCE(agg.movement_count, 0)::int AS je_count,
-             agg.last_movement::date            AS last_movement
+             agg.last_movement::date            AS last_movement,
+             FALSE                              AS is_unattached
         FROM payment_accounts pa
         LEFT JOIN chart_of_accounts coa ON coa.code = pa.gl_account_code
         LEFT JOIN LATERAL (
@@ -244,7 +276,48 @@ export class PaymentsService {
           ) m
         ) agg ON TRUE
        ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
-       ORDER BY pa.method, pa.sort_order, pa.display_name
+      ),
+      unattached_balances AS (
+        SELECT
+          'unattached:' || ip.payment_method::text AS payment_account_id,
+          ip.payment_method::text                  AS method,
+          NULL::text                               AS provider_key,
+          'غير مرتبط بحساب دفع'                    AS display_name,
+          NULL::text                               AS identifier,
+          -- Method-default GL — same mapping the FE uses for new accounts.
+          CASE
+            WHEN ip.payment_method::text = 'cash'                              THEN '1111'
+            WHEN ip.payment_method::text IN ('card_visa','card_mastercard','card_meeza','bank_transfer')
+                                                                               THEN '1113'
+            WHEN ip.payment_method::text IN ('instapay','wallet','vodafone_cash','orange_cash')
+                                                                               THEN '1114'
+            WHEN ip.payment_method::text = 'check'                             THEN '1115'
+            ELSE '1111'
+          END                                      AS gl_account_code,
+          NULL::text                               AS cashbox_id,
+          FALSE                                    AS is_default,
+          TRUE                                     AS active,
+          -- Sort to top of each method group — the operator should see
+          -- unattached money first.
+          -1                                       AS sort_order,
+          '{}'::jsonb                              AS metadata,
+          NULL::text                               AS gl_name_ar,
+          NULL::text                               AS normal_balance,
+          SUM(ip.amount)::numeric                  AS total_in,
+          0::numeric                               AS total_out,
+          SUM(ip.amount)::numeric                  AS net_debit,
+          COUNT(*)::int                            AS je_count,
+          MAX(ip.created_at)::date                 AS last_movement,
+          TRUE                                     AS is_unattached
+        FROM invoice_payments ip
+        WHERE ip.payment_account_id IS NULL
+          ${methodArgIdx ? `AND ip.payment_method = $${methodArgIdx}::payment_method_code` : ''}
+        GROUP BY ip.payment_method
+      )
+      SELECT * FROM attached_balances
+      UNION ALL
+      SELECT * FROM unattached_balances
+      ORDER BY method, sort_order, display_name
     `;
     return this.ds.query(sql, args);
   }
@@ -488,10 +561,19 @@ export class PaymentsService {
         'لا يمكن تعيين حساب غير مفعل كافتراضي. فعّل الحساب أولاً.',
       );
     }
+    // PR-FIN-PAYACCT-4D-UX-FIX-8 — defensive UUID sanitization. The
+    // DTO already declares `@IsOptional() @IsUUID() cashbox_id`, but
+    // we also accept null/empty/`"undefined"`/`"null"` from older FE
+    // payload-builders that sometimes serialized a missing link as
+    // the literal string. Normalize to null BEFORE
+    // validateCashboxKindMatch reaches the SQL — otherwise a poisoned
+    // value would explode as
+    // `invalid input syntax for type uuid: "undefined"`.
+    const safeCashboxId = sanitizeUuidInput(dto.cashbox_id);
     return this.ds.transaction(async (em) => {
       // PR-FIN-PAYACCT-4A: validate optional cashbox pin BEFORE the
       // INSERT so we don't leave a half-rolled-back row.
-      await this.validateCashboxKindMatch(dto.cashbox_id, dto.method, em);
+      await this.validateCashboxKindMatch(safeCashboxId, dto.method, em);
 
       // is_default uniqueness is enforced by the partial unique index
       // (method) WHERE is_default AND active. We let Postgres raise on
@@ -513,7 +595,7 @@ export class PaymentsService {
             dto.display_name,
             dto.identifier ?? null,
             dto.gl_account_code,
-            dto.cashbox_id ?? null,
+            safeCashboxId,
             dto.is_default ?? false,
             dto.active ?? true,
             dto.sort_order ?? 0,
@@ -547,17 +629,24 @@ export class PaymentsService {
     if (dto.display_name !== undefined && !dto.display_name.trim()) {
       throw new BadRequestException('اسم العرض لا يمكن أن يكون فارغاً.');
     }
+    // PR-FIN-PAYACCT-4D-UX-FIX-8 — defensive UUID sanitization. See
+    // create() for the full rationale. The previous truthy check
+    // `if (dto.cashbox_id)` would let the literal string `"undefined"`
+    // through and explode at the SQL boundary inside
+    // validateCashboxKindMatch.
+    const cashboxIdProvided = dto.cashbox_id !== undefined;
+    const safeCashboxId = sanitizeUuidInput(dto.cashbox_id);
     return this.ds.transaction(async (em) => {
       // If cashbox_id is being set (not just cleared with null), validate
       // it against the account's CURRENT method. We re-read the row to
       // get the method since the DTO doesn't carry it on update.
-      if (dto.cashbox_id) {
+      if (safeCashboxId) {
         const [existing] = await em.query(
           `SELECT method::text AS method FROM payment_accounts WHERE id = $1`,
           [id],
         );
         if (!existing) throw new NotFoundException('payment_account not found');
-        await this.validateCashboxKindMatch(dto.cashbox_id, existing.method, em);
+        await this.validateCashboxKindMatch(safeCashboxId, existing.method, em);
       }
 
       const fields: string[] = [];
@@ -576,7 +665,11 @@ export class PaymentsService {
         push('metadata', JSON.stringify(dto.metadata));
       // PR-FIN-PAYACCT-4A: explicit `null` clears the pin; `undefined`
       // (field omitted) leaves it untouched.
-      if (dto.cashbox_id !== undefined) push('cashbox_id', dto.cashbox_id);
+      // PR-FIN-PAYACCT-4D-UX-FIX-8: a poisoned `"undefined"` / `"null"`
+      // sentinel from the FE is treated as the operator's intent to
+      // CLEAR the pin (sanitizeUuidInput → null), so we still write
+      // null to the column.
+      if (cashboxIdProvided) push('cashbox_id', safeCashboxId);
       if (!fields.length) return this.getById(id, em);
 
       args.push(userId);
