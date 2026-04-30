@@ -4,6 +4,7 @@ import {
   Delete,
   Get,
   Param,
+  ParseUUIDPipe,
   Patch,
   Post,
   Query,
@@ -21,12 +22,40 @@ import {
 } from './dto/payment-account.dto';
 import { PaymentsService } from './payments.service';
 
+/**
+ * PR-FIN-PAYACCT-4D-UX-FIX-9-HOTFIX-1 — route ordering invariant
+ * ──────────────────────────────────────────────────────────────────
+ *
+ * NestJS / Express resolves routes in DECLARATION ORDER and the
+ * `:id` placeholder matches any single-segment path. So if a static
+ * route like `payment-accounts/unattached-summary` is declared AFTER
+ * `payment-accounts/:id`, the dynamic one wins and `getById()` runs
+ * with `id="unattached-summary"` — Postgres then throws
+ * `invalid input syntax for type uuid: "unattached-summary"` because
+ * `payment_accounts.id` is a uuid.
+ *
+ * Invariant: every static path under `payment-accounts/...` MUST be
+ * declared above `@Get('payment-accounts/:id')`. Routes below that
+ * line use the `:id` placeholder.
+ *
+ * Defense in depth: every `:id` parameter is bound through
+ * `ParseUUIDPipe` so a slug that somehow slips past route matching
+ * (e.g. a typo'd path on the FE) returns a clean 400 BadRequest
+ * instead of a Postgres uuid-coercion 500.
+ *
+ * The accompanying spec file `payments.controller.spec.ts` reflects
+ * on the controller's route metadata at test time and asserts every
+ * static route appears before its dynamic sibling — anyone reordering
+ * methods will hit a clear test failure.
+ */
 @ApiTags('payments')
 @ApiBearerAuth()
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Controller()
 export class PaymentsController {
   constructor(private readonly service: PaymentsService) {}
+
+  // ─── Static GETs (must come before any `:id` GET) ──────────────────
 
   /**
    * Static provider catalog (InstaPay / wallets / cards / banks). Open
@@ -52,12 +81,8 @@ export class PaymentsController {
 
   /**
    * PR-FIN-PAYACCT-4B — same shape as `list`, plus per-account
-   * running-balance columns from `v_payment_account_balance` (the
-   * view added in mig 121 of PR-4A). Used by the dedicated admin
-   * page at `/payment-accounts` for the KPI cards + per-row balance
-   * column + bottom summary chart. Read-only — any authenticated
-   * user can call (the route at the FE is gated on
-   * `payment-accounts.read`).
+   * running-balance columns. Used by the unified treasury page's
+   * KPI cards + per-row balance column. Read-only.
    */
   @Get('payment-accounts/balances')
   listBalances(
@@ -65,6 +90,24 @@ export class PaymentsController {
     @Query('active') active?: string,
   ) {
     return this.service.listBalances({ method, active });
+  }
+
+  /**
+   * PR-FIN-PAYACCT-4D-UX-FIX-9 — read-only summary of unattached
+   * historical payment rows for the operator-facing reconciliation
+   * panel on /cashboxes. One row per (table, payment_method) bucket
+   * with `supported` + `status_message` so the FE renders the right
+   * action (or explanation).
+   *
+   * Pure SELECT. Any authenticated user can read.
+   *
+   * PR-FIN-PAYACCT-4D-UX-FIX-9-HOTFIX-1: this STATIC route MUST
+   * appear above `@Get('payment-accounts/:id')` below — otherwise
+   * the dynamic placeholder captures `unattached-summary` as an id.
+   */
+  @Get('payment-accounts/unattached-summary')
+  unattachedSummary() {
+    return this.service.unattachedSummary();
   }
 
   /**
@@ -81,8 +124,10 @@ export class PaymentsController {
     return this.service.methodMix(Number.isFinite(n) && n > 0 ? n : 30);
   }
 
+  // ─── Dynamic GETs (must come AFTER all static GETs above) ──────────
+
   @Get('payment-accounts/:id')
-  getById(@Param('id') id: string) {
+  getById(@Param('id', ParseUUIDPipe) id: string) {
     return this.service.getById(id);
   }
 
@@ -106,7 +151,7 @@ export class PaymentsController {
    */
   @Get('payment-accounts/:id/movements')
   listMovements(
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Query('from')   from?: string,
     @Query('to')     to?: string,
     @Query('type')   type?: string,
@@ -126,33 +171,40 @@ export class PaymentsController {
     });
   }
 
+  // ─── Static POSTs (must come before any `:id` POST) ────────────────
+
   @Post('payment-accounts')
   @Roles('admin', 'manager')
   create(@Body() dto: CreatePaymentAccountDto, @Req() req: any) {
     return this.service.create(dto, req.user.sub ?? req.user.id);
   }
 
-  @Patch('payment-accounts/:id')
+  /**
+   * PR-FIN-PAYACCT-4D-UX-FIX-9 — operator-triggered backfill. By
+   * default `dryRun=true` returns counts/total without writing; the
+   * FE flips it to `dryRun=false` only after the operator clicks the
+   * confirm button. Limited to admin/manager roles. Service layer
+   * enforces method whitelist + single-target invariant + idempotency.
+   *
+   * PR-FIN-PAYACCT-4D-UX-FIX-9-HOTFIX-1: belt + suspenders ordering —
+   * this STATIC route declared above the dynamic `:id` POST routes.
+   * (Today the dynamic POST routes have a sub-segment so they don't
+   * actually collide with this one-segment path, but keeping the
+   * static-first invariant prevents future regressions.)
+   */
+  @Post('payment-accounts/backfill-unattached')
   @Roles('admin', 'manager')
-  update(
-    @Param('id') id: string,
-    @Body() dto: UpdatePaymentAccountDto,
-    @Req() req: any,
-  ) {
-    return this.service.update(id, dto, req.user.sub ?? req.user.id);
+  backfillUnattached(@Body() dto: BackfillUnattachedDto, @Req() req: any) {
+    return this.service.backfillUnattachedInvoicePayments({
+      method: dto.method,
+      // Default to dryRun=true. Operator must explicitly opt in to
+      // an actual UPDATE by sending dryRun=false.
+      dryRun: dto.dryRun !== false,
+      userId: req.user.sub ?? req.user.id,
+    });
   }
 
-  @Patch('payment-accounts/:id/deactivate')
-  @Roles('admin', 'manager')
-  deactivate(@Param('id') id: string, @Req() req: any) {
-    return this.service.deactivate(id, req.user.sub ?? req.user.id);
-  }
-
-  @Patch('payment-accounts/:id/set-default')
-  @Roles('admin', 'manager')
-  setDefault(@Param('id') id: string, @Req() req: any) {
-    return this.service.setDefault(id, req.user.sub ?? req.user.id);
-  }
+  // ─── Dynamic POSTs (must come after static POSTs above) ────────────
 
   /**
    * PR-FIN-PAYACCT-4A — POST alias of the PATCH /set-default route to
@@ -162,7 +214,7 @@ export class PaymentsController {
    */
   @Post('payment-accounts/:id/set-default')
   @Roles('admin', 'manager')
-  setDefaultPost(@Param('id') id: string, @Req() req: any) {
+  setDefaultPost(@Param('id', ParseUUIDPipe) id: string, @Req() req: any) {
     return this.service.setDefault(id, req.user.sub ?? req.user.id);
   }
 
@@ -174,9 +226,35 @@ export class PaymentsController {
    */
   @Post('payment-accounts/:id/toggle-active')
   @Roles('admin', 'manager')
-  toggleActive(@Param('id') id: string, @Req() req: any) {
+  toggleActive(@Param('id', ParseUUIDPipe) id: string, @Req() req: any) {
     return this.service.toggleActive(id, req.user.sub ?? req.user.id);
   }
+
+  // ─── Dynamic PATCHes ───────────────────────────────────────────────
+
+  @Patch('payment-accounts/:id')
+  @Roles('admin', 'manager')
+  update(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdatePaymentAccountDto,
+    @Req() req: any,
+  ) {
+    return this.service.update(id, dto, req.user.sub ?? req.user.id);
+  }
+
+  @Patch('payment-accounts/:id/deactivate')
+  @Roles('admin', 'manager')
+  deactivate(@Param('id', ParseUUIDPipe) id: string, @Req() req: any) {
+    return this.service.deactivate(id, req.user.sub ?? req.user.id);
+  }
+
+  @Patch('payment-accounts/:id/set-default')
+  @Roles('admin', 'manager')
+  setDefault(@Param('id', ParseUUIDPipe) id: string, @Req() req: any) {
+    return this.service.setDefault(id, req.user.sub ?? req.user.id);
+  }
+
+  // ─── Dynamic DELETE ────────────────────────────────────────────────
 
   /**
    * PR-FIN-PAYACCT-4A — safe delete:
@@ -189,41 +267,7 @@ export class PaymentsController {
    */
   @Delete('payment-accounts/:id')
   @Roles('admin', 'manager')
-  deletePaymentAccount(@Param('id') id: string, @Req() req: any) {
+  deletePaymentAccount(@Param('id', ParseUUIDPipe) id: string, @Req() req: any) {
     return this.service.deleteAccount(id, req.user.sub ?? req.user.id);
-  }
-
-  /**
-   * PR-FIN-PAYACCT-4D-UX-FIX-9 — read-only summary of unattached
-   * historical payment rows for the operator-facing reconciliation
-   * panel on /cashboxes. One row per (table, payment_method) bucket
-   * with `supported` + `status_message` so the FE renders the right
-   * action (or explanation).
-   *
-   * Pure SELECT. Any authenticated user can read — same as
-   * `payment-accounts/balances`, etc.
-   */
-  @Get('payment-accounts/unattached-summary')
-  unattachedSummary() {
-    return this.service.unattachedSummary();
-  }
-
-  /**
-   * PR-FIN-PAYACCT-4D-UX-FIX-9 — operator-triggered backfill. By
-   * default `dryRun=true` returns counts/total without writing; the
-   * FE flips it to `dryRun=false` only after the operator clicks the
-   * confirm button. Limited to admin/manager roles. Service layer
-   * enforces method whitelist + single-target invariant + idempotency.
-   */
-  @Post('payment-accounts/backfill-unattached')
-  @Roles('admin', 'manager')
-  backfillUnattached(@Body() dto: BackfillUnattachedDto, @Req() req: any) {
-    return this.service.backfillUnattachedInvoicePayments({
-      method: dto.method,
-      // Default to dryRun=true. Operator must explicitly opt in to
-      // an actual UPDATE by sending dryRun=false.
-      dryRun: dto.dryRun !== false,
-      userId: req.user.sub ?? req.user.id,
-    });
   }
 }
