@@ -539,7 +539,12 @@ describe('PaymentsService — PR-FIN-PAYACCT-4B', () => {
       const sql = dsCalls[0].sql;
       expect(sql).toMatch(/FROM payment_accounts pa/);
       expect(sql).toMatch(/LEFT JOIN chart_of_accounts coa/);
-      expect(sql).toMatch(/ORDER BY pa\.method, pa\.sort_order, pa\.display_name/);
+      // PR-FIN-PAYACCT-4D-UX-FIX-8: the final ORDER BY now operates on
+      // the UNION result (attached_balances ⊎ unattached_balances), so
+      // the column references are unqualified — `method, sort_order,
+      // display_name` rather than `pa.method`. The semantics are the
+      // same; both CTEs preserve the original column names.
+      expect(sql).toMatch(/ORDER BY method, sort_order, display_name/);
       // The shared-bucket view is GONE from listBalances — that was the bug.
       expect(sql).not.toMatch(/v_payment_account_balance/);
       // The new aggregation reads strictly from account-tagged source tables,
@@ -830,5 +835,240 @@ describe('PaymentsService — PR-FIN-PAYACCT-4D methodMix', () => {
     expect(dsCalls).toHaveLength(2);
     expect(dsCalls[0].sql).toBe(dsCalls[1].sql);
     expect(dsCalls[0].sql).toMatch(/v_dashboard_payment_mix_30d/);
+  });
+});
+
+/* ============================================================================
+ * PR-FIN-PAYACCT-4D-UX-FIX-8 — defensive cashbox_id sanitization
+ * ----------------------------------------------------------------------------
+ * Production threw `invalid input syntax for type uuid: "undefined"` again
+ * on 2026-04-30 12:11:05 UTC, this time on the payment_accounts UPDATE
+ * path — the operator was saving "ربط وسيلة الدفع بمحفظة" and a poisoned
+ * `cashbox_id: "undefined"` reached `validateCashboxKindMatch` because
+ * the previous service code did `if (dto.cashbox_id)` (truthy on the
+ * string `"undefined"`) and passed it straight to a uuid SQL parameter.
+ *
+ * Fix: sanitize via the shared `sanitizeUuidInput` helper at the service
+ * boundary in BOTH `create()` and `update()`. The helper neutralizes
+ * `undefined` / `null` / `""` / `"undefined"` / `"null"` to `null`. When
+ * the inbound key was provided (FE intent: change the link), we still
+ * write `null` to the column — the operator's intent is "clear the pin".
+ * ========================================================================== */
+describe('PaymentsService.create — PR-FIN-PAYACCT-4D-UX-FIX-8 cashbox_id sanitization', () => {
+  it('cashbox_id = "undefined" → never passes "undefined" to the SQL; stored as NULL', async () => {
+    const { service, emCalls } = await makeService({
+      emResults: [
+        [{ id: 'pa-fix8-1' }],   // INSERT
+        [{ id: 'pa-fix8-1', method: 'instapay', display_name: 'X' }], // getById SELECT
+      ],
+    });
+
+    await service.create(
+      {
+        method: 'instapay',
+        display_name: 'InstaPay',
+        gl_account_code: '1114',
+        cashbox_id: 'undefined' as any, // ← poison
+      } as any,
+      'user-1',
+    );
+
+    // The INSERT happened with cashbox_id slot = null, NOT "undefined".
+    const insert = emCalls.find((c) => /INSERT INTO payment_accounts/.test(c.sql))!;
+    expect(insert).toBeDefined();
+    expect(insert.params).not.toContain('undefined');
+    expect(insert.params).not.toContain('null');
+    // No validateCashboxKindMatch SELECT against cashboxes fired for the poisoned value.
+    const cashboxLookup = emCalls.find((c) => /FROM cashboxes WHERE id = \$1/.test(c.sql));
+    expect(cashboxLookup).toBeUndefined();
+  });
+
+  it('cashbox_id = "" / "null" / whitespace → also normalized to null; no validator SELECT fires', async () => {
+    for (const poison of ['', 'null', '  '] as const) {
+      const { service, emCalls } = await makeService({
+        emResults: [
+          [{ id: 'pa-x' }],
+          [{ id: 'pa-x', method: 'instapay', display_name: 'X' }],
+        ],
+      });
+      await service.create(
+        {
+          method: 'instapay',
+          display_name: 'InstaPay',
+          gl_account_code: '1114',
+          cashbox_id: poison as any,
+        } as any,
+        'user-1',
+      );
+      expect(emCalls.find((c) => /FROM cashboxes WHERE id = \$1/.test(c.sql))).toBeUndefined();
+      const insert = emCalls.find((c) => /INSERT INTO payment_accounts/.test(c.sql))!;
+      expect(insert.params).not.toContain(poison);
+    }
+  });
+
+  it('cashbox_id = real UUID → validator runs against that UUID, not poison', async () => {
+    const REAL = 'b533200b-ec23-4cb8-a539-8c78e3679f78';
+    const { service, emCalls } = await makeService({
+      emResults: [
+        [{ id: REAL, kind: 'ewallet' }], // validator SELECT
+        [{ id: 'pa-real' }],             // INSERT
+        [{ id: 'pa-real', method: 'instapay', display_name: 'X' }], // getById
+      ],
+    });
+    await service.create(
+      {
+        method: 'instapay',
+        display_name: 'InstaPay',
+        gl_account_code: '1114',
+        cashbox_id: REAL,
+      } as any,
+      'user-1',
+    );
+    const validatorCall = emCalls.find((c) => /FROM cashboxes WHERE id = \$1/.test(c.sql))!;
+    expect(validatorCall).toBeDefined();
+    expect(validatorCall.params[0]).toBe(REAL);
+  });
+});
+
+describe('PaymentsService.update — PR-FIN-PAYACCT-4D-UX-FIX-8 cashbox_id sanitization', () => {
+  it('cashbox_id = "undefined" → validator skipped, UPDATE writes NULL (clears the pin)', async () => {
+    const { service, emCalls } = await makeService({
+      emResults: [
+        [],                                                              // UPDATE (no RETURNING)
+        [{ id: 'pa-up-1', method: 'instapay', display_name: 'X' }],      // getById SELECT
+      ],
+    });
+    await service.update(
+      'pa-up-1',
+      { cashbox_id: 'undefined' as any } as any,
+      'user-1',
+    );
+    // No validator SELECT against cashboxes (the poison value was
+    // sanitized to null and `if (safeCashboxId)` never fires).
+    expect(emCalls.find((c) => /FROM cashboxes WHERE id = \$1/.test(c.sql))).toBeUndefined();
+    // UPDATE happened with cashbox_id = null in the SET clause.
+    const update = emCalls.find((c) => /UPDATE payment_accounts SET/.test(c.sql))!;
+    expect(update).toBeDefined();
+    expect(update.sql).toMatch(/cashbox_id\s*=/);
+    // params include null for cashbox_id; the literal 'undefined' must NOT appear.
+    expect(update.params).not.toContain('undefined');
+    expect(update.params).toContain(null);
+  });
+
+  it('cashbox_id = "" / "null" / whitespace → same as "undefined": cleared, no validator', async () => {
+    for (const poison of ['', 'null', '  '] as const) {
+      const { service, emCalls } = await makeService({
+        emResults: [
+          [],                                                                 // UPDATE
+          [{ id: 'pa-up-x', method: 'instapay', display_name: 'X' }],         // getById
+        ],
+      });
+      await service.update('pa-up-x', { cashbox_id: poison as any } as any, 'user-1');
+      expect(emCalls.find((c) => /FROM cashboxes WHERE id = \$1/.test(c.sql))).toBeUndefined();
+      const update = emCalls.find((c) => /UPDATE payment_accounts SET/.test(c.sql))!;
+      expect(update.params).not.toContain(poison);
+    }
+  });
+
+  it('cashbox_id = explicit null → validator skipped, UPDATE writes NULL (existing behavior preserved)', async () => {
+    const { service, emCalls } = await makeService({
+      emResults: [
+        [],                                                                 // UPDATE
+        [{ id: 'pa-up-2', method: 'instapay', display_name: 'X' }],         // getById
+      ],
+    });
+    await service.update('pa-up-2', { cashbox_id: null } as any, 'user-1');
+    expect(emCalls.find((c) => /FROM cashboxes WHERE id = \$1/.test(c.sql))).toBeUndefined();
+    const update = emCalls.find((c) => /UPDATE payment_accounts SET/.test(c.sql))!;
+    expect(update.sql).toMatch(/cashbox_id\s*=/);
+    expect(update.params).toContain(null);
+  });
+
+  it('cashbox_id = real UUID → validator runs and writes the real UUID', async () => {
+    const REAL = 'b533200b-ec23-4cb8-a539-8c78e3679f78';
+    const { service, emCalls } = await makeService({
+      emResults: [
+        [{ method: 'instapay' }],                             // SELECT method for validation
+        [{ id: REAL, kind: 'ewallet' }],                      // validator SELECT
+        [],                                                   // UPDATE
+        [{ id: 'pa-up-3', method: 'instapay', display_name: 'X' }], // getById
+      ],
+    });
+    await service.update('pa-up-3', { cashbox_id: REAL } as any, 'user-1');
+    const validatorCall = emCalls.find((c) => /FROM cashboxes WHERE id = \$1/.test(c.sql))!;
+    expect(validatorCall.params[0]).toBe(REAL);
+    const update = emCalls.find((c) => /UPDATE payment_accounts SET/.test(c.sql))!;
+    expect(update.params).toContain(REAL);
+  });
+
+  it('cashbox_id field omitted entirely → no UPDATE on cashbox_id (preserves existing pin)', async () => {
+    const { service, emCalls } = await makeService({
+      emResults: [
+        [],                                                                 // UPDATE
+        [{ id: 'pa-up-4', method: 'instapay', display_name: 'X' }],         // getById
+      ],
+    });
+    await service.update('pa-up-4', { display_name: 'New Name' } as any, 'user-1');
+    const update = emCalls.find((c) => /UPDATE payment_accounts SET/.test(c.sql))!;
+    expect(update).toBeDefined();
+    expect(update.sql).not.toMatch(/cashbox_id\s*=/);
+  });
+});
+
+/* ============================================================================
+ * PR-FIN-PAYACCT-4D-UX-FIX-8 — listBalances surfaces unattached invoice_payments
+ * ----------------------------------------------------------------------------
+ * The "detailed payment-method report" shows invoice_payments grouped by
+ * (payment_method, payment_account_id) including a row where
+ * payment_account_id IS NULL (3 InstaPay receipts totalling 1,050 EGP in
+ * production). /cashboxes used to only surface registered payment_accounts,
+ * so the 1,050 was invisible. Fix: UNION ALL with synthetic rows carrying
+ * a sentinel `payment_account_id = unattached:<method>`, `is_unattached =
+ * TRUE`, sort_order=-1 (top of method group).
+ * ========================================================================== */
+describe('PaymentsService.listBalances — PR-FIN-PAYACCT-4D-UX-FIX-8 unattached rows', () => {
+  it('emits a UNION ALL with a synthetic unattached_balances CTE for invoice_payments where payment_account_id IS NULL', async () => {
+    const { service, dsCalls } = await makeService({ dsResults: [[]] });
+    await service.listBalances();
+    const sql = dsCalls[0].sql;
+    expect(sql).toMatch(/WITH attached_balances AS/);
+    expect(sql).toMatch(/unattached_balances AS/);
+    // The unattached CTE filters strictly to invoice_payments with NULL PA.
+    expect(sql).toMatch(/FROM invoice_payments ip[\s\S]+payment_account_id IS NULL/);
+    // Group by payment_method only — one synthetic row per method.
+    expect(sql).toMatch(/GROUP BY ip\.payment_method/);
+    // Final SELECT unions both CTEs.
+    expect(sql).toMatch(/SELECT \* FROM attached_balances[\s\S]+UNION ALL[\s\S]+SELECT \* FROM unattached_balances/);
+    // No DML.
+    expect(sql).not.toMatch(/\b(INSERT|UPDATE|DELETE)\b/i);
+  });
+
+  it('synthetic rows carry the `is_unattached=TRUE` flag + sentinel payment_account_id', async () => {
+    const { service, dsCalls } = await makeService({ dsResults: [[]] });
+    await service.listBalances();
+    const sql = dsCalls[0].sql;
+    expect(sql).toMatch(/'unattached:' \|\| ip\.payment_method::text\s+AS payment_account_id/);
+    expect(sql).toMatch(/TRUE\s+AS is_unattached/);
+    expect(sql).toMatch(/FALSE\s+AS is_unattached/);
+  });
+
+  it('synthetic rows use the method-default GL bucket', async () => {
+    const { service, dsCalls } = await makeService({ dsResults: [[]] });
+    await service.listBalances();
+    const sql = dsCalls[0].sql;
+    // The CASE expression maps payment_method → method-default GL code.
+    expect(sql).toMatch(/payment_method::text = 'cash'\s+THEN '1111'/);
+    expect(sql).toMatch(/payment_method::text IN \('card_visa','card_mastercard','card_meeza','bank_transfer'\)\s+THEN '1113'/);
+    expect(sql).toMatch(/payment_method::text IN \('instapay','wallet','vodafone_cash','orange_cash'\)\s+THEN '1114'/);
+    expect(sql).toMatch(/payment_method::text = 'check'\s+THEN '1115'/);
+  });
+
+  it('method filter passes through to the unattached CTE too (no untagged leakage when filtered)', async () => {
+    const { service, dsCalls } = await makeService({ dsResults: [[]] });
+    await service.listBalances({ method: 'instapay' });
+    const sql = dsCalls[0].sql;
+    // Both the attached and unattached predicates restrict by method.
+    expect(sql).toMatch(/pa\.method = \$1::payment_method_code/);
+    expect(sql).toMatch(/AND ip\.payment_method = \$1::payment_method_code/);
   });
 });

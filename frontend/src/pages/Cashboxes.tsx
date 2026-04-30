@@ -382,26 +382,22 @@ export default function Cashboxes() {
     }
     const noDefault = activeMethods.size - defaultedMethods.size;
 
-    // Wallet / bank totals — dedupe by (gl_account_code | cashbox_id)
-    // so accounts that share a bucket don't double-count.
-    const seen = new Set<string>();
-    const sumDedupe = (filter: (b: PaymentAccountBalance) => boolean) => {
-      let s = 0;
-      for (const b of balances) {
-        if (!filter(b)) continue;
-        const key = `${b.gl_account_code}|${b.cashbox_id ?? 'null'}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        s += Number(b.net_debit || 0);
-      }
-      seen.clear();
-      return s;
-    };
-    const walletTotal = sumDedupe((b) => {
+    // PR-FIN-PAYACCT-4D-UX-FIX-8 — wallet / bank totals are now a
+    // straight per-account sum. The legacy dedup-by-(gl_account_code,
+    // cashbox_id) was a workaround for the pre-FIX-2 backend that
+    // returned shared GL-bucket totals on every account row; FIX-2
+    // made listBalances strictly per-payment_account_id, so the
+    // dedup is now actively WRONG — InstaPay (gl=1114, cashbox=null)
+    // and WE Pay (gl=1114, cashbox=null) share the same dedup key
+    // and only one of them gets counted. Each row already has a
+    // unique payment_account_id; sum them straight.
+    const sumByMethod = (filter: (b: PaymentAccountBalance) => boolean) =>
+      balances.reduce((s, b) => (filter(b) ? s + Number(b.net_debit || 0) : s), 0);
+    const walletTotal = sumByMethod((b) => {
       const k = paymentAccountKind(b.method as PaymentMethodCode);
       return k === 'wallet' || k === 'instapay';
     });
-    const bankTotal = sumDedupe((b) => paymentAccountKind(b.method as PaymentMethodCode) === 'bank');
+    const bankTotal = sumByMethod((b) => paymentAccountKind(b.method as PaymentMethodCode) === 'bank');
 
     // "آخر حركة" = max(last_movement across balances, latest cashbox movement)
     const balanceLast = balances
@@ -1137,12 +1133,23 @@ function PaymentAccountsTable({
               const kind = paymentAccountKind(b.method as PaymentMethodCode);
               const isSelected = b.payment_account_id === selectedId;
               const warnings = warningsFor(b);
+              // PR-FIN-PAYACCT-4D-UX-FIX-8 — synthetic "unattached"
+              // rows are aggregations of invoice_payments where
+              // payment_account_id IS NULL. They have a sentinel id
+              // (`unattached:<method>`), no real provider/identifier/
+              // cashbox, and MUST NOT be editable / deletable /
+              // set-default-able. The select handler is also a no-op
+              // because the details panel can't fetch movements for
+              // a non-existent payment_account_id.
+              const isUnattached = !!b.is_unattached;
               return (
                 <tr
                   key={b.payment_account_id}
-                  onClick={() => onSelect(b.payment_account_id)}
-                  className={`cursor-pointer hover:bg-slate-50 ${isSelected ? 'bg-pink-50/50' : ''}`}
-                  data-testid={`payment-account-row-${b.payment_account_id}`}
+                  onClick={() => { if (!isUnattached) onSelect(b.payment_account_id); }}
+                  className={`hover:bg-slate-50 ${isSelected ? 'bg-pink-50/50' : ''} ${isUnattached ? 'bg-amber-50/30 italic' : 'cursor-pointer'}`}
+                  data-testid={isUnattached
+                    ? `payment-account-row-unattached-${b.method}`
+                    : `payment-account-row-${b.payment_account_id}`}
                 >
                   <Td>
                     <PaymentProviderLogo
@@ -1166,7 +1173,13 @@ function PaymentAccountsTable({
                       {kind ? KIND_AR_LABEL[kind] : '—'}
                     </span>
                   </Td>
-                  <Td className="font-mono text-[11px]">{b.identifier ?? '—'}</Td>
+                  <Td className="font-mono text-[11px]">
+                    {isUnattached ? (
+                      <span className="text-[10px] font-bold bg-amber-200 text-amber-900 px-2 py-0.5 rounded" data-testid="row-unattached-badge">
+                        غير مرتبط
+                      </span>
+                    ) : (b.identifier ?? '—')}
+                  </Td>
                   <Td>
                     <div className="font-mono text-xs text-slate-700">{b.gl_account_code}</div>
                     <div className="text-[10px] text-slate-500 truncate max-w-32">{b.gl_name_ar ?? ''}</div>
@@ -1218,24 +1231,41 @@ function PaymentAccountsTable({
                   </Td>
                   <Td>
                     <div className="flex items-center gap-1 justify-end">
-                      {/* PR-FIN-PAYACCT-4D-UX-FIX-2 — visible "عرض التفاصيل"
-                          action available to all readers (no manage perm).
-                          Opens the same details modal as a row click. */}
-                      <button
-                        type="button"
-                        onClick={(e) => { e.stopPropagation(); onOpenDetails(b); }}
-                        className="text-[11px] px-2 py-1 rounded bg-pink-100 text-pink-700 hover:bg-pink-200 inline-flex items-center gap-1"
-                        data-testid="row-action-view-details"
-                        title="عرض التفاصيل"
-                      >
-                        عرض التفاصيل
-                      </button>
-                      {canManage && (
+                      {/* PR-FIN-PAYACCT-4D-UX-FIX-8 — synthetic
+                          "unattached" rows have no real PA backing,
+                          so every action is suppressed. The row
+                          surfaces the value (e.g. 1,050 EGP of
+                          historical InstaPay receipts with no PA
+                          link) so the operator can see they exist;
+                          fixing the link is a separate workflow
+                          (open the affected invoices and re-tag
+                          their payments). */}
+                      {isUnattached ? (
+                        <span className="text-[10px] text-slate-400" data-testid="row-action-unattached">
+                          —
+                        </span>
+                      ) : (
                         <>
-                          <button onClick={(e) => { e.stopPropagation(); onEdit(b); }}         className="text-[11px] px-2 py-1 rounded bg-slate-100 text-slate-700 hover:bg-slate-200" data-testid="row-action-edit"          title="تعديل"><Edit3 size={12} /></button>
-                          <button onClick={(e) => { e.stopPropagation(); onSetDefault(b); }}   className="text-[11px] px-2 py-1 rounded bg-amber-100 text-amber-700 hover:bg-amber-200" data-testid="row-action-set-default"  title="تعيين افتراضي"><Star size={12} /></button>
-                          <button onClick={(e) => { e.stopPropagation(); onToggleActive(b); }} className="text-[11px] px-2 py-1 rounded bg-sky-100 text-sky-700 hover:bg-sky-200"       data-testid="row-action-toggle-active" title={b.active ? 'تعطيل' : 'تفعيل'}>{b.active ? <PowerOff size={12} /> : <Power size={12} />}</button>
-                          <button onClick={(e) => { e.stopPropagation(); onDelete(b); }}       className="text-[11px] px-2 py-1 rounded bg-rose-100 text-rose-700 hover:bg-rose-200"   data-testid="row-action-delete"        title="حذف"><Trash2 size={12} /></button>
+                          {/* PR-FIN-PAYACCT-4D-UX-FIX-2 — visible "عرض التفاصيل"
+                              action available to all readers (no manage perm).
+                              Opens the same details modal as a row click. */}
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); onOpenDetails(b); }}
+                            className="text-[11px] px-2 py-1 rounded bg-pink-100 text-pink-700 hover:bg-pink-200 inline-flex items-center gap-1"
+                            data-testid="row-action-view-details"
+                            title="عرض التفاصيل"
+                          >
+                            عرض التفاصيل
+                          </button>
+                          {canManage && (
+                            <>
+                              <button onClick={(e) => { e.stopPropagation(); onEdit(b); }}         className="text-[11px] px-2 py-1 rounded bg-slate-100 text-slate-700 hover:bg-slate-200" data-testid="row-action-edit"          title="تعديل"><Edit3 size={12} /></button>
+                              <button onClick={(e) => { e.stopPropagation(); onSetDefault(b); }}   className="text-[11px] px-2 py-1 rounded bg-amber-100 text-amber-700 hover:bg-amber-200" data-testid="row-action-set-default"  title="تعيين افتراضي"><Star size={12} /></button>
+                              <button onClick={(e) => { e.stopPropagation(); onToggleActive(b); }} className="text-[11px] px-2 py-1 rounded bg-sky-100 text-sky-700 hover:bg-sky-200"       data-testid="row-action-toggle-active" title={b.active ? 'تعطيل' : 'تفعيل'}>{b.active ? <PowerOff size={12} /> : <Power size={12} />}</button>
+                              <button onClick={(e) => { e.stopPropagation(); onDelete(b); }}       className="text-[11px] px-2 py-1 rounded bg-rose-100 text-rose-700 hover:bg-rose-200"   data-testid="row-action-delete"        title="حذف"><Trash2 size={12} /></button>
+                            </>
+                          )}
                         </>
                       )}
                     </div>

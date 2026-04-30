@@ -33,6 +33,7 @@ import {
 import { type Cashbox } from '@/api/cash-desk.api';
 import { Modal, Field } from '@/components/cash-desk/Modal';
 import { PaymentProviderLogo } from '@/components/payments/PaymentProviderLogo';
+import { uuidOrNull } from '@/lib/uuid-or-null';
 
 /**
  * Methods the admin can create accounts for. Cash + non-cash (incl.
@@ -258,7 +259,13 @@ export function PaymentAccountModal({
         // PR-FIN-PAYACCT-4D-UX-FIX-2 — always include cashbox_id so the
         // backend records it on create. `null` means "intentionally
         // not linked" (the operator picked "— بدون ربط —").
-        cashbox_id: cashboxId,
+        // PR-FIN-PAYACCT-4D-UX-FIX-8 — defensive sanitize so the
+        // literal strings `"undefined"` / `"null"` (from a poisoned
+        // form-state path or template-literal coercion) can never
+        // reach the backend uuid column. The select onChange already
+        // emits `null` for the empty option, but this is belt-and-
+        // suspenders for the same FIX-6 pattern.
+        cashbox_id: uuidOrNull(cashboxId),
       } as any),
     onSuccess: () => {
       toast.success('تم إنشاء حساب الدفع');
@@ -285,7 +292,14 @@ export function PaymentAccountModal({
         // PR-FIN-PAYACCT-4D-UX-FIX-2 — include cashbox_id on edit. The
         // backend treats `null` as "clear the pin" and a UUID as "set
         // or change to this cashbox".
-        cashbox_id: cashboxId,
+        // PR-FIN-PAYACCT-4D-UX-FIX-8 — defensive sanitize. Same
+        // pattern as the create path; the production error
+        // `invalid input syntax for type uuid: "undefined"` was
+        // landing on this path because the backend's old
+        // `if (dto.cashbox_id)` truthy check let the literal string
+        // `"undefined"` reach validateCashboxKindMatch. Backend now
+        // also sanitizes; this is the FE half of belt-and-suspenders.
+        cashbox_id: uuidOrNull(cashboxId),
       } as any);
     },
     onSuccess: () => {
