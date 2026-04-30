@@ -150,6 +150,29 @@ export const paymentsApi = {
       api.get('/payments/method-mix', { params: { days } }),
     ),
 
+  /**
+   * PR-FIN-PAYACCT-4D-UX-FIX-9 — read-only summary of unattached
+   * historical payment rows. Drives the reconciliation panel on
+   * /cashboxes. One entry per (source_table, payment_method) bucket
+   * with status + (when applicable) the active default target.
+   */
+  unattachedSummary: () =>
+    unwrap<UnattachedSummaryRow[]>(
+      api.get('/payment-accounts/unattached-summary'),
+    ),
+
+  /**
+   * PR-FIN-PAYACCT-4D-UX-FIX-9 — operator-triggered historical
+   * backfill. Always runs in `dryRun=true` mode unless the operator
+   * explicitly opts in via `dryRun: false`. Only `instapay` is
+   * supported in this PR; other methods return a clean Arabic
+   * BadRequest. Idempotent — second run matches 0 rows.
+   */
+  backfillUnattached: (body: { method: PaymentMethodCode; dryRun?: boolean }) =>
+    unwrap<BackfillUnattachedResponse>(
+      api.post('/payment-accounts/backfill-unattached', body),
+    ),
+
   // PR-FIN-PAYACCT-4D-UX-FIX-2 — read-only feed of operations for the
   // selected payment_account. Strictly filtered by payment_account_id;
   // never reads gl_account_code-shared rows.
@@ -225,6 +248,46 @@ export interface PaymentAccountBalance {
    * MUST NOT offer edit / delete / set-default actions on them.
    */
   is_unattached?: boolean;
+}
+
+/**
+ * PR-FIN-PAYACCT-4D-UX-FIX-9 — one row of the unattached-summary
+ * endpoint. Drives the reconciliation panel.
+ */
+export interface UnattachedSummaryRow {
+  source_table: 'invoice_payments' | 'customer_payments' | 'supplier_payments';
+  payment_method: PaymentMethodCode;
+  row_count: number;
+  total_amount: string; // pg numeric → string
+  earliest: string | null;
+  latest: string | null;
+  /** TRUE → operator can press the backfill button. */
+  supported: boolean;
+  /** Arabic message for the operator (e.g. cash explanation). */
+  status_message: string;
+  target_account: {
+    id: string;
+    display_name: string;
+    identifier: string | null;
+    provider_key: string | null;
+    gl_account_code: string;
+  } | null;
+}
+
+/**
+ * PR-FIN-PAYACCT-4D-UX-FIX-9 — backfill endpoint response.
+ */
+export interface BackfillUnattachedResponse {
+  method: PaymentMethodCode;
+  dryRun: boolean;
+  targetAccount: {
+    id: string;
+    display_name: string;
+    identifier: string | null;
+  };
+  before: { rowCount: number; totalAmount: string };
+  after: { rowCount: number; totalAmount: string };
+  updatedCount: number;
 }
 
 /**

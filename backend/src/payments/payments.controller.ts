@@ -15,6 +15,7 @@ import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
 import {
+  BackfillUnattachedDto,
   CreatePaymentAccountDto,
   UpdatePaymentAccountDto,
 } from './dto/payment-account.dto';
@@ -190,5 +191,39 @@ export class PaymentsController {
   @Roles('admin', 'manager')
   deletePaymentAccount(@Param('id') id: string, @Req() req: any) {
     return this.service.deleteAccount(id, req.user.sub ?? req.user.id);
+  }
+
+  /**
+   * PR-FIN-PAYACCT-4D-UX-FIX-9 — read-only summary of unattached
+   * historical payment rows for the operator-facing reconciliation
+   * panel on /cashboxes. One row per (table, payment_method) bucket
+   * with `supported` + `status_message` so the FE renders the right
+   * action (or explanation).
+   *
+   * Pure SELECT. Any authenticated user can read — same as
+   * `payment-accounts/balances`, etc.
+   */
+  @Get('payment-accounts/unattached-summary')
+  unattachedSummary() {
+    return this.service.unattachedSummary();
+  }
+
+  /**
+   * PR-FIN-PAYACCT-4D-UX-FIX-9 — operator-triggered backfill. By
+   * default `dryRun=true` returns counts/total without writing; the
+   * FE flips it to `dryRun=false` only after the operator clicks the
+   * confirm button. Limited to admin/manager roles. Service layer
+   * enforces method whitelist + single-target invariant + idempotency.
+   */
+  @Post('payment-accounts/backfill-unattached')
+  @Roles('admin', 'manager')
+  backfillUnattached(@Body() dto: BackfillUnattachedDto, @Req() req: any) {
+    return this.service.backfillUnattachedInvoicePayments({
+      method: dto.method,
+      // Default to dryRun=true. Operator must explicitly opt in to
+      // an actual UPDATE by sending dryRun=false.
+      dryRun: dto.dryRun !== false,
+      userId: req.user.sub ?? req.user.id,
+    });
   }
 }
