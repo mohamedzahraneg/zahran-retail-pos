@@ -1096,3 +1096,285 @@ describe('PaymentsService.listBalances — PR-FIN-PAYACCT-4D-UX-FIX-8 unattached
     expect(sql).not.toMatch(/coa\.name_ar\s+AS gl_name_ar/);
   });
 });
+
+/* ============================================================================
+ * PR-FIN-PAYACCT-4D-UX-FIX-9 — historical-payment backfill (instapay)
+ * ----------------------------------------------------------------------------
+ * Operator-triggered, behind admin/manage permission. Maps historical
+ * `invoice_payments` rows where `payment_account_id IS NULL` onto the
+ * method's single active default PA. Pure write — no JE/JL/CT side
+ * effects, no posting, no engine. Strict guards: method whitelist
+ * (instapay only), exactly one active default PA, idempotent.
+ * ========================================================================== */
+describe('PaymentsService.backfillUnattachedInvoicePayments — PR-FIN-PAYACCT-4D-UX-FIX-9', () => {
+  const TARGET_PA = {
+    id: '4dbe8e84-f145-4bbb-a508-4f934bf302ca',
+    method: 'instapay',
+    provider_key: 'instapay',
+    display_name: 'InstaPay ',
+    identifier: '01004888879',
+    gl_account_code: '1114',
+    cashbox_id: null,
+    metadata: {},
+  };
+
+  it('rejects unsupported method (cash) with clean Arabic', async () => {
+    const { service } = await makeService({});
+    await expect(
+      service.backfillUnattachedInvoicePayments({
+        method: 'cash',
+        dryRun: true,
+        userId: 'u-1',
+      }),
+    ).rejects.toThrow(/الربط التلقائي غير مدعوم/);
+  });
+
+  it('rejects when no active default PA exists for the method', async () => {
+    const { service } = await makeService({
+      dsResults: [[]],
+    });
+    await expect(
+      service.backfillUnattachedInvoicePayments({
+        method: 'instapay',
+        dryRun: true,
+        userId: 'u-1',
+      }),
+    ).rejects.toThrow(/لا يوجد حساب دفع افتراضي مفعل/);
+  });
+
+  it('rejects when MORE than one active default PA exists for the method', async () => {
+    const { service } = await makeService({
+      dsResults: [
+        [
+          { ...TARGET_PA, id: 'pa-a' },
+          { ...TARGET_PA, id: 'pa-b' },
+        ],
+      ],
+    });
+    await expect(
+      service.backfillUnattachedInvoicePayments({
+        method: 'instapay',
+        dryRun: true,
+        userId: 'u-1',
+      }),
+    ).rejects.toThrow(/يوجد 2 حساب افتراضي مفعل/);
+  });
+
+  it('dry-run returns counts/total without firing UPDATE', async () => {
+    const { service, dsCalls, emCalls } = await makeService({
+      dsResults: [
+        [TARGET_PA],                                       // candidates SELECT
+        [{ row_count: 3, total_amount: '1050.00' }],       // before count
+      ],
+    });
+    const out = await service.backfillUnattachedInvoicePayments({
+      method: 'instapay',
+      dryRun: true,
+      userId: 'u-1',
+    });
+    expect(out.dryRun).toBe(true);
+    expect(out.before.rowCount).toBe(3);
+    expect(out.before.totalAmount).toBe('1050.00');
+    expect(out.after.rowCount).toBe(3);    // unchanged in dry-run
+    expect(out.updatedCount).toBe(0);
+    expect(out.targetAccount.id).toBe(TARGET_PA.id);
+    // No UPDATE fired (no transaction + no UPDATE invoice_payments).
+    expect(dsCalls.some((c) => /UPDATE invoice_payments/.test(c.sql))).toBe(false);
+    expect(emCalls.some((c) => /UPDATE invoice_payments/.test(c.sql))).toBe(false);
+  });
+
+  it('execute runs UPDATE on payment_account_id + payment_account_snapshot only', async () => {
+    const { service, emCalls } = await makeService({
+      dsResults: [
+        [TARGET_PA],                                       // candidates SELECT (initial)
+        [{ row_count: 3, total_amount: '1050.00' }],       // before count
+        [{ row_count: 0, total_amount: '0' }],             // after count
+      ],
+      emResults: [
+        [TARGET_PA],                                       // tx-scoped re-read FOR UPDATE
+        [{ id: 'r1' }, { id: 'r2' }, { id: 'r3' }],        // UPDATE RETURNING
+        [],                                                // activity_logs INSERT (best-effort)
+      ],
+    });
+    const out = await service.backfillUnattachedInvoicePayments({
+      method: 'instapay',
+      dryRun: false,
+      userId: 'u-1',
+    });
+
+    expect(out.dryRun).toBe(false);
+    expect(out.updatedCount).toBe(3);
+    expect(out.before.rowCount).toBe(3);
+    expect(out.after.rowCount).toBe(0);
+
+    // The UPDATE statement targets only the two columns we own and
+    // nothing else. payment_account_id + payment_account_snapshot
+    // appear in SET; amounts/dates/customer_id/invoice_id do NOT.
+    const update = emCalls.find((c) => /UPDATE invoice_payments/.test(c.sql))!;
+    expect(update).toBeDefined();
+    expect(update.sql).toMatch(/SET payment_account_id\s*=\s*\$1::uuid/);
+    expect(update.sql).toMatch(/payment_account_snapshot\s*=\s*\$2::jsonb/);
+    expect(update.sql).not.toMatch(/SET[\s\S]+amount\s*=/);
+    expect(update.sql).not.toMatch(/SET[\s\S]+created_at\s*=/);
+    expect(update.sql).not.toMatch(/SET[\s\S]+invoice_id\s*=/);
+    expect(update.sql).not.toMatch(/SET[\s\S]+customer_id\s*=/);
+    expect(update.params[0]).toBe(TARGET_PA.id);
+    // Snapshot contains the canonical buildSnapshot fields.
+    const snap = JSON.parse(update.params[1]);
+    expect(snap).toMatchObject({
+      display_name: 'InstaPay ',
+      provider_key: 'instapay',
+      identifier: '01004888879',
+      gl_account_code: '1114',
+      cashbox_id: null,
+    });
+    expect(update.params[2]).toBe('instapay');
+  });
+
+  it('does NOT touch journal_entries / journal_lines / cashbox_transactions', async () => {
+    const { service, emCalls, dsCalls } = await makeService({
+      dsResults: [
+        [TARGET_PA],
+        [{ row_count: 3, total_amount: '1050.00' }],
+        [{ row_count: 0, total_amount: '0' }],
+      ],
+      emResults: [
+        [TARGET_PA],
+        [{ id: 'r1' }, { id: 'r2' }, { id: 'r3' }],
+        [],
+      ],
+    });
+    await service.backfillUnattachedInvoicePayments({
+      method: 'instapay',
+      dryRun: false,
+      userId: 'u-1',
+    });
+    const allSql = [...dsCalls, ...emCalls].map((c) => c.sql).join(' || ');
+    expect(allSql).not.toMatch(/INSERT INTO journal_entries/i);
+    expect(allSql).not.toMatch(/UPDATE journal_entries/i);
+    expect(allSql).not.toMatch(/INSERT INTO journal_lines/i);
+    expect(allSql).not.toMatch(/UPDATE journal_lines/i);
+    expect(allSql).not.toMatch(/INSERT INTO cashbox_transactions/i);
+    expect(allSql).not.toMatch(/UPDATE cashbox_transactions/i);
+  });
+
+  it('idempotent: second execute hits 0 rows and reports updatedCount=0', async () => {
+    const { service } = await makeService({
+      dsResults: [
+        [TARGET_PA],                                       // candidates
+        [{ row_count: 0, total_amount: '0' }],             // before (already 0)
+        [{ row_count: 0, total_amount: '0' }],             // after
+      ],
+      emResults: [
+        [TARGET_PA],                                       // tx-scoped re-read
+        [],                                                // UPDATE RETURNING (no rows match)
+        [],                                                // audit
+      ],
+    });
+    const out = await service.backfillUnattachedInvoicePayments({
+      method: 'instapay',
+      dryRun: false,
+      userId: 'u-1',
+    });
+    expect(out.updatedCount).toBe(0);
+    expect(out.before.rowCount).toBe(0);
+    expect(out.after.rowCount).toBe(0);
+  });
+
+  it('aborts mid-flight if the active default PA changed during the tx', async () => {
+    const { service } = await makeService({
+      dsResults: [
+        [TARGET_PA],                                       // initial candidates
+        [{ row_count: 3, total_amount: '1050.00' }],       // before
+      ],
+      emResults: [
+        // Tx-scoped re-read returns a DIFFERENT PA — concurrent
+        // change. The service must throw rather than UPDATE against
+        // a target that no longer matches.
+        [{ id: 'pa-different', method: 'instapay' }],
+      ],
+    });
+    await expect(
+      service.backfillUnattachedInvoicePayments({
+        method: 'instapay',
+        dryRun: false,
+        userId: 'u-1',
+      }),
+    ).rejects.toThrow(/تغيّر الحساب الافتراضي/);
+  });
+});
+
+/* ============================================================================
+ * PR-FIN-PAYACCT-4D-UX-FIX-9 — unattached-summary endpoint
+ * ----------------------------------------------------------------------------
+ * Drives the operator-facing reconciliation panel. Read-only.
+ * ========================================================================== */
+describe('PaymentsService.unattachedSummary — PR-FIN-PAYACCT-4D-UX-FIX-9', () => {
+  it('marks cash buckets as unsupported with the cashbox-driven explanation', async () => {
+    const { service } = await makeService({
+      dsResults: [
+        // bucket query
+        [
+          { source_table: 'invoice_payments', payment_method: 'cash',
+            row_count: 101, total_amount: '30305.01',
+            earliest: '2026-04-20', latest: '2026-04-30' },
+        ],
+        // active default targets per method
+        [],
+        // active_default_count per method
+        [{ method: 'cash', active_default_count: 0 }],
+      ],
+    });
+    const out = await service.unattachedSummary();
+    expect(out).toHaveLength(1);
+    expect(out[0].payment_method).toBe('cash');
+    expect(out[0].supported).toBe(false);
+    expect(out[0].status_message).toMatch(/النقدية تُسجَّل عبر الخزنة/);
+    expect(out[0].target_account).toBeNull();
+  });
+
+  it('marks instapay invoice_payments bucket as supported when exactly one active default PA exists', async () => {
+    const { service } = await makeService({
+      dsResults: [
+        [
+          { source_table: 'invoice_payments', payment_method: 'instapay',
+            row_count: 3, total_amount: '1050.00',
+            earliest: '2026-04-24', latest: '2026-04-25' },
+        ],
+        [
+          {
+            method: 'instapay',
+            id: '4dbe8e84-f145-4bbb-a508-4f934bf302ca',
+            display_name: 'InstaPay ',
+            identifier: '01004888879',
+            provider_key: 'instapay',
+            gl_account_code: '1114',
+          },
+        ],
+        [{ method: 'instapay', active_default_count: 1 }],
+      ],
+    });
+    const out = await service.unattachedSummary();
+    expect(out).toHaveLength(1);
+    expect(out[0].payment_method).toBe('instapay');
+    expect(out[0].supported).toBe(true);
+    expect(out[0].status_message).toMatch(/جاهز للربط/);
+    expect(out[0].target_account?.id).toBe('4dbe8e84-f145-4bbb-a508-4f934bf302ca');
+  });
+
+  it('marks customer_payments / supplier_payments rows as unsupported even for instapay', async () => {
+    const { service } = await makeService({
+      dsResults: [
+        [
+          { source_table: 'customer_payments', payment_method: 'cash',
+            row_count: 1, total_amount: '10.00',
+            earliest: '2026-04-29', latest: '2026-04-29' },
+        ],
+        [],
+        [{ method: 'cash', active_default_count: 0 }],
+      ],
+    });
+    const out = await service.unattachedSummary();
+    expect(out[0].supported).toBe(false);
+  });
+});

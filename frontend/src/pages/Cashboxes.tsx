@@ -96,6 +96,7 @@ import {
 } from '@/api/payments.api';
 import { PaymentProviderLogo } from '@/components/payments/PaymentProviderLogo';
 import { PaymentAccountModal } from '@/components/payment-accounts/PaymentAccountModal';
+import { UnattachedReconciliationPanel } from '@/components/payment-accounts/UnattachedReconciliationPanel';
 import { PaymentAccountAlerts } from '@/components/payment-accounts/PaymentAccountAlerts';
 import { PaymentAccountDetailsPanel } from '@/components/payment-accounts/PaymentAccountDetailsPanel';
 import { CashboxDetailsModal } from '@/components/cashboxes/CashboxDetailsModal';
@@ -328,6 +329,16 @@ export default function Cashboxes() {
   // ── Filtered + sorted accounts (no fake rows) ──────────────────────
   const filteredAccounts = useMemo(() => {
     return balances.filter((b) => {
+      // PR-FIN-PAYACCT-4D-UX-FIX-9 — cash synthetic "unattached" rows
+      // are NOT real payment-accounts and must NOT appear in the main
+      // PA table (operator decision: cash flows via cashbox by design,
+      // surfacing it here under "غير مرتبط" caused confusion). The
+      // value still surfaces in the dedicated reconciliation panel
+      // below the table with the explanatory message. Non-cash
+      // synthetic rows (e.g. instapay) still appear so the operator
+      // sees the historical balance until the backfill action clears
+      // it from the unattached_balances CTE.
+      if (b.is_unattached && b.method === 'cash') return false;
       if (search) {
         const q = search.trim().toLowerCase();
         const hay = [
@@ -801,6 +812,14 @@ export default function Cashboxes() {
             onPageChange={setPage}
             onPageSizeChange={(n) => { setPageSize(n); setPage(1); }}
           />
+
+          {/* PR-FIN-PAYACCT-4D-UX-FIX-9 — historical-payment
+              reconciliation. Renders only when at least one bucket
+              of unattached rows exists. Cash entries surface the
+              "النقدية تُسجَّل عبر الخزنة" explanation; instapay
+              entries surface a guarded "ربط ..." action button for
+              admins. */}
+          <UnattachedReconciliationPanel canManage={canManageAccounts} />
 
           {/* Bottom 3 dashboard cards */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-3" data-testid="treasury-summary">

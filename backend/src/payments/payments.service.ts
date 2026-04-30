@@ -868,4 +868,341 @@ export class PaymentsService {
     );
     return row ?? null;
   }
+
+  /**
+   * PR-FIN-PAYACCT-4D-UX-FIX-9 — read-only summary of unattached
+   * historical payment rows (invoice/customer/supplier_payments
+   * where `payment_account_id IS NULL`).
+   *
+   * Drives the operator-facing reconciliation panel on /cashboxes.
+   * Returns one entry per (table, payment_method) bucket plus a
+   * `supported` flag and Arabic `status_message` so the FE can
+   * render the right action:
+   *
+   *   - `supported=true`  → show "ربط ..." button (instapay only in
+   *                          this PR; explicit per-method opt-in)
+   *   - `supported=false` → show explanatory message (cash flows
+   *                          via cashbox by design — no PA needed)
+   *
+   * Pure SELECT. No DDL. No mutations.
+   */
+  async unattachedSummary(): Promise<
+    Array<{
+      source_table: 'invoice_payments' | 'customer_payments' | 'supplier_payments';
+      payment_method: string;
+      row_count: number;
+      total_amount: string;
+      earliest: string | null;
+      latest: string | null;
+      supported: boolean;
+      status_message: string;
+      target_account: {
+        id: string;
+        display_name: string;
+        identifier: string | null;
+        provider_key: string | null;
+        gl_account_code: string;
+      } | null;
+    }>
+  > {
+    // Per-bucket counts.
+    const buckets = await this.ds.query(`
+      SELECT 'invoice_payments'::text AS source_table,
+             payment_method::text AS payment_method,
+             COUNT(*)::int AS row_count,
+             COALESCE(SUM(amount), 0)::numeric AS total_amount,
+             MIN(created_at)::date AS earliest,
+             MAX(created_at)::date AS latest
+        FROM invoice_payments WHERE payment_account_id IS NULL
+       GROUP BY payment_method
+       UNION ALL
+      SELECT 'customer_payments'::text, payment_method::text,
+             COUNT(*)::int, COALESCE(SUM(amount), 0)::numeric,
+             MIN(created_at)::date, MAX(created_at)::date
+        FROM customer_payments
+       WHERE payment_account_id IS NULL AND COALESCE(is_void, FALSE) = FALSE
+       GROUP BY payment_method
+       UNION ALL
+      SELECT 'supplier_payments'::text, payment_method::text,
+             COUNT(*)::int, COALESCE(SUM(amount), 0)::numeric,
+             MIN(created_at)::date, MAX(created_at)::date
+        FROM supplier_payments
+       WHERE payment_account_id IS NULL AND COALESCE(is_void, FALSE) = FALSE
+       GROUP BY payment_method
+       ORDER BY source_table, total_amount DESC
+    `);
+
+    // Resolve a single active default target PA per method, if one
+    // exists — needed to drive the FE button label and to enforce
+    // the same single-target invariant the backfill enforces.
+    const targets = await this.ds.query(`
+      SELECT method::text AS method,
+             id::text AS id, display_name, identifier,
+             provider_key, gl_account_code
+        FROM payment_accounts
+       WHERE active = TRUE AND is_default = TRUE
+    `);
+    const targetByMethod = new Map<string, any>();
+    for (const t of targets) targetByMethod.set(t.method, t);
+
+    // Per-method count of active default PAs (to detect ambiguity).
+    const counts = await this.ds.query(`
+      SELECT method::text AS method,
+             COUNT(*) FILTER (WHERE active AND is_default)::int AS active_default_count
+        FROM payment_accounts
+       GROUP BY method
+    `);
+    const activeDefaultByMethod = new Map<string, number>();
+    for (const c of counts) {
+      activeDefaultByMethod.set(c.method, c.active_default_count);
+    }
+
+    // Per-row status decision. Cash is unsupported by design (cash
+    // flows through cashbox, not via payment_accounts). Other methods
+    // are supported only if exactly one active default PA exists.
+    return buckets.map((b: any) => {
+      const isSupported =
+        BACKFILL_SUPPORTED_METHODS.has(b.payment_method) &&
+        b.source_table === 'invoice_payments' &&
+        activeDefaultByMethod.get(b.payment_method) === 1;
+      let status_message: string;
+      if (b.payment_method === 'cash') {
+        status_message =
+          'النقدية تُسجَّل عبر الخزنة ولا تحتاج حساب دفع';
+      } else if (b.source_table !== 'invoice_payments') {
+        status_message =
+          'هذه العمليات لا يدعم الربط التلقائي بهذا الإصدار';
+      } else if (activeDefaultByMethod.get(b.payment_method) === 0) {
+        status_message = 'لا يوجد حساب دفع افتراضي مفعل لهذه الطريقة';
+      } else if ((activeDefaultByMethod.get(b.payment_method) ?? 0) > 1) {
+        status_message =
+          'يوجد أكثر من حساب دفع افتراضي مفعل — اختر حسابًا واحدًا قبل الربط';
+      } else if (!BACKFILL_SUPPORTED_METHODS.has(b.payment_method)) {
+        status_message =
+          'الربط التلقائي مدعوم حاليًا لـ InstaPay فقط — تواصل مع المسؤول لتفعيل طرق أخرى';
+      } else {
+        status_message = 'جاهز للربط بالحساب الافتراضي';
+      }
+      return {
+        source_table: b.source_table,
+        payment_method: b.payment_method,
+        row_count: Number(b.row_count),
+        total_amount: String(b.total_amount),
+        earliest: b.earliest ? String(b.earliest) : null,
+        latest: b.latest ? String(b.latest) : null,
+        supported: isSupported,
+        status_message,
+        target_account: targetByMethod.get(b.payment_method) ?? null,
+      };
+    });
+  }
+
+  /**
+   * PR-FIN-PAYACCT-4D-UX-FIX-9 — operator-triggered backfill.
+   *
+   * Maps historical `invoice_payments` rows where `payment_account_id
+   * IS NULL` onto the method's single active default PA. Strict
+   * guards: method must be in `BACKFILL_SUPPORTED_METHODS` (today
+   * just `instapay`), exactly one active default PA must exist for
+   * the method, dryRun mode returns counts without writing,
+   * idempotent (a second run matches 0 rows), and the UPDATE only
+   * touches `(payment_account_id, payment_account_snapshot)` —
+   * journal_entries / journal_lines / cashbox_transactions / amounts
+   * / dates / customer_id / invoice_id are all untouched.
+   *
+   * Trial balance is unaffected because we add ONLY the account-id
+   * tag — the underlying invoice_payment GL leg already exists in
+   * the journal and is untouched.
+   */
+  async backfillUnattachedInvoicePayments(args: {
+    method: string;
+    dryRun: boolean;
+    userId: string;
+  }): Promise<{
+    method: string;
+    dryRun: boolean;
+    targetAccount: {
+      id: string;
+      display_name: string;
+      identifier: string | null;
+    };
+    before: { rowCount: number; totalAmount: string };
+    after: { rowCount: number; totalAmount: string };
+    updatedCount: number;
+  }> {
+    const { method, dryRun, userId } = args;
+
+    // Guard 1: method must be in the explicit supported list.
+    if (!BACKFILL_SUPPORTED_METHODS.has(method)) {
+      throw new BadRequestException(
+        `الربط التلقائي غير مدعوم لطريقة الدفع "${method}". الإصدار الحالي يدعم InstaPay فقط.`,
+      );
+    }
+
+    // Guard 2: exactly one active default PA for the method.
+    const candidates = await this.ds.query(
+      `SELECT id::text AS id, method::text AS method, provider_key,
+              display_name, identifier, gl_account_code,
+              cashbox_id::text AS cashbox_id, metadata
+         FROM payment_accounts
+        WHERE method::text = $1 AND active = TRUE AND is_default = TRUE`,
+      [method],
+    );
+    if (candidates.length === 0) {
+      throw new BadRequestException(
+        `لا يوجد حساب دفع افتراضي مفعل لطريقة "${method}". أضف/فعّل حسابًا قبل الربط.`,
+      );
+    }
+    if (candidates.length > 1) {
+      throw new BadRequestException(
+        `يوجد ${candidates.length} حساب افتراضي مفعل لطريقة "${method}". لا يمكن اختيار هدف واحد بأمان.`,
+      );
+    }
+    const target = candidates[0];
+
+    // Pre-flight count of rows that would be (or were) updated.
+    const [before] = await this.ds.query(
+      `SELECT COUNT(*)::int AS row_count,
+              COALESCE(SUM(amount), 0)::numeric AS total_amount
+         FROM invoice_payments
+        WHERE payment_account_id IS NULL
+          AND payment_method = $1::payment_method_code`,
+      [method],
+    );
+
+    // Build the snapshot the same way `buildSnapshot` shapes it for
+    // payment-account-tagged rows (PR-FIN-PAYACCT-4C frozen-snapshot
+    // contract). Mirrors the helper at the top of cash-desk.service.ts.
+    const snapshot: Record<string, unknown> = {
+      display_name: target.display_name,
+      provider_key: target.provider_key,
+      identifier: target.identifier,
+      gl_account_code: target.gl_account_code,
+      cashbox_id: target.cashbox_id,
+    };
+    const metadataLogo =
+      typeof (target.metadata as { logo_data_url?: string } | null)
+        ?.logo_data_url === 'string'
+        ? (target.metadata as { logo_data_url: string }).logo_data_url
+        : undefined;
+    if (metadataLogo) snapshot.logo_data_url = metadataLogo;
+
+    if (dryRun) {
+      return {
+        method,
+        dryRun: true,
+        targetAccount: {
+          id: target.id,
+          display_name: target.display_name,
+          identifier: target.identifier,
+        },
+        before: {
+          rowCount: Number(before.row_count),
+          totalAmount: String(before.total_amount),
+        },
+        // dryRun reports same numbers in both — no UPDATE happens.
+        after: {
+          rowCount: Number(before.row_count),
+          totalAmount: String(before.total_amount),
+        },
+        updatedCount: 0,
+      };
+    }
+
+    // Execute the UPDATE in a transaction. Returns the rows it
+    // modified so we can recompute the after-counts deterministically.
+    const updatedRows = await this.ds.transaction(async (em) => {
+      // Defense in depth: re-read the candidate inside the tx so a
+      // concurrent change to the default PA still produces a coherent
+      // snapshot/target. If the invariant changes mid-flight, abort.
+      const [refreshed] = await em.query(
+        `SELECT id::text AS id FROM payment_accounts
+          WHERE method::text = $1 AND active = TRUE AND is_default = TRUE
+          FOR UPDATE`,
+        [method],
+      );
+      if (!refreshed || refreshed.id !== target.id) {
+        throw new BadRequestException(
+          'تغيّر الحساب الافتراضي أثناء العملية — أعد المحاولة.',
+        );
+      }
+      // The UPDATE itself. Strictly limited to the two columns we
+      // own; everything else (amounts, dates, FKs, JE links) stays.
+      const rows = await em.query(
+        `UPDATE invoice_payments
+            SET payment_account_id = $1::uuid,
+                payment_account_snapshot = $2::jsonb
+          WHERE payment_account_id IS NULL
+            AND payment_method = $3::payment_method_code
+        RETURNING id`,
+        [target.id, JSON.stringify(snapshot), method],
+      );
+      // Audit-log via raw SQL (no @nestjs/audit dependency at this
+      // service). One row per backfill run, regardless of count.
+      await em.query(
+        `INSERT INTO activity_logs
+           (action, entity, entity_id, user_id, payload)
+         VALUES ('update'::activity_action, 'invoice'::entity_type, $1::uuid,
+                 $2::uuid,
+                 jsonb_build_object(
+                   'pr', 'PR-FIN-PAYACCT-4D-UX-FIX-9',
+                   'op', 'backfill_unattached_invoice_payments',
+                   'method', $3,
+                   'target_payment_account_id', $1,
+                   'updated_count', $4,
+                   'before_total_amount', $5
+                 ))
+         ON CONFLICT DO NOTHING`,
+        [
+          target.id,
+          userId,
+          method,
+          rows.length,
+          String(before.total_amount),
+        ],
+      ).catch(() => {
+        // activity_logs is best-effort here — never block the
+        // operator's backfill on a logging failure.
+      });
+      return rows;
+    });
+
+    // After-counts (should be 0 if the backfill was exhaustive).
+    const [after] = await this.ds.query(
+      `SELECT COUNT(*)::int AS row_count,
+              COALESCE(SUM(amount), 0)::numeric AS total_amount
+         FROM invoice_payments
+        WHERE payment_account_id IS NULL
+          AND payment_method = $1::payment_method_code`,
+      [method],
+    );
+
+    return {
+      method,
+      dryRun: false,
+      targetAccount: {
+        id: target.id,
+        display_name: target.display_name,
+        identifier: target.identifier,
+      },
+      before: {
+        rowCount: Number(before.row_count),
+        totalAmount: String(before.total_amount),
+      },
+      after: {
+        rowCount: Number(after.row_count),
+        totalAmount: String(after.total_amount),
+      },
+      updatedCount: updatedRows.length,
+    };
+  }
 }
+
+/**
+ * PR-FIN-PAYACCT-4D-UX-FIX-9 — methods the historical-payment
+ * backfill is allowed to operate on. Cash is intentionally excluded
+ * (cash flows via cashbox, not via payment_accounts). Other methods
+ * can be opted-in later by extending this set + verifying the
+ * single-target invariant in production.
+ */
+const BACKFILL_SUPPORTED_METHODS: ReadonlySet<string> = new Set(['instapay']);
