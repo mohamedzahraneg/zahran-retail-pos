@@ -241,8 +241,14 @@ export class PaymentsService {
              pa.active,
              pa.sort_order,
              pa.metadata,
-             coa.name_ar                        AS gl_name_ar,
-             coa.normal_balance,
+             -- PR-FIN-PAYACCT-4D-UX-FIX-8-HOTFIX-1 — explicit ::text casts
+             -- so the UNION ALL with unattached_balances (which uses
+             -- NULL::text for both) matches types. Postgres cannot auto-
+             -- coerce normal_balance enum (USER-DEFINED) plus text, and
+             -- production threw "UNION types normal_balance and text
+             -- cannot be matched" opening /cashboxes after PR #210.
+             coa.name_ar::text                  AS gl_name_ar,
+             coa.normal_balance::text           AS normal_balance,
              COALESCE(agg.total_in, 0)::numeric  AS total_in,
              COALESCE(agg.total_out, 0)::numeric AS total_out,
              (COALESCE(agg.total_in, 0) - COALESCE(agg.total_out, 0))::numeric AS net_debit,
