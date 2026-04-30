@@ -1855,4 +1855,342 @@ describe('CashDeskService.cashboxMovementsUnified — PR-FIN-PAYACCT-4D-UX-FIX-4
   });
 });
 
+/* ============================================================================
+ * PR-FIN-PAYACCT-4D-UX-FIX-6 — UUID-input sanitization
+ * ----------------------------------------------------------------------------
+ * Production showed `invalid input syntax for type uuid: "undefined"` when
+ * an operator created an ewallet cashbox. The repro path is one of two:
+ *   (a) the FE serialized an absent uuid as the literal string "undefined",
+ *       which then reached cashboxes.warehouse_id (uuid NOT NULL) without
+ *       being neutralized.
+ *   (b) the legacy `actorId = userId ?? 'system'` line forced the literal
+ *       text `'system'` (a non-uuid) into chart_of_accounts.created_by
+ *       (uuid NULL) when userId came in as null/empty, OR the literal
+ *       `"undefined"` when userId came in as the string "undefined".
+ *
+ * The fix sanitizes both DTO uuid inputs AND the actor id at the service
+ * boundary, drops the `'system'` sentinel entirely (the column is
+ * nullable), and threads a single `safeUserId` through both
+ * `linkOrCreateGLSubAccount` and `engine.recordTransaction`.
+ *
+ * These tests pin the new behavior so a future revert can't reintroduce
+ * the regression.
+ * ========================================================================== */
+describe('CashDeskService.createCashbox — PR-FIN-PAYACCT-4D-UX-FIX-6 uuid sanitization', () => {
+  function buildEmResultsForFix6(opts: { cashbox_id: string; capturedGlInsert?: { sql: string; params: any[] }[] } = { cashbox_id: 'cb-fix6' }) {
+    const cashbox = {
+      id: opts.cashbox_id,
+      name_ar: 'خزنة المحفظة',
+      kind: 'ewallet',
+      current_balance: '0.00',
+      opening_balance: '0.00',
+      is_active: true,
+    };
+    return [
+      [cashbox],                  // [0] INSERT cashboxes RETURNING *
+      [],                         // [1] SELECT existing GL → none
+      [{ id: 'parent-111', code: '111' }], // [2] SELECT parent COA → present
+      [{ next_seq: 1 }],          // [3] SELECT MAX(SUBSTRING(...)) for next code
+      [],                         // [4] INSERT chart_of_accounts (linkOrCreateGLSubAccount)
+    ];
+  }
+
+  it('1) dto.warehouse_id = "undefined" → never reaches the SQL as a uuid; warehouse fallback fires', async () => {
+    const { ds, dsCalls, emCalls } = makeFakeDataSource(
+      buildEmResultsForFix6({ cashbox_id: 'cb-fix6-1' }),
+    );
+    // Backend warehouse-fallback SELECT runs on `this.ds.query`, not em.
+    ds.query = jest.fn().mockImplementation(async (sql: string, params: any[] = []) => {
+      dsCalls.push({ sql, params });
+      // Return a real warehouse uuid so the fallback succeeds.
+      if (/FROM warehouses/.test(sql)) return [{ id: 'wh-real-uuid' }];
+      return [];
+    });
+
+    const moduleRef = await Test.createTestingModule({
+      providers: [
+        CashDeskService,
+        { provide: DataSource, useValue: ds },
+      ],
+    }).compile();
+    const service = moduleRef.get(CashDeskService);
+
+    await service.createCashbox(
+      {
+        name_ar: 'خزنة المحفظة',
+        kind: 'ewallet',
+        institution_code: 'instapay',
+        warehouse_id: 'undefined' as any, // ← the production poison value
+        opening_balance: 0,
+      } as any,
+      'real-user-uuid',
+    );
+
+    // The cashbox INSERT must NOT carry the literal 'undefined' as
+    // warehouse_id ($2 in the parameter tuple).
+    const insert = emCalls.find((c) => /INSERT INTO cashboxes/.test(c.sql))!;
+    expect(insert).toBeDefined();
+    expect(insert.params).not.toContain('undefined');
+    expect(insert.params).not.toContain('null');
+    // $2 is warehouse_id — must be the real fallback uuid.
+    expect(insert.params[1]).toBe('wh-real-uuid');
+
+    // The warehouse-fallback SELECT must have fired, since the DTO
+    // value was treated as missing.
+    expect(
+      dsCalls.some((c) => /FROM warehouses WHERE is_active = TRUE/.test(c.sql)),
+    ).toBe(true);
+  });
+
+  it('2) dto.warehouse_id = "null" / "" / whitespace → treated as missing, fallback fires', async () => {
+    for (const poison of ['null', '', '   '] as const) {
+      const { ds, dsCalls, emCalls } = makeFakeDataSource(
+        buildEmResultsForFix6({ cashbox_id: `cb-${poison || 'blank'}` }),
+      );
+      ds.query = jest.fn().mockImplementation(async (sql: string, params: any[] = []) => {
+        dsCalls.push({ sql, params });
+        if (/FROM warehouses/.test(sql)) return [{ id: 'wh-fallback' }];
+        return [];
+      });
+
+      const moduleRef = await Test.createTestingModule({
+        providers: [
+          CashDeskService,
+          { provide: DataSource, useValue: ds },
+        ],
+      }).compile();
+      const service = moduleRef.get(CashDeskService);
+
+      await service.createCashbox(
+        {
+          name_ar: 'خزنة',
+          kind: 'cash',
+          warehouse_id: poison as any,
+          opening_balance: 0,
+        } as any,
+        'real-user-uuid',
+      );
+
+      const insert = emCalls.find((c) => /INSERT INTO cashboxes/.test(c.sql))!;
+      expect(insert.params[1]).toBe('wh-fallback');
+      expect(insert.params).not.toContain(poison);
+    }
+  });
+
+  it('3) userId = "undefined" → chart_of_accounts INSERT receives null, NOT the literal "undefined"', async () => {
+    const { ds, emCalls } = makeFakeDataSource(
+      buildEmResultsForFix6({ cashbox_id: 'cb-fix6-3' }),
+    );
+    ds.query = jest.fn().mockImplementation(async (sql: string) => {
+      if (/FROM warehouses/.test(sql)) return [{ id: 'wh-1' }];
+      return [];
+    });
+    const moduleRef = await Test.createTestingModule({
+      providers: [
+        CashDeskService,
+        { provide: DataSource, useValue: ds },
+      ],
+    }).compile();
+    const service = moduleRef.get(CashDeskService);
+
+    await service.createCashbox(
+      {
+        name_ar: 'خزنة',
+        kind: 'cash',
+        opening_balance: 0,
+      } as any,
+      'undefined' as any, // ← poison user id
+    );
+
+    const coaInsert = emCalls.find((c) => /INSERT INTO chart_of_accounts/.test(c.sql));
+    expect(coaInsert).toBeDefined();
+    // $6 is created_by — must be null, NOT the string 'undefined' or
+    // the legacy 'system' sentinel.
+    expect(coaInsert!.params[5]).toBeNull();
+    expect(coaInsert!.params).not.toContain('undefined');
+    expect(coaInsert!.params).not.toContain('system');
+  });
+
+  it('4) userId = null → chart_of_accounts INSERT receives null, NOT the legacy "system" sentinel', async () => {
+    const { ds, emCalls } = makeFakeDataSource(
+      buildEmResultsForFix6({ cashbox_id: 'cb-fix6-4' }),
+    );
+    ds.query = jest.fn().mockImplementation(async (sql: string) => {
+      if (/FROM warehouses/.test(sql)) return [{ id: 'wh-1' }];
+      return [];
+    });
+    const moduleRef = await Test.createTestingModule({
+      providers: [
+        CashDeskService,
+        { provide: DataSource, useValue: ds },
+      ],
+    }).compile();
+    const service = moduleRef.get(CashDeskService);
+
+    await service.createCashbox(
+      {
+        name_ar: 'خزنة',
+        kind: 'cash',
+        warehouse_id: 'wh-1',
+        opening_balance: 0,
+      } as any,
+      null,
+    );
+
+    const coaInsert = emCalls.find((c) => /INSERT INTO chart_of_accounts/.test(c.sql))!;
+    expect(coaInsert.params[5]).toBeNull();
+    expect(coaInsert.params).not.toContain('system');
+  });
+
+  it('5) userId = real uuid → passed through untouched to chart_of_accounts.created_by', async () => {
+    const { ds, emCalls } = makeFakeDataSource(
+      buildEmResultsForFix6({ cashbox_id: 'cb-fix6-5' }),
+    );
+    ds.query = jest.fn().mockImplementation(async (sql: string) => {
+      if (/FROM warehouses/.test(sql)) return [{ id: 'wh-1' }];
+      return [];
+    });
+    const moduleRef = await Test.createTestingModule({
+      providers: [
+        CashDeskService,
+        { provide: DataSource, useValue: ds },
+      ],
+    }).compile();
+    const service = moduleRef.get(CashDeskService);
+
+    await service.createCashbox(
+      {
+        name_ar: 'خزنة',
+        kind: 'cash',
+        warehouse_id: 'wh-1',
+        opening_balance: 0,
+      } as any,
+      '00000000-1111-2222-3333-444444444444',
+    );
+
+    const coaInsert = emCalls.find((c) => /INSERT INTO chart_of_accounts/.test(c.sql))!;
+    expect(coaInsert.params[5]).toBe('00000000-1111-2222-3333-444444444444');
+  });
+
+  it('6) opening>0 + userId="undefined" → engine receives user_id:null, never the poison string', async () => {
+    const cashbox = {
+      id: 'cb-fix6-6',
+      name_ar: 'خزنة مع رصيد',
+      kind: 'cash',
+      current_balance: '0.00',
+      opening_balance: '0.00',
+      is_active: true,
+    };
+    const refreshed = { ...cashbox, current_balance: '500.00', opening_journal_entry_id: 'je-x' };
+    const { ds, emCalls } = makeFakeDataSource([
+      [cashbox],                      // [0] INSERT cashboxes
+      [],                             // [1] SELECT existing GL
+      [{ id: 'p-111', code: '111' }], // [2] SELECT parent COA
+      [{ next_seq: 1 }],              // [3] SELECT next_seq
+      [],                             // [4] INSERT COA
+      [],                             // [5] UPDATE cashboxes (trace cols)
+      [refreshed],                    // [6] re-SELECT cashbox
+    ]);
+    ds.query = jest.fn().mockImplementation(async (sql: string) => {
+      if (/FROM warehouses/.test(sql)) return [{ id: 'wh-1' }];
+      return [];
+    });
+    const engine = {
+      recordTransaction: jest.fn().mockResolvedValue({ ok: true, entry_id: 'je-x' }),
+    };
+    const moduleRef = await Test.createTestingModule({
+      providers: [
+        CashDeskService,
+        { provide: DataSource, useValue: ds },
+        { provide: FinancialEngineService, useValue: engine },
+      ],
+    }).compile();
+    const service = moduleRef.get(CashDeskService);
+
+    await service.createCashbox(
+      {
+        name_ar: 'خزنة مع رصيد',
+        kind: 'cash',
+        warehouse_id: 'wh-1',
+        opening_balance: 500,
+      } as any,
+      'undefined' as any,
+    );
+
+    const spec = engine.recordTransaction.mock.calls[0][0];
+    expect(spec.user_id).toBeNull();
+    expect(spec.user_id).not.toBe('undefined');
+    // The COA INSERT also receives a null actor (defense in depth).
+    const coaInsert = emCalls.find((c) => /INSERT INTO chart_of_accounts/.test(c.sql))!;
+    expect(coaInsert.params[5]).toBeNull();
+  });
+});
+
+describe('CashDeskService.updateCashbox — PR-FIN-PAYACCT-4D-UX-FIX-6 uuid sanitization', () => {
+  it('dto.warehouse_id = "undefined" → field is OMITTED from the UPDATE (column is NOT NULL)', async () => {
+    const { ds, dsCalls } = makeFakeDataSource([]);
+    // updateCashbox uses `this.ds.query` for the SELECT existence check
+    // AND the UPDATE — both run on the bare DataSource, not the
+    // transaction's EntityManager.
+    ds.query = jest.fn().mockImplementation(async (sql: string, params: any[] = []) => {
+      dsCalls.push({ sql, params });
+      if (/SELECT id, kind FROM cashboxes/.test(sql)) {
+        return [{ id: 'cb-1', kind: 'cash' }];
+      }
+      if (/UPDATE cashboxes/.test(sql)) {
+        return [{ id: 'cb-1' }];
+      }
+      return [];
+    });
+
+    const moduleRef = await Test.createTestingModule({
+      providers: [
+        CashDeskService,
+        { provide: DataSource, useValue: ds },
+      ],
+    }).compile();
+    const service = moduleRef.get(CashDeskService);
+
+    await service.updateCashbox('cb-1', {
+      name_ar: 'اسم جديد',
+      warehouse_id: 'undefined',
+    } as any);
+
+    const update = dsCalls.find((c) => /UPDATE cashboxes/.test(c.sql))!;
+    expect(update).toBeDefined();
+    // The UPDATE SET clause must NOT include warehouse_id.
+    expect(update.sql).not.toMatch(/warehouse_id\s*=/);
+    expect(update.params).not.toContain('undefined');
+  });
+
+  it('dto.warehouse_id = real uuid → still pushed into the UPDATE', async () => {
+    const { ds, dsCalls } = makeFakeDataSource([]);
+    ds.query = jest.fn().mockImplementation(async (sql: string, params: any[] = []) => {
+      dsCalls.push({ sql, params });
+      if (/SELECT id, kind FROM cashboxes/.test(sql)) {
+        return [{ id: 'cb-2', kind: 'cash' }];
+      }
+      if (/UPDATE cashboxes/.test(sql)) {
+        return [{ id: 'cb-2' }];
+      }
+      return [];
+    });
+
+    const moduleRef = await Test.createTestingModule({
+      providers: [
+        CashDeskService,
+        { provide: DataSource, useValue: ds },
+      ],
+    }).compile();
+    const service = moduleRef.get(CashDeskService);
+
+    await service.updateCashbox('cb-2', {
+      warehouse_id: '00000000-1111-2222-3333-444444444444',
+    } as any);
+
+    const update = dsCalls.find((c) => /UPDATE cashboxes/.test(c.sql))!;
+    expect(update.sql).toMatch(/warehouse_id\s*=/);
+    expect(update.params).toContain('00000000-1111-2222-3333-444444444444');
+  });
+});
 

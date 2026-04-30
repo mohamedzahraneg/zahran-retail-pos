@@ -101,6 +101,7 @@ import { PaymentAccountDetailsPanel } from '@/components/payment-accounts/Paymen
 import { CashboxDetailsModal } from '@/components/cashboxes/CashboxDetailsModal';
 import { InstitutionLogo } from '@/components/InstitutionLogo';
 import { useAuthStore } from '@/stores/auth.store';
+import { uuidOrNull, isMissingUuid } from '@/lib/uuid-or-null';
 
 /**
  * Icon used by `CashboxFormModal` (kept verbatim from earlier PRs) to
@@ -1692,9 +1693,23 @@ function CashboxFormModal({
   const mutation = useMutation({
     mutationFn: () => {
       const payload: any = { ...form };
-      // Strip empty strings so we don't overwrite with blanks.
+      // PR-FIN-PAYACCT-4D-UX-FIX-6 — Strip empty / sentinel values so
+      // we don't overwrite with blanks AND don't ship the literal
+      // strings "undefined" / "null" to the server (which would
+      // explode at the SQL boundary as
+      // `invalid input syntax for type uuid: "undefined"` for any
+      // optional UUID field).
       for (const k of Object.keys(payload)) {
-        if (payload[k] === '') payload[k] = null;
+        if (isMissingUuid(payload[k])) payload[k] = null;
+      }
+      // Defense in depth: explicitly sanitize the UUID-typed optional
+      // field. `warehouse_id` is the only optional UUID in
+      // `CreateCashboxPayload` today; if a future field arrives, add
+      // it to UUID_FIELDS. This keeps the contract obvious to readers
+      // even though the loop above already covers the same case.
+      const UUID_FIELDS = ['warehouse_id'] as const;
+      for (const k of UUID_FIELDS) {
+        payload[k] = uuidOrNull(payload[k]);
       }
       if (isEdit) {
         return cashDeskApi.updateCashbox(editing!.id, payload);

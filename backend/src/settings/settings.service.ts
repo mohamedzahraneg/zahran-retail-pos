@@ -1,4 +1,8 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import {
   UpdateCompanyProfileDto,
@@ -6,6 +10,7 @@ import {
   UpsertSettingDto,
   UpsertWarehouseDto,
 } from './dto/settings.dto';
+import { sanitizeUuidInput } from '../common/uuid-or-null';
 
 @Injectable()
 export class SettingsService {
@@ -182,11 +187,30 @@ export class SettingsService {
   }
 
   async createCashbox(dto: UpsertCashboxDto) {
+    // PR-FIN-PAYACCT-4D-UX-FIX-6 — defensive sanitization. Even with
+    // the DTO tightened to `@IsOptional() @IsUUID()` (which now
+    // rejects the literal `"undefined"` / `"null"` sentinels at the
+    // validator), we still normalize at the service boundary to cover
+    // internal callers / future refactors. Then mirror the
+    // `cash-desk.service.createCashbox` fallback so a missing
+    // warehouse_id picks the first active warehouse instead of
+    // failing the NOT NULL constraint at the SQL — keeping the two
+    // create paths behaviorally identical.
+    let warehouseId = sanitizeUuidInput(dto.warehouse_id);
+    if (!warehouseId) {
+      const [w] = await this.ds.query(
+        `SELECT id FROM warehouses WHERE is_active = TRUE ORDER BY created_at LIMIT 1`,
+      );
+      warehouseId = w?.id ?? null;
+    }
+    if (!warehouseId) {
+      throw new BadRequestException('لا يوجد مخزن نشط لربط الخزنة به');
+    }
     const [row] = await this.ds.query(
       `INSERT INTO cashboxes (name_ar, name_en, warehouse_id, is_active)
        VALUES ($1,$2,$3,COALESCE($4,TRUE))
        RETURNING *`,
-      [dto.name_ar, dto.name_en ?? null, dto.warehouse_id, dto.is_active],
+      [dto.name_ar, dto.name_en ?? null, warehouseId, dto.is_active],
     );
     return row;
   }
@@ -197,6 +221,19 @@ export class SettingsService {
     let i = 1;
     for (const [k, v] of Object.entries(dto)) {
       if (v === undefined) continue;
+      // PR-FIN-PAYACCT-4D-UX-FIX-6 — neutralize the
+      // `"undefined"` / `"null"` UUID sentinels for warehouse_id BEFORE
+      // they reach the dynamic UPDATE SET clause. The column is
+      // `uuid NOT NULL`, so an explicit null would fail the constraint
+      // anyway — treat the sentinel as "leave it alone" rather than
+      // "clear it".
+      if (k === 'warehouse_id') {
+        const safe = sanitizeUuidInput(v);
+        if (safe === null) continue;
+        fields.push(`${k} = $${i++}`);
+        params.push(safe);
+        continue;
+      }
       fields.push(`${k} = $${i++}`);
       params.push(v);
     }

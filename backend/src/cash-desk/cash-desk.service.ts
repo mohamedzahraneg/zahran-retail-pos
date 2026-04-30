@@ -12,6 +12,7 @@ import {
 import { AccountingPostingService } from '../chart-of-accounts/posting.service';
 import { FinancialEngineService } from '../chart-of-accounts/financial-engine.service';
 import { PaymentsService } from '../payments/payments.service';
+import { sanitizeUuidInput } from '../common/uuid-or-null';
 
 /**
  * PR-FIN-PAYACCT-4C — central rule used by both `receiveFromCustomer`
@@ -28,6 +29,7 @@ import { PaymentsService } from '../payments/payments.service';
 function isCashMethod(m: string): boolean {
   return m === 'cash';
 }
+
 
 interface FrozenAccountSnapshot {
   display_name: string;
@@ -203,7 +205,10 @@ export class CashDeskService {
   private async linkOrCreateGLSubAccount(
     q: { query: (sql: string, params?: any[]) => Promise<any[]> },
     cashbox: any,
-    userId: string,
+    // PR-FIN-PAYACCT-4D-UX-FIX-6 — accepts null. `chart_of_accounts
+    // .created_by` is `uuid NULL`; passing a null actor is preferable
+    // to the legacy `'system'` literal which would fail uuid syntax.
+    userId: string | null,
   ): Promise<void> {
     const [existing] = await q.query(
       `SELECT id FROM chart_of_accounts WHERE cashbox_id = $1 LIMIT 1`,
@@ -693,8 +698,18 @@ export class CashDeskService {
       );
     }
 
+    // PR-FIN-PAYACCT-4D-UX-FIX-6 — defensive normalization. The DTO's
+    // `@IsUUID()` would already reject a syntactically-bad UUID, but we
+    // also accept `"undefined"` / `"null"` / `""` from older FE
+    // payload-builders that sometimes serialized missing values as the
+    // literal string. Normalize to null BEFORE any SQL touches a uuid
+    // column, so the warehouse fallback and the `created_by` write
+    // never poison the query with the literal text "undefined".
+    const dtoWarehouseId = sanitizeUuidInput(dto.warehouse_id);
+    const safeUserId = sanitizeUuidInput(userId);
+
     // Fall back to a valid warehouse if none given (cashboxes NOT NULL).
-    let warehouseId = dto.warehouse_id ?? null;
+    let warehouseId = dtoWarehouseId;
     if (!warehouseId) {
       const [w] = await this.ds.query(
         `SELECT id FROM warehouses WHERE is_active = TRUE ORDER BY created_at LIMIT 1`,
@@ -705,7 +720,12 @@ export class CashDeskService {
       throw new BadRequestException('لا يوجد مخزن نشط لربط الخزنة به');
     }
 
-    const actorId = userId ?? 'system';
+    // PR-FIN-PAYACCT-4D-UX-FIX-6 — drop the legacy `'system'` literal
+    // sentinel. `chart_of_accounts.created_by` is `uuid NULL`, so a
+    // missing/invalid actor must serialize as NULL, not the string
+    // `"system"` (which would also fail uuid syntax). The engine's
+    // `journal_entries.created_by/posted_by` are likewise nullable.
+    const actorId: string | null = safeUserId;
 
     return this.ds.transaction(async (em) => {
       // Step 1 — INSERT with current_balance=0, opening_balance=0
@@ -771,7 +791,10 @@ export class CashDeskService {
               notes: `رصيد افتتاحي - ${row.name_ar}`,
             },
           ],
-          user_id: userId,
+          // PR-FIN-PAYACCT-4D-UX-FIX-6 — pass the sanitized actor so a
+          // poisoned `"undefined"` from upstream can never reach the
+          // engine's nullable uuid columns (posted_by/created_by).
+          user_id: safeUserId,
           em,
         });
         if (!result.ok) {
@@ -819,7 +842,16 @@ export class CashDeskService {
     };
     if (dto.name_ar !== undefined) push('name_ar', dto.name_ar);
     if (dto.kind !== undefined) push('kind', dto.kind);
-    if (dto.warehouse_id !== undefined) push('warehouse_id', dto.warehouse_id);
+    // PR-FIN-PAYACCT-4D-UX-FIX-6 — sanitize the optional UUID before
+    // it reaches the SQL UPDATE. `cashboxes.warehouse_id` is NOT NULL,
+    // so an explicit `null` here would fail the check constraint —
+    // skip the field entirely when the inbound value is the
+    // `"undefined"`/`"null"`/`""` sentinel (treat it as "leave it
+    // alone" rather than "clear it").
+    if (dto.warehouse_id !== undefined) {
+      const safe = sanitizeUuidInput(dto.warehouse_id);
+      if (safe !== null) push('warehouse_id', safe);
+    }
     if (dto.currency !== undefined) push('currency', dto.currency);
     if (dto.institution_code !== undefined)
       push('institution_code', dto.institution_code);
