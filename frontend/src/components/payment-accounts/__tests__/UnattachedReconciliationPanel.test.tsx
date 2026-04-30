@@ -128,6 +128,16 @@ describe('UnattachedReconciliationPanel — PR-FIN-PAYACCT-4D-UX-FIX-9', () => {
     expect(action.textContent).toMatch(/InstaPay/);
   });
 
+  it('PR-FIN-PAYACCT-4D-UX-FIX-9-BUTTON-LABEL: InstaPay button text is exactly "ربط عمليات InstaPay التاريخية"', async () => {
+    (paymentsApi.unattachedSummary as any).mockResolvedValue([INSTAPAY_BUCKET]);
+    renderPanel(true);
+    const action = await screen.findByTestId('unattached-action-instapay');
+    // Idle state must read the verbatim spec string (not the dynamic
+    // target.display_name template). Confirm dialog and status row
+    // continue to mention the target account elsewhere.
+    expect(action.textContent?.trim()).toBe('ربط عمليات InstaPay التاريخية');
+  });
+
   it('hides the InstaPay action button when canManage=false', async () => {
     (paymentsApi.unattachedSummary as any).mockResolvedValue([INSTAPAY_BUCKET]);
     renderPanel(false);
