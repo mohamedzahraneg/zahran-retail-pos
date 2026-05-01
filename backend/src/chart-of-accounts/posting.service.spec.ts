@@ -399,3 +399,297 @@ describe('AccountingPostingService — PR-FIN-PAYACCT-4C snapshot routing', () =
   });
 });
 
+/* ============================================================================
+ * PR-FIN-PAYACCT-4D-DRIFT-ROOT-FIX-1 — forward-fix specs
+ * ----------------------------------------------------------------------------
+ * Two source-of-drift fixes pinned at the service layer (no DB, no engine
+ * end-to-end). Builds a stub `engine` whose `recordTransaction` records
+ * its argument, so we can assert the exact `cash_movements` and `gl_lines`
+ * the engine would receive.
+ *
+ * Bug families being fixed:
+ *
+ *   A) `postInvoiceEdit` → `postInvoice` re-emitted `cash_movements`
+ *      after `editInvoice` (in pos.service) had already written
+ *      `edit_reversal` + `edit_replay` CT rows. Result: inflated CT
+ *      (+700 on INV-2026-000147, +200 on INV-2026-000116).
+ *
+ *   B) `postReturn` SELECT aliased `s.cashbox_id AS cashbox_id` and
+ *      ignored `returns.cashbox_id`. Standalone returns with no
+ *      `original_invoice_id` got a refund cash leg with
+ *      `journal_lines.cashbox_id = NULL`. Result: 3 returns
+ *      (RET-2026-000002/3/4, total 1,150 EGP) marked CT_only by
+ *      `v_cashbox_drift_per_ref` even though the JE is correct.
+ * ========================================================================== */
+describe('AccountingPostingService — PR-FIN-PAYACCT-4D-DRIFT-ROOT-FIX-1', () => {
+  /**
+   * Build a service with:
+   *   • A stub DataSource whose `query` shifts the next answer off
+   *     `dsResults` (FIFO).
+   *   • A stub engine that records every `recordTransaction` call.
+   * Returns helpers + the captured engine calls for assertions.
+   */
+  function makeServiceWithEngineSpy(opts: {
+    dsResults: any[][];
+    /** Map of `code` → fake account id used by `accountIdByCode`. */
+    coaIds?: Record<string, string>;
+  }) {
+    const dsCalls: Array<{ sql: string; params: any[] }> = [];
+    let i = 0;
+    const dsManager = {
+      query: async (sql: string, params: any[] = []) => {
+        dsCalls.push({ sql, params });
+        return opts.dsResults[i++] ?? [];
+      },
+    };
+    const ds: any = {
+      manager: dsManager,
+      query: dsManager.query,
+    };
+    const engineCalls: any[] = [];
+    const engine: any = {
+      recordTransaction: jest.fn().mockImplementation(async (spec: any) => {
+        engineCalls.push(spec);
+        return { ok: true, entry_id: 'je-mock' };
+      }),
+    };
+    const svc = new AccountingPostingService(ds, engine);
+    if (opts.coaIds) {
+      (svc as any).accountIdByCode = async (_q: any, code: string) =>
+        opts.coaIds![code] ?? null;
+    }
+    (svc as any).cashboxAccountId = async (_q: any, cashboxId: string) =>
+      `acc-cashbox-${cashboxId}`;
+    return { svc, engine, engineCalls, dsCalls };
+  }
+
+  /* ── Fix #1: invoice edit CT duplication ───────────────────────── */
+
+  describe('Fix #1 — postInvoice / postInvoiceEdit', () => {
+    /**
+     * Default postInvoice still ships cash_movements for cash payments.
+     * Initial sale postings must not regress when the new flag is
+     * absent.
+     */
+    it('postInvoice (default) still emits cash_movements for cash payments', async () => {
+      const { svc, engineCalls } = makeServiceWithEngineSpy({
+        dsResults: [
+          // 1: SELECT invoice header (with cashbox_id)
+          [{ id: 'inv-1', invoice_no: 'INV-1', grand_total: 100,
+             paid_amount: 100, tax_amount: 0, status: 'paid',
+             customer_id: 'c-1', cashbox_id: 'cb-1', completed_at: '2026-04-30' }],
+          // 2: SELECT cogs
+          [{ cogs: 0 }],
+          // 3: SELECT payments — single cash payment
+          [{ payment_method: 'cash', amount: '100',
+             payment_account_id: null, payment_account_snapshot: null }],
+        ],
+      });
+
+      await svc.postInvoice('inv-1', 'user-1');
+
+      expect(engineCalls).toHaveLength(1);
+      const spec = engineCalls[0];
+      expect(spec.cash_movements).toBeDefined();
+      expect(spec.cash_movements).toHaveLength(1);
+      expect(spec.cash_movements[0]).toMatchObject({
+        cashbox_id: 'cb-1',
+        direction: 'in',
+        amount: 100,
+        category: 'sale',
+      });
+    });
+
+    /**
+     * The new `skipCashMovements` opt forces cash_movements: [] even
+     * when the invoice has cash payments and a cashbox_id. This is
+     * the contract postInvoiceEdit uses to avoid double-writing.
+     */
+    it('postInvoice with { skipCashMovements: true } emits cash_movements: []', async () => {
+      const { svc, engineCalls } = makeServiceWithEngineSpy({
+        dsResults: [
+          [{ id: 'inv-1', invoice_no: 'INV-1', grand_total: 100,
+             paid_amount: 100, tax_amount: 0, status: 'paid',
+             customer_id: 'c-1', cashbox_id: 'cb-1', completed_at: '2026-04-30' }],
+          [{ cogs: 0 }],
+          [{ payment_method: 'cash', amount: '100',
+             payment_account_id: null, payment_account_snapshot: null }],
+        ],
+      });
+
+      await svc.postInvoice('inv-1', 'user-1', undefined, {
+        skipCashMovements: true,
+      });
+
+      expect(engineCalls).toHaveLength(1);
+      expect(engineCalls[0].cash_movements).toEqual([]);
+    });
+
+    /**
+     * postInvoiceEdit must reach postInvoice with the skip flag — and
+     * void any active JE first. We spy on the service's own
+     * postInvoice method so the assertion is pinned to the contract,
+     * not the inner SQL.
+     */
+    it('postInvoiceEdit voids the active JE then calls postInvoice with skipCashMovements: true', async () => {
+      const { svc } = makeServiceWithEngineSpy({ dsResults: [] });
+      const dsManagerCalls: Array<{ sql: string; params: any[] }> = [];
+      // Replace the SQL recorder so we see the void-update.
+      (svc as any).ds = {
+        manager: {
+          query: async (sql: string, params: any[]) => {
+            dsManagerCalls.push({ sql, params });
+            return [];
+          },
+        },
+      };
+      const postInvoiceSpy = jest
+        .spyOn(svc, 'postInvoice')
+        .mockResolvedValue({ entry_id: 'je-edit' } as any);
+
+      await (svc as any).postInvoiceEdit('inv-1', 'user-1');
+
+      // The void update fired before postInvoice.
+      const voidCall = dsManagerCalls.find((c) =>
+        /UPDATE journal_entries[\s\S]+SET is_void = TRUE/.test(c.sql),
+      );
+      expect(voidCall).toBeDefined();
+      expect(voidCall!.params).toEqual(['inv-1', 'user-1']);
+      // postInvoice was invoked with the skip flag.
+      expect(postInvoiceSpy).toHaveBeenCalledTimes(1);
+      const args = postInvoiceSpy.mock.calls[0];
+      expect(args[0]).toBe('inv-1');                 // invoiceId
+      expect(args[1]).toBe('user-1');                // userId
+      expect(args[3]).toEqual({ skipCashMovements: true });
+    });
+  });
+
+  /* ── Fix #2: refund cash JE line cashbox_id wiring ─────────────── */
+
+  describe('Fix #2 — postReturn cashbox_id wiring', () => {
+    /**
+     * Standalone return (`original_invoice_id IS NULL`) but the
+     * return row carries its own `cashbox_id`. After the COALESCE
+     * fix the SELECT returns that cashbox_id; the cash refund leg
+     * must thread it through to `journal_lines.cashbox_id` so
+     * `v_cashbox_drift_per_ref` can pair the JE with the cashbox.
+     *
+     * Pinned via the engine's `gl_lines` arg — the cash leg has
+     * `account_id = acc-cashbox-cb-1` and `cashbox_id = 'cb-1'`.
+     */
+    it('standalone return with returns.cashbox_id populates JE cash line cashbox_id', async () => {
+      const { svc, engineCalls, dsCalls } = makeServiceWithEngineSpy({
+        coaIds: { '49': 'acc-49' },
+        dsResults: [
+          // safe() probes — return-header SELECT shape is validated by
+          // service code; we provide the COALESCE'd cashbox_id directly.
+          [{
+            id: 'ret-1', return_no: 'RET-1', total_refund: '350',
+            restocking_fee: 0, net_refund: '350', status: 'refunded',
+            refunded_at: '2026-05-01', approved_at: null, requested_at: null,
+            refund_method: 'cash', original_invoice_id: null,
+            cashbox_id: 'cb-1',  // ← from COALESCE(r.cashbox_id, s.cashbox_id)
+          }],
+          // costRow
+          [{ cost: 0 }],
+        ],
+      });
+
+      // Stub safe() to invoke the body with our `q` (the dsManager.query).
+      (svc as any).safe = async (
+        _refType: string,
+        _refId: string,
+        _em: any,
+        body: (q: any) => Promise<any>,
+      ) => body((svc as any).ds.manager.query.bind((svc as any).ds.manager));
+
+      await svc.postReturn('ret-1', 'user-1');
+
+      // The COALESCE alias must appear in the SELECT — this is the
+      // forward-fix wiring pinned at the SQL level.
+      const headerSql = dsCalls.find((c) => /FROM returns r/.test(c.sql));
+      expect(headerSql).toBeDefined();
+      expect(headerSql!.sql).toMatch(
+        /COALESCE\(r\.cashbox_id,\s*s\.cashbox_id\)\s+AS cashbox_id/,
+      );
+
+      // The engine receives a gl_lines array with the cash refund leg
+      // carrying cashbox_id = 'cb-1' (so v_cashbox_drift_per_ref can pair).
+      expect(engineCalls).toHaveLength(1);
+      const cashLine = engineCalls[0].gl_lines.find(
+        (l: any) => l.account_id === 'acc-cashbox-cb-1',
+      );
+      expect(cashLine).toBeDefined();
+      expect(cashLine.cashbox_id).toBe('cb-1');
+      expect(cashLine.credit).toBe(350); // refund leaves the cashbox
+      expect(cashLine.debit).toBe(0);
+    });
+
+    /**
+     * Regression guard: when the return DOES carry an original
+     * invoice (the original happy path), the SELECT still resolves
+     * cashbox_id via either source — same shape as before, just
+     * with the COALESCE alias.
+     */
+    it('return with original_invoice_id still resolves cashbox_id (regression)', async () => {
+      const { svc, engineCalls } = makeServiceWithEngineSpy({
+        coaIds: { '49': 'acc-49' },
+        dsResults: [
+          [{
+            id: 'ret-2', return_no: 'RET-2', total_refund: '120',
+            restocking_fee: 0, net_refund: '120', status: 'refunded',
+            refunded_at: '2026-05-01', approved_at: null, requested_at: null,
+            refund_method: 'cash',
+            original_invoice_id: 'inv-99',
+            cashbox_id: 'cb-2',  // COALESCE picks r.cashbox_id (or s.cashbox_id when r is null)
+          }],
+          [{ cost: 0 }],
+        ],
+      });
+      (svc as any).safe = async (
+        _refType: string,
+        _refId: string,
+        _em: any,
+        body: (q: any) => Promise<any>,
+      ) => body((svc as any).ds.manager.query.bind((svc as any).ds.manager));
+
+      await svc.postReturn('ret-2', 'user-1');
+
+      const cashLine = engineCalls[0].gl_lines.find(
+        (l: any) => l.account_id === 'acc-cashbox-cb-2',
+      );
+      expect(cashLine).toBeDefined();
+      expect(cashLine.cashbox_id).toBe('cb-2');
+      expect(cashLine.credit).toBe(120);
+    });
+  });
+
+  /* ── Read-only invariant for the whole forward-fix set ──────────── */
+
+  it('forward-fix code paths emit zero DELETE/DROP/TRUNCATE/auto-settle SQL', async () => {
+    const { svc, dsCalls } = makeServiceWithEngineSpy({
+      dsResults: [
+        [{ id: 'inv-1', invoice_no: 'INV-1', grand_total: 50,
+           paid_amount: 50, tax_amount: 0, status: 'paid',
+           customer_id: 'c-1', cashbox_id: 'cb-1', completed_at: '2026-04-30' }],
+        [{ cogs: 0 }],
+        [{ payment_method: 'cash', amount: '50',
+           payment_account_id: null, payment_account_snapshot: null }],
+      ],
+    });
+
+    await svc.postInvoice('inv-1', 'user-1', undefined, {
+      skipCashMovements: true,
+    });
+
+    for (const c of dsCalls) {
+      expect(c.sql).not.toMatch(/\bDELETE\b/i);
+      expect(c.sql).not.toMatch(/\bDROP\b/i);
+      expect(c.sql).not.toMatch(/\bTRUNCATE\b/i);
+      // No "settlement" or "auto correct" markers in this code path.
+      expect(c.sql).not.toMatch(/auto[_ ]?settle/i);
+      expect(c.sql).not.toMatch(/drift[_ ]?correction/i);
+    }
+  });
+});
+
