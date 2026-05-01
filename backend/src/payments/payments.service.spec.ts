@@ -1231,6 +1231,52 @@ describe('PaymentsService.backfillUnattachedInvoicePayments — PR-FIN-PAYACCT-4
     expect(update.params[2]).toBe('instapay');
   });
 
+  /**
+   * PR-FIN-PAYACCT-4D-UX-FIX-11 — regression guard.
+   *
+   * Earlier shipped code wrote the audit row with column name `payload`,
+   * but `activity_logs` exposes the JSON column as `metadata`. Postgres
+   * rejected the INSERT, the failed query poisoned the open transaction,
+   * and TypeORM ROLLBACKed at COMMIT — so the UPDATE on
+   * `invoice_payments` was undone. Net effect in production: the operator
+   * clicked the backfill button repeatedly (7 PG errors observed on
+   * 2026-05-01 between 09:14:48Z and 09:33:16Z), saw a server error each
+   * time, and the 3 historical InstaPay rows stayed unattached.
+   *
+   * This test pins the column name so any future drift breaks the build
+   * before it can break production.
+   */
+  it('PR-FIN-PAYACCT-4D-UX-FIX-11: audit INSERT writes column `metadata`, not `payload`', async () => {
+    const { service, emCalls } = await makeService({
+      dsResults: [
+        [TARGET_PA],
+        [{ row_count: 3, total_amount: '1050.00' }],
+        [{ row_count: 0, total_amount: '0' }],
+      ],
+      emResults: [
+        [TARGET_PA],
+        [{ id: 'r1' }, { id: 'r2' }, { id: 'r3' }],
+        [],
+      ],
+    });
+    await service.backfillUnattachedInvoicePayments({
+      method: 'instapay',
+      dryRun: false,
+      userId: 'u-1',
+    });
+    const audit = emCalls.find((c) =>
+      /INSERT INTO activity_logs/.test(c.sql),
+    );
+    expect(audit).toBeDefined();
+    // Column list must include `metadata` and must NOT include `payload`.
+    expect(audit!.sql).toMatch(/\(\s*action\s*,\s*entity\s*,\s*entity_id\s*,\s*user_id\s*,\s*metadata\s*\)/);
+    expect(audit!.sql).not.toMatch(/\bpayload\b/);
+    // VALUES still build the JSONB payload via jsonb_build_object — that's
+    // a function name, not the column. (Sanity that we didn't rename the
+    // wrong identifier.)
+    expect(audit!.sql).toMatch(/jsonb_build_object\(/);
+  });
+
   it('does NOT touch journal_entries / journal_lines / cashbox_transactions', async () => {
     const { service, emCalls, dsCalls } = await makeService({
       dsResults: [

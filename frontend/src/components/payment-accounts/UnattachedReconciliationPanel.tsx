@@ -59,9 +59,38 @@ export function UnattachedReconciliationPanel({
     mutationFn: (method: PaymentMethodCode) =>
       paymentsApi.backfillUnattached({ method, dryRun: false }),
     onSuccess: (res) => {
-      toast.success(
-        `تم ربط ${res.updatedCount} عملية بحساب "${res.targetAccount.display_name}"`,
-      );
+      // PR-FIN-PAYACCT-4D-UX-FIX-11 — never claim success when nothing
+      // actually moved. Earlier code raised a green toast even when the
+      // backend returned `dryRun=true` or `updatedCount=0`, which masked
+      // the real bug (BE rolled back the tx after a column-name error
+      // in the audit INSERT). Distinguish three response shapes:
+      //
+      //   1. dryRun=true                 → BE didn't write. Surface as
+      //                                     warning so operator knows
+      //                                     to click again with intent.
+      //   2. dryRun=false, updatedCount=0 → no rows matched. Surface as
+      //                                      warning — already linked, or
+      //                                      a silent BE rollback.
+      //   3. dryRun=false, updatedCount>0 → real success.
+      if (res.dryRun) {
+        toast(
+          `العملية رجعت كمحاكاة (dryRun) — لم يتم تعديل أي بيانات. ` +
+            `أعد المحاولة وتأكد من ظهور رسالة نجاح حقيقية.`,
+          { icon: '⚠️', duration: 6000 },
+        );
+        return;
+      }
+      if (res.updatedCount === 0) {
+        toast(
+          `لم يتم ربط أي عملية — قد تكون مرتبطة بالفعل أو تم التراجع عن العملية في الخادم. ` +
+            `راجع القائمة بعد التحديث.`,
+          { icon: '⚠️', duration: 6000 },
+        );
+      } else {
+        toast.success(
+          `تم ربط ${res.updatedCount} عملية بحساب "${res.targetAccount.display_name}"`,
+        );
+      }
       qc.invalidateQueries({ queryKey: ['unattached-summary'] });
       qc.invalidateQueries({ queryKey: ['payment-accounts-balances'] });
     },
