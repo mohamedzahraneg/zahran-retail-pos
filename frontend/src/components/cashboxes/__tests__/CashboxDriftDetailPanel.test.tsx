@@ -147,25 +147,30 @@ describe('CashboxDriftDetailPanel — PR-FIN-PAYACCT-4D-REPORTS-1A', () => {
     expect(note.textContent).toMatch(/لا يتم إجراء أي تسوية تلقائية/);
   });
 
-  it('renders totals: count=3, CT=+800.00, JE=+550.00, drift=+250.00', async () => {
+  it('renders summary cards (UX-FIX): total drift, count, real, self-cancelling', async () => {
     (cashDeskApi.driftDetail as any).mockResolvedValue(PROD_DRIFT_RESPONSE);
     renderPanel();
-    // Totals are 0/--/-- until the query resolves — wait for the
-    // resolved count before reading sibling cells.
+    // Cards mount once the data lands — wait for the count card.
     await waitFor(() =>
       expect(
-        screen.getByTestId('cashbox-drift-detail-totals-count').textContent,
-      ).toBe('3'),
+        screen.getByTestId('cashbox-drift-detail-summary-count').textContent,
+      ).toMatch(/3/),
     );
     expect(
-      screen.getByTestId('cashbox-drift-detail-totals-ct').textContent,
-    ).toMatch(/\+800\.00/);
-    expect(
-      screen.getByTestId('cashbox-drift-detail-totals-je').textContent,
-    ).toMatch(/\+550\.00/);
-    expect(
-      screen.getByTestId('cashbox-drift-detail-totals-drift').textContent,
+      screen.getByTestId('cashbox-drift-detail-summary-total-drift').textContent,
     ).toMatch(/\+250\.00/);
+    // 3 real economic rows that sum to +250 (matches production fixture).
+    expect(
+      screen.getByTestId('cashbox-drift-detail-summary-real').textContent,
+    ).toMatch(/3 · \+250\.00/);
+    // Self-cancelling pairs: 0 in this fixture (the production split
+    // shape lives in the categorize spec; here we only verify the card
+    // renders the right zero state).
+    expect(
+      screen.getByTestId(
+        'cashbox-drift-detail-summary-self-cancelling',
+      ).textContent,
+    ).toMatch(/0/);
   });
 
   it('renders the cashbox-level cross-check value (gl_drift = +250.00)', async () => {
@@ -228,7 +233,10 @@ describe('CashboxDriftDetailPanel — PR-FIN-PAYACCT-4D-REPORTS-1A', () => {
   it('renders Arabic reference-type labels — never the raw schema codes', async () => {
     (cashDeskApi.driftDetail as any).mockResolvedValue(PROD_DRIFT_RESPONSE);
     renderPanel();
-    const rowsRoot = await screen.findByTestId('cashbox-drift-detail-rows');
+    // UX-FIX: rows now live inside the "real" table.
+    const rowsRoot = await screen.findByTestId(
+      'cashbox-drift-detail-table-real',
+    );
     expect(within(rowsRoot).getAllByText(/فاتورة بيع/).length).toBeGreaterThanOrEqual(1);
     expect(within(rowsRoot).getByText(/مرتجع/)).toBeInTheDocument();
     // Raw schema codes must NOT appear inside the rows table.
@@ -259,7 +267,9 @@ describe('CashboxDriftDetailPanel — PR-FIN-PAYACCT-4D-REPORTS-1A', () => {
     expect(
       await screen.findByTestId('cashbox-drift-detail-empty'),
     ).toHaveTextContent('لا توجد تفاصيل فجوة لهذه الخزنة');
-    expect(screen.queryByTestId('cashbox-drift-detail-rows')).toBeNull();
+    // UX-FIX: neither group table renders when there are no rows.
+    expect(screen.queryByTestId('cashbox-drift-detail-table-real')).toBeNull();
+    expect(screen.queryByTestId('cashbox-drift-detail-table-self')).toBeNull();
   });
 
   it('close button fires the onClose callback', async () => {
@@ -292,5 +302,234 @@ describe('CashboxDriftDetailPanel — PR-FIN-PAYACCT-4D-REPORTS-1A', () => {
     expect(src).not.toMatch(/\buseMutation\b/);
     // `.mutate(` would catch both `mutation.mutate(...)` and `xMutation.mutate(...)`.
     expect(src).not.toMatch(/\.mutate\(/);
+  });
+
+  // ─── PR-FIN-PAYACCT-4D-REPORTS-1A-UX-FIX ───────────────────────────
+  // Pin the rewritten layout: full-screen overlay, contributors block,
+  // guidance block, two-table grouping, and the optional Excel/Print
+  // toolbar. Production-shaped fixture below uses the real +250 split:
+  //   • 3 real economic rows (sum +250).
+  //   • 2 self-cancelling label-mismatch rows (same reference_id, sum 0).
+  describe('PR-FIN-PAYACCT-4D-REPORTS-1A-UX-FIX rewrite', () => {
+    const SHIFT_REF_ID = 'accd3480-a815-4c66-914e-cbd9869765b0';
+    const PROD_FIXTURE_FULL = {
+      ...PROD_DRIFT_RESPONSE,
+      rows: [
+        ...PROD_DRIFT_RESPONSE.rows,
+        // Self-cancelling pair on the same reference_id (shift +17.99
+        // in CT, shift_variance -17.99 in JE → net 0 per ref_id).
+        {
+          cashbox_id: CASHBOX_ID,
+          cashbox_name: 'الخزينة الرئيسية',
+          reference_type: 'shift',
+          reference_id: SHIFT_REF_ID,
+          reference_no: null,
+          coverage: 'CT_only' as const,
+          ct_count: 1, je_line_count: 0,
+          ct_signed_amount: '17.99', je_signed_amount: '0', drift_amount: '17.99',
+          first_seen_at: '2026-04-26T07:16:14Z', last_seen_at: '2026-04-26T07:16:14Z',
+          sample_entry_no: null,
+        },
+        {
+          cashbox_id: CASHBOX_ID,
+          cashbox_name: 'الخزينة الرئيسية',
+          reference_type: 'shift_variance',
+          reference_id: SHIFT_REF_ID,
+          reference_no: null,
+          coverage: 'JE_only' as const,
+          ct_count: 0, je_line_count: 1,
+          ct_signed_amount: '0', je_signed_amount: '17.99', drift_amount: '-17.99',
+          first_seen_at: '2026-04-26T07:16:14Z', last_seen_at: '2026-04-26T07:16:14Z',
+          sample_entry_no: 'JE-2026-000242',
+        },
+      ],
+      totals: { count: 5, total_ct: '817.99', total_je: '567.99', total_drift: '250.00' },
+    };
+
+    it('panel mounts as a full-screen overlay (fixed inset, dim backdrop)', async () => {
+      (cashDeskApi.driftDetail as any).mockResolvedValue(PROD_FIXTURE_FULL);
+      renderPanel();
+      const overlay = await screen.findByTestId(
+        'cashbox-drift-detail-overlay',
+      );
+      // The overlay sits at fixed inset-0 — full viewport.
+      expect(overlay.className).toMatch(/fixed/);
+      expect(overlay.className).toMatch(/inset-0/);
+      // The dialog card itself.
+      const dlg = within(overlay).getByTestId('cashbox-drift-detail-panel');
+      expect(dlg).toHaveAttribute('role', 'dialog');
+      expect(dlg).toHaveAttribute('aria-modal', 'true');
+    });
+
+    it('clicking the dim backdrop closes the modal', async () => {
+      (cashDeskApi.driftDetail as any).mockResolvedValue(PROD_FIXTURE_FULL);
+      const onClose = vi.fn();
+      const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      render(
+        <QueryClientProvider client={qc}>
+          <CashboxDriftDetailPanel cashboxId={CASHBOX_ID} onClose={onClose} />
+        </QueryClientProvider>,
+      );
+      const overlay = await screen.findByTestId(
+        'cashbox-drift-detail-overlay',
+      );
+      // Click the backdrop directly (not the card).
+      fireEvent.click(overlay);
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('renders the "ما سبب الفرق؟" contributors with the top 3 production gaps', async () => {
+      (cashDeskApi.driftDetail as any).mockResolvedValue(PROD_FIXTURE_FULL);
+      renderPanel();
+      const contrib = await screen.findByTestId(
+        'cashbox-drift-detail-contributors',
+      );
+      // Three real economic gaps from the production fixture appear here.
+      expect(contrib.textContent).toMatch(/INV-001234/);
+      expect(contrib.textContent).toMatch(/\+700\.00/);
+      expect(contrib.textContent).toMatch(/-650\.00/);
+      expect(contrib.textContent).toMatch(/\+200\.00/);
+      // Each contributor has its own testid.
+      expect(
+        within(contrib).getByTestId(
+          'cashbox-drift-detail-contributor-invoice-61017528-7377-4691-9711-6f7f9bafe5b7',
+        ),
+      ).toBeInTheDocument();
+    });
+
+    it('renders the "ماذا أفعل؟" guidance block with the four read-only steps', async () => {
+      (cashDeskApi.driftDetail as any).mockResolvedValue(PROD_FIXTURE_FULL);
+      renderPanel();
+      const guide = await screen.findByTestId(
+        'cashbox-drift-detail-guidance',
+      );
+      expect(guide.textContent).toMatch(/ماذا أفعل؟/);
+      expect(guide.textContent).toMatch(/راجع الفواتير ذات الفرق أولاً/);
+      expect(guide.textContent).toMatch(/لا تقم بتسوية تلقائية/);
+      expect(guide.textContent).toMatch(/شاشة التسويات/);
+      expect(guide.textContent).toMatch(/تصحيح مطابقة\/تصنيف/);
+    });
+
+    it('groups rows into two tables: real-economic + self-cancelling (with badges)', async () => {
+      (cashDeskApi.driftDetail as any).mockResolvedValue(PROD_FIXTURE_FULL);
+      renderPanel();
+      // Both group tables render.
+      const realTbl = await screen.findByTestId('cashbox-drift-detail-table-real');
+      const selfTbl = screen.getByTestId('cashbox-drift-detail-table-self');
+      // Real table contains the 3 real economic rows.
+      expect(
+        within(realTbl).getByTestId(
+          'cashbox-drift-detail-row-invoice-61017528-7377-4691-9711-6f7f9bafe5b7',
+        ),
+      ).toBeInTheDocument();
+      expect(
+        within(realTbl).getByTestId(
+          'cashbox-drift-detail-row-return-73824179-3e2c-458f-a3bf-3cd87f1b3381',
+        ),
+      ).toBeInTheDocument();
+      // Self table contains the shift / shift_variance pair (same ref_id).
+      expect(
+        within(selfTbl).getByTestId(
+          `cashbox-drift-detail-row-shift-${SHIFT_REF_ID}`,
+        ),
+      ).toBeInTheDocument();
+      expect(
+        within(selfTbl).getByTestId(
+          `cashbox-drift-detail-row-shift_variance-${SHIFT_REF_ID}`,
+        ),
+      ).toBeInTheDocument();
+      // Badges: real rows say "سبب رئيسي", self rows say "يلغي نفسه".
+      const realBadge = within(realTbl).getByTestId(
+        'cashbox-drift-detail-row-badge-invoice-61017528-7377-4691-9711-6f7f9bafe5b7',
+      );
+      expect(realBadge.textContent).toMatch(/سبب رئيسي/);
+      const selfBadge = within(selfTbl).getByTestId(
+        `cashbox-drift-detail-row-badge-shift-${SHIFT_REF_ID}`,
+      );
+      expect(selfBadge.textContent).toMatch(/يلغي نفسه/);
+    });
+
+    it('does NOT render any "تسوية تلقائية" / settle / fix action button', async () => {
+      (cashDeskApi.driftDetail as any).mockResolvedValue(PROD_FIXTURE_FULL);
+      renderPanel();
+      await screen.findByTestId('cashbox-drift-detail-panel');
+      // Action-button testids that would imply a write surface — none must exist.
+      expect(screen.queryByTestId('cashbox-drift-detail-auto-settle')).toBeNull();
+      expect(screen.queryByTestId('cashbox-drift-detail-fix-now')).toBeNull();
+      expect(screen.queryByTestId('cashbox-drift-detail-correct')).toBeNull();
+    });
+
+    it('Excel toolbar button invokes XLSX.writeFile with the loaded rows', async () => {
+      const xlsx = await import('xlsx');
+      const writeSpy = vi
+        .spyOn(xlsx, 'writeFile')
+        .mockImplementation(() => undefined as any);
+      (cashDeskApi.driftDetail as any).mockResolvedValue(PROD_FIXTURE_FULL);
+      renderPanel();
+      const btn = await screen.findByTestId(
+        'cashbox-drift-detail-export-excel',
+      );
+      await waitFor(() => expect(btn).not.toBeDisabled());
+      fireEvent.click(btn);
+      await waitFor(() => expect(writeSpy).toHaveBeenCalledTimes(1));
+      const filename = String(writeSpy.mock.calls[0]?.[1] ?? '');
+      expect(filename).toMatch(/^cashbox-drift-report-/);
+      expect(filename).toMatch(/\.xlsx$/);
+      writeSpy.mockRestore();
+    });
+
+    it('Print/PDF toolbar button opens a window via window.open with the report HTML', async () => {
+      const fakeDoc = { write: vi.fn(), close: vi.fn() };
+      const openSpy = vi
+        .spyOn(window, 'open')
+        .mockReturnValue({ document: fakeDoc } as any);
+      (cashDeskApi.driftDetail as any).mockResolvedValue(PROD_FIXTURE_FULL);
+      renderPanel();
+      const btn = await screen.findByTestId(
+        'cashbox-drift-detail-print-report',
+      );
+      await waitFor(() => expect(btn).not.toBeDisabled());
+      fireEvent.click(btn);
+      await waitFor(() => expect(openSpy).toHaveBeenCalledTimes(1));
+      const html = String(fakeDoc.write.mock.calls[0]?.[0] ?? '');
+      // Title + cashbox name + read-only footer + a totals card.
+      expect(html).toMatch(/تقرير فجوة الخزنة/);
+      expect(html).toMatch(/الخزينة الرئيسية/);
+      expect(html).toMatch(/ما سبب الفرق؟/);
+      expect(html).toMatch(/ماذا أفعل؟/);
+      expect(html).toMatch(
+        /هذه قراءة فقط؛ لا يتم إجراء أي تسوية تلقائية/,
+      );
+      openSpy.mockRestore();
+    });
+
+    it('Excel/Print buttons are disabled when there are no rows (no blank exports)', async () => {
+      (cashDeskApi.driftDetail as any).mockResolvedValue({
+        cashbox: { ...PROD_DRIFT_RESPONSE.cashbox!, gl_drift: '0.00' },
+        rows: [],
+        totals: { count: 0, total_ct: '0', total_je: '0', total_drift: '0' },
+      });
+      renderPanel();
+      const excel = await screen.findByTestId(
+        'cashbox-drift-detail-export-excel',
+      );
+      const print = screen.getByTestId('cashbox-drift-detail-print-report');
+      expect(excel).toBeDisabled();
+      expect(print).toBeDisabled();
+    });
+
+    it('Esc key closes the modal', async () => {
+      (cashDeskApi.driftDetail as any).mockResolvedValue(PROD_FIXTURE_FULL);
+      const onClose = vi.fn();
+      const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      render(
+        <QueryClientProvider client={qc}>
+          <CashboxDriftDetailPanel cashboxId={CASHBOX_ID} onClose={onClose} />
+        </QueryClientProvider>,
+      );
+      await screen.findByTestId('cashbox-drift-detail-panel');
+      fireEvent.keyDown(window, { key: 'Escape' });
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
   });
 });
