@@ -80,8 +80,23 @@ export class AccountingPostingService {
    * calls `fn_record_cashbox_txn` inline for cash sales. Net effect:
    * every sale is one atomic engine call; no split ownership; no
    * `service:cashbox_fn_fallback` bypass alert.
+   *
+   * PR-FIN-PAYACCT-4D-DRIFT-ROOT-FIX-1 — `opts.skipCashMovements`.
+   * When TRUE, the JE is posted normally but `cash_movements: []` is
+   * passed to the engine — no cashbox_transactions row is written
+   * here. Used by `postInvoiceEdit` so the void+repost cycle DOES
+   * NOT duplicate the cash CT (the editInvoice path in pos.service
+   * already wrote `edit_reversal` + `edit_replay` on the CT side).
+   *
+   * Default behavior is unchanged: initial sale postings continue to
+   * write the cash CT row alongside the JE in one atomic engine call.
    */
-  async postInvoice(invoiceId: string, userId: string, em?: EntityManager) {
+  async postInvoice(
+    invoiceId: string,
+    userId: string,
+    em?: EntityManager,
+    opts?: { skipCashMovements?: boolean },
+  ) {
     if (!this.engine) {
       // Engine missing in a stubbed test — return no-op.
       return null;
@@ -245,6 +260,14 @@ export class AccountingPostingService {
     // Phase 2.2: gather cash payments → engine cash_movements. Only
     // cash payments produce a cashbox_transactions row; non-cash GL
     // legs go to their bucket account above with no cashbox effect.
+    //
+    // PR-FIN-PAYACCT-4D-DRIFT-ROOT-FIX-1: when called from
+    // `postInvoiceEdit` (`opts.skipCashMovements === true`), build an
+    // empty list — the editInvoice path in `pos.service` already wrote
+    // the corresponding `edit_reversal` + `edit_replay` CT rows, so
+    // re-emitting `sale` here would double-count the cash effect
+    // (observed pattern: INV-2026-000147 / INV-2026-000116 with 5 CT
+    // rows summing to +1,050 vs JE cash leg +350 → +700 drift).
     const cashMoves: Array<{
       cashbox_id: string;
       direction: 'in' | 'out';
@@ -252,7 +275,7 @@ export class AccountingPostingService {
       category: string;
       notes?: string;
     }> = [];
-    if (inv.cashbox_id) {
+    if (inv.cashbox_id && !opts?.skipCashMovements) {
       for (const p of payments) {
         if (!isCashMethod(p.payment_method)) continue;
         cashMoves.push({
@@ -323,7 +346,16 @@ export class AccountingPostingService {
           AND is_void = FALSE`,
       [invoiceId, userId],
     );
-    return this.postInvoice(invoiceId, userId, em);
+    // PR-FIN-PAYACCT-4D-DRIFT-ROOT-FIX-1: skip cash_movements on the
+    // repost. The cashbox side is already owned by `editInvoice`
+    // (pos.service) which wrote `edit_reversal` + `edit_replay` CT
+    // rows. Without this flag, the engine would emit a fresh `sale`
+    // CT row on top of those, inflating CT vs JE by the new cash
+    // amount on every edit (the bug repro'd on INV-2026-000147 +700
+    // and INV-2026-000116 +200).
+    return this.postInvoice(invoiceId, userId, em, {
+      skipCashMovements: true,
+    });
   }
 
   /**
@@ -336,11 +368,21 @@ export class AccountingPostingService {
    */
   async postReturn(returnId: string, userId: string, em?: EntityManager) {
     return this.safe('return', returnId, em, async (q) => {
+      // PR-FIN-PAYACCT-4D-DRIFT-ROOT-FIX-1: prefer the return's own
+      // `cashbox_id` (always set by the POS refund flow when the
+      // operator picks a cashbox) and fall back to the original
+      // invoice's shift only when the return is missing it. The
+      // earlier `s.cashbox_id AS cashbox_id` alias dropped the
+      // cashbox link entirely for standalone returns
+      // (`returns.original_invoice_id IS NULL`), which left the cash
+      // refund leg with `journal_lines.cashbox_id = NULL` — exactly
+      // the wiring that caused RET-2026-000002/3/4 to show up as
+      // `coverage='CT_only'` in `v_cashbox_drift_per_ref`.
       const [r] = await q(
         `SELECT r.id, r.return_no, r.total_refund, r.restocking_fee,
                 r.net_refund, r.status, r.refunded_at, r.approved_at,
                 r.requested_at, r.refund_method, r.original_invoice_id,
-                s.cashbox_id AS cashbox_id
+                COALESCE(r.cashbox_id, s.cashbox_id) AS cashbox_id
            FROM returns r
            LEFT JOIN invoices i ON i.id = r.original_invoice_id
            LEFT JOIN shifts s   ON s.id = i.shift_id
