@@ -357,4 +357,125 @@ describe('<CashboxDetailsModal /> — PR-FIN-PAYACCT-4D-UX-FIX-4', () => {
     expect(screen.getByTestId('cashbox-details-drift')).toBeInTheDocument();
     expect(screen.getByText(/فجوة مع الأستاذ العام/)).toBeInTheDocument();
   });
+
+  // ─── PR-FIN-PAYACCT-4D-UX-FIX-15 ──────────────────────────────────
+  // Pin the redesigned accounting reconciliation card:
+  //   • full Arabic labels ("رصيد الخزنة", "رصيد الأستاذ العام", "الفرق")
+  //     on their own rows — never the broken inline "مخزن: ... · أستاذ:".
+  //   • |drift| ≤ 0.01 → calm green "لا توجد فروقات محاسبية".
+  //   • |drift| > 0.01 → rose warning, money formatted, sign preserved.
+  //   • read-only footer: "هذه قراءة فقط؛ لا يتم إجراء أي تسوية تلقائية."
+  //   • component remains read-only (no extra mutation hooks).
+  describe('PR-FIN-PAYACCT-4D-UX-FIX-15 accounting reconciliation card', () => {
+    const PROD_DRIFT: CashboxGlDrift = {
+      cashbox_id: 'cb-cash-1', cashbox_name: 'الخزينة الرئيسية',
+      kind: 'cash', is_active: true,
+      stored_balance: '29800.00',
+      gl_total_dr: '36043.00', gl_total_cr: '6493.00', gl_net: '29550.00',
+      drift_amount: '250.00',
+    };
+
+    it('renders the three labelled rows on their own lines (stored / GL / difference)', async () => {
+      movementsUnifiedMock.mockResolvedValue({
+        rows: [], total: 0, totals: { in: '0', out: '0', net: '0', count: 0 },
+      });
+      renderModal({ drifts: [PROD_DRIFT] });
+      const card = await screen.findByTestId('cashbox-details-drift');
+      expect(within(card).getByText(/رصيد الخزنة/)).toBeInTheDocument();
+      expect(within(card).getByText(/رصيد الأستاذ العام/)).toBeInTheDocument();
+      expect(within(card).getByText(/الفرق/)).toBeInTheDocument();
+    });
+
+    it('renders each money value next to its label (29,800 / 29,550 / +250)', async () => {
+      movementsUnifiedMock.mockResolvedValue({
+        rows: [], total: 0, totals: { in: '0', out: '0', net: '0', count: 0 },
+      });
+      renderModal({ drifts: [PROD_DRIFT] });
+      const stored = await screen.findByTestId('cashbox-details-drift-stored');
+      const gl     = screen.getByTestId('cashbox-details-drift-gl');
+      const amount = screen.getByTestId('cashbox-details-drift-amount');
+      expect(stored.textContent).toMatch(/29,800\.00/);
+      expect(gl.textContent).toMatch(/29,550\.00/);
+      expect(amount.textContent).toMatch(/\+250\.00/);
+    });
+
+    it('does NOT render the broken inline "مخزن: ... · أستاذ: ..." line', async () => {
+      movementsUnifiedMock.mockResolvedValue({
+        rows: [], total: 0, totals: { in: '0', out: '0', net: '0', count: 0 },
+      });
+      renderModal({ drifts: [PROD_DRIFT] });
+      const card = await screen.findByTestId('cashbox-details-drift');
+      // The legacy text was: "مخزن: 29,800.00 ج.م · أستاذ: 29,550.00 ج.م".
+      // Both the lone "مخزن" stem AND the inline "·" separator must be absent.
+      expect(card.textContent).not.toMatch(/مخزن[:\s]/);
+      expect(card.textContent).not.toMatch(/·/);
+      // And "أستاذ" must only appear inside the full label "رصيد الأستاذ العام".
+      expect(card.textContent).not.toMatch(/^أستاذ:/m);
+    });
+
+    it('renders the read-only footer note (no auto-correction)', async () => {
+      movementsUnifiedMock.mockResolvedValue({
+        rows: [], total: 0, totals: { in: '0', out: '0', net: '0', count: 0 },
+      });
+      renderModal({ drifts: [PROD_DRIFT] });
+      const note = await screen.findByTestId('cashbox-details-drift-readonly-note');
+      expect(note.textContent).toMatch(/هذه قراءة فقط/);
+      expect(note.textContent).toMatch(/لا يتم إجراء أي تسوية تلقائية/);
+    });
+
+    it('renders the rose warning header when |drift| > 0.01', async () => {
+      movementsUnifiedMock.mockResolvedValue({
+        rows: [], total: 0, totals: { in: '0', out: '0', net: '0', count: 0 },
+      });
+      renderModal({ drifts: [PROD_DRIFT] });
+      const card = await screen.findByTestId('cashbox-details-drift');
+      const header = screen.getByTestId('cashbox-details-drift-header');
+      expect(header.textContent).toMatch(/فجوة مع الأستاذ العام/);
+      expect(card.className).toMatch(/rose/);
+      expect(card.className).not.toMatch(/emerald/);
+    });
+
+    it('renders the calm "لا توجد فروقات محاسبية" header when |drift| ≤ 0.01', async () => {
+      movementsUnifiedMock.mockResolvedValue({
+        rows: [], total: 0, totals: { in: '0', out: '0', net: '0', count: 0 },
+      });
+      const matched: CashboxGlDrift = {
+        ...PROD_DRIFT,
+        stored_balance: '29550.00',
+        gl_net: '29550.00',
+        drift_amount: '0.00',
+      };
+      renderModal({ drifts: [matched] });
+      const card = await screen.findByTestId('cashbox-details-drift');
+      const header = screen.getByTestId('cashbox-details-drift-header');
+      expect(header.textContent).toMatch(/لا توجد فروقات محاسبية/);
+      expect(card.className).toMatch(/emerald/);
+      expect(card.className).not.toMatch(/rose/);
+      // Read-only footer still present.
+      expect(
+        within(card).getByTestId('cashbox-details-drift-readonly-note'),
+      ).toBeInTheDocument();
+    });
+
+    it('preserves the sign — negative drifts render with a leading "-" not "+"', async () => {
+      movementsUnifiedMock.mockResolvedValue({
+        rows: [], total: 0, totals: { in: '0', out: '0', net: '0', count: 0 },
+      });
+      const negDrift: CashboxGlDrift = { ...PROD_DRIFT, drift_amount: '-450.00' };
+      renderModal({ drifts: [negDrift] });
+      const amount = await screen.findByTestId('cashbox-details-drift-amount');
+      expect(amount.textContent).toMatch(/-450\.00/);
+      expect(amount.textContent).not.toMatch(/\+/);
+    });
+
+    it('still falls back to the neutral "no drift data available" line when no drift row matches', async () => {
+      movementsUnifiedMock.mockResolvedValue({
+        rows: [], total: 0, totals: { in: '0', out: '0', net: '0', count: 0 },
+      });
+      renderModal({ drifts: [] });
+      // Card is gone; calm explanatory line shown instead.
+      expect(screen.queryByTestId('cashbox-details-drift')).toBeNull();
+      expect(screen.getByText(/لا توجد بيانات فروق متاحة لهذه الخزنة/)).toBeInTheDocument();
+    });
+  });
 });
