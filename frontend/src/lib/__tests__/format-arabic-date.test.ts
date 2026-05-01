@@ -10,6 +10,7 @@ import { describe, it, expect } from 'vitest';
 import {
   formatArabicDate,
   formatArabicDateRange,
+  formatArabicDateTime,
 } from '../format-arabic-date';
 
 describe('formatArabicDate — PR-FIN-PAYACCT-4D-UX-FIX-14', () => {
@@ -106,5 +107,56 @@ describe('formatArabicDateRange — PR-FIN-PAYACCT-4D-UX-FIX-14', () => {
     expect(out).not.toMatch(/GMT\+0300/);
     expect(out).not.toMatch(/Wed Apr/);
     expect(out).not.toMatch(/Eastern European/);
+  });
+});
+
+describe('formatArabicDateTime — PR-FIN-PAYACCT-4D-REPORTS-1B', () => {
+  it('returns empty string for null / undefined / ""', () => {
+    expect(formatArabicDateTime(null)).toBe('');
+    expect(formatArabicDateTime(undefined)).toBe('');
+    expect(formatArabicDateTime('')).toBe('');
+  });
+
+  it('renders the operator-spec compact format DD/MM/YYYY HH:mm:ss', () => {
+    const out = formatArabicDateTime('2026-05-01T11:35:09Z');
+    // Manual format: 2-digit day/month, 4-digit year, 2-digit H/M/S, all
+    // separated by `/` and `:`. Latin numerals throughout.
+    expect(out).toMatch(/^\d{2}\/\d{2}\/\d{4} \d{2}:\d{2}:\d{2}$/);
+  });
+
+  it('always includes seconds (the operator spec requires second-level precision)', () => {
+    const out = formatArabicDateTime('2026-05-01T14:35:09.500Z');
+    // Two `:` separators → two fields after the hour → minutes AND seconds.
+    expect((out.match(/:/g) ?? []).length).toBe(2);
+    // The trailing two-digit field (seconds) must be present.
+    expect(out).toMatch(/:\d{2}$/);
+  });
+
+  it('uses Latin numerals (operator spec example: 01/05/2026 14:35:09)', () => {
+    const out = formatArabicDateTime('2026-05-01T11:35:09Z');
+    // Arabic-Indic digits (٠-٩) must NOT appear.
+    expect(out).not.toMatch(/[٠-٩]/);
+    // Eastern Arabic-Indic (Persian) digits must NOT appear either.
+    expect(out).not.toMatch(/[۰-۹]/);
+  });
+
+  it('does NOT leak raw JS Date / GMT / ISO shapes (defense same as date-only formatter)', () => {
+    const inputs = [
+      'Wed Apr 29 2026 00:00:00 GMT+0300 (Eastern European Summer Time)',
+      '2026-04-20 13:06:42.082408+00',
+      '2026-04-20T13:06:42.082Z',
+    ];
+    for (const input of inputs) {
+      const out = formatArabicDateTime(input);
+      expect(out).not.toMatch(/GMT\+0300/);
+      expect(out).not.toMatch(/Wed Apr/);
+      expect(out).not.toMatch(/Eastern European/);
+      expect(out).not.toMatch(/T\d{2}:\d{2}:\d{2}/);
+      expect(out).not.toMatch(/\+00\b/);
+    }
+  });
+
+  it('falls back to the input verbatim when Date cannot parse it', () => {
+    expect(formatArabicDateTime('not-a-date')).toBe('not-a-date');
   });
 });
