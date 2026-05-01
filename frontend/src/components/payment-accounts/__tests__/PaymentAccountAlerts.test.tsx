@@ -208,6 +208,61 @@ describe('<PaymentAccountAlerts /> — PR-FIN-PAYACCT-4B', () => {
     expect(screen.getByTestId('alert-all-clear')).toBeInTheDocument();
   });
 
+  /**
+   * PR-FIN-PAYACCT-4D-UX-FIX-13 — `cash` is exempt from the no-default
+   * alert. Cash flows through cashboxes, not payment_accounts (FIX-9
+   * design). Earlier the synthetic unattached cash entry could appear
+   * as an active account with no `is_default`, surfacing the misleading
+   * warning "طريقة كاش لا يوجد لها حساب افتراضي نشط" even though the
+   * operator is doing nothing wrong.
+   */
+  it('PR-FIN-PAYACCT-4D-UX-FIX-13: cash is exempt from the no-default alert even when active without a default', () => {
+    render(
+      <PaymentAccountAlerts
+        accounts={[
+          // Active cash account, no default — pre-FIX-13 this would
+          // have fired `alert-no-default-cash`. Post-FIX-13: silent.
+          makeAccount({ id: 'a-cash', method: 'cash', is_default: false }),
+        ]}
+        balances={[
+          makeBalance({
+            payment_account_id: 'a-cash',
+            method: 'cash',
+            is_default: false,
+          }),
+        ]}
+        drifts={[]}
+      />,
+    );
+    expect(screen.queryByTestId('alert-no-default-cash')).toBeNull();
+    // No other alerts either → all-clear should render.
+    expect(screen.getByTestId('alert-all-clear')).toBeInTheDocument();
+  });
+
+  it('PR-FIN-PAYACCT-4D-UX-FIX-13: cash exemption does NOT suppress non-cash no-default alerts in the same render', () => {
+    render(
+      <PaymentAccountAlerts
+        accounts={[
+          // Cash without default — must NOT fire (FIX-13).
+          makeAccount({ id: 'a-cash', method: 'cash', is_default: false }),
+          // InstaPay without default — MUST still fire (regression guard).
+          makeAccount({ id: 'a-ip-1', method: 'instapay', is_default: false, cashbox_id: 'cb-x' }),
+          makeAccount({ id: 'a-ip-2', method: 'instapay', is_default: false, cashbox_id: 'cb-x' }),
+        ]}
+        balances={[
+          makeBalance({ payment_account_id: 'a-cash', method: 'cash', is_default: false }),
+          makeBalance({ payment_account_id: 'a-ip-1', method: 'instapay', is_default: false, cashbox_id: 'cb-x' }),
+          makeBalance({ payment_account_id: 'a-ip-2', method: 'instapay', is_default: false, cashbox_id: 'cb-x' }),
+        ]}
+        drifts={[]}
+      />,
+    );
+    // Cash: silent.
+    expect(screen.queryByTestId('alert-no-default-cash')).toBeNull();
+    // InstaPay: still loud.
+    expect(screen.getByTestId('alert-no-default-instapay')).toBeInTheDocument();
+  });
+
   it('does NOT render the no-default warning when the only account for a method is inactive', () => {
     // Only one account; inactive — so the method has 0 active rows and
     // therefore no "missing default" problem.

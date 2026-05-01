@@ -45,6 +45,13 @@ const PIN_RECOMMENDED_METHODS = new Set<PaymentMethodCode>([
   'check',
 ]);
 
+/**
+ * PR-FIN-PAYACCT-4D-UX-FIX-13 — methods exempted from the "no default
+ * payment_account" alert. Cash is cashbox-driven by design (no PA is
+ * created or expected). Mirror this set in `Cashboxes.tsx` if expanded.
+ */
+const NO_DEFAULT_ALERT_EXEMPT_METHODS = new Set<string>(['cash']);
+
 function daysSince(iso: string | null): number | null {
   if (!iso) return null;
   const ms = Date.now() - new Date(iso).getTime();
@@ -72,9 +79,11 @@ export function PaymentAccountAlerts({
 
   // 2. No-default-per-method warnings.
   // A method that has at least one active account but none marked is_default.
+  // PR-FIN-PAYACCT-4D-UX-FIX-13 — exempt cash (cashbox-driven by design).
   const activeByMethod = new Map<string, PaymentAccount[]>();
   for (const a of accounts) {
     if (!a.active) continue;
+    if (NO_DEFAULT_ALERT_EXEMPT_METHODS.has(a.method)) continue;
     const arr = activeByMethod.get(a.method) ?? [];
     arr.push(a);
     activeByMethod.set(a.method, arr);

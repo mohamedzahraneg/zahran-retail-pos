@@ -211,6 +211,19 @@ const PIN_RECOMMENDED_METHODS = new Set<PaymentMethodCode>([
 ]);
 
 /**
+ * PR-FIN-PAYACCT-4D-UX-FIX-13 — methods exempted from the "no default
+ * payment_account" KPI / warning. Cash is intentionally cashbox-driven
+ * (no payment_account is created or expected); the synthetic unattached
+ * cash row injected by the FIX-9 listBalances feed (active=true,
+ * is_default=false) would otherwise add 1 to `kpis.noDefault` and
+ * render the misleading amber warning
+ *   "طريقة كاش لا يوجد لها حساب افتراضي نشط"
+ * even though the operator is doing nothing wrong. Mirror this set
+ * inside `PaymentAccountAlerts.tsx` if either is ever expanded.
+ */
+const NO_DEFAULT_ALERT_EXEMPT_METHODS = new Set<string>(['cash']);
+
+/**
  * PR-FIN-PAYACCT-4D-UX-FIX-4 — suggested `name_ar` when the operator
  * launches the cashbox-create flow from inside the PaymentAccountModal
  * empty-state. Helps avoid empty inputs and conveys intent at a glance.
@@ -430,10 +443,19 @@ export default function Cashboxes() {
     const inactive = total - active;
 
     // Active methods missing a default.
+    //
+    // PR-FIN-PAYACCT-4D-UX-FIX-13 — `cash` is intentionally cashbox-
+    // driven (no payment_account is created or expected for it; see
+    // FIX-9). The synthetic unattached cash row in `balances`
+    // (active=true, is_default=false) would otherwise add 1 to this
+    // count and trigger a misleading "no default payment_account"
+    // KPI / warning. Skip cash here so the count and the warning
+    // strip below stay consistent.
     const activeMethods    = new Set<string>();
     const defaultedMethods = new Set<string>();
     for (const b of balances) {
       if (!b.active) continue;
+      if (NO_DEFAULT_ALERT_EXEMPT_METHODS.has(b.method)) continue;
       activeMethods.add(b.method);
       if (b.is_default) defaultedMethods.add(b.method);
     }
@@ -477,10 +499,13 @@ export default function Cashboxes() {
   }, [balances, recentMovements]);
 
   // ── Warning-strip data (computed from the same balances; no extra fetch) ──
+  // PR-FIN-PAYACCT-4D-UX-FIX-13 — exempt cash (cashbox-driven by design).
+  // See KPI block above for the long-form rationale.
   const noDefaultMethods = useMemo(() => {
     const activeByMethod = new Map<string, PaymentAccountBalance[]>();
     for (const b of balances) {
       if (!b.active) continue;
+      if (NO_DEFAULT_ALERT_EXEMPT_METHODS.has(b.method)) continue;
       const arr = activeByMethod.get(b.method) ?? [];
       arr.push(b);
       activeByMethod.set(b.method, arr);
