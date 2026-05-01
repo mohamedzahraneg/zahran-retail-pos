@@ -186,9 +186,38 @@ export interface CashboxMovementsUnifiedResponse {
 export type CashboxDriftCoverage = 'CT_only' | 'JE_only' | 'both';
 
 /**
+ * PR-FIN-PAYACCT-4D-REPORTS-1A-UX-FIX-2 — explanation taxonomy for
+ * the per-row "شرح السبب" expandable. Backend computes the code +
+ * Arabic phrase + recommended review action so the FE just renders.
+ */
+export type CashboxDriftExplanationCode =
+  | 'invoice_ct_inflated_by_edit_replay'
+  | 'invoice_ct_more_than_je_cash'
+  | 'invoice_je_more_than_ct'
+  | 'return_je_missing_cashbox_link'
+  | 'return_ct_only_no_je'
+  | 'ref_label_mismatch'
+  | 'unknown_review_required';
+
+/**
+ * PR-FIN-PAYACCT-4D-REPORTS-1A-UX-FIX-2 — one entry of an invoice's
+ * payment breakdown. Surfaces the per-method roll-up so the operator
+ * sees how much of the invoice was paid in cash vs other methods.
+ */
+export interface CashboxDriftPaymentBreakdownEntry {
+  method: PaymentMethodCode | string;
+  amount: string;
+}
+
+/**
  * PR-FIN-PAYACCT-4D-REPORTS-1A — one row of the per-reference drift
  * drilldown. Money columns arrive as PG-numeric strings to preserve
  * precision (formatted on the FE with EGP). Read-only.
+ *
+ * UX-FIX-2 added the per-row enrichment fields (`invoice_*`,
+ * `return_*`, `je_*`, `expected_cashbox_amount`, `explanation_*`,
+ * `recommended_review_action_ar`). All optional/nullable so an older
+ * BE without the enrichment still parses cleanly.
  */
 export interface CashboxDriftDetailRow {
   cashbox_id: string;
@@ -207,6 +236,38 @@ export interface CashboxDriftDetailRow {
   last_seen_at: string | null;
   /** A representative entry_no from `journal_entries` (if any JE side). */
   sample_entry_no: string | null;
+
+  // ── PR-FIN-PAYACCT-4D-REPORTS-1A-UX-FIX-2 enrichment ───────────────
+  /** Invoice grand_total (numeric string). null when ref isn't an invoice. */
+  invoice_grand_total?: string | null;
+  /** Invoice paid_amount (numeric string). null when ref isn't an invoice. */
+  invoice_paid_amount?: string | null;
+  /** Sum of cash invoice_payments. null when ref isn't an invoice. */
+  invoice_cash_paid?: string | null;
+  /** Sum of non-cash invoice_payments (instapay/wallet/card/etc). */
+  invoice_non_cash_paid?: string | null;
+  /** Per-method breakdown of invoice_payments (rolled up). */
+  invoice_payment_breakdown?: CashboxDriftPaymentBreakdownEntry[] | null;
+  /** Return total_refund (numeric string). null when ref isn't a return. */
+  return_total_refund?: string | null;
+  /** Return refund_method (cash / wallet / etc). */
+  return_refund_method?: string | null;
+  /** TRUE when ANY non-void JE exists for this reference_id. */
+  je_exists?: boolean;
+  /** TRUE when at least one JE line links to this cashbox (directly or via COA). */
+  je_has_cashbox_link?: boolean;
+  /**
+   * The amount the cashbox SHOULD show for this reference, as
+   * computed from the source document (cash-paid for invoices,
+   * -refund for returns). Operator-facing reference value.
+   */
+  expected_cashbox_amount?: string | null;
+  /** Explanation enum (see `CashboxDriftExplanationCode`). */
+  explanation_code?: CashboxDriftExplanationCode;
+  /** Short Arabic phrase summarizing the cause of the drift. */
+  explanation_ar?: string;
+  /** Read-only suggested next step (never an automatic action). */
+  recommended_review_action_ar?: string;
 }
 
 /**

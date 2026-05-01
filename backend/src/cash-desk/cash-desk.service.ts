@@ -1400,11 +1400,226 @@ export class CashDeskService {
       [cashboxId],
     );
 
+    // 4. PR-FIN-PAYACCT-4D-REPORTS-1A-UX-FIX-2 — per-row explanation
+    //    enrichment. For each contributing row we add:
+    //      • invoice_grand_total / invoice_paid_amount (when applicable)
+    //      • invoice_cash_paid / invoice_non_cash_paid
+    //      • invoice_payment_breakdown (per-method roll-up)
+    //      • return_total_refund / return_method (when applicable)
+    //      • je_exists                — does ANY non-void JE exist for
+    //                                   this reference_id?
+    //      • je_has_cashbox_link      — does any JE line for this ref
+    //                                   carry the cashbox's id either
+    //                                   directly (`journal_lines.cashbox_id`)
+    //                                   OR via the GL account
+    //                                   (`chart_of_accounts.cashbox_id`)?
+    //      • expected_cashbox_amount  — the operator-facing "what the
+    //                                   cashbox SHOULD show for this ref"
+    //                                   (cash-paid for invoices,
+    //                                   -refund for returns)
+    //      • explanation_code         — enum from EXPLANATION_CODES
+    //      • explanation_ar           — short Arabic phrase for the UI
+    //      • recommended_review_action_ar — what the operator should do
+    //
+    //    All queries are pure SELECT — no INSERT/UPDATE/DELETE anywhere
+    //    in the enrichment path.
+    const enrichedRows = await Promise.all(
+      rows.map((r: any) => this.enrichDriftRow(cashboxId, r)),
+    );
+
     return {
       cashbox: cashboxRow ?? null,
-      rows,
+      rows: enrichedRows,
       totals: totals ?? { count: 0, total_ct: '0', total_je: '0', total_drift: '0' },
     };
+  }
+
+  /**
+   * PR-FIN-PAYACCT-4D-REPORTS-1A-UX-FIX-2 — per-row explanation
+   * enrichment. Read-only — pure SELECT against `invoices`,
+   * `invoice_payments`, `returns`, `journal_entries`, `journal_lines`,
+   * `chart_of_accounts`, `cashbox_transactions`. No writes.
+   *
+   * Explanation taxonomy (kept compact + operator-readable):
+   *
+   *   invoice_ct_inflated_by_edit_replay
+   *     → CT total > JE cash leg AND `cashbox_transactions` shows
+   *       multiple `sale`-category rows in addition to the
+   *       edit_reversal/edit_replay pair. Symptom of a known POS
+   *       edit-flow bug that double-records the new amount.
+   *
+   *   invoice_ct_more_than_je_cash
+   *     → CT total > JE cash leg, but no obvious duplication pattern.
+   *
+   *   invoice_je_more_than_ct
+   *     → JE cash leg > CT total. Rare; usually means the cashbox
+   *       missed recording the receipt.
+   *
+   *   return_je_missing_cashbox_link
+   *     → JE for the return EXISTS and has a cash leg posted to the
+   *       cashbox's GL account, but `journal_lines.cashbox_id` is NULL
+   *       so `v_cashbox_drift_per_ref` can't see it. Wiring fix only
+   *       — the underlying accounting is correct.
+   *
+   *   return_ct_only_no_je
+   *     → CT exists, no JE at all for this reference_id. Real
+   *       missing-posting case; needs a manager-approved adjustment.
+   *
+   *   ref_label_mismatch
+   *     → Same `reference_id` appears in both CT and JE under
+   *       different `reference_type` codes; per-ref view can't pair
+   *       them but they net to zero on the cashbox total.
+   *
+   *   unknown_review_required
+   *     → Catch-all when the data doesn't fit any known pattern.
+   */
+  private async enrichDriftRow(cashboxId: string, row: any): Promise<any> {
+    const refType  = String(row.reference_type ?? '');
+    const refId    = String(row.reference_id ?? '');
+    const ctSigned = Number(row.ct_signed_amount ?? 0);
+    const jeSigned = Number(row.je_signed_amount ?? 0);
+
+    const enrichment: any = {
+      invoice_grand_total: null,
+      invoice_paid_amount: null,
+      invoice_cash_paid: null,
+      invoice_non_cash_paid: null,
+      invoice_payment_breakdown: null,
+      return_total_refund: null,
+      return_refund_method: null,
+      je_exists: false,
+      je_has_cashbox_link: false,
+      expected_cashbox_amount: null,
+      explanation_code: 'unknown_review_required' as string,
+      explanation_ar: 'يحتاج مراجعة يدوية.',
+      recommended_review_action_ar: 'راجع سجلات الفاتورة والقيد يدويًا.',
+    };
+
+    // Always check for any non-void JE on this reference + whether any
+    // of its lines link to the cashbox (directly or via the COA).
+    const [jeRow] = await this.ds.query(
+      `SELECT
+         (SELECT COUNT(*)::int FROM journal_entries
+            WHERE reference_id = $1::uuid AND is_void = FALSE)            AS je_count,
+         (SELECT COUNT(*)::int FROM journal_lines jl
+            JOIN journal_entries je ON je.id = jl.entry_id
+            LEFT JOIN chart_of_accounts coa ON coa.id = jl.account_id
+            WHERE je.reference_id = $1::uuid
+              AND je.is_void = FALSE
+              AND (jl.cashbox_id = $2::uuid OR coa.cashbox_id = $2::uuid))  AS linked_lines`,
+      [refId, cashboxId],
+    );
+    enrichment.je_exists           = (jeRow?.je_count ?? 0) > 0;
+    enrichment.je_has_cashbox_link = (jeRow?.linked_lines ?? 0) > 0;
+
+    // ── Reference-type branch ────────────────────────────────────────
+    if (refType === 'invoice') {
+      const [inv] = await this.ds.query(
+        `SELECT grand_total::text, paid_amount::text, status::text, is_return
+           FROM invoices WHERE id = $1::uuid`,
+        [refId],
+      );
+      if (inv) {
+        enrichment.invoice_grand_total = String(inv.grand_total);
+        enrichment.invoice_paid_amount = String(inv.paid_amount);
+
+        const breakdown = await this.ds.query(
+          `SELECT payment_method::text AS method,
+                  COALESCE(SUM(amount), 0)::text AS amount
+             FROM invoice_payments
+            WHERE invoice_id = $1::uuid
+            GROUP BY payment_method
+            ORDER BY payment_method`,
+          [refId],
+        );
+        enrichment.invoice_payment_breakdown = breakdown;
+        const cashSum = breakdown
+          .filter((b: any) => b.method === 'cash')
+          .reduce((s: number, b: any) => s + Number(b.amount), 0);
+        const nonCashSum = breakdown
+          .filter((b: any) => b.method !== 'cash')
+          .reduce((s: number, b: any) => s + Number(b.amount), 0);
+        enrichment.invoice_cash_paid     = cashSum.toFixed(2);
+        enrichment.invoice_non_cash_paid = nonCashSum.toFixed(2);
+        // The cashbox should hold exactly the cash-paid portion.
+        enrichment.expected_cashbox_amount = cashSum.toFixed(2);
+
+        // Detect the edit-replay duplication pattern: more than 2 rows
+        // total in cashbox_transactions for this invoice on this
+        // cashbox, AND CT > JE cash side.
+        const [ctMix] = await this.ds.query(
+          `SELECT
+             COUNT(*) FILTER (WHERE category::text = 'sale')::int           AS sale_rows,
+             COUNT(*) FILTER (WHERE category::text = 'edit_reversal')::int  AS reversal_rows,
+             COUNT(*) FILTER (WHERE category::text = 'edit_replay')::int    AS replay_rows
+             FROM cashbox_transactions
+            WHERE reference_id = $1::uuid AND cashbox_id = $2::uuid`,
+          [refId, cashboxId],
+        );
+        const hasEditFlow =
+          (ctMix?.reversal_rows ?? 0) > 0 || (ctMix?.replay_rows ?? 0) > 0;
+        // The classic bug: edit happened (so reversal+replay exist) AND
+        // there's more than one `sale`-category row on top.
+        const editReplayDuplicated =
+          hasEditFlow && (ctMix?.sale_rows ?? 0) > 1;
+
+        if (ctSigned > jeSigned + 0.01 && editReplayDuplicated) {
+          enrichment.explanation_code = 'invoice_ct_inflated_by_edit_replay';
+          enrichment.explanation_ar =
+            'الخزنة سجلت دفعات إضافية بسبب تكرار حركات تعديل الفاتورة. ' +
+            'الفاتورة والقيد المحاسبي صحيحان — الزيادة في الخزنة فقط.';
+          enrichment.recommended_review_action_ar =
+            'راجع حركات تعديل الفاتورة على الخزنة، وأبلغ المطور لإصلاح خطأ التكرار. ' +
+            'لا تنشئ قيدًا جديدًا.';
+        } else if (ctSigned > jeSigned + 0.01) {
+          enrichment.explanation_code = 'invoice_ct_more_than_je_cash';
+          enrichment.explanation_ar =
+            'الخزنة سجلت مبلغًا أكبر من الجزء النقدي للقيد. ' +
+            'الفاتورة والقيد قد يكونان صحيحين؛ الفرق ناتج عن حركات إضافية على الخزنة.';
+          enrichment.recommended_review_action_ar =
+            'افحص حركات الخزنة المرتبطة بالفاتورة قبل أي تسوية يدوية.';
+        } else if (jeSigned > ctSigned + 0.01) {
+          enrichment.explanation_code = 'invoice_je_more_than_ct';
+          enrichment.explanation_ar =
+            'القيد المحاسبي يحمل مبلغًا أكبر من المسجل في الخزنة. ' +
+            'قد تكون الخزنة لم تسجل بعض الإيصالات.';
+          enrichment.recommended_review_action_ar =
+            'تحقق من كون الإيصال النقدي قد سُجل في الخزنة.';
+        }
+      }
+    } else if (refType === 'return') {
+      const [ret] = await this.ds.query(
+        `SELECT total_refund::text, refund_method::text
+           FROM returns WHERE id = $1::uuid`,
+        [refId],
+      );
+      if (ret) {
+        enrichment.return_total_refund  = String(ret.total_refund);
+        enrichment.return_refund_method = String(ret.refund_method);
+        // Refund leaves the cashbox → expected = -total_refund.
+        enrichment.expected_cashbox_amount = (-Number(ret.total_refund)).toFixed(2);
+      }
+      if (enrichment.je_exists && !enrichment.je_has_cashbox_link) {
+        // The exact pattern observed in production: refund JE posts to
+        // the cashbox's GL account but `journal_lines.cashbox_id` is
+        // NULL, so the per-ref view can't pair it with the cashbox.
+        enrichment.explanation_code = 'return_je_missing_cashbox_link';
+        enrichment.explanation_ar =
+          'القيد المحاسبي للمرتجع موجود وصحيح، لكن سطر النقد لا يحمل ' +
+          'معرف الخزنة. الفرق ناتج عن ربط الخزنة على القيد فقط.';
+        enrichment.recommended_review_action_ar =
+          'اطلب من المحاسب ضبط ربط الخزنة على سطر النقد في القيد. ' +
+          'لا تحتاج قيدًا جديدًا.';
+      } else if (!enrichment.je_exists && row.coverage === 'CT_only') {
+        enrichment.explanation_code = 'return_ct_only_no_je';
+        enrichment.explanation_ar =
+          'لا يوجد قيد محاسبي للمرتجع على هذه الخزنة.';
+        enrichment.recommended_review_action_ar =
+          'أنشئ قيد المرتجع المحاسبي بعد موافقة المدير.';
+      }
+    }
+
+    return { ...row, ...enrichment };
   }
 
   async shiftVariances() {

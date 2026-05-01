@@ -2403,7 +2403,14 @@ describe('CashDeskService.getDriftDetail — PR-FIN-PAYACCT-4D-REPORTS-1A', () =
     const service = moduleRef.get(CashDeskService);
 
     const out = await service.getDriftDetail(CASHBOX_ID);
-    expect(out).toEqual({ cashbox: cashboxHeader, rows, totals: totalsRow });
+    // PR-FIN-PAYACCT-4D-REPORTS-1A-UX-FIX-2 — `rows` are now enriched
+    // with explanation fields. Use `toMatchObject` so the original
+    // base-row shape passes regardless of new enrichment fields.
+    expect(out).toMatchObject({ cashbox: cashboxHeader, totals: totalsRow });
+    expect(out.rows).toHaveLength(rows.length);
+    rows.forEach((r: any, i: number) => {
+      expect(out.rows[i]).toMatchObject(r);
+    });
     // Per-ref totals.total_drift sums to the cashbox-level gl_drift in this fixture.
     expect(out.totals.total_drift).toBe('250.00');
     expect(out.cashbox?.gl_drift).toBe('250.00');
@@ -2442,6 +2449,267 @@ describe('CashDeskService.getDriftDetail — PR-FIN-PAYACCT-4D-REPORTS-1A', () =
     await service.getDriftDetail(CASHBOX_ID);
 
     expect(calls[1].sql).toMatch(/ORDER BY ABS\(pr\.drift_amount::numeric\) DESC,\s*pr\.last_seen_at DESC NULLS LAST/);
+  });
+
+  // ─── PR-FIN-PAYACCT-4D-REPORTS-1A-UX-FIX-2 ──────────────────────────
+  // Per-row explanation enrichment. Production audit found two patterns
+  // driving the +250→-250 cashbox drift:
+  //   1. INV-2026-000147 / INV-2026-000116: cashbox_transactions
+  //      duplicated `sale` rows alongside the edit_reversal/edit_replay
+  //      pair (POS edit-flow bug). CT > JE cash leg.
+  //   2. RET-2026-000002/3/4: refund JE EXISTS with cash leg posted to
+  //      the cashbox's GL account (1111), but `journal_lines.cashbox_id`
+  //      is NULL → `v_cashbox_drift_per_ref` can't pair it with the
+  //      cashbox, so the per-ref view shows `coverage='CT_only'` even
+  //      though the JE is correct.
+  describe('PR-FIN-PAYACCT-4D-REPORTS-1A-UX-FIX-2 explanation enrichment', () => {
+    function buildHeader() {
+      return [{
+        id: CASHBOX_ID, name: 'الخزينة الرئيسية', kind: 'cash', is_active: true,
+        stored_balance: '30475.00', gl_net: '30725.00', gl_drift: '-250.00',
+      }];
+    }
+    function buildTotals() {
+      return [{ count: 1, total_ct: '0', total_je: '0', total_drift: '-250.00' }];
+    }
+
+    it('invoice_ct_inflated_by_edit_replay: CT > JE cash AND duplicated `sale` rows alongside edit pair', async () => {
+      const invoiceRefId = '61017528-7377-4691-9711-6f7f9bafe5b7';
+      const { dsObj } = makeServiceWithQueue([
+        buildHeader(),
+        // 1 row in the per-ref view: invoice with CT 1050, JE 350
+        [{
+          cashbox_id: CASHBOX_ID, cashbox_name: 'الخزينة الرئيسية',
+          reference_type: 'invoice', reference_id: invoiceRefId,
+          coverage: 'both', ct_count: 5, je_line_count: 1,
+          ct_signed_amount: '1050.00', je_signed_amount: '350.00',
+          drift_amount: '700.00',
+          first_seen_at: '2026-04-30T13:24:33Z', last_seen_at: '2026-04-30T14:15:09Z',
+          sample_entry_no: 'JE-2026-000333', reference_no: 'INV-2026-000147',
+        }],
+        buildTotals(),
+        // Enrichment query #1: je_count + linked_lines for the invoice ref
+        [{ je_count: 1, linked_lines: 1 }],
+        // Enrichment query #2: invoice header
+        [{ grand_total: '625', paid_amount: '350', status: 'paid', is_return: false }],
+        // Enrichment query #3: invoice_payments breakdown — cash 350
+        [{ method: 'cash', amount: '350.00' }],
+        // Enrichment query #4: cashbox_transactions category mix —
+        // 3 sale + 1 reversal + 1 replay (the production duplication
+        // pattern that triggers `invoice_ct_inflated_by_edit_replay`).
+        [{ sale_rows: 3, reversal_rows: 1, replay_rows: 1 }],
+      ]);
+      const moduleRef = await Test.createTestingModule({
+        providers: [CashDeskService, { provide: DataSource, useValue: dsObj }],
+      }).compile();
+      const service = moduleRef.get(CashDeskService);
+
+      const out = await service.getDriftDetail(CASHBOX_ID);
+      expect(out.rows).toHaveLength(1);
+      const r = out.rows[0];
+      expect(r.invoice_grand_total).toBe('625');
+      expect(r.invoice_paid_amount).toBe('350');
+      expect(r.invoice_cash_paid).toBe('350.00');
+      expect(r.invoice_non_cash_paid).toBe('0.00');
+      expect(r.expected_cashbox_amount).toBe('350.00');
+      expect(r.je_exists).toBe(true);
+      expect(r.je_has_cashbox_link).toBe(true);
+      expect(r.explanation_code).toBe('invoice_ct_inflated_by_edit_replay');
+      expect(r.explanation_ar).toMatch(/تكرار حركات تعديل الفاتورة/);
+      expect(r.recommended_review_action_ar).toMatch(/راجع حركات تعديل الفاتورة/);
+      expect(r.recommended_review_action_ar).not.toMatch(/أنشئ قيدًا/);
+    });
+
+    it('invoice_ct_more_than_je_cash: CT > JE cash but NO edit-flow duplication signal', async () => {
+      const { dsObj } = makeServiceWithQueue([
+        buildHeader(),
+        [{
+          cashbox_id: CASHBOX_ID, cashbox_name: 'X',
+          reference_type: 'invoice', reference_id: 'inv-X',
+          coverage: 'both', ct_count: 1, je_line_count: 1,
+          ct_signed_amount: '500.00', je_signed_amount: '300.00',
+          drift_amount: '200.00',
+          first_seen_at: null, last_seen_at: null,
+          sample_entry_no: 'JE-X', reference_no: 'INV-X',
+        }],
+        buildTotals(),
+        // je exists + linked
+        [{ je_count: 1, linked_lines: 1 }],
+        // invoice header
+        [{ grand_total: '500', paid_amount: '300', status: 'paid', is_return: false }],
+        // payments — all cash 300 (no breakdown irregularity)
+        [{ method: 'cash', amount: '300.00' }],
+        // CT mix — single sale, no edit pair → not the duplicate-pattern.
+        [{ sale_rows: 1, reversal_rows: 0, replay_rows: 0 }],
+      ]);
+      const moduleRef = await Test.createTestingModule({
+        providers: [CashDeskService, { provide: DataSource, useValue: dsObj }],
+      }).compile();
+      const service = moduleRef.get(CashDeskService);
+
+      const out = await service.getDriftDetail(CASHBOX_ID);
+      const r = out.rows[0];
+      expect(r.explanation_code).toBe('invoice_ct_more_than_je_cash');
+      expect(r.explanation_ar).toMatch(/مبلغًا أكبر من الجزء النقدي للقيد/);
+    });
+
+    it('invoice_je_more_than_ct: JE cash > CT', async () => {
+      const { dsObj } = makeServiceWithQueue([
+        buildHeader(),
+        [{
+          cashbox_id: CASHBOX_ID, cashbox_name: 'X',
+          reference_type: 'invoice', reference_id: 'inv-Y',
+          coverage: 'both', ct_count: 1, je_line_count: 1,
+          ct_signed_amount: '100.00', je_signed_amount: '300.00',
+          drift_amount: '-200.00',
+          first_seen_at: null, last_seen_at: null,
+          sample_entry_no: 'JE-Y', reference_no: 'INV-Y',
+        }],
+        buildTotals(),
+        [{ je_count: 1, linked_lines: 1 }],
+        [{ grand_total: '300', paid_amount: '300', status: 'paid', is_return: false }],
+        [{ method: 'cash', amount: '300.00' }],
+        [{ sale_rows: 1, reversal_rows: 0, replay_rows: 0 }],
+      ]);
+      const moduleRef = await Test.createTestingModule({
+        providers: [CashDeskService, { provide: DataSource, useValue: dsObj }],
+      }).compile();
+      const service = moduleRef.get(CashDeskService);
+
+      const out = await service.getDriftDetail(CASHBOX_ID);
+      const r = out.rows[0];
+      expect(r.explanation_code).toBe('invoice_je_more_than_ct');
+      expect(r.explanation_ar).toMatch(/القيد المحاسبي يحمل مبلغًا أكبر/);
+    });
+
+    it('return_je_missing_cashbox_link: JE exists but no line links to the cashbox (the production refund pattern)', async () => {
+      const returnRefId = 'b65e0e45-09b8-44ce-987a-a67c9dcd9e4f';
+      const { dsObj } = makeServiceWithQueue([
+        buildHeader(),
+        [{
+          cashbox_id: CASHBOX_ID, cashbox_name: 'الخزينة الرئيسية',
+          reference_type: 'return', reference_id: returnRefId,
+          coverage: 'CT_only', ct_count: 1, je_line_count: 0,
+          ct_signed_amount: '-350.00', je_signed_amount: '0',
+          drift_amount: '-350.00',
+          first_seen_at: '2026-05-01T16:44:36Z', last_seen_at: '2026-05-01T16:44:36Z',
+          sample_entry_no: null, reference_no: null,
+        }],
+        buildTotals(),
+        // Enrichment: JE exists for this reference_id (count=1) but
+        // ZERO lines link to the cashbox — that's the wiring bug.
+        [{ je_count: 1, linked_lines: 0 }],
+        // Return header lookup
+        [{ total_refund: '350', refund_method: 'cash' }],
+      ]);
+      const moduleRef = await Test.createTestingModule({
+        providers: [CashDeskService, { provide: DataSource, useValue: dsObj }],
+      }).compile();
+      const service = moduleRef.get(CashDeskService);
+
+      const out = await service.getDriftDetail(CASHBOX_ID);
+      const r = out.rows[0];
+      expect(r.je_exists).toBe(true);
+      expect(r.je_has_cashbox_link).toBe(false);
+      expect(r.return_total_refund).toBe('350');
+      expect(r.return_refund_method).toBe('cash');
+      expect(r.expected_cashbox_amount).toBe('-350.00');
+      expect(r.explanation_code).toBe('return_je_missing_cashbox_link');
+      expect(r.explanation_ar).toMatch(/سطر النقد لا يحمل معرف الخزنة/);
+      expect(r.recommended_review_action_ar).toMatch(/ضبط ربط الخزنة/);
+      // Operator MUST NOT be told to create a new JE for this case.
+      expect(r.recommended_review_action_ar).not.toMatch(/أنشئ قيد/);
+    });
+
+    it('return_ct_only_no_je: CT exists, NO journal entry at all', async () => {
+      const { dsObj } = makeServiceWithQueue([
+        buildHeader(),
+        [{
+          cashbox_id: CASHBOX_ID, cashbox_name: 'X',
+          reference_type: 'return', reference_id: 'ret-Z',
+          coverage: 'CT_only', ct_count: 1, je_line_count: 0,
+          ct_signed_amount: '-100.00', je_signed_amount: '0',
+          drift_amount: '-100.00',
+          first_seen_at: null, last_seen_at: null,
+          sample_entry_no: null, reference_no: null,
+        }],
+        buildTotals(),
+        // No JE for this reference — nor any cashbox link.
+        [{ je_count: 0, linked_lines: 0 }],
+        [{ total_refund: '100', refund_method: 'cash' }],
+      ]);
+      const moduleRef = await Test.createTestingModule({
+        providers: [CashDeskService, { provide: DataSource, useValue: dsObj }],
+      }).compile();
+      const service = moduleRef.get(CashDeskService);
+
+      const out = await service.getDriftDetail(CASHBOX_ID);
+      const r = out.rows[0];
+      expect(r.je_exists).toBe(false);
+      expect(r.explanation_code).toBe('return_ct_only_no_je');
+      expect(r.recommended_review_action_ar).toMatch(/أنشئ قيد المرتجع المحاسبي بعد موافقة المدير/);
+    });
+
+    it('falls back to unknown_review_required when ref type is neither invoice nor return', async () => {
+      const { dsObj } = makeServiceWithQueue([
+        buildHeader(),
+        [{
+          cashbox_id: CASHBOX_ID, cashbox_name: 'X',
+          reference_type: 'shift', reference_id: 'sh-1',
+          coverage: 'CT_only', ct_count: 1, je_line_count: 0,
+          ct_signed_amount: '-7.00', je_signed_amount: '0',
+          drift_amount: '-7.00',
+          first_seen_at: null, last_seen_at: null,
+          sample_entry_no: null, reference_no: null,
+        }],
+        buildTotals(),
+        // je_count + linked
+        [{ je_count: 0, linked_lines: 0 }],
+      ]);
+      const moduleRef = await Test.createTestingModule({
+        providers: [CashDeskService, { provide: DataSource, useValue: dsObj }],
+      }).compile();
+      const service = moduleRef.get(CashDeskService);
+
+      const out = await service.getDriftDetail(CASHBOX_ID);
+      const r = out.rows[0];
+      expect(r.explanation_code).toBe('unknown_review_required');
+      expect(r.je_exists).toBe(false);
+      expect(r.je_has_cashbox_link).toBe(false);
+    });
+
+    it('enrichment SQL is read-only — every emitted query is a SELECT/CTE', async () => {
+      const invoiceRefId = '61017528-7377-4691-9711-6f7f9bafe5b7';
+      const { dsObj, calls } = makeServiceWithQueue([
+        buildHeader(),
+        [{
+          cashbox_id: CASHBOX_ID, cashbox_name: 'X',
+          reference_type: 'invoice', reference_id: invoiceRefId,
+          coverage: 'both', ct_count: 5, je_line_count: 1,
+          ct_signed_amount: '1050', je_signed_amount: '350', drift_amount: '700',
+          first_seen_at: null, last_seen_at: null,
+          sample_entry_no: 'JE-X', reference_no: 'INV-X',
+        }],
+        buildTotals(),
+        [{ je_count: 1, linked_lines: 1 }],
+        [{ grand_total: '625', paid_amount: '350', status: 'paid', is_return: false }],
+        [{ method: 'cash', amount: '350' }],
+        [{ sale_rows: 3, reversal_rows: 1, replay_rows: 1 }],
+      ]);
+      const moduleRef = await Test.createTestingModule({
+        providers: [CashDeskService, { provide: DataSource, useValue: dsObj }],
+      }).compile();
+      const service = moduleRef.get(CashDeskService);
+
+      await service.getDriftDetail(CASHBOX_ID);
+      expect(calls.length).toBeGreaterThan(3); // base 3 + enrichment
+      for (const c of calls) {
+        expect(c.sql).toMatch(/^\s*(SELECT|WITH)\b/i);
+        expect(c.sql).not.toMatch(/\bINSERT\b/i);
+        expect(c.sql).not.toMatch(/\bUPDATE\b/i);
+        expect(c.sql).not.toMatch(/\bDELETE\b/i);
+      }
+    });
   });
 });
 

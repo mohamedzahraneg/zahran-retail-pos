@@ -532,4 +532,184 @@ describe('CashboxDriftDetailPanel — PR-FIN-PAYACCT-4D-REPORTS-1A', () => {
       expect(onClose).toHaveBeenCalledTimes(1);
     });
   });
+
+  // ─── PR-FIN-PAYACCT-4D-REPORTS-1A-UX-FIX-2 ─────────────────────────
+  // Per-row "شرح السبب" expandable. Verifies that the BE-supplied
+  // enrichment fields render correctly for each explanation_code, with
+  // payment-method chips for invoices and JE-link diagnostic for
+  // returns. Defense-in-depth: NO action buttons appear in the body.
+  describe('PR-FIN-PAYACCT-4D-REPORTS-1A-UX-FIX-2 شرح السبب per row', () => {
+    const INV_REF = '61017528-7377-4691-9711-6f7f9bafe5b7';
+    const RET_REF = 'b65e0e45-09b8-44ce-987a-a67c9dcd9e4f';
+    const ENRICHED_FIXTURE = {
+      cashbox: {
+        id: CASHBOX_ID, name: 'الخزينة الرئيسية',
+        kind: 'cash' as const, is_active: true,
+        stored_balance: '30475.00', gl_net: '30725.00', gl_drift: '-250.00',
+      },
+      rows: [
+        // INV-2026-000147 with edit-replay duplication
+        {
+          cashbox_id: CASHBOX_ID, cashbox_name: 'الخزينة الرئيسية',
+          reference_type: 'invoice', reference_id: INV_REF,
+          reference_no: 'INV-2026-000147',
+          coverage: 'both' as const, ct_count: 5, je_line_count: 1,
+          ct_signed_amount: '1050.00', je_signed_amount: '350.00',
+          drift_amount: '700.00',
+          first_seen_at: '2026-04-30T13:24:33Z', last_seen_at: '2026-04-30T14:15:09Z',
+          sample_entry_no: 'JE-2026-000333',
+          // UX-FIX-2 enrichment
+          invoice_grand_total: '625', invoice_paid_amount: '350',
+          invoice_cash_paid: '350.00', invoice_non_cash_paid: '0.00',
+          invoice_payment_breakdown: [
+            { method: 'cash', amount: '350.00' },
+          ],
+          return_total_refund: null, return_refund_method: null,
+          je_exists: true, je_has_cashbox_link: true,
+          expected_cashbox_amount: '350.00',
+          explanation_code: 'invoice_ct_inflated_by_edit_replay' as const,
+          explanation_ar:
+            'الخزنة سجلت دفعات إضافية بسبب تكرار حركات تعديل الفاتورة. ' +
+            'الفاتورة والقيد المحاسبي صحيحان — الزيادة في الخزنة فقط.',
+          recommended_review_action_ar:
+            'راجع حركات تعديل الفاتورة على الخزنة، وأبلغ المطور لإصلاح خطأ التكرار. ' +
+            'لا تنشئ قيدًا جديدًا.',
+        },
+        // RET with JE missing cashbox link
+        {
+          cashbox_id: CASHBOX_ID, cashbox_name: 'الخزينة الرئيسية',
+          reference_type: 'return', reference_id: RET_REF,
+          reference_no: null,
+          coverage: 'CT_only' as const, ct_count: 1, je_line_count: 0,
+          ct_signed_amount: '-350.00', je_signed_amount: '0',
+          drift_amount: '-350.00',
+          first_seen_at: '2026-05-01T16:44:36Z', last_seen_at: '2026-05-01T16:44:36Z',
+          sample_entry_no: null,
+          invoice_grand_total: null, invoice_paid_amount: null,
+          invoice_cash_paid: null, invoice_non_cash_paid: null,
+          invoice_payment_breakdown: null,
+          return_total_refund: '350', return_refund_method: 'cash',
+          je_exists: true, je_has_cashbox_link: false,
+          expected_cashbox_amount: '-350.00',
+          explanation_code: 'return_je_missing_cashbox_link' as const,
+          explanation_ar:
+            'القيد المحاسبي للمرتجع موجود وصحيح، لكن سطر النقد لا يحمل ' +
+            'معرف الخزنة. الفرق ناتج عن ربط الخزنة على القيد فقط.',
+          recommended_review_action_ar:
+            'اطلب من المحاسب ضبط ربط الخزنة على سطر النقد في القيد. ' +
+            'لا تحتاج قيدًا جديدًا.',
+        },
+      ],
+      totals: { count: 2, total_ct: '700.00', total_je: '350.00', total_drift: '350.00' },
+    };
+
+    it('renders an expandable شرح السبب row beneath each contributing row that has an explanation', async () => {
+      (cashDeskApi.driftDetail as any).mockResolvedValue(ENRICHED_FIXTURE);
+      renderPanel();
+      await screen.findByTestId(`cashbox-drift-detail-row-invoice-${INV_REF}`);
+      // Both contributors have explanation rows.
+      expect(
+        screen.getByTestId(`cashbox-drift-detail-explanation-invoice-${INV_REF}`),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByTestId(`cashbox-drift-detail-explanation-return-${RET_REF}`),
+      ).toBeInTheDocument();
+    });
+
+    it('invoice row: explanation body shows headline + Arabic text + numeric stats + payment-method chip', async () => {
+      (cashDeskApi.driftDetail as any).mockResolvedValue(ENRICHED_FIXTURE);
+      renderPanel();
+      const body = await screen.findByTestId(
+        `cashbox-drift-detail-explanation-body-invoice-${INV_REF}`,
+      );
+      // Headline pinned to the explanation_code.
+      expect(body.textContent).toMatch(/تكرار حركات تعديل الفاتورة في الخزنة/);
+      // BE Arabic phrase rendered verbatim.
+      expect(
+        within(body).getByTestId(
+          `cashbox-drift-detail-explanation-text-invoice-${INV_REF}`,
+        ).textContent,
+      ).toMatch(/تكرار حركات تعديل الفاتورة/);
+      // Invoice numeric stats grid renders.
+      const stats = within(body).getByTestId(
+        `cashbox-drift-detail-invoice-stats-${INV_REF}`,
+      );
+      expect(stats.textContent).toMatch(/إجمالي الفاتورة/);
+      expect(stats.textContent).toMatch(/المدفوع نقدًا/);
+      expect(stats.textContent).toMatch(/المسجل في الخزنة/);
+      expect(stats.textContent).toMatch(/المتوقع في الخزنة/);
+      // Payment-method chip(s).
+      const breakdown = within(body).getByTestId(
+        `cashbox-drift-detail-invoice-breakdown-${INV_REF}`,
+      );
+      expect(
+        within(breakdown).getByTestId(
+          `cashbox-drift-detail-invoice-method-${INV_REF}-cash`,
+        ),
+      ).toBeInTheDocument();
+      // Recommended review action visible.
+      const rec = within(body).getByTestId(
+        `cashbox-drift-detail-recommendation-invoice-${INV_REF}`,
+      );
+      expect(rec.textContent).toMatch(/إجراء المراجعة المقترح/);
+      expect(rec.textContent).toMatch(/راجع حركات تعديل الفاتورة/);
+    });
+
+    it('return row: explanation body shows refund stats + JE-link diagnostic + "no new JE" recommendation', async () => {
+      (cashDeskApi.driftDetail as any).mockResolvedValue(ENRICHED_FIXTURE);
+      renderPanel();
+      const body = await screen.findByTestId(
+        `cashbox-drift-detail-explanation-body-return-${RET_REF}`,
+      );
+      expect(body.textContent).toMatch(/القيد موجود لكن سطر النقد لا يحمل معرف الخزنة/);
+      const stats = within(body).getByTestId(
+        `cashbox-drift-detail-return-stats-${RET_REF}`,
+      );
+      expect(stats.textContent).toMatch(/إجمالي المرتجع/);
+      expect(stats.textContent).toMatch(/وسيلة الاسترداد/);
+      expect(stats.textContent).toMatch(/هل يوجد قيد محاسبي\؟/);
+      expect(stats.textContent).toMatch(/هل القيد مرتبط بالخزنة\؟/);
+      // The diagnostic value: je_exists=true (نعم), je_has_cashbox_link=false (لا)
+      expect(stats.textContent).toMatch(/نعم/);
+      expect(stats.textContent).toMatch(/لا/);
+      // Recommendation explicitly says NOT to create a new JE.
+      const rec = within(body).getByTestId(
+        `cashbox-drift-detail-recommendation-return-${RET_REF}`,
+      );
+      expect(rec.textContent).toMatch(/ضبط ربط الخزنة/);
+      expect(rec.textContent).toMatch(/لا تحتاج قيدًا/);
+    });
+
+    it('does NOT render the explanation row when explanation_code is missing or unknown_review_required', async () => {
+      const FIXTURE_NO_EXPL = {
+        ...ENRICHED_FIXTURE,
+        rows: [
+          {
+            ...ENRICHED_FIXTURE.rows[0],
+            explanation_code: 'unknown_review_required' as const,
+          },
+        ],
+      };
+      (cashDeskApi.driftDetail as any).mockResolvedValue(FIXTURE_NO_EXPL);
+      renderPanel();
+      await screen.findByTestId(`cashbox-drift-detail-row-invoice-${INV_REF}`);
+      expect(
+        screen.queryByTestId(`cashbox-drift-detail-explanation-invoice-${INV_REF}`),
+      ).toBeNull();
+    });
+
+    it('defense-in-depth: explanation body never contains an action <button> (read-only by construction)', async () => {
+      (cashDeskApi.driftDetail as any).mockResolvedValue(ENRICHED_FIXTURE);
+      renderPanel();
+      const body = await screen.findByTestId(
+        `cashbox-drift-detail-explanation-body-invoice-${INV_REF}`,
+      );
+      // No <button> element inside the explanation body.
+      expect(body.querySelectorAll('button').length).toBe(0);
+      // No action testids.
+      expect(within(body).queryByTestId('cashbox-drift-detail-fix-now')).toBeNull();
+      expect(within(body).queryByTestId('cashbox-drift-detail-auto-settle')).toBeNull();
+      expect(within(body).queryByTestId('cashbox-drift-detail-correct')).toBeNull();
+    });
+  });
 });
