@@ -177,6 +177,67 @@ export interface CashboxMovementsUnifiedResponse {
   };
 }
 
+/**
+ * PR-FIN-PAYACCT-4D-REPORTS-1A — coverage flag from
+ * `v_cashbox_drift_per_ref`. Indicates whether the per-reference
+ * row appears in `cashbox_transactions` only, `journal_lines` only,
+ * or both (with a numeric difference).
+ */
+export type CashboxDriftCoverage = 'CT_only' | 'JE_only' | 'both';
+
+/**
+ * PR-FIN-PAYACCT-4D-REPORTS-1A — one row of the per-reference drift
+ * drilldown. Money columns arrive as PG-numeric strings to preserve
+ * precision (formatted on the FE with EGP). Read-only.
+ */
+export interface CashboxDriftDetailRow {
+  cashbox_id: string;
+  cashbox_name: string;
+  reference_type: string;
+  reference_id: string;
+  /** Resolved invoice_no / payment_no / expense_no / purchase_no. Null for shifts/other refs. */
+  reference_no: string | null;
+  coverage: CashboxDriftCoverage;
+  ct_count: number;
+  je_line_count: number;
+  ct_signed_amount: string;
+  je_signed_amount: string;
+  drift_amount: string;
+  first_seen_at: string | null;
+  last_seen_at: string | null;
+  /** A representative entry_no from `journal_entries` (if any JE side). */
+  sample_entry_no: string | null;
+}
+
+/**
+ * PR-FIN-PAYACCT-4D-REPORTS-1A — full drift-detail response.
+ *   • `cashbox`  → matching `v_cashbox_gl_drift` row, or null when the
+ *                  cashbox isn't in the view yet.
+ *   • `rows`     → contributing references with `ABS(drift) > 0.01`,
+ *                  ordered by ABS(drift) DESC.
+ *   • `totals`   → signed sums + count over the same filter — the FE
+ *                  can compare `totals.total_drift` to
+ *                  `cashbox.gl_drift` to verify the breakdown sums.
+ */
+export interface CashboxDriftDetailResponse {
+  cashbox: {
+    id: string;
+    name: string;
+    kind: CashboxKind;
+    is_active: boolean;
+    stored_balance: string;
+    gl_net: string;
+    gl_drift: string;
+  } | null;
+  rows: CashboxDriftDetailRow[];
+  totals: {
+    count: number;
+    total_ct: string;
+    total_je: string;
+    total_drift: string;
+  };
+}
+
 export interface CashboxMovement {
   id: string;
   cashbox_id: string;
@@ -410,6 +471,17 @@ export const cashDeskApi = {
           offset: filter.offset,
         },
       }),
+    ),
+
+  // PR-FIN-PAYACCT-4D-REPORTS-1A — read-only per-reference drilldown
+  // for a single cashbox's stored vs GL drift. Returns the cashbox-
+  // level header (from `v_cashbox_gl_drift`) plus every contributing
+  // reference (from `v_cashbox_drift_per_ref`) with non-zero drift,
+  // plus signed-sum totals over the same filter. Pure SELECT — the
+  // BE method is `getDriftDetail` and contains no INSERT/UPDATE/DELETE.
+  driftDetail: (cashboxId: string) =>
+    unwrap<CashboxDriftDetailResponse>(
+      api.get(`/cash-desk/cashboxes/${cashboxId}/drift-detail`),
     ),
 
   // Customer receipts

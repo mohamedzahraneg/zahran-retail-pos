@@ -54,6 +54,7 @@ import {
   SMART_RANGE_LABELS_AR,
   type SmartRangeKey,
 } from '@/lib/smart-date-range';
+import { CashboxDriftDetailPanel } from './CashboxDriftDetailPanel';
 
 const EGP = (n: number | string) =>
   `${Number(n || 0).toLocaleString('en-US', {
@@ -158,6 +159,11 @@ export function CashboxDetailsModal({
     () => drifts.find((d) => d.cashbox_id === cashbox.id) ?? null,
     [drifts, cashbox.id],
   );
+
+  // PR-FIN-PAYACCT-4D-REPORTS-1A — inline drilldown toggle. The panel
+  // only mounts (and only fires its query) when the operator opens it,
+  // so the modal's default render cost is unchanged.
+  const [showDriftDetail, setShowDriftDetail] = useState(false);
 
   function clearFilters() {
     setRangeKey('month');
@@ -326,12 +332,32 @@ export function CashboxDetailsModal({
                   >
                     هذه قراءة فقط؛ لا يتم إجراء أي تسوية تلقائية.
                   </div>
+                  {/* PR-FIN-PAYACCT-4D-REPORTS-1A — drilldown toggle.
+                      Only rendered when there's a real gap to investigate;
+                      the matched-state card stays minimal. */}
+                  {hasGap && !showDriftDetail && (
+                    <button
+                      type="button"
+                      onClick={() => setShowDriftDetail(true)}
+                      className="text-[11px] px-3 py-1.5 rounded bg-rose-600 hover:bg-rose-700 text-white font-bold inline-flex items-center gap-1"
+                      data-testid="cashbox-details-drift-show-report"
+                    >
+                      عرض تقرير الفجوة
+                    </button>
+                  )}
                 </div>
               );
             })() : (
               <div className="text-[11px] text-slate-500">
                 لا توجد بيانات فروق متاحة لهذه الخزنة.
               </div>
+            )}
+            {/* PR-FIN-PAYACCT-4D-REPORTS-1A — inline read-only drilldown. */}
+            {showDriftDetail && (
+              <CashboxDriftDetailPanel
+                cashboxId={cashbox.id}
+                onClose={() => setShowDriftDetail(false)}
+              />
             )}
           </div>
         </div>

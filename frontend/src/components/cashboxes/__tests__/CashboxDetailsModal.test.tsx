@@ -478,4 +478,56 @@ describe('<CashboxDetailsModal /> — PR-FIN-PAYACCT-4D-UX-FIX-4', () => {
       expect(screen.getByText(/لا توجد بيانات فروق متاحة لهذه الخزنة/)).toBeInTheDocument();
     });
   });
+
+  // ─── PR-FIN-PAYACCT-4D-REPORTS-1A ─────────────────────────────────
+  // Pin the wiring of the drilldown button into the drift card:
+  //   • "عرض تقرير الفجوة" button renders ONLY when there's a real gap.
+  //   • Clicking it mounts the drilldown panel beneath the card.
+  //   • The matched-state card never shows the button.
+  describe('PR-FIN-PAYACCT-4D-REPORTS-1A drift drilldown button', () => {
+    const PROD_DRIFT: CashboxGlDrift = {
+      cashbox_id: 'cb-cash-1', cashbox_name: 'الخزينة الرئيسية',
+      kind: 'cash', is_active: true,
+      stored_balance: '29800.00',
+      gl_total_dr: '36043.00', gl_total_cr: '6493.00', gl_net: '29550.00',
+      drift_amount: '250.00',
+    };
+
+    it('renders the "عرض تقرير الفجوة" button when |drift| > 0.01', async () => {
+      movementsUnifiedMock.mockResolvedValue({
+        rows: [], total: 0, totals: { in: '0', out: '0', net: '0', count: 0 },
+      });
+      renderModal({ drifts: [PROD_DRIFT] });
+      const btn = await screen.findByTestId('cashbox-details-drift-show-report');
+      expect(btn.textContent?.trim()).toBe('عرض تقرير الفجوة');
+    });
+
+    it('does NOT render the button when |drift| ≤ 0.01 (matched state)', async () => {
+      movementsUnifiedMock.mockResolvedValue({
+        rows: [], total: 0, totals: { in: '0', out: '0', net: '0', count: 0 },
+      });
+      const matched: CashboxGlDrift = {
+        ...PROD_DRIFT,
+        stored_balance: '29550.00',
+        gl_net: '29550.00',
+        drift_amount: '0.00',
+      };
+      renderModal({ drifts: [matched] });
+      // Card present (matched green state) — but no drilldown button.
+      await screen.findByTestId('cashbox-details-drift');
+      expect(
+        screen.queryByTestId('cashbox-details-drift-show-report'),
+      ).toBeNull();
+    });
+
+    it('does NOT render the button when there is no drift data at all', async () => {
+      movementsUnifiedMock.mockResolvedValue({
+        rows: [], total: 0, totals: { in: '0', out: '0', net: '0', count: 0 },
+      });
+      renderModal({ drifts: [] });
+      expect(
+        screen.queryByTestId('cashbox-details-drift-show-report'),
+      ).toBeNull();
+    });
+  });
 });

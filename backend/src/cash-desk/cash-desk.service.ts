@@ -1293,6 +1293,120 @@ export class CashDeskService {
     `);
   }
 
+  /**
+   * PR-FIN-PAYACCT-4D-REPORTS-1A — per-reference drilldown for a single
+   * cashbox's stored vs GL drift. Surfaces every contributing
+   * `(reference_type, reference_id)` bucket that explains the
+   * `v_cashbox_gl_drift.drift_amount` for the cashbox.
+   *
+   * Strictly read-only:
+   *   • Pure SELECT against `v_cashbox_drift_per_ref` (the existing
+   *     per-reference view) and `v_cashbox_gl_drift` (cashbox-level).
+   *   • LEFT JOINs to `invoices`, `expenses`, `customer_payments`,
+   *     `supplier_payments`, `purchases` to enrich `reference_no` —
+   *     mirrors the same enrichment pattern used in
+   *     `cashboxMovementsUnified`.
+   *   • Filters out 0-drift rows (`ABS(drift_amount) > 0.01`) so the
+   *     operator only sees real contributors.
+   *   • No INSERT/UPDATE/DELETE anywhere in this method or the view.
+   *
+   * Returns:
+   *   {
+   *     cashbox: { id, name, gl_drift, stored_balance, gl_net } | null,
+   *     rows: Array<{...per-ref drilldown...}>,
+   *     totals: { count, total_ct, total_je, total_drift }
+   *   }
+   *
+   * The caller can compare `totals.total_drift` to
+   * `cashbox.gl_drift` to verify the per-ref breakdown sums to the
+   * cashbox-level drift; small deltas are expected when 0-drift refs
+   * are filtered out (label-mismatch pairs cancel each other out at
+   * the cashbox total but appear as paired rows in the per-ref view).
+   */
+  async getDriftDetail(cashboxId: string) {
+    // 1. Cashbox-level drift snapshot for the header. Returns null if
+    //    the cashbox isn't in the view (e.g. has no GL postings yet).
+    const [cashboxRow] = await this.ds.query(
+      `SELECT cashbox_id::text       AS id,
+              cashbox_name           AS name,
+              kind::text             AS kind,
+              is_active              AS is_active,
+              stored_balance::text   AS stored_balance,
+              gl_net::text           AS gl_net,
+              drift_amount::text     AS gl_drift
+         FROM v_cashbox_gl_drift
+        WHERE cashbox_id = $1::uuid`,
+      [cashboxId],
+    );
+
+    // 2. Per-reference rows that explain the drift, with reference_no
+    //    enrichment. Sorted by absolute drift desc so the biggest
+    //    contributors land at the top.
+    const rows = await this.ds.query(
+      `WITH per_ref AS (
+         SELECT cashbox_id::text       AS cashbox_id,
+                cashbox_name           AS cashbox_name,
+                reference_type::text   AS reference_type,
+                reference_id::text     AS reference_id,
+                coverage::text         AS coverage,
+                ct_count::int          AS ct_count,
+                je_line_count::int     AS je_line_count,
+                ct_signed_amount::text AS ct_signed_amount,
+                je_signed_amount::text AS je_signed_amount,
+                drift_amount::text     AS drift_amount,
+                first_seen_at,
+                last_seen_at,
+                sample_entry_no
+           FROM v_cashbox_drift_per_ref
+          WHERE cashbox_id = $1::uuid
+            AND ABS(drift_amount) > 0.01
+       )
+       SELECT pr.cashbox_id,
+              pr.cashbox_name,
+              pr.reference_type,
+              pr.reference_id,
+              pr.coverage,
+              pr.ct_count,
+              pr.je_line_count,
+              pr.ct_signed_amount,
+              pr.je_signed_amount,
+              pr.drift_amount,
+              pr.first_seen_at,
+              pr.last_seen_at,
+              pr.sample_entry_no,
+              COALESCE(
+                (SELECT i.invoice_no  FROM invoices          i  WHERE i.id::text  = pr.reference_id),
+                (SELECT e.expense_no  FROM expenses          e  WHERE e.id::text  = pr.reference_id),
+                (SELECT cp.payment_no FROM customer_payments cp WHERE cp.id::text = pr.reference_id),
+                (SELECT sp.payment_no FROM supplier_payments sp WHERE sp.id::text = pr.reference_id),
+                (SELECT p.purchase_no FROM purchases         p  WHERE p.id::text  = pr.reference_id)
+              )                       AS reference_no
+         FROM per_ref pr
+        ORDER BY ABS(pr.drift_amount::numeric) DESC,
+                 pr.last_seen_at DESC NULLS LAST`,
+      [cashboxId],
+    );
+
+    // 3. Totals computed straight from the same per-ref filter so the
+    //    FE can sanity-check the breakdown without re-summing rows.
+    const [totals] = await this.ds.query(
+      `SELECT COUNT(*)::int                                  AS count,
+              COALESCE(SUM(ct_signed_amount), 0)::text       AS total_ct,
+              COALESCE(SUM(je_signed_amount), 0)::text       AS total_je,
+              COALESCE(SUM(drift_amount),     0)::text       AS total_drift
+         FROM v_cashbox_drift_per_ref
+        WHERE cashbox_id = $1::uuid
+          AND ABS(drift_amount) > 0.01`,
+      [cashboxId],
+    );
+
+    return {
+      cashbox: cashboxRow ?? null,
+      rows,
+      totals: totals ?? { count: 0, total_ct: '0', total_je: '0', total_drift: '0' },
+    };
+  }
+
   async shiftVariances() {
     const [row] = await this.ds.query(`
       SELECT

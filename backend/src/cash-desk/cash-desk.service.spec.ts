@@ -2252,6 +2252,199 @@ describe('CashDeskService.createCashbox — PR-FIN-PAYACCT-4D-UX-FIX-6 uuid sani
   });
 });
 
+/* ════════════════════════════════════════════════════════════════════
+ * PR-FIN-PAYACCT-4D-REPORTS-1A — getDriftDetail (per-reference drift drilldown)
+ * ----------------------------------------------------------------------------
+ * Pins the read-only contract of the new drift-detail endpoint
+ * (`GET /cash-desk/cashboxes/:id/drift-detail`):
+ *   • Pure SELECT — no INSERT/UPDATE/DELETE anywhere in the path.
+ *   • Reads `v_cashbox_gl_drift` (cashbox header) and
+ *     `v_cashbox_drift_per_ref` (rows + totals).
+ *   • Filters strictly by cashbox_id; non-zero drift only.
+ *   • Returns the canonical `{ cashbox, rows, totals }` shape the FE
+ *     drilldown panel consumes.
+ *   • `reference_no` is enriched via LEFT JOINs to invoices /
+ *     expenses / customer_payments / supplier_payments / purchases —
+ *     read-only, no schema changes.
+ * ========================================================================== */
+describe('CashDeskService.getDriftDetail — PR-FIN-PAYACCT-4D-REPORTS-1A', () => {
+  const CASHBOX_ID = '524646d5-7bd6-4d8d-a484-b1f562b039a4';
+
+  function makeServiceWithQueue(results: any[][]) {
+    const calls: Array<{ sql: string; params: any[] }> = [];
+    let i = 0;
+    const dsObj: any = {
+      query: async (sql: string, params: any[] = []) => {
+        calls.push({ sql, params });
+        return results[i++] ?? [];
+      },
+      transaction: async (cb: any) => cb({ query: dsObj.query }),
+    };
+    return { dsObj, calls };
+  }
+
+  it('issues exactly three SELECTs (cashbox header / rows / totals) — and zero writes', async () => {
+    const { dsObj, calls } = makeServiceWithQueue([
+      [{ id: CASHBOX_ID, name: 'الخزينة الرئيسية', kind: 'cash', is_active: true,
+         stored_balance: '29800.00', gl_net: '29550.00', gl_drift: '250.00' }],
+      [],
+      [{ count: 0, total_ct: '0', total_je: '0', total_drift: '0' }],
+    ]);
+    const moduleRef = await Test.createTestingModule({
+      providers: [CashDeskService, { provide: DataSource, useValue: dsObj }],
+    }).compile();
+    const service = moduleRef.get(CashDeskService);
+
+    await service.getDriftDetail(CASHBOX_ID);
+
+    expect(calls).toHaveLength(3);
+    // Read-only invariant: every emitted SQL must be a SELECT/CTE/COUNT.
+    for (const c of calls) {
+      expect(c.sql).toMatch(/^\s*(SELECT|WITH)\b/i);
+      expect(c.sql).not.toMatch(/\bINSERT\b/i);
+      expect(c.sql).not.toMatch(/\bUPDATE\b/i);
+      expect(c.sql).not.toMatch(/\bDELETE\b/i);
+      expect(c.sql).not.toMatch(/\bDROP\b/i);
+      expect(c.sql).not.toMatch(/\bTRUNCATE\b/i);
+    }
+  });
+
+  it('reads `v_cashbox_gl_drift` for the header and `v_cashbox_drift_per_ref` for rows + totals', async () => {
+    const { dsObj, calls } = makeServiceWithQueue([
+      [{ id: CASHBOX_ID, name: 'الخزينة الرئيسية', kind: 'cash', is_active: true,
+         stored_balance: '29800.00', gl_net: '29550.00', gl_drift: '250.00' }],
+      [],
+      [{ count: 0, total_ct: '0', total_je: '0', total_drift: '0' }],
+    ]);
+    const moduleRef = await Test.createTestingModule({
+      providers: [CashDeskService, { provide: DataSource, useValue: dsObj }],
+    }).compile();
+    const service = moduleRef.get(CashDeskService);
+
+    await service.getDriftDetail(CASHBOX_ID);
+
+    // 1st query — cashbox-level drift header.
+    expect(calls[0].sql).toMatch(/FROM v_cashbox_gl_drift/);
+    expect(calls[0].sql).toMatch(/WHERE cashbox_id\s*=\s*\$1::uuid/);
+    expect(calls[0].params).toEqual([CASHBOX_ID]);
+    // 2nd query — per-reference rows.
+    expect(calls[1].sql).toMatch(/FROM v_cashbox_drift_per_ref/);
+    expect(calls[1].sql).toMatch(/WHERE cashbox_id\s*=\s*\$1::uuid/);
+    expect(calls[1].sql).toMatch(/ABS\(drift_amount\)\s*>\s*0\.01/);
+    expect(calls[1].params).toEqual([CASHBOX_ID]);
+    // 3rd query — totals over the same per-ref filter.
+    expect(calls[2].sql).toMatch(/FROM v_cashbox_drift_per_ref/);
+    expect(calls[2].sql).toMatch(/SUM\(ct_signed_amount\)/);
+    expect(calls[2].sql).toMatch(/SUM\(je_signed_amount\)/);
+    expect(calls[2].sql).toMatch(/SUM\(drift_amount\)/);
+    expect(calls[2].sql).toMatch(/COUNT\(\*\)::int\s+AS count/);
+    expect(calls[2].params).toEqual([CASHBOX_ID]);
+  });
+
+  it('rows query enriches `reference_no` via LEFT JOINs to invoices/expenses/customer_payments/supplier_payments/purchases', async () => {
+    const { dsObj, calls } = makeServiceWithQueue([
+      [{ id: CASHBOX_ID, name: 'الخزينة الرئيسية', kind: 'cash', is_active: true,
+         stored_balance: '29800.00', gl_net: '29550.00', gl_drift: '250.00' }],
+      [],
+      [{ count: 0, total_ct: '0', total_je: '0', total_drift: '0' }],
+    ]);
+    const moduleRef = await Test.createTestingModule({
+      providers: [CashDeskService, { provide: DataSource, useValue: dsObj }],
+    }).compile();
+    const service = moduleRef.get(CashDeskService);
+
+    await service.getDriftDetail(CASHBOX_ID);
+
+    const rowsSql = calls[1].sql;
+    expect(rowsSql).toMatch(/FROM invoices\b/);
+    expect(rowsSql).toMatch(/FROM expenses\b/);
+    expect(rowsSql).toMatch(/FROM customer_payments\b/);
+    expect(rowsSql).toMatch(/FROM supplier_payments\b/);
+    expect(rowsSql).toMatch(/FROM purchases\b/);
+    expect(rowsSql).toMatch(/AS reference_no/);
+  });
+
+  it('returns the canonical { cashbox, rows, totals } shape', async () => {
+    const cashboxHeader = {
+      id: CASHBOX_ID, name: 'الخزينة الرئيسية', kind: 'cash', is_active: true,
+      stored_balance: '29800.00', gl_net: '29550.00', gl_drift: '250.00',
+    };
+    const rows = [
+      { cashbox_id: CASHBOX_ID, cashbox_name: 'الخزينة الرئيسية',
+        reference_type: 'invoice', reference_id: '61017528-7377-4691-9711-6f7f9bafe5b7',
+        coverage: 'both', ct_count: 5, je_line_count: 1,
+        ct_signed_amount: '1050.00', je_signed_amount: '350.00', drift_amount: '700.00',
+        first_seen_at: '2026-04-30T13:24:33.695Z', last_seen_at: '2026-04-30T14:15:09.379Z',
+        sample_entry_no: 'JE-2026-000333', reference_no: 'INV-001234' },
+      { cashbox_id: CASHBOX_ID, cashbox_name: 'الخزينة الرئيسية',
+        reference_type: 'return', reference_id: '73824179-3e2c-458f-a3bf-3cd87f1b3381',
+        coverage: 'CT_only', ct_count: 1, je_line_count: 0,
+        ct_signed_amount: '-650.00', je_signed_amount: '0', drift_amount: '-650.00',
+        first_seen_at: '2026-04-28T17:02:44.893Z', last_seen_at: '2026-04-28T17:02:44.893Z',
+        sample_entry_no: null, reference_no: null },
+      { cashbox_id: CASHBOX_ID, cashbox_name: 'الخزينة الرئيسية',
+        reference_type: 'invoice', reference_id: '44e7effa-da2a-4e48-a409-0291edaa19ee',
+        coverage: 'both', ct_count: 4, je_line_count: 1,
+        ct_signed_amount: '400.00', je_signed_amount: '200.00', drift_amount: '200.00',
+        first_seen_at: '2026-04-28T11:24:15.389Z', last_seen_at: '2026-04-28T13:23:23.017Z',
+        sample_entry_no: 'JE-2026-000286', reference_no: 'INV-001230' },
+    ];
+    const totalsRow = {
+      count: 3, total_ct: '800.00', total_je: '550.00', total_drift: '250.00',
+    };
+    const { dsObj } = makeServiceWithQueue([
+      [cashboxHeader],
+      rows,
+      [totalsRow],
+    ]);
+    const moduleRef = await Test.createTestingModule({
+      providers: [CashDeskService, { provide: DataSource, useValue: dsObj }],
+    }).compile();
+    const service = moduleRef.get(CashDeskService);
+
+    const out = await service.getDriftDetail(CASHBOX_ID);
+    expect(out).toEqual({ cashbox: cashboxHeader, rows, totals: totalsRow });
+    // Per-ref totals.total_drift sums to the cashbox-level gl_drift in this fixture.
+    expect(out.totals.total_drift).toBe('250.00');
+    expect(out.cashbox?.gl_drift).toBe('250.00');
+  });
+
+  it('returns cashbox=null when the cashbox is not in v_cashbox_gl_drift, and totals defaulted to zeros', async () => {
+    const { dsObj } = makeServiceWithQueue([
+      [],   // header empty
+      [],   // no rows
+      [],   // totals empty (service falls back to zero-defaults)
+    ]);
+    const moduleRef = await Test.createTestingModule({
+      providers: [CashDeskService, { provide: DataSource, useValue: dsObj }],
+    }).compile();
+    const service = moduleRef.get(CashDeskService);
+
+    const out = await service.getDriftDetail('00000000-0000-0000-0000-000000000000');
+    expect(out.cashbox).toBeNull();
+    expect(out.rows).toEqual([]);
+    expect(out.totals).toEqual({
+      count: 0, total_ct: '0', total_je: '0', total_drift: '0',
+    });
+  });
+
+  it('rows are ordered by ABS(drift_amount) DESC then last_seen_at DESC NULLS LAST', async () => {
+    const { dsObj, calls } = makeServiceWithQueue([
+      [{ id: CASHBOX_ID, name: 'X', kind: 'cash', is_active: true,
+         stored_balance: '0', gl_net: '0', gl_drift: '0' }],
+      [],
+      [{ count: 0, total_ct: '0', total_je: '0', total_drift: '0' }],
+    ]);
+    const moduleRef = await Test.createTestingModule({
+      providers: [CashDeskService, { provide: DataSource, useValue: dsObj }],
+    }).compile();
+    const service = moduleRef.get(CashDeskService);
+    await service.getDriftDetail(CASHBOX_ID);
+
+    expect(calls[1].sql).toMatch(/ORDER BY ABS\(pr\.drift_amount::numeric\) DESC,\s*pr\.last_seen_at DESC NULLS LAST/);
+  });
+});
+
 describe('CashDeskService.updateCashbox — PR-FIN-PAYACCT-4D-UX-FIX-6 uuid sanitization', () => {
   it('dto.warehouse_id = "undefined" → field is OMITTED from the UPDATE (column is NOT NULL)', async () => {
     const { ds, dsCalls } = makeFakeDataSource([]);

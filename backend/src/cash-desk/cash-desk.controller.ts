@@ -295,6 +295,32 @@ export class CashDeskController {
     });
   }
 
+  /**
+   * PR-FIN-PAYACCT-4D-REPORTS-1A — read-only per-reference drilldown
+   * for a single cashbox's stored vs GL drift. Backs the
+   * "عرض تقرير الفجوة" panel inside `CashboxDetailsModal`.
+   *
+   * Returns `{ cashbox, rows, totals }`:
+   *   • cashbox  — the matching `v_cashbox_gl_drift` row (or null)
+   *   • rows     — every per-reference contributor with non-zero
+   *                drift, enriched with `reference_no`
+   *   • totals   — count + signed sums (CT, JE, drift) over the same
+   *                non-zero filter
+   *
+   * `:id` is bound through `ParseUUIDPipe` so a non-uuid slug returns
+   * a clean 400 BadRequest instead of a Postgres uuid coercion 500
+   * (same defense pattern as PR-FIN-PAYACCT-4D-UX-FIX-9-HOTFIX-1 on
+   * the payments controller).
+   *
+   * Strictly read-only — pure SELECT against existing views and
+   * lookup tables. No INSERT/UPDATE/DELETE anywhere. No drift
+   * correction; the UI surfaces the gap but never closes it.
+   */
+  @Get('cashboxes/:id/drift-detail')
+  cashboxDriftDetail(@Param('id', ParseUUIDPipe) id: string) {
+    return this.svc.getDriftDetail(id);
+  }
+
   // ── Customer receipts ────────────────────────────────────────────────
   @Post('customer-payments')
   @Roles('admin', 'manager', 'cashier', 'accountant')
