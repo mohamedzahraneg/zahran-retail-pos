@@ -256,32 +256,79 @@ export function CashboxDetailsModal({
             </ul>
           </div>
 
-          {/* Drift + warnings */}
+          {/* PR-FIN-PAYACCT-4D-UX-FIX-15 — accounting reconciliation card.
+              Read-only. The earlier inline "مخزن: ... · أستاذ: ..." line
+              fragmented under RTL because of mixed Latin numerals and
+              Arabic colons. Replace with a clean three-row layout that
+              keeps each label and money value on its own row, and add
+              an explicit "read-only" footer so the operator never
+              mistakes this card for an action surface.
+
+              Tones:
+                • |drift| > 0.01 → rose (warning) — surfaces the gap.
+                • |drift| ≤ 0.01 → emerald (calm) — "لا توجد فروقات محاسبية".
+              No drift data → neutral slate explanatory line. */}
           <div data-testid="cashbox-details-flags">
             <h3 className="font-bold text-sm text-slate-700 mb-2">المراجعة المحاسبية</h3>
-            {drift ? (
-              <div
-                className={`rounded-lg border p-3 ${
-                  Math.abs(Number(drift.drift_amount || 0)) > 0.01
-                    ? 'border-rose-200 bg-rose-50'
-                    : 'border-emerald-200 bg-emerald-50'
-                }`}
-                data-testid="cashbox-details-drift"
-              >
-                <div className="text-[11px] font-bold mb-1">
-                  {Math.abs(Number(drift.drift_amount || 0)) > 0.01
-                    ? 'فجوة مع الأستاذ العام'
-                    : 'مطابقة مع الأستاذ'}
+            {drift ? (() => {
+              const driftNum = Number(drift.drift_amount || 0);
+              const hasGap   = Math.abs(driftNum) > 0.01;
+              const cardClass = hasGap
+                ? 'rounded-lg border border-rose-200 bg-rose-50 p-3 space-y-2'
+                : 'rounded-lg border border-emerald-200 bg-emerald-50 p-3 space-y-2';
+              const headerClass = hasGap ? 'text-rose-700' : 'text-emerald-700';
+              const dividerClass = hasGap ? 'border-rose-200' : 'border-emerald-200';
+              const totalClass   = hasGap ? 'text-rose-800'   : 'text-emerald-800';
+              const headerText = hasGap
+                ? 'فجوة مع الأستاذ العام'
+                : 'لا توجد فروقات محاسبية';
+              const driftPrefix = driftNum > 0 ? '+' : '';
+              return (
+                <div className={cardClass} data-testid="cashbox-details-drift">
+                  <div
+                    className={`text-[12px] font-bold ${headerClass}`}
+                    data-testid="cashbox-details-drift-header"
+                  >
+                    {headerText}
+                  </div>
+                  <dl className="text-[12px] text-slate-700 space-y-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <dt>رصيد الخزنة</dt>
+                      <dd
+                        className="font-mono"
+                        data-testid="cashbox-details-drift-stored"
+                      >
+                        {EGP(drift.stored_balance)}
+                      </dd>
+                    </div>
+                    <div className="flex items-center justify-between gap-2">
+                      <dt>رصيد الأستاذ العام</dt>
+                      <dd
+                        className="font-mono"
+                        data-testid="cashbox-details-drift-gl"
+                      >
+                        {EGP(drift.gl_net)}
+                      </dd>
+                    </div>
+                    <div className={`pt-1 mt-1 border-t ${dividerClass} flex items-center justify-between gap-2`}>
+                      <dt className={`font-bold ${totalClass}`}>الفرق</dt>
+                      <dd
+                        className={`font-mono font-bold ${totalClass}`}
+                        data-testid="cashbox-details-drift-amount"
+                      >
+                        {driftPrefix}{EGP(drift.drift_amount)}
+                      </dd>
+                    </div>
+                  </dl>
+                  <div
+                    className="text-[10px] text-slate-500 pt-1"
+                    data-testid="cashbox-details-drift-readonly-note"
+                  >
+                    هذه قراءة فقط؛ لا يتم إجراء أي تسوية تلقائية.
+                  </div>
                 </div>
-                <div className="font-mono text-sm">
-                  مخزن: {EGP(drift.stored_balance)} · أستاذ: {EGP(drift.gl_net)}
-                </div>
-                <div className="font-mono text-sm font-bold">
-                  الفرق: {Number(drift.drift_amount) > 0 ? '+' : ''}
-                  {EGP(drift.drift_amount)}
-                </div>
-              </div>
-            ) : (
+              );
+            })() : (
               <div className="text-[11px] text-slate-500">
                 لا توجد بيانات فروق متاحة لهذه الخزنة.
               </div>
