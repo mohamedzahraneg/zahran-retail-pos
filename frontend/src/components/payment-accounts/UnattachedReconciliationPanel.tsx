@@ -23,16 +23,40 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
-import { AlertTriangle, Link as LinkIcon, Wallet } from 'lucide-react';
+import { AlertTriangle, Info, Link as LinkIcon, Wallet } from 'lucide-react';
 import {
   paymentsApi,
   METHOD_LABEL_AR,
   type PaymentMethodCode,
   type UnattachedSummaryRow,
 } from '@/api/payments.api';
+import { formatArabicDateRange } from '@/lib/format-arabic-date';
 
 const EGP = (n: number | string) =>
   `${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ج.م`;
+
+/**
+ * PR-FIN-PAYACCT-4D-UX-FIX-14 — operator-facing Arabic labels for the
+ * source-table column. The raw `invoice_payments` / `customer_payments`
+ * / `supplier_payments` codes leak schema details into the UI; show the
+ * business meaning instead.
+ */
+const SOURCE_TABLE_LABEL_AR: Record<UnattachedSummaryRow['source_table'], string> = {
+  invoice_payments:  'فواتير البيع',
+  customer_payments: 'قبض العملاء',
+  supplier_payments: 'مدفوعات الموردين',
+};
+
+/**
+ * PR-FIN-PAYACCT-4D-UX-FIX-14 — canonical Arabic copy for the cash
+ * branch. Cash is intentionally cashbox-driven (no payment_account
+ * exists or is expected; see FIX-9 + FIX-13). The BE may still send
+ * its own `status_message`, but for cash we always render this exact
+ * sentence so the operator sees a calm, definitive explanation —
+ * never a noisy DB-shaped warning.
+ */
+const CASH_INFO_TITLE   = 'عمليات نقدية مسجلة عبر الخزنة';
+const CASH_INFO_MESSAGE = 'النقدية تُسجَّل عبر الخزائن ولا تحتاج حساب دفع';
 
 export interface UnattachedReconciliationPanelProps {
   /**
@@ -117,6 +141,23 @@ export function UnattachedReconciliationPanel({
   }
   if (!rows.length) return null;
 
+  // PR-FIN-PAYACCT-4D-UX-FIX-14 — visual tone follows whether ANY row
+  // needs operator action. If every bucket is informational (today:
+  // cash-only), drop the amber container so the panel reads as info
+  // rather than warning. As soon as one actionable bucket appears
+  // (e.g. future unattached InstaPay), the amber container returns.
+  const hasActionableRow = rows.some(
+    (r) => r.payment_method !== 'cash' && r.supported,
+  );
+  const containerClass = hasActionableRow
+    ? 'rounded-2xl border border-amber-200 bg-amber-50/40 p-4 space-y-3'
+    : 'rounded-2xl border border-slate-200 bg-slate-50/60 p-4 space-y-3';
+  const headerIconClass = hasActionableRow ? 'text-amber-700' : 'text-slate-600';
+  const headerTextClass = hasActionableRow ? 'text-amber-900' : 'text-slate-800';
+  const headerTitle = hasActionableRow
+    ? 'عمليات قديمة غير مرتبطة بحساب دفع'
+    : 'سجلّ تاريخي للعمليات القديمة';
+
   const handleBackfill = (row: UnattachedSummaryRow) => {
     if (!row.target_account) return;
     const confirmMsg =
@@ -131,14 +172,11 @@ export function UnattachedReconciliationPanel({
   };
 
   return (
-    <div
-      className="rounded-2xl border border-amber-200 bg-amber-50/40 p-4 space-y-3"
-      data-testid="unattached-panel"
-    >
+    <div className={containerClass} data-testid="unattached-panel">
       <div className="flex items-center gap-2">
-        <AlertTriangle size={16} className="text-amber-700" />
-        <h3 className="font-bold text-sm text-amber-900">
-          عمليات قديمة غير مرتبطة بحساب دفع
+        <AlertTriangle size={16} className={headerIconClass} />
+        <h3 className={`font-bold text-sm ${headerTextClass}`}>
+          {headerTitle}
         </h3>
       </div>
       <div className="space-y-2" data-testid="unattached-panel-rows">
@@ -146,39 +184,75 @@ export function UnattachedReconciliationPanel({
           const key = `${row.source_table}:${row.payment_method}`;
           const methodLabel =
             METHOD_LABEL_AR[row.payment_method] ?? row.payment_method;
+          const sourceLabel =
+            SOURCE_TABLE_LABEL_AR[row.source_table] ?? row.source_table;
+          const dateRange = formatArabicDateRange(row.earliest, row.latest);
           const isBusy = busyMethod === row.payment_method;
+          const isCash = row.payment_method === 'cash';
+
+          // PR-FIN-PAYACCT-4D-UX-FIX-14 — calm info-style card for cash
+          // (cashbox-driven by design, never actionable). Non-cash rows
+          // keep the existing amber-tinted "needs action" surface.
+          const rowClass = isCash
+            ? 'rounded-lg border border-slate-200 bg-white p-3 flex items-center gap-3 flex-wrap'
+            : 'rounded-lg border border-amber-200 bg-amber-50/60 p-3 flex items-center gap-3 flex-wrap';
+          const rowIcon = isCash
+            ? <Info size={14} className="text-slate-500 shrink-0" data-testid={`unattached-row-icon-info-${row.source_table}-${row.payment_method}`} />
+            : <Wallet size={14} className="text-amber-700 shrink-0" data-testid={`unattached-row-icon-warn-${row.source_table}-${row.payment_method}`} />;
+          const rowTitle = isCash ? CASH_INFO_TITLE : methodLabel;
+          // For cash we always render the canonical FE message — the
+          // BE's `status_message` could drift; this stays definitive.
+          const rowMessage = isCash ? CASH_INFO_MESSAGE : row.status_message;
+          const messageClass = isCash
+            ? 'text-[11px] text-slate-600 mt-0.5'
+            : 'text-[11px] text-amber-800 mt-0.5';
+
           return (
             <div
               key={key}
               data-testid={`unattached-row-${row.source_table}-${row.payment_method}`}
-              className="rounded-lg border border-slate-200 bg-white p-3 flex items-center gap-3 flex-wrap"
+              className={rowClass}
             >
               <div className="flex items-center gap-2 min-w-0 flex-1">
-                <Wallet size={14} className="text-slate-500 shrink-0" />
+                {rowIcon}
                 <div className="min-w-0">
-                  <div className="text-sm font-bold text-slate-800">
-                    {methodLabel}
-                    <span className="text-[10px] text-slate-500 font-normal mr-1">
-                      ({row.source_table})
+                  <div className="text-sm font-bold text-slate-800 flex items-center gap-1.5 flex-wrap">
+                    <span>{rowTitle}</span>
+                    <span
+                      className="inline-flex items-center px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 text-[10px] font-normal"
+                      data-testid={`unattached-source-badge-${row.source_table}-${row.payment_method}`}
+                    >
+                      {sourceLabel}
                     </span>
+                    {isCash && (
+                      <span className="text-[10px] text-slate-500 font-normal">
+                        ({methodLabel})
+                      </span>
+                    )}
                   </div>
-                  <div className="text-[11px] text-slate-600 truncate">
+                  <div className="text-[11px] text-slate-600">
                     {row.row_count} عملية · إجمالي {EGP(row.total_amount)}
-                    {row.earliest && row.latest && (
-                      <span className="text-slate-400">
-                        {' '}· من {row.earliest} إلى {row.latest}
+                    {dateRange && (
+                      <span
+                        className="text-slate-400"
+                        data-testid={`unattached-date-range-${row.source_table}-${row.payment_method}`}
+                      >
+                        {' '}· الفترة: {dateRange}
                       </span>
                     )}
                   </div>
                   <div
-                    className="text-[11px] text-amber-800 mt-0.5"
+                    className={messageClass}
                     data-testid={`unattached-status-${row.source_table}-${row.payment_method}`}
                   >
-                    {row.status_message}
+                    {rowMessage}
                   </div>
                 </div>
               </div>
-              {row.supported && row.target_account && canManage && (
+              {/* PR-FIN-PAYACCT-4D-UX-FIX-14 — defense in depth: cash
+                  rows can NEVER render the action button, even if the
+                  BE accidentally flips `supported` to TRUE for cash. */}
+              {!isCash && row.supported && row.target_account && canManage && (
                 <button
                   type="button"
                   disabled={isBusy}
