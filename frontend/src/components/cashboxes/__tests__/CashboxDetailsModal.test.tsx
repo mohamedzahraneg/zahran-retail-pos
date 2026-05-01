@@ -530,4 +530,238 @@ describe('<CashboxDetailsModal /> — PR-FIN-PAYACCT-4D-UX-FIX-4', () => {
       ).toBeNull();
     });
   });
+
+  // ─── PR-FIN-PAYACCT-4D-REPORTS-1B ─────────────────────────────────
+  // Pin the report toolbar (Excel + Print/PDF), the sortable column
+  // headers, and the operator-spec datetime format with seconds.
+  describe('PR-FIN-PAYACCT-4D-REPORTS-1B report toolbar + sort + datetime', () => {
+    /**
+     * Two production-shaped rows so we can verify ASC/DESC by amount
+     * AND see the exact `DD/MM/YYYY HH:mm:ss` format land in the table.
+     */
+    const ROW_OLDER = makeRow({
+      id: 'mv-100', amount_in: '100.00', net_amount: '100.00',
+      reference_no: 'INV-A', counterparty_name: 'علي', user_name: 'احمد',
+      occurred_at: '2026-04-29T08:15:00Z',
+    });
+    const ROW_NEWER = makeRow({
+      id: 'mv-200', amount_in: '900.00', net_amount: '900.00',
+      reference_no: 'INV-B', counterparty_name: 'باسل', user_name: 'بسمة',
+      occurred_at: '2026-04-30T17:45:30Z',
+    });
+
+    it('toolbar renders with Excel + Print/PDF buttons disabled when there are no rows', async () => {
+      movementsUnifiedMock.mockResolvedValue({
+        rows: [], total: 0, totals: { in: '0', out: '0', net: '0', count: 0 },
+      });
+      renderModal();
+      // Wait for the empty-state message — it only renders after the
+      // query settles (so `isLoading=false`).
+      const emptyMsg = await screen.findByTestId(
+        'cashbox-details-export-empty-msg',
+      );
+      expect(emptyMsg).toHaveTextContent('لا توجد حركات للتصدير');
+      const toolbar = screen.getByTestId('cashbox-details-report-toolbar');
+      expect(
+        within(toolbar).getByTestId('cashbox-details-export-excel'),
+      ).toBeDisabled();
+      expect(
+        within(toolbar).getByTestId('cashbox-details-print-report'),
+      ).toBeDisabled();
+    });
+
+    it('toolbar buttons enable as soon as rows arrive', async () => {
+      movementsUnifiedMock.mockResolvedValue({
+        rows: [ROW_OLDER, ROW_NEWER], total: 2,
+        totals: { in: '1000.00', out: '0', net: '1000.00', count: 2 },
+      });
+      renderModal();
+      const excel = await screen.findByTestId('cashbox-details-export-excel');
+      const print = screen.getByTestId('cashbox-details-print-report');
+      // Wait for query to resolve and re-render with `disabled={false}`.
+      await waitFor(() => expect(excel).not.toBeDisabled());
+      expect(print).not.toBeDisabled();
+      expect(
+        screen.queryByTestId('cashbox-details-export-empty-msg'),
+      ).toBeNull();
+    });
+
+    it('datetime column renders DD/MM/YYYY HH:mm:ss with seconds (no GMT / no raw ISO)', async () => {
+      movementsUnifiedMock.mockResolvedValue({
+        rows: [ROW_OLDER], total: 1,
+        totals: { in: '100.00', out: '0', net: '100.00', count: 1 },
+      });
+      renderModal();
+      const row = await screen.findByTestId(
+        'cashbox-details-row-cashbox_txn-mv-100',
+      );
+      // The first cell (date) carries the compact format.
+      expect(row.textContent).toMatch(/\d{2}\/\d{2}\/\d{4} \d{2}:\d{2}:\d{2}/);
+      // No ISO-style or GMT leakage anywhere in the row.
+      expect(row.textContent).not.toMatch(/2026-04-29T/);
+      expect(row.textContent).not.toMatch(/GMT/);
+      expect(row.textContent).not.toMatch(/Wed Apr/);
+    });
+
+    it('default sort is occurred_at DESC (newest first)', async () => {
+      movementsUnifiedMock.mockResolvedValue({
+        rows: [ROW_OLDER, ROW_NEWER], total: 2,
+        totals: { in: '1000.00', out: '0', net: '1000.00', count: 2 },
+      });
+      renderModal();
+      // Wait for the table to render.
+      const tbl = await screen.findByTestId('cashbox-details-operations-table');
+      const renderedRows = within(tbl).getAllByTestId(
+        /cashbox-details-row-cashbox_txn-/,
+      );
+      // Newer row (mv-200, 2026-04-30) before older (mv-100, 2026-04-29).
+      expect(renderedRows[0]).toHaveAttribute(
+        'data-testid',
+        'cashbox-details-row-cashbox_txn-mv-200',
+      );
+      expect(renderedRows[1]).toHaveAttribute(
+        'data-testid',
+        'cashbox-details-row-cashbox_txn-mv-100',
+      );
+    });
+
+    it('clicking the date header toggles to ASC (oldest first)', async () => {
+      movementsUnifiedMock.mockResolvedValue({
+        rows: [ROW_OLDER, ROW_NEWER], total: 2,
+        totals: { in: '1000.00', out: '0', net: '1000.00', count: 2 },
+      });
+      renderModal();
+      const sortBtn = await screen.findByTestId(
+        'cashbox-details-sort-btn-occurred_at',
+      );
+      // First click on the active column toggles to ASC.
+      fireEvent.click(sortBtn);
+      const tbl = screen.getByTestId('cashbox-details-operations-table');
+      const renderedRows = within(tbl).getAllByTestId(
+        /cashbox-details-row-cashbox_txn-/,
+      );
+      expect(renderedRows[0]).toHaveAttribute(
+        'data-testid',
+        'cashbox-details-row-cashbox_txn-mv-100',
+      );
+      expect(renderedRows[1]).toHaveAttribute(
+        'data-testid',
+        'cashbox-details-row-cashbox_txn-mv-200',
+      );
+      // aria-sort reflects the active state.
+      const th = screen.getByTestId('cashbox-details-sort-th-occurred_at');
+      expect(within(th).getByRole('button')).toHaveAttribute(
+        'aria-sort',
+        'ascending',
+      );
+    });
+
+    it('clicking the amount_in header switches sort to that column (DESC default for numerics)', async () => {
+      movementsUnifiedMock.mockResolvedValue({
+        rows: [ROW_OLDER, ROW_NEWER], total: 2,
+        totals: { in: '1000.00', out: '0', net: '1000.00', count: 2 },
+      });
+      renderModal();
+      const sortBtn = await screen.findByTestId(
+        'cashbox-details-sort-btn-amount_in',
+      );
+      fireEvent.click(sortBtn);
+      const tbl = screen.getByTestId('cashbox-details-operations-table');
+      const renderedRows = within(tbl).getAllByTestId(
+        /cashbox-details-row-cashbox_txn-/,
+      );
+      // 900 (mv-200) before 100 (mv-100) — DESC default for amount.
+      expect(renderedRows[0]).toHaveAttribute(
+        'data-testid',
+        'cashbox-details-row-cashbox_txn-mv-200',
+      );
+      expect(renderedRows[1]).toHaveAttribute(
+        'data-testid',
+        'cashbox-details-row-cashbox_txn-mv-100',
+      );
+    });
+
+    it('Excel button click invokes XLSX.writeFile (via lib/exportExcel) with the loaded rows', async () => {
+      // Spy on XLSX.writeFile to verify the export pipeline ran without
+      // actually writing a file in the test environment.
+      const xlsx = await import('xlsx');
+      const writeSpy = vi
+        .spyOn(xlsx, 'writeFile')
+        .mockImplementation(() => undefined as any);
+
+      movementsUnifiedMock.mockResolvedValue({
+        rows: [ROW_OLDER, ROW_NEWER], total: 2,
+        totals: { in: '1000.00', out: '0', net: '1000.00', count: 2 },
+      });
+      renderModal();
+      const btn = await screen.findByTestId('cashbox-details-export-excel');
+      // Wait for the query to resolve and re-render the button as enabled.
+      await waitFor(() => expect(btn).not.toBeDisabled());
+      fireEvent.click(btn);
+
+      await waitFor(() => expect(writeSpy).toHaveBeenCalledTimes(1));
+      // Filename arg ends with .xlsx and starts with the cashbox slug.
+      const filename = writeSpy.mock.calls[0]?.[1];
+      expect(typeof filename).toBe('string');
+      expect(String(filename)).toMatch(/^cashbox-report-/);
+      expect(String(filename)).toMatch(/\.xlsx$/);
+
+      writeSpy.mockRestore();
+    });
+
+    it('Print/PDF button click opens a new window via window.open (printReport flow)', async () => {
+      const fakeDoc = { write: vi.fn(), close: vi.fn() };
+      const openSpy = vi
+        .spyOn(window, 'open')
+        .mockReturnValue({ document: fakeDoc } as any);
+
+      movementsUnifiedMock.mockResolvedValue({
+        rows: [ROW_OLDER, ROW_NEWER], total: 2,
+        totals: { in: '1000.00', out: '0', net: '1000.00', count: 2 },
+      });
+      renderModal();
+      const btn = await screen.findByTestId('cashbox-details-print-report');
+      await waitFor(() => expect(btn).not.toBeDisabled());
+      fireEvent.click(btn);
+
+      await waitFor(() => expect(openSpy).toHaveBeenCalledTimes(1));
+      // The popup got the report HTML written into it.
+      expect(fakeDoc.write).toHaveBeenCalledTimes(1);
+      const html = String(fakeDoc.write.mock.calls[0]?.[0] ?? '');
+      // Title + cashbox name + read-only footer + a totals header.
+      expect(html).toMatch(/تقرير حركات الخزنة/);
+      expect(html).toMatch(/الخزينة الرئيسية/);
+      expect(html).toMatch(/إجمالي الداخل/);
+      expect(html).toMatch(
+        /هذا التقرير للقراءة فقط ولا يُجري أي تعديل على البيانات/,
+      );
+
+      openSpy.mockRestore();
+    });
+
+    it('clicking Excel/Print when there are no rows is a no-op (buttons disabled)', async () => {
+      const xlsx = await import('xlsx');
+      const writeSpy = vi
+        .spyOn(xlsx, 'writeFile')
+        .mockImplementation(() => undefined as any);
+      const openSpy = vi.spyOn(window, 'open');
+
+      movementsUnifiedMock.mockResolvedValue({
+        rows: [], total: 0, totals: { in: '0', out: '0', net: '0', count: 0 },
+      });
+      renderModal();
+      const excel = await screen.findByTestId('cashbox-details-export-excel');
+      const print = screen.getByTestId('cashbox-details-print-report');
+      // The buttons are `disabled` so click events don't propagate to
+      // the handlers — but in case of a future regression, no export
+      // call should happen either way.
+      fireEvent.click(excel);
+      fireEvent.click(print);
+      expect(writeSpy).not.toHaveBeenCalled();
+      expect(openSpy).not.toHaveBeenCalled();
+
+      writeSpy.mockRestore();
+      openSpy.mockRestore();
+    });
+  });
 });

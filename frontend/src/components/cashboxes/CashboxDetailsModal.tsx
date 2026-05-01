@@ -34,6 +34,11 @@ import {
   FileCheck,
   AlertTriangle,
   Star,
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
+  FileSpreadsheet,
+  Printer,
 } from 'lucide-react';
 import {
   cashDeskApi,
@@ -55,6 +60,36 @@ import {
   type SmartRangeKey,
 } from '@/lib/smart-date-range';
 import { CashboxDriftDetailPanel } from './CashboxDriftDetailPanel';
+import { formatArabicDateTime } from '@/lib/format-arabic-date';
+import { exportToExcel, printReport } from '@/lib/exportExcel';
+import {
+  buildExcelFilename,
+  buildExcelRows,
+  buildPrintHtml,
+  buildReportTitle,
+} from './cashboxReportBuilder';
+
+/**
+ * PR-FIN-PAYACCT-4D-REPORTS-1B — sortable columns for the operations
+ * table. Default sort is `occurred_at DESC` (newest first), matching
+ * the BE feed's natural order. The keys map directly onto fields of
+ * `CashboxMovementUnifiedRow`.
+ */
+type SortKey =
+  | 'occurred_at'
+  | 'kind_ar'
+  | 'reference_no'
+  | 'counterparty_name'
+  | 'amount_in'
+  | 'amount_out'
+  | 'net_amount'
+  | 'user_name';
+type SortDir = 'asc' | 'desc';
+
+/** Numeric vs text columns determine the default direction on a fresh click. */
+const NUMERIC_SORT_KEYS = new Set<SortKey>([
+  'occurred_at', 'amount_in', 'amount_out', 'net_amount',
+]);
 
 const EGP = (n: number | string) =>
   `${Number(n || 0).toLocaleString('en-US', {
@@ -164,6 +199,69 @@ export function CashboxDetailsModal({
   // only mounts (and only fires its query) when the operator opens it,
   // so the modal's default render cost is unchanged.
   const [showDriftDetail, setShowDriftDetail] = useState(false);
+
+  // PR-FIN-PAYACCT-4D-REPORTS-1B — client-side sort over the currently
+  // loaded page. The BE already orders newest-first server-side, so
+  // the default state is a no-op render.
+  const [sortKey, setSortKey] = useState<SortKey>('occurred_at');
+  const [sortDir, setSortDir] = useState<SortDir>('desc');
+
+  /** Apply current sort to the loaded rows. Pure; never mutates the source array. */
+  const sortedRows = useMemo(() => {
+    const rows = movementsQuery.data?.rows ?? [];
+    if (rows.length === 0) return rows;
+    const out = [...rows];
+    out.sort((a, b) => compareRows(a, b, sortKey, sortDir));
+    return out;
+  }, [movementsQuery.data, sortKey, sortDir]);
+
+  function handleSort(key: SortKey) {
+    if (key === sortKey) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortKey(key);
+      // Numeric/date columns get DESC by default (biggest/newest first);
+      // text columns get ASC so alphabetical reading is natural.
+      setSortDir(NUMERIC_SORT_KEYS.has(key) ? 'desc' : 'asc');
+    }
+  }
+
+  // PR-FIN-PAYACCT-4D-REPORTS-1B — Excel + Print/PDF wiring. Exports
+  // the currently-sorted-and-loaded page only; totals come from the
+  // backend response so they always match the on-screen table.
+  function handleExportExcel() {
+    if (sortedRows.length === 0) return;
+    const input = {
+      cashbox: {
+        name: cashbox.name,
+        name_ar: cashbox.name_ar,
+        kind: cashbox.kind,
+        currency: cashbox.currency,
+      },
+      range: { from: range.from, to: range.to },
+      rows: sortedRows,
+      totals,
+    };
+    exportToExcel(buildExcelFilename(input), buildExcelRows(input), 'حركات الخزنة');
+  }
+
+  function handlePrintReport() {
+    if (sortedRows.length === 0) return;
+    const input = {
+      cashbox: {
+        name: cashbox.name,
+        name_ar: cashbox.name_ar,
+        kind: cashbox.kind,
+        currency: cashbox.currency,
+      },
+      range: { from: range.from, to: range.to },
+      rows: sortedRows,
+      totals,
+    };
+    printReport(buildReportTitle(input), buildPrintHtml(input));
+  }
+
+  const canExport = sortedRows.length > 0 && !movementsQuery.isLoading;
 
   function clearFilters() {
     setRangeKey('month');
@@ -524,10 +622,55 @@ export function CashboxDetailsModal({
 
         {/* Operations table */}
         <div className="p-5">
-          <h3 className="font-bold text-sm text-slate-700 mb-3">حركات الخزنة</h3>
+          <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+            <h3 className="font-bold text-sm text-slate-700">حركات الخزنة</h3>
+            {/* PR-FIN-PAYACCT-4D-REPORTS-1B — report toolbar.
+                Excel + Print/PDF use the existing `lib/exportExcel.ts`
+                helpers (no new deps). Buttons are disabled when there
+                are no rows to export so the empty-state never produces
+                an empty workbook or a blank print window. */}
+            <div
+              className="flex items-center gap-2"
+              data-testid="cashbox-details-report-toolbar"
+            >
+              <button
+                type="button"
+                onClick={handleExportExcel}
+                disabled={!canExport}
+                className="text-[11px] px-3 py-1.5 rounded border border-emerald-300 bg-emerald-50 text-emerald-800 hover:bg-emerald-100 inline-flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
+                data-testid="cashbox-details-export-excel"
+                title={canExport ? 'تصدير الصفوف الحالية إلى Excel' : 'لا توجد حركات للتصدير'}
+              >
+                <FileSpreadsheet size={12} />
+                Excel
+              </button>
+              <button
+                type="button"
+                onClick={handlePrintReport}
+                disabled={!canExport}
+                className="text-[11px] px-3 py-1.5 rounded border border-slate-300 bg-slate-50 text-slate-800 hover:bg-slate-100 inline-flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
+                data-testid="cashbox-details-print-report"
+                title={canExport ? 'فتح التقرير في نافذة الطباعة' : 'لا توجد حركات للتصدير'}
+              >
+                <Printer size={12} />
+                طباعة / PDF
+              </button>
+              {!canExport && !movementsQuery.isLoading && (
+                <span
+                  className="text-[10px] text-slate-500"
+                  data-testid="cashbox-details-export-empty-msg"
+                >
+                  لا توجد حركات للتصدير
+                </span>
+              )}
+            </div>
+          </div>
           <OperationsTable
             isLoading={movementsQuery.isLoading}
-            rows={movementsQuery.data?.rows ?? []}
+            rows={sortedRows}
+            sortKey={sortKey}
+            sortDir={sortDir}
+            onSort={handleSort}
           />
 
           <Pagination
@@ -586,10 +729,13 @@ function SummaryRow({
 }
 
 function OperationsTable({
-  isLoading, rows,
+  isLoading, rows, sortKey, sortDir, onSort,
 }: {
   isLoading: boolean;
   rows: CashboxMovementUnifiedRow[];
+  sortKey: SortKey;
+  sortDir: SortDir;
+  onSort: (k: SortKey) => void;
 }) {
   if (isLoading) {
     return (
@@ -614,34 +760,33 @@ function OperationsTable({
         <table className="w-full text-xs" data-testid="cashbox-details-operations-table">
           <thead className="bg-slate-50 text-[10px] text-slate-600">
             <tr>
-              <Th>التاريخ والوقت</Th>
-              <Th>نوع العملية</Th>
-              <Th>رقم المرجع</Th>
-              <Th>الطرف</Th>
-              <Th>الداخل</Th>
-              <Th>الخارج</Th>
+              <SortableTh sortKey="occurred_at"        label="التاريخ والوقت" current={sortKey} dir={sortDir} onSort={onSort} />
+              <SortableTh sortKey="kind_ar"            label="نوع العملية"   current={sortKey} dir={sortDir} onSort={onSort} />
+              <SortableTh sortKey="reference_no"       label="رقم المرجع"    current={sortKey} dir={sortDir} onSort={onSort} />
+              <SortableTh sortKey="counterparty_name"  label="الطرف"          current={sortKey} dir={sortDir} onSort={onSort} />
+              <SortableTh sortKey="amount_in"          label="الداخل"         current={sortKey} dir={sortDir} onSort={onSort} />
+              <SortableTh sortKey="amount_out"         label="الخارج"         current={sortKey} dir={sortDir} onSort={onSort} />
+              <SortableTh sortKey="net_amount"         label="الصافي"          current={sortKey} dir={sortDir} onSort={onSort} />
               <Th>الرصيد بعد</Th>
               <Th>طريقة الدفع</Th>
               <Th>الحساب المرتبط</Th>
               <Th>القيد المحاسبي</Th>
-              <Th>المستخدم</Th>
+              <SortableTh sortKey="user_name"          label="المستخدم"       current={sortKey} dir={sortDir} onSort={onSort} />
               <Th>ملاحظات</Th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
             {rows.map((r) => {
-              const dt = new Date(r.occurred_at);
               return (
                 <tr
                   key={`${r.source}-${r.id}`}
                   data-testid={`cashbox-details-row-${r.source}-${r.id}`}
                   className="hover:bg-slate-50"
                 >
-                  <Td className="whitespace-nowrap text-slate-700">
-                    {dt.toLocaleDateString('en-CA')}{' '}
-                    <span className="text-[10px] text-slate-500">
-                      {dt.toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })}
-                    </span>
+                  <Td className="whitespace-nowrap text-slate-700 font-mono text-[11px]">
+                    {/* PR-FIN-PAYACCT-4D-REPORTS-1B — operator-spec
+                        compact format `DD/MM/YYYY HH:mm:ss` with seconds. */}
+                    {formatArabicDateTime(r.occurred_at)}
                   </Td>
                   <Td>
                     <span className="px-1.5 py-0.5 rounded bg-slate-100 text-[10px] font-bold text-slate-700">
@@ -741,4 +886,76 @@ function Th({ children }: { children: React.ReactNode }) {
 }
 function Td({ children, className }: { children: React.ReactNode; className?: string }) {
   return <td className={`px-2 py-1.5 text-right whitespace-nowrap ${className ?? ''}`}>{children}</td>;
+}
+
+/**
+ * PR-FIN-PAYACCT-4D-REPORTS-1B — sortable column header. Click toggles
+ * direction; clicking a different column resets to that column's
+ * default direction. Stable test ids (`sort-th-<key>`) so the spec
+ * can drive sort interactions without coupling to RTL DOM order.
+ */
+function SortableTh({
+  sortKey, label, current, dir, onSort,
+}: {
+  sortKey: SortKey;
+  label: string;
+  current: SortKey;
+  dir: SortDir;
+  onSort: (k: SortKey) => void;
+}) {
+  const active = sortKey === current;
+  const Icon = !active ? ArrowUpDown : dir === 'asc' ? ArrowUp : ArrowDown;
+  return (
+    <th
+      className="px-2 py-1.5 text-right font-bold whitespace-nowrap"
+      data-testid={`cashbox-details-sort-th-${sortKey}`}
+    >
+      <button
+        type="button"
+        onClick={() => onSort(sortKey)}
+        className={`inline-flex items-center gap-1 hover:text-slate-900 ${active ? 'text-slate-900' : ''}`}
+        data-testid={`cashbox-details-sort-btn-${sortKey}`}
+        aria-sort={active ? (dir === 'asc' ? 'ascending' : 'descending') : 'none'}
+      >
+        {label}
+        <Icon size={10} className={active ? '' : 'opacity-40'} />
+      </button>
+    </th>
+  );
+}
+
+/**
+ * PR-FIN-PAYACCT-4D-REPORTS-1B — pure comparator over the unified-row
+ * shape. Numerics are compared as numbers (handles BE string-numerics
+ * cleanly); dates fall back to lexicographic comparison of the raw ISO
+ * string when both sides parse — that's identical to numeric Date
+ * comparison and avoids `new Date(...)` allocation per pair.
+ *
+ * `null`/missing values sort last regardless of direction so the
+ * operator always sees populated rows first.
+ */
+function compareRows(
+  a: CashboxMovementUnifiedRow,
+  b: CashboxMovementUnifiedRow,
+  key: SortKey,
+  dir: SortDir,
+): number {
+  const sign = dir === 'asc' ? 1 : -1;
+  const av = (a as any)[key];
+  const bv = (b as any)[key];
+  // Push nullish values to the end no matter the direction.
+  const aNull = av === null || av === undefined || av === '';
+  const bNull = bv === null || bv === undefined || bv === '';
+  if (aNull && bNull) return 0;
+  if (aNull) return 1;
+  if (bNull) return -1;
+  if (NUMERIC_SORT_KEYS.has(key)) {
+    if (key === 'occurred_at') {
+      // Lexicographic ISO compare matches Date.getTime() ordering and
+      // is allocation-free.
+      return sign * (String(av) < String(bv) ? -1 : String(av) > String(bv) ? 1 : 0);
+    }
+    return sign * (Number(av) - Number(bv));
+  }
+  return sign * String(av).localeCompare(String(bv), 'ar-EG');
 }

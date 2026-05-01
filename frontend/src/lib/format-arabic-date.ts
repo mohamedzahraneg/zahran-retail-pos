@@ -45,6 +45,43 @@ export function formatArabicDate(
 }
 
 /**
+ * PR-FIN-PAYACCT-4D-REPORTS-1B — pad a number to two digits.
+ * Local helper kept private to this module so the date-time formatter
+ * never has to reach for a 3rd-party `padStart` polyfill.
+ */
+function pad2(n: number): string {
+  return n < 10 ? `0${n}` : String(n);
+}
+
+/**
+ * PR-FIN-PAYACCT-4D-REPORTS-1B — operator-friendly compact datetime.
+ *
+ * Returns the input rendered in the operator's local timezone as
+ * `DD/MM/YYYY HH:mm:ss` with Latin numerals — the format requested by
+ * the report spec for the cashbox operations table and report exports.
+ * Example: `"01/05/2026 14:35:09"`.
+ *
+ * Defensive in the same way as `formatArabicDate`: accepts ISO 8601,
+ * PG `timestamptz` text, stringified JS Dates, etc. Returns the input
+ * verbatim when `Date` cannot parse, and `''` for null / undefined / ''.
+ *
+ * Avoids `Intl.DateTimeFormat`'s `'en-GB'` quirk that injects a
+ * `,` between the date and time across Node/browser implementations
+ * — a manual format keeps the output deterministic in tests.
+ */
+export function formatArabicDateTime(
+  input: string | null | undefined,
+): string {
+  if (!input) return '';
+  const d = new Date(input);
+  if (Number.isNaN(d.getTime())) return input;
+  return (
+    `${pad2(d.getDate())}/${pad2(d.getMonth() + 1)}/${d.getFullYear()} ` +
+    `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`
+  );
+}
+
+/**
  * Format an inclusive date range. Renders:
  *   • `""` when both ends are missing.
  *   • The single formatted date when both ends parse to the same day.
