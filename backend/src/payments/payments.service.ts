@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { DataSource } from 'typeorm';
@@ -47,6 +48,8 @@ const METHOD_TO_CASHBOX_KIND: Record<string, string> = {
 
 @Injectable()
 export class PaymentsService {
+  private readonly logger = new Logger('PaymentsService');
+
   constructor(private readonly ds: DataSource) {}
 
   // ── Provider catalog (static) ────────────────────────────────────
@@ -1109,8 +1112,28 @@ export class PaymentsService {
       };
     }
 
-    // Execute the UPDATE in a transaction. Returns the rows it
-    // modified so we can recompute the after-counts deterministically.
+    // PR-FIN-PAYACCT-4D-UX-FIX-12 — main transaction is now strictly
+    // about the data write. The activity_logs audit INSERT was moved
+    // OUT of the tx (see below) so any future failure in the audit
+    // path can never poison the tx and roll back the backfill.
+    //
+    // Earlier production incident (2026-05-01): FIX-11 fixed the
+    // `payload`→`metadata` column-name bug, but PG then surfaced a
+    // SECOND issue inside the same INSERT — `could not determine
+    // data type of parameter $3` (the method string used in
+    // `jsonb_build_object('method', $3, ...)` had no explicit
+    // type). The audit INSERT failed inside the tx, the failed
+    // query put PG in an aborted state, TypeORM's COMMIT was
+    // silently demoted to ROLLBACK, and the `invoice_payments`
+    // UPDATE was undone. Two operator clicks at 11:39:08Z and
+    // 11:39:40Z left the 3 historical rows still unattached.
+    //
+    // Two-part fix:
+    //   1. Audit INSERT now runs AFTER tx commit, on a separate
+    //      connection (`this.ds.query`, not `em.query`). Its catch
+    //      can no longer affect the committed state.
+    //   2. Method param is explicitly cast `$3::text` so PG's type
+    //      inference inside `jsonb_build_object` cannot fail again.
     const updatedRows = await this.ds.transaction(async (em) => {
       // Defense in depth: re-read the candidate inside the tx so a
       // concurrent change to the default PA still produces a coherent
@@ -1137,50 +1160,9 @@ export class PaymentsService {
         RETURNING id`,
         [target.id, JSON.stringify(snapshot), method],
       );
-      // PR-FIN-PAYACCT-4D-UX-FIX-11 — audit log via raw SQL.
-      //
-      // ⚠️  Column name is `metadata`, not `payload`. Earlier shipped
-      // code used `payload` which doesn't exist on `activity_logs`,
-      // and Postgres rejects the INSERT. Even though the JS error is
-      // swallowed by `.catch()`, the failed query poisons the open
-      // transaction (PG: "current transaction is aborted, commands
-      // ignored until end of transaction block"), so TypeORM ROLLBACKs
-      // at COMMIT time and the UPDATE on `invoice_payments` is undone.
-      //
-      // Net effect under the bug: operator clicks the backfill button,
-      // BE returns a server error, FE shows error toast, and the 3
-      // historical rows stay unattached forever — exactly the symptom
-      // we observed in production today (7 PG ERROR rows on
-      // 2026-05-01 between 09:14:48Z and 09:33:16Z).
-      await em.query(
-        `INSERT INTO activity_logs
-           (action, entity, entity_id, user_id, metadata)
-         VALUES ('update'::activity_action, 'invoice'::entity_type, $1::uuid,
-                 $2::uuid,
-                 jsonb_build_object(
-                   'pr', 'PR-FIN-PAYACCT-4D-UX-FIX-9',
-                   'op', 'backfill_unattached_invoice_payments',
-                   'method', $3,
-                   'target_payment_account_id', $1,
-                   'updated_count', $4,
-                   'before_total_amount', $5
-                 ))
-         ON CONFLICT DO NOTHING`,
-        [
-          target.id,
-          userId,
-          method,
-          rows.length,
-          String(before.total_amount),
-        ],
-      ).catch(() => {
-        // activity_logs INSERT is best-effort — but the .catch only
-        // swallows the JS error, not the PG transaction state. Keep
-        // the column name correct (above) so this catch never has
-        // anything to swallow under normal operation.
-      });
       return rows;
     });
+    // Tx committed. From here down, nothing can affect the data write.
 
     // After-counts (should be 0 if the backfill was exhaustive).
     const [after] = await this.ds.query(
@@ -1191,6 +1173,44 @@ export class PaymentsService {
           AND payment_method = $1::payment_method_code`,
       [method],
     );
+
+    // Best-effort audit log. Runs on a separate connection (this.ds)
+    // so any failure here is invisible to the already-committed
+    // backfill and the operator-facing response. Note the explicit
+    // `$3::text` cast (PR-FIN-PAYACCT-4D-UX-FIX-12) — without it,
+    // PG can't infer the type of the parameter inside
+    // `jsonb_build_object` and the INSERT errors with
+    // "could not determine data type of parameter $3".
+    try {
+      await this.ds.query(
+        `INSERT INTO activity_logs
+           (action, entity, entity_id, user_id, metadata)
+         VALUES ('update'::activity_action, 'invoice'::entity_type, $1::uuid,
+                 $2::uuid,
+                 jsonb_build_object(
+                   'pr', 'PR-FIN-PAYACCT-4D-UX-FIX-9',
+                   'op', 'backfill_unattached_invoice_payments',
+                   'method', $3::text,
+                   'target_payment_account_id', $1::text,
+                   'updated_count', $4::int,
+                   'before_total_amount', $5::text
+                 ))
+         ON CONFLICT DO NOTHING`,
+        [
+          target.id,
+          userId,
+          method,
+          updatedRows.length,
+          String(before.total_amount),
+        ],
+      );
+    } catch (err) {
+      this.logger.warn(
+        `backfillUnattachedInvoicePayments: activity_logs audit INSERT failed (best-effort, ignored): ${
+          (err as Error)?.message ?? String(err)
+        }`,
+      );
+    }
 
     return {
       method,
