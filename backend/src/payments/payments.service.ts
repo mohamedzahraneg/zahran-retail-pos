@@ -1137,11 +1137,24 @@ export class PaymentsService {
         RETURNING id`,
         [target.id, JSON.stringify(snapshot), method],
       );
-      // Audit-log via raw SQL (no @nestjs/audit dependency at this
-      // service). One row per backfill run, regardless of count.
+      // PR-FIN-PAYACCT-4D-UX-FIX-11 — audit log via raw SQL.
+      //
+      // ⚠️  Column name is `metadata`, not `payload`. Earlier shipped
+      // code used `payload` which doesn't exist on `activity_logs`,
+      // and Postgres rejects the INSERT. Even though the JS error is
+      // swallowed by `.catch()`, the failed query poisons the open
+      // transaction (PG: "current transaction is aborted, commands
+      // ignored until end of transaction block"), so TypeORM ROLLBACKs
+      // at COMMIT time and the UPDATE on `invoice_payments` is undone.
+      //
+      // Net effect under the bug: operator clicks the backfill button,
+      // BE returns a server error, FE shows error toast, and the 3
+      // historical rows stay unattached forever — exactly the symptom
+      // we observed in production today (7 PG ERROR rows on
+      // 2026-05-01 between 09:14:48Z and 09:33:16Z).
       await em.query(
         `INSERT INTO activity_logs
-           (action, entity, entity_id, user_id, payload)
+           (action, entity, entity_id, user_id, metadata)
          VALUES ('update'::activity_action, 'invoice'::entity_type, $1::uuid,
                  $2::uuid,
                  jsonb_build_object(
@@ -1161,8 +1174,10 @@ export class PaymentsService {
           String(before.total_amount),
         ],
       ).catch(() => {
-        // activity_logs is best-effort here — never block the
-        // operator's backfill on a logging failure.
+        // activity_logs INSERT is best-effort — but the .catch only
+        // swallows the JS error, not the PG transaction state. Keep
+        // the column name correct (above) so this catch never has
+        // anything to swallow under normal operation.
       });
       return rows;
     });

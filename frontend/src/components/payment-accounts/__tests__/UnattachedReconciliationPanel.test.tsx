@@ -188,6 +188,93 @@ describe('UnattachedReconciliationPanel — PR-FIN-PAYACCT-4D-UX-FIX-9', () => {
     confirmSpy.mockRestore();
   });
 
+  /**
+   * PR-FIN-PAYACCT-4D-UX-FIX-11 — never raise a "success" toast when
+   * the BE response says nothing moved. Earlier code did `toast.success`
+   * unconditionally on any 2xx, which masked a server-side rollback bug
+   * (the audit INSERT used the wrong column name; PG rolled back the
+   * UPDATE; FE still cheerfully said "تم ربط 0 عملية..."). The three
+   * branches below pin the new contract.
+   */
+  it('PR-FIN-PAYACCT-4D-UX-FIX-11: dryRun=true response shows a WARNING, not success, and does not invalidate queries', async () => {
+    (paymentsApi.unattachedSummary as any).mockResolvedValue([INSTAPAY_BUCKET]);
+    (paymentsApi.backfillUnattached as any).mockResolvedValue({
+      method: 'instapay',
+      dryRun: true, // ← dryRun branch
+      targetAccount: { id: INSTAPAY_BUCKET.target_account!.id, display_name: 'InstaPay', identifier: '01004888879' },
+      before: { rowCount: 3, totalAmount: '1050.00' },
+      after: { rowCount: 3, totalAmount: '1050.00' },
+      updatedCount: 0,
+    });
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const toastModule = await import('react-hot-toast');
+    const toastSuccessSpy = vi.spyOn(toastModule.default, 'success');
+
+    const { qc } = renderPanel(true);
+    const invalidateSpy = vi.spyOn(qc, 'invalidateQueries');
+
+    fireEvent.click(await screen.findByTestId('unattached-action-instapay'));
+    await waitFor(() =>
+      expect(paymentsApi.backfillUnattached).toHaveBeenCalled(),
+    );
+
+    // No success toast on a dryRun response.
+    await waitFor(() => expect(toastSuccessSpy).not.toHaveBeenCalled());
+    // Query cache must not be invalidated either — there's nothing to refetch.
+    expect(invalidateSpy).not.toHaveBeenCalled();
+
+    confirmSpy.mockRestore();
+  });
+
+  it('PR-FIN-PAYACCT-4D-UX-FIX-11: dryRun=false + updatedCount=0 shows a WARNING, not success', async () => {
+    (paymentsApi.unattachedSummary as any).mockResolvedValue([INSTAPAY_BUCKET]);
+    (paymentsApi.backfillUnattached as any).mockResolvedValue({
+      method: 'instapay',
+      dryRun: false,
+      targetAccount: { id: INSTAPAY_BUCKET.target_account!.id, display_name: 'InstaPay', identifier: '01004888879' },
+      before: { rowCount: 3, totalAmount: '1050.00' },
+      after: { rowCount: 3, totalAmount: '1050.00' }, // ← unchanged
+      updatedCount: 0,                                // ← zero
+    });
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const toastModule = await import('react-hot-toast');
+    const toastSuccessSpy = vi.spyOn(toastModule.default, 'success');
+
+    renderPanel(true);
+    fireEvent.click(await screen.findByTestId('unattached-action-instapay'));
+    await waitFor(() =>
+      expect(paymentsApi.backfillUnattached).toHaveBeenCalled(),
+    );
+    await waitFor(() => expect(toastSuccessSpy).not.toHaveBeenCalled());
+    confirmSpy.mockRestore();
+  });
+
+  it('PR-FIN-PAYACCT-4D-UX-FIX-11: dryRun=false + updatedCount>0 shows the real success toast', async () => {
+    (paymentsApi.unattachedSummary as any).mockResolvedValue([INSTAPAY_BUCKET]);
+    (paymentsApi.backfillUnattached as any).mockResolvedValue({
+      method: 'instapay',
+      dryRun: false,
+      targetAccount: { id: INSTAPAY_BUCKET.target_account!.id, display_name: 'InstaPay', identifier: '01004888879' },
+      before: { rowCount: 3, totalAmount: '1050.00' },
+      after: { rowCount: 0, totalAmount: '0' },
+      updatedCount: 3, // ← real success
+    });
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const toastModule = await import('react-hot-toast');
+    const toastSuccessSpy = vi.spyOn(toastModule.default, 'success');
+
+    renderPanel(true);
+    fireEvent.click(await screen.findByTestId('unattached-action-instapay'));
+    await waitFor(() =>
+      expect(paymentsApi.backfillUnattached).toHaveBeenCalled(),
+    );
+    await waitFor(() => expect(toastSuccessSpy).toHaveBeenCalledTimes(1));
+    expect(toastSuccessSpy).toHaveBeenCalledWith(
+      expect.stringMatching(/تم ربط 3 عملية/),
+    );
+    confirmSpy.mockRestore();
+  });
+
   it('on success invalidates payment-accounts-balances + unattached-summary queries', async () => {
     (paymentsApi.unattachedSummary as any).mockResolvedValue([INSTAPAY_BUCKET]);
     (paymentsApi.backfillUnattached as any).mockResolvedValue({
