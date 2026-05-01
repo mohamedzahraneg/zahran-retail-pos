@@ -1189,11 +1189,11 @@ describe('PaymentsService.backfillUnattachedInvoicePayments — PR-FIN-PAYACCT-4
         [TARGET_PA],                                       // candidates SELECT (initial)
         [{ row_count: 3, total_amount: '1050.00' }],       // before count
         [{ row_count: 0, total_amount: '0' }],             // after count
+        [],                                                // activity_logs INSERT (PR-FIN-PAYACCT-4D-UX-FIX-12 — now on ds, post-tx)
       ],
       emResults: [
         [TARGET_PA],                                       // tx-scoped re-read FOR UPDATE
         [{ id: 'r1' }, { id: 'r2' }, { id: 'r3' }],        // UPDATE RETURNING
-        [],                                                // activity_logs INSERT (best-effort)
       ],
     });
     const out = await service.backfillUnattachedInvoicePayments({
@@ -1232,31 +1232,40 @@ describe('PaymentsService.backfillUnattachedInvoicePayments — PR-FIN-PAYACCT-4
   });
 
   /**
-   * PR-FIN-PAYACCT-4D-UX-FIX-11 — regression guard.
+   * PR-FIN-PAYACCT-4D-UX-FIX-11 + PR-FIN-PAYACCT-4D-UX-FIX-12 — audit INSERT
+   * regression guard.
    *
-   * Earlier shipped code wrote the audit row with column name `payload`,
-   * but `activity_logs` exposes the JSON column as `metadata`. Postgres
-   * rejected the INSERT, the failed query poisoned the open transaction,
-   * and TypeORM ROLLBACKed at COMMIT — so the UPDATE on
-   * `invoice_payments` was undone. Net effect in production: the operator
-   * clicked the backfill button repeatedly (7 PG errors observed on
-   * 2026-05-01 between 09:14:48Z and 09:33:16Z), saw a server error each
-   * time, and the 3 historical InstaPay rows stayed unattached.
+   * Layered history:
+   *   FIX-11: original code wrote `(... payload)` but the column is
+   *           `metadata` → PG rejected the INSERT inside the tx →
+   *           tx aborted → UPDATE rolled back → 3 rows stayed unattached
+   *           (7 PG errors on 2026-05-01 between 09:14:48Z and 09:33:16Z).
+   *   FIX-12: column rename revealed a SECOND failure inside the same
+   *           INSERT — `could not determine data type of parameter $3`
+   *           in `jsonb_build_object('method', $3, ...)`. Same poison
+   *           effect (2 PG errors on 2026-05-01 at 11:39:08Z, 11:39:40Z).
    *
-   * This test pins the column name so any future drift breaks the build
-   * before it can break production.
+   * FIX-12 corrects both root causes:
+   *   • The audit INSERT now runs on `this.ds` (separate connection)
+   *     AFTER the main tx commits, so any failure here cannot affect
+   *     the committed `invoice_payments` UPDATE.
+   *   • Every parameter inside `jsonb_build_object` is explicitly cast
+   *     so PG's type inference cannot fail (`$3::text`, `$1::text`,
+   *     `$4::int`, `$5::text`).
+   *
+   * This single test pins the post-FIX-12 contract.
    */
-  it('PR-FIN-PAYACCT-4D-UX-FIX-11: audit INSERT writes column `metadata`, not `payload`', async () => {
-    const { service, emCalls } = await makeService({
+  it('PR-FIN-PAYACCT-4D-UX-FIX-12: audit INSERT runs OUTSIDE the tx, on ds (not em), with `metadata` column and explicit param casts', async () => {
+    const { service, dsCalls, emCalls } = await makeService({
       dsResults: [
         [TARGET_PA],
         [{ row_count: 3, total_amount: '1050.00' }],
         [{ row_count: 0, total_amount: '0' }],
+        [],                                                // audit insert (now on ds)
       ],
       emResults: [
         [TARGET_PA],
         [{ id: 'r1' }, { id: 'r2' }, { id: 'r3' }],
-        [],
       ],
     });
     await service.backfillUnattachedInvoicePayments({
@@ -1264,17 +1273,78 @@ describe('PaymentsService.backfillUnattachedInvoicePayments — PR-FIN-PAYACCT-4
       dryRun: false,
       userId: 'u-1',
     });
-    const audit = emCalls.find((c) =>
+    // Audit must NOT appear inside the tx (em.query) — that was the
+    // tx-poison vector.
+    expect(emCalls.some((c) => /INSERT INTO activity_logs/.test(c.sql))).toBe(false);
+    // Audit MUST appear on the connection-pool query path (ds.query).
+    const audit = dsCalls.find((c) =>
       /INSERT INTO activity_logs/.test(c.sql),
     );
     expect(audit).toBeDefined();
-    // Column list must include `metadata` and must NOT include `payload`.
+    // Column list: metadata, never payload (FIX-11 regression).
     expect(audit!.sql).toMatch(/\(\s*action\s*,\s*entity\s*,\s*entity_id\s*,\s*user_id\s*,\s*metadata\s*\)/);
     expect(audit!.sql).not.toMatch(/\bpayload\b/);
-    // VALUES still build the JSONB payload via jsonb_build_object — that's
-    // a function name, not the column. (Sanity that we didn't rename the
-    // wrong identifier.)
+    // FIX-12 explicit casts: `$3::text` for the method, plus the
+    // other params we touch inside jsonb_build_object so PG's type
+    // inference can't trip again.
+    expect(audit!.sql).toMatch(/'method',\s*\$3::text/);
+    expect(audit!.sql).toMatch(/\$1::text/);    // target_payment_account_id
+    expect(audit!.sql).toMatch(/\$4::int/);     // updated_count
+    expect(audit!.sql).toMatch(/\$5::text/);    // before_total_amount
     expect(audit!.sql).toMatch(/jsonb_build_object\(/);
+  });
+
+  /**
+   * PR-FIN-PAYACCT-4D-UX-FIX-12 — best-effort guarantee.
+   *
+   * Even if the audit INSERT throws (e.g. activity_logs schema drifts
+   * again, or PG hits some unrelated transient), the operator response
+   * MUST be unaffected. The committed UPDATE stands; the API returns
+   * the same shape with the real updatedCount.
+   */
+  it('PR-FIN-PAYACCT-4D-UX-FIX-12: audit INSERT failure does NOT change the committed backfill result', async () => {
+    const { ds, dsCalls, emCalls } = makeFakeDataSource({
+      dsResults: [
+        [TARGET_PA],                                  // candidates
+        [{ row_count: 3, total_amount: '1050.00' }],  // before
+        [{ row_count: 0, total_amount: '0' }],        // after
+      ],
+      emResults: [
+        [TARGET_PA],                                  // tx-scoped re-read
+        [{ id: 'r1' }, { id: 'r2' }, { id: 'r3' }],   // UPDATE RETURNING
+      ],
+    });
+    // Make the audit INSERT throw. Track the call manually since the
+    // override short-circuits before originalDsQuery's tracking.
+    const originalDsQuery = ds.query;
+    ds.query = async (sql: string, params: any[] = []) => {
+      if (/INSERT INTO activity_logs/.test(sql)) {
+        dsCalls.push({ sql, params });
+        throw new Error('synthetic audit-insert failure');
+      }
+      return originalDsQuery(sql, params);
+    };
+    const moduleRef = await Test.createTestingModule({
+      providers: [PaymentsService, { provide: DataSource, useValue: ds }],
+    }).compile();
+    const service = moduleRef.get(PaymentsService);
+
+    const out = await service.backfillUnattachedInvoicePayments({
+      method: 'instapay',
+      dryRun: false,
+      userId: 'u-1',
+    });
+
+    // Service did NOT throw. The committed backfill result stands.
+    expect(out.dryRun).toBe(false);
+    expect(out.updatedCount).toBe(3);
+    expect(out.before.rowCount).toBe(3);
+    expect(out.after.rowCount).toBe(0);
+    expect(out.targetAccount.id).toBe(TARGET_PA.id);
+
+    // Sanity: the UPDATE happened (em side), the audit was attempted (ds side)
+    expect(emCalls.some((c) => /UPDATE invoice_payments/.test(c.sql))).toBe(true);
+    expect(dsCalls.some((c) => /INSERT INTO activity_logs/.test(c.sql))).toBe(true);
   });
 
   it('does NOT touch journal_entries / journal_lines / cashbox_transactions', async () => {
@@ -1283,11 +1353,11 @@ describe('PaymentsService.backfillUnattachedInvoicePayments — PR-FIN-PAYACCT-4
         [TARGET_PA],
         [{ row_count: 3, total_amount: '1050.00' }],
         [{ row_count: 0, total_amount: '0' }],
+        [],                                          // audit insert
       ],
       emResults: [
         [TARGET_PA],
         [{ id: 'r1' }, { id: 'r2' }, { id: 'r3' }],
-        [],
       ],
     });
     await service.backfillUnattachedInvoicePayments({
@@ -1302,6 +1372,35 @@ describe('PaymentsService.backfillUnattachedInvoicePayments — PR-FIN-PAYACCT-4
     expect(allSql).not.toMatch(/UPDATE journal_lines/i);
     expect(allSql).not.toMatch(/INSERT INTO cashbox_transactions/i);
     expect(allSql).not.toMatch(/UPDATE cashbox_transactions/i);
+    // FIX-12 also: no UPDATE invoices (we only touch invoice_payments).
+    expect(allSql).not.toMatch(/UPDATE invoices\b/i);
+  });
+
+  /**
+   * PR-FIN-PAYACCT-4D-UX-FIX-12 — dryRun must not write activity_logs.
+   * The dryRun branch returns before any UPDATE or audit INSERT so the
+   * post-tx audit code path is never reached.
+   */
+  it('PR-FIN-PAYACCT-4D-UX-FIX-12: dryRun never writes activity_logs', async () => {
+    const { service, dsCalls, emCalls } = await makeService({
+      dsResults: [
+        [TARGET_PA],                                  // candidates
+        [{ row_count: 3, total_amount: '1050.00' }],  // before count
+      ],
+    });
+    const out = await service.backfillUnattachedInvoicePayments({
+      method: 'instapay',
+      dryRun: true,
+      userId: 'u-1',
+    });
+    expect(out.dryRun).toBe(true);
+    expect(out.updatedCount).toBe(0);
+    // No audit INSERT on either path.
+    expect(dsCalls.some((c) => /INSERT INTO activity_logs/.test(c.sql))).toBe(false);
+    expect(emCalls.some((c) => /INSERT INTO activity_logs/.test(c.sql))).toBe(false);
+    // No UPDATE either (dryRun).
+    expect(emCalls.some((c) => /UPDATE invoice_payments/.test(c.sql))).toBe(false);
+    expect(dsCalls.some((c) => /UPDATE invoice_payments/.test(c.sql))).toBe(false);
   });
 
   it('idempotent: second execute hits 0 rows and reports updatedCount=0', async () => {
@@ -1310,11 +1409,11 @@ describe('PaymentsService.backfillUnattachedInvoicePayments — PR-FIN-PAYACCT-4
         [TARGET_PA],                                       // candidates
         [{ row_count: 0, total_amount: '0' }],             // before (already 0)
         [{ row_count: 0, total_amount: '0' }],             // after
+        [],                                                // audit insert
       ],
       emResults: [
         [TARGET_PA],                                       // tx-scoped re-read
         [],                                                // UPDATE RETURNING (no rows match)
-        [],                                                // audit
       ],
     });
     const out = await service.backfillUnattachedInvoicePayments({
