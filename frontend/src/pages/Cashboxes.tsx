@@ -100,6 +100,7 @@ import { UnattachedReconciliationPanel } from '@/components/payment-accounts/Una
 import { PaymentAccountAlerts } from '@/components/payment-accounts/PaymentAccountAlerts';
 import { PaymentAccountDetailsPanel } from '@/components/payment-accounts/PaymentAccountDetailsPanel';
 import { CashboxDetailsModal } from '@/components/cashboxes/CashboxDetailsModal';
+import { DriftCleanupPreviewModal } from '@/components/cashboxes/DriftCleanupPreviewModal';
 import { InstitutionLogo } from '@/components/InstitutionLogo';
 import { useAuthStore } from '@/stores/auth.store';
 import { uuidOrNull, isMissingUuid } from '@/lib/uuid-or-null';
@@ -283,6 +284,9 @@ export default function Cashboxes() {
   const hasPermission = useAuthStore((s) => s.hasPermission);
   const canManageCashboxes = hasPermission('cashdesk.manage_accounts');
   const canManageAccounts  = hasPermission('payment-accounts.manage');
+  // PR-FIN-PAYACCT-4D-DRIFT-HISTORICAL-CLEANUP-1 — operator-only diagnostic
+  // (DRY RUN ONLY; no execute path in this UI).
+  const canPreviewDriftCleanup = hasPermission('accounts.journal.post');
 
   // ── Filters ────────────────────────────────────────────────────────
   const [search, setSearch] = useState('');
@@ -318,6 +322,8 @@ export default function Cashboxes() {
   const [editingCashbox, setEditingCashbox]       = useState<Cashbox | null>(null);
   const [showTransfer, setShowTransfer]           = useState(false);
   const [showOverflow, setShowOverflow]           = useState(false);
+  // PR-FIN-PAYACCT-4D-DRIFT-HISTORICAL-CLEANUP-1 — preview modal
+  const [showDriftCleanupPreview, setShowDriftCleanupPreview] = useState(false);
 
   // PR-FIN-PAYACCT-4D-UX-FIX-4 — Settings deep-link consumer.
   // The Settings page links here with `?action=create-account&method=...`
@@ -620,6 +626,20 @@ export default function Cashboxes() {
           >
             <RefreshCcw size={14} /> تحديث الأرصدة
           </button>
+          {/* PR-FIN-PAYACCT-4D-DRIFT-HISTORICAL-CLEANUP-1 — owner-only diagnostic.
+              DRY RUN ONLY: opens a read-only preview of the historical
+              cleanup plan. Cannot trigger execute from this UI. */}
+          {canPreviewDriftCleanup && (
+            <button
+              type="button"
+              onClick={() => setShowDriftCleanupPreview(true)}
+              className="px-3 py-2 rounded-lg border border-amber-300 bg-amber-50 text-sm font-bold text-amber-800 hover:bg-amber-100 inline-flex items-center gap-1.5"
+              data-testid="treasury-drift-cleanup-preview"
+              title="معاينة تنظيف فروقات الخزنة (قراءة فقط — لا تنفّذ أي تغييرات)"
+            >
+              معاينة تنظيف فروقات الخزنة
+            </button>
+          )}
           <OverflowMenu
             open={showOverflow}
             onToggle={() => setShowOverflow((v) => !v)}
@@ -1039,6 +1059,14 @@ export default function Cashboxes() {
           />
         );
       })()}
+
+      {/* PR-FIN-PAYACCT-4D-DRIFT-HISTORICAL-CLEANUP-1 — DRY RUN preview modal.
+          Read-only diagnostic; cannot trigger execute from this UI. */}
+      {showDriftCleanupPreview && (
+        <DriftCleanupPreviewModal
+          onClose={() => setShowDriftCleanupPreview(false)}
+        />
+      )}
     </div>
   );
 }
