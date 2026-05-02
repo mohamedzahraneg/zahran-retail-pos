@@ -43,12 +43,22 @@ describe('ShiftsService.summary — refund_cash_movements cancel-aware SQL', () 
     );
   });
 
-  it('bridges reversal CT → reversal JE → original JE → return via three LEFT JOINs', () => {
-    // The bridge structure is what lets the report group an original
-    // refund "out" row with its cancellation "in" row by return_no.
-    expect(SRC).toMatch(/je_rev[\s\S]+je_rev\.id\s*=\s*ct\.reference_id/);
-    expect(SRC).toMatch(/je_orig[\s\S]+je_orig\.id\s*=\s*je_rev\.reversal_of/);
-    expect(SRC).toMatch(/r_via_je[\s\S]+r_via_je\.id\s*=\s*je_orig\.reference_id/);
+  it('bridges reversal CT → original JE → return via a single LEFT JOIN hop', () => {
+    // PR-FIN-RETURNS-SHIFT-CANCEL-AWARE-BRIDGE-FIX —
+    // `posting.reverseByReference` writes paired CT rows with
+    // `reference_id = orig.id` (the ORIGINAL JE id, NOT the
+    // newly-created reversal JE id). So the reversal CT's
+    // `reference_id` already points directly at the original return
+    // JE, and the bridge needs ONE hop, not three.
+    expect(SRC).toMatch(
+      /je_orig[\s\S]+je_orig\.id\s*=\s*ct\.reference_id[\s\S]+je_orig\.reference_type::text\s*=\s*'return'/,
+    );
+    expect(SRC).toMatch(
+      /r_via_je[\s\S]+r_via_je\.id\s*=\s*je_orig\.reference_id/,
+    );
+    // The old (broken) intermediate `je_rev` JOIN must be gone.
+    expect(SRC).not.toMatch(/je_rev\.id\s*=\s*ct\.reference_id/);
+    expect(SRC).not.toMatch(/je_orig\.id\s*=\s*je_rev\.reversal_of/);
   });
 
   it('exposes source_return_status so the FE can render "ملغي" badges', () => {
