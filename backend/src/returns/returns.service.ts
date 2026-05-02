@@ -388,6 +388,24 @@ export class ReturnsService {
   //  LIST / GET
   // ==========================================================================
 
+  /**
+   * PR-FIN-RETURNS-UX-1A — read enrichment.
+   *
+   * The list endpoint now joins the operator names, the linked cashbox,
+   * the active journal entry, the refund cashbox_transaction, and a
+   * computed `accounting_status` / `inventory_status` so the FE can
+   * render operator + timestamp + diagnostic badges per row without
+   * needing a separate per-row fetch. All joins are LEFT and the new
+   * fields are nullable — existing callers that only read the prior
+   * shape are unaffected.
+   *
+   * Filter additions: `date_from`, `date_to`, `refund_method`,
+   * `accounting_status` (computed via the same CASE expression that
+   * builds the column, wrapped in a sub-CTE so the WHERE can reference
+   * it). All optional and backwards compatible.
+   *
+   * Read-only. No side effects. No write paths touched.
+   */
   async list(q: ListReturnsQueryDto) {
     const where: string[] = [];
     const params: any[] = [];
@@ -405,6 +423,32 @@ export class ReturnsService {
         `(r.return_no ILIKE $${params.length} OR i.invoice_no ILIKE $${params.length} OR c.full_name ILIKE $${params.length})`,
       );
     }
+    if (q.date_from) {
+      params.push(q.date_from);
+      where.push(`r.requested_at >= $${params.length}::date`);
+    }
+    if (q.date_to) {
+      // Inclusive upper bound on the day (`<` next day) so callers can
+      // pass `2026-05-02` and match every event on that date.
+      params.push(q.date_to);
+      where.push(
+        `r.requested_at < ($${params.length}::date + INTERVAL '1 day')`,
+      );
+    }
+    if (q.refund_method) {
+      params.push(q.refund_method);
+      where.push(`r.refund_method = $${params.length}`);
+    }
+
+    // accounting_status filter is applied AFTER the SELECT computes the
+    // column, by wrapping the base query in an outer SELECT.
+    const accountingFilter = q.accounting_status
+      ? (() => {
+          params.push(q.accounting_status);
+          return `WHERE accounting_status = $${params.length}`;
+        })()
+      : '';
+
     const limit = Math.min(
       Math.max(parseInt(q.limit ?? '50', 10) || 50, 1),
       200,
@@ -414,19 +458,98 @@ export class ReturnsService {
 
     return this.ds.query(
       `
+      WITH base AS (
+        SELECT
+          r.id, r.return_no, r.status, r.reason,
+          r.total_refund, r.restocking_fee, r.net_refund, r.refund_method,
+          r.requested_at, r.approved_at, r.refunded_at, r.rejected_at,
+          r.created_at, r.updated_at,
+          r.original_invoice_id, i.invoice_no,
+          r.customer_id, c.full_name AS customer_name, c.phone AS customer_phone,
+          r.cashbox_id, cb.name_ar AS cashbox_name,
+          r.requested_by, u1.full_name AS requested_by_name,
+          r.approved_by,  u2.full_name AS approved_by_name,
+          r.refunded_by,  u3.full_name AS refunded_by_name,
+          (SELECT COUNT(*)::int FROM return_items ri
+            WHERE ri.return_id = r.id)                                AS items_count,
+          (SELECT COALESCE(SUM(quantity),0)::int FROM return_items ri
+            WHERE ri.return_id = r.id)                                AS units_count,
+          -- Inventory diagnostic: do we expect any items to have been
+          -- restocked? (back_to_stock=true AND condition='resellable')
+          (SELECT COUNT(*)::int FROM return_items ri
+            WHERE ri.return_id = r.id
+              AND ri.back_to_stock = true
+              AND ri.condition = 'resellable')                        AS restock_eligible_items,
+          -- Active JE for this return.
+          (SELECT je.id        FROM journal_entries je
+            WHERE je.reference_type='return' AND je.reference_id = r.id
+              AND je.is_posted=true AND je.is_void=false LIMIT 1)     AS journal_entry_id,
+          (SELECT je.entry_no  FROM journal_entries je
+            WHERE je.reference_type='return' AND je.reference_id = r.id
+              AND je.is_posted=true AND je.is_void=false LIMIT 1)     AS journal_entry_no,
+          (SELECT je.posted_at FROM journal_entries je
+            WHERE je.reference_type='return' AND je.reference_id = r.id
+              AND je.is_posted=true AND je.is_void=false LIMIT 1)     AS journal_entry_posted_at,
+          -- Refund cashbox_transaction for this return.
+          (SELECT ct.id FROM cashbox_transactions ct
+            WHERE ct.reference_type='return' AND ct.reference_id = r.id
+              AND ct.category='refund' AND ct.is_void=false LIMIT 1)  AS refund_cashbox_transaction_id,
+          -- Cash leg JL.cashbox_id NULL diagnostic (the bug PR #225 fixed).
+          (SELECT BOOL_OR(jl.cashbox_id IS NULL)
+             FROM journal_entries je
+             JOIN journal_lines  jl ON jl.entry_id = je.id
+             JOIN chart_of_accounts coa ON coa.id = jl.account_id
+            WHERE je.reference_type='return' AND je.reference_id = r.id
+              AND je.is_posted=true AND je.is_void=false
+              AND coa.code LIKE '111_'
+              AND jl.credit > 0)                                      AS has_unlinked_cash_leg
+        FROM returns r
+        LEFT JOIN invoices   i  ON i.id  = r.original_invoice_id
+        LEFT JOIN customers  c  ON c.id  = r.customer_id
+        LEFT JOIN cashboxes  cb ON cb.id = r.cashbox_id
+        LEFT JOIN users      u1 ON u1.id = r.requested_by
+        LEFT JOIN users      u2 ON u2.id = r.approved_by
+        LEFT JOIN users      u3 ON u3.id = r.refunded_by
+        ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+      )
       SELECT
-        r.id, r.return_no, r.status, r.reason,
-        r.total_refund, r.restocking_fee, r.net_refund, r.refund_method,
-        r.requested_at, r.approved_at, r.refunded_at, r.rejected_at,
-        r.original_invoice_id, i.invoice_no,
-        r.customer_id, c.full_name AS customer_name, c.phone AS customer_phone,
-        (SELECT COUNT(*)::int FROM return_items ri WHERE ri.return_id = r.id) AS items_count,
-        (SELECT COALESCE(SUM(quantity),0)::int FROM return_items ri WHERE ri.return_id = r.id) AS units_count
-      FROM returns r
-      LEFT JOIN invoices  i ON i.id = r.original_invoice_id
-      LEFT JOIN customers c ON c.id = r.customer_id
-      ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
-      ORDER BY r.requested_at DESC
+        b.*,
+        -- Computed accounting_status:
+        --   not_applicable: pending/rejected (no JE expected)
+        --   je_missing:     approved/refunded but no active JE
+        --   cashbox_not_linked: JE exists but cash leg cashbox_id NULL
+        --   matched:        JE present + (no unlinked cash leg) + (refund CT present iff cash refund)
+        --   needs_review:   anything else
+        CASE
+          WHEN b.status IN ('pending','rejected') THEN 'not_applicable'
+          WHEN b.journal_entry_id IS NULL THEN 'je_missing'
+          WHEN b.has_unlinked_cash_leg = true THEN 'cashbox_not_linked'
+          WHEN b.refund_method = 'cash'
+            AND b.status = 'refunded'
+            AND b.refund_cashbox_transaction_id IS NULL THEN 'needs_review'
+          ELSE 'matched'
+        END AS accounting_status,
+        -- Computed inventory_status:
+        --   not_applicable: no restock-eligible items OR pending/rejected
+        --   restored:       approved/refunded with restock-eligible items
+        --                   (the approve flow restocks symmetrically; we
+        --                   don't yet match against stock_movements at
+        --                   the row level — that's a 1B/1C concern)
+        CASE
+          WHEN b.status IN ('pending','rejected') THEN 'not_applicable'
+          WHEN b.restock_eligible_items = 0       THEN 'not_applicable'
+          ELSE 'restored'
+        END AS inventory_status,
+        -- Match status: top-line operational badge for the row.
+        CASE
+          WHEN b.status IN ('pending','rejected') THEN 'pending'
+          WHEN b.journal_entry_id IS NULL THEN 'needs_review'
+          WHEN b.has_unlinked_cash_leg = true THEN 'needs_review'
+          ELSE 'matched'
+        END AS match_status
+      FROM base b
+      ${accountingFilter}
+      ORDER BY b.requested_at DESC
       LIMIT $${params.length - 1} OFFSET $${params.length}
       `,
       params,
@@ -434,24 +557,79 @@ export class ReturnsService {
   }
 
   async findOne(id: string) {
+    // PR-FIN-RETURNS-UX-1A: detail response inherits the same enriched
+    // shape as list() — operator names (already present), cashbox name,
+    // active JE id+entry_no+posted_at, refund CT id, computed
+    // accounting/inventory/match statuses. No write side-effects.
     const [header] = await this.ds.query(
       `
+      WITH base AS (
+        SELECT
+          r.*,
+          i.invoice_no, i.completed_at AS invoice_date,
+          c.full_name AS customer_name, c.phone AS customer_phone,
+          w.name AS warehouse_name,
+          cb.name_ar AS cashbox_name,
+          u1.full_name AS requested_by_name,
+          u2.full_name AS approved_by_name,
+          u3.full_name AS refunded_by_name,
+          (SELECT COUNT(*)::int FROM return_items ri
+            WHERE ri.return_id = r.id
+              AND ri.back_to_stock = true
+              AND ri.condition = 'resellable')                        AS restock_eligible_items,
+          (SELECT je.id        FROM journal_entries je
+            WHERE je.reference_type='return' AND je.reference_id = r.id
+              AND je.is_posted=true AND je.is_void=false LIMIT 1)     AS journal_entry_id,
+          (SELECT je.entry_no  FROM journal_entries je
+            WHERE je.reference_type='return' AND je.reference_id = r.id
+              AND je.is_posted=true AND je.is_void=false LIMIT 1)     AS journal_entry_no,
+          (SELECT je.posted_at FROM journal_entries je
+            WHERE je.reference_type='return' AND je.reference_id = r.id
+              AND je.is_posted=true AND je.is_void=false LIMIT 1)     AS journal_entry_posted_at,
+          (SELECT ct.id FROM cashbox_transactions ct
+            WHERE ct.reference_type='return' AND ct.reference_id = r.id
+              AND ct.category='refund' AND ct.is_void=false LIMIT 1)  AS refund_cashbox_transaction_id,
+          (SELECT BOOL_OR(jl.cashbox_id IS NULL)
+             FROM journal_entries je
+             JOIN journal_lines  jl ON jl.entry_id = je.id
+             JOIN chart_of_accounts coa ON coa.id = jl.account_id
+            WHERE je.reference_type='return' AND je.reference_id = r.id
+              AND je.is_posted=true AND je.is_void=false
+              AND coa.code LIKE '111_'
+              AND jl.credit > 0)                                      AS has_unlinked_cash_leg
+        FROM returns r
+        LEFT JOIN invoices  i ON i.id  = r.original_invoice_id
+        LEFT JOIN customers c ON c.id  = r.customer_id
+        LEFT JOIN warehouses w ON w.id = r.warehouse_id
+        LEFT JOIN cashboxes  cb ON cb.id = r.cashbox_id
+        LEFT JOIN users    u1 ON u1.id = r.requested_by
+        LEFT JOIN users    u2 ON u2.id = r.approved_by
+        LEFT JOIN users    u3 ON u3.id = r.refunded_by
+        WHERE r.id = $1
+      )
       SELECT
-        r.*,
-        i.invoice_no, i.completed_at AS invoice_date,
-        c.full_name AS customer_name, c.phone AS customer_phone,
-        w.name AS warehouse_name,
-        u1.full_name AS requested_by_name,
-        u2.full_name AS approved_by_name,
-        u3.full_name AS refunded_by_name
-      FROM returns r
-      LEFT JOIN invoices  i ON i.id  = r.original_invoice_id
-      LEFT JOIN customers c ON c.id  = r.customer_id
-      LEFT JOIN warehouses w ON w.id = r.warehouse_id
-      LEFT JOIN users    u1 ON u1.id = r.requested_by
-      LEFT JOIN users    u2 ON u2.id = r.approved_by
-      LEFT JOIN users    u3 ON u3.id = r.refunded_by
-      WHERE r.id = $1
+        b.*,
+        CASE
+          WHEN b.status IN ('pending','rejected') THEN 'not_applicable'
+          WHEN b.journal_entry_id IS NULL THEN 'je_missing'
+          WHEN b.has_unlinked_cash_leg = true THEN 'cashbox_not_linked'
+          WHEN b.refund_method = 'cash'
+            AND b.status = 'refunded'
+            AND b.refund_cashbox_transaction_id IS NULL THEN 'needs_review'
+          ELSE 'matched'
+        END AS accounting_status,
+        CASE
+          WHEN b.status IN ('pending','rejected') THEN 'not_applicable'
+          WHEN b.restock_eligible_items = 0       THEN 'not_applicable'
+          ELSE 'restored'
+        END AS inventory_status,
+        CASE
+          WHEN b.status IN ('pending','rejected') THEN 'pending'
+          WHEN b.journal_entry_id IS NULL THEN 'needs_review'
+          WHEN b.has_unlinked_cash_leg = true THEN 'needs_review'
+          ELSE 'matched'
+        END AS match_status
+      FROM base b
       `,
       [id],
     );
