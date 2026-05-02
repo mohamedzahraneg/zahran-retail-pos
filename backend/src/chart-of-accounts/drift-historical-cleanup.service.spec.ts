@@ -373,12 +373,92 @@ describe('DriftHistoricalCleanupService — execute (happy path)', () => {
       expect(c.sql).not.toMatch(/^\s*INSERT\s/i);
     }
 
+    // engine_bypass_alerts invariant — the cleanup tx never INSERTs into
+    // engine_bypass_alerts. The post-commit rebuild path delegates to
+    // ReconciliationService.rebuildCashboxBalance which only UPDATEs the
+    // cashboxes table; the cashboxes UPDATE trigger uses fn_is_engine_context
+    // (a pure boolean check, no INSERT into engine_bypass_alerts), so the
+    // whole execute path increments the alert count by 0.
+    for (const c of emCalls) {
+      expect(c.sql).not.toMatch(/engine_bypass_alerts/i);
+    }
+
     // rebuildCashboxBalance was called once for the affected cashbox, after tx
     expect(recon.rebuildCashboxBalance).toHaveBeenCalledTimes(1);
     expect(recon.rebuildCashboxBalance).toHaveBeenCalledWith(MAIN_CB);
     expect(out.cashboxBalanceRebuilt).toEqual([
       { cashbox_id: MAIN_CB, new_balance: 31930 },
     ]);
+  });
+
+  it('rebuild path produces no engine_bypass_alerts INSERT (contract test)', async () => {
+    // Records every interaction the recon mock receives so we can prove
+    // the cleanup orchestration NEVER asks recon to do anything other
+    // than rebuildCashboxBalance(cashboxId). Combined with the production
+    // implementation of rebuildCashboxBalance (which only UPDATEs the
+    // cashboxes table — a trigger surface that does NOT call
+    // fn_engine_write_allowed), this guarantees engine_bypass_alerts is
+    // not incremented by the post-commit rebuild step.
+    const reconCalls: Array<{ method: string; args: any[] }> = [];
+    const recon = {
+      rebuildCashboxBalance: jest.fn((...args: any[]) => {
+        reconCalls.push({ method: 'rebuildCashboxBalance', args });
+        return Promise.resolve({ cashbox_id: MAIN_CB, new_balance: 31930 });
+      }),
+    };
+
+    const { ds, emCalls, dsCalls } = makeFakeDs(
+      script([
+        // pre-tx dry-run snapshot
+        [PAT_A_DETECT, [A_CANDIDATE]],
+        [PAT_A_ROWS, A_ROWS],
+        [PAT_B_DETECT, [B_CANDIDATE]],
+        [PAT_B_AMBIGUOUS, []],
+        [PAT_DRIFT, [{ drift: 2100 }]],
+        [PAT_BAL, [{ bal: 32930 }]],
+        [PAT_EXPECTED_BAL, [{ bal: 31930 }]],
+        // inside tx
+        [PAT_LOCK, []],
+        [PAT_SET_CTX, []],
+        [PAT_A_DETECT, [A_CANDIDATE]],
+        [PAT_A_ROWS, A_ROWS],
+        [PAT_B_DETECT, [B_CANDIDATE]],
+        [PAT_UPDATE_CT, [[], 1]],
+        [PAT_UPDATE_CT, [[], 1]],
+        [PAT_UPDATE_JL, [[], 1]],
+        [PAT_A_DETECT, []],
+        [PAT_B_DETECT, []],
+        [PAT_DRIFT, [{ drift: 0 }]],
+      ]),
+    );
+
+    const svc = await buildModule({ ds, recon });
+    await svc.execute({
+      confirm: EXECUTE_CONFIRM_TOKEN,
+      rebuildCashboxBalance: true,
+    });
+
+    // 1. The cleanup tx itself never references engine_bypass_alerts.
+    for (const c of emCalls) {
+      expect(c.sql).not.toMatch(/engine_bypass_alerts/i);
+      expect(c.sql).not.toMatch(/^\s*INSERT\s/i);
+    }
+    // 2. The dry-run pre-snapshot also never references engine_bypass_alerts.
+    for (const c of dsCalls) {
+      expect(c.sql).not.toMatch(/engine_bypass_alerts/i);
+      expect(c.sql).not.toMatch(/^\s*INSERT\s/i);
+    }
+    // 3. The orchestration calls EXACTLY ONE recon method, with EXACTLY
+    //    ONE argument shape: rebuildCashboxBalance(cashboxId). It never
+    //    asks recon to insert alerts, void rows, or do any other work.
+    expect(reconCalls).toEqual([
+      { method: 'rebuildCashboxBalance', args: [MAIN_CB] },
+    ]);
+    // 4. The cleanup engine context literal MUST be 'engine:*' (silent
+    //    path); 'service:*' would log to engine_bypass_alerts.
+    const ctxCall = emCalls.find((c) => PAT_SET_CTX.test(c.sql));
+    expect(ctxCall?.params[0]).toMatch(/^engine:/);
+    expect(ctxCall?.params[0]).not.toMatch(/^service:/);
   });
 
   it('skips rebuildCashboxBalance when opt-out is requested', async () => {

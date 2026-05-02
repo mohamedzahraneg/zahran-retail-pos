@@ -113,7 +113,27 @@ export type ExecuteReport = Omit<DryRunReport, 'executed'> & {
 
 // ─── constants ────────────────────────────────────────────────────────
 
-/** ≥10 chars, leading "engine:" → silent path in fn_engine_write_allowed (no alert log). */
+/**
+ * ≥10 chars, leading "engine:" → silent path in fn_engine_write_allowed
+ * (no alert log).
+ *
+ * `engine_bypass_alerts` invariant — verified end-to-end:
+ *   1. The cleanup tx writes ONLY to `cashbox_transactions` and
+ *      `journal_lines`. Both tables' BEFORE-write triggers
+ *      (`fn_guard_cashbox_transactions`, `fn_guard_journal_lines`)
+ *      delegate to `fn_engine_write_allowed`. Under `engine:*` the
+ *      function returns TRUE without inserting into
+ *      `engine_bypass_alerts` (only the `service:*` branch logs).
+ *   2. The post-commit `ReconciliationService.rebuildCashboxBalance`
+ *      call writes ONLY to `cashboxes` (UPDATE current_balance).
+ *      The `cashboxes` UPDATE trigger is `fn_guard_cashbox_balance`,
+ *      which calls `fn_is_engine_context()` — that helper returns a
+ *      boolean and NEVER inserts into `engine_bypass_alerts`.
+ *
+ * Net effect: a successful execute (cleanup tx + rebuild) increments
+ * `engine_bypass_alerts` by exactly 0. Spec asserts this contract via
+ * the "rebuild path produces no engine_bypass_alerts INSERT" test.
+ */
 const ENGINE_CONTEXT = 'engine:drift-historical-cleanup';
 
 /** Required body field for execute. Single-use literal — owner-typed. */
