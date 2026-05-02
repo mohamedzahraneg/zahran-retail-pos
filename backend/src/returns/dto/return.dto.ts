@@ -229,10 +229,17 @@ export class CreateExchangeDto {
 // ---- Query filters ---------------------------------------------------------
 
 export class ListReturnsQueryDto {
-  @ApiPropertyOptional({ enum: ['pending', 'approved', 'refunded', 'rejected'] })
+  // PR-FIN-RETURNS-UX-1B widened the underlying enum to include
+  // 'cancelled'. The list filter accepts the new bucket so the UI can
+  // surface cancelled returns in their own tab once PR 1C ships the
+  // write path. No behavior change for callers that don't pass the
+  // new value.
+  @ApiPropertyOptional({
+    enum: ['pending', 'approved', 'refunded', 'rejected', 'cancelled'],
+  })
   @IsOptional()
-  @IsIn(['pending', 'approved', 'refunded', 'rejected'])
-  status?: 'pending' | 'approved' | 'refunded' | 'rejected';
+  @IsIn(['pending', 'approved', 'refunded', 'rejected', 'cancelled'])
+  status?: 'pending' | 'approved' | 'refunded' | 'rejected' | 'cancelled';
 
   @ApiPropertyOptional() @IsOptional() @IsUUID() customer_id?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() q?: string;
