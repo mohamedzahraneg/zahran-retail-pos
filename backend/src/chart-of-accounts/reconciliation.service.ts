@@ -67,13 +67,19 @@ export class ReconciliationService {
       ? `(SELECT a.code FROM chart_of_accounts a
            WHERE a.cashbox_id = cb.id AND a.is_active = TRUE LIMIT 1)`
       : `NULL`;
+    // PR-FIN-PAYACCT-4D-CASHBOX-BALANCE-VOID-FIX-1: filter `is_void=false`
+    // so the computed balance reflects the active cashbox ledger, not the
+    // physical-row sum. Voided CTs are soft-deletes and must not contribute
+    // to current_balance / drift comparisons.
     return this.ds.query(`
       SELECT
         cb.id, cb.name_ar, ${kindCol} AS kind, ${currencyCol} AS currency, cb.is_active,
         cb.current_balance::numeric(14,2)  AS stored_balance,
         COALESCE((
           SELECT SUM(CASE WHEN direction = 'in' THEN amount ELSE -amount END)
-            FROM cashbox_transactions WHERE cashbox_id = cb.id
+            FROM cashbox_transactions
+           WHERE cashbox_id = cb.id
+             AND COALESCE(is_void, false) = false
         ), 0)::numeric(14,2) AS computed_balance,
         ${glSubquery} AS gl_balance,
         ${glIdSubquery} AS gl_account_id,
@@ -274,12 +280,26 @@ export class ReconciliationService {
   }
 
   /**
-   * Recompute a cashbox's current_balance from its transaction log.
-   * Uses the sum of (in − out) as the authoritative value.
+   * Recompute a cashbox's current_balance from its **active** transaction
+   * log. Sums `in − out` over `cashbox_transactions` rows where
+   * `is_void = false`.
    *
    * NOTE: this is one of only TWO sanctioned paths that write to
-   * cashboxes.current_balance (the other is fn_record_cashbox_txn).
+   * cashboxes.current_balance (the other is `fn_record_cashbox_txn`).
    * Migration 058 protects the column from all other writers.
+   *
+   * PR-FIN-PAYACCT-4D-CASHBOX-BALANCE-VOID-FIX-1
+   *   • Adds `COALESCE(is_void, false) = false` so voided CTs (soft-
+   *     deletes) no longer contribute to the rebuilt balance. Prior
+   *     behavior summed every CT regardless of `is_void`, leaving the
+   *     stored balance polluted by every row that earlier cleanup PRs
+   *     had soft-voided. The system invariant is that voiding a CT is
+   *     a logical delete; rebuild must honor that.
+   *   • Switches the engine context literal from `service:*` to
+   *     `engine:*`. The `cashboxes` UPDATE trigger does NOT log to
+   *     `engine_bypass_alerts` under either prefix (it only checks
+   *     `fn_is_engine_context()`, not `fn_engine_write_allowed()`),
+   *     so this is intent-correct hygiene, not a behavior change.
    */
   async rebuildCashboxBalance(cashboxId: string) {
     const [r] = await this.ds.query(
@@ -289,16 +309,19 @@ export class ReconciliationService {
       ), 0)::numeric(14,2) AS computed
         FROM cashbox_transactions
        WHERE cashbox_id = $1
+         AND COALESCE(is_void, false) = false
       `,
       [cashboxId],
     );
     const computed = Number(r?.computed || 0);
-    // Raise the session flag so migration 058's trigger allows the
-    // write — this is a sanctioned rebuild, not a stray mutation.
+    // Raise the session flag so migration 058's trigger allows the write.
     await this.ds.transaction(async (em) => {
-      // Migration 068 strict guard: service:* identity pattern.
+      // engine:* canonical context (≥10 chars, silent path). The cashboxes
+      // guard fires `fn_is_engine_context()` only — both engine:* and
+      // service:* are silent there — so this is alert-neutral.
       await em.query(
-        `SET LOCAL app.engine_context = 'service:reconciliation.service'`,
+        `SELECT set_config('app.engine_context', $1, true)`,
+        ['engine:reconciliation.balance-rebuild'],
       );
       await em.query(
         `UPDATE cashboxes SET current_balance = $2, updated_at = NOW()
@@ -351,10 +374,14 @@ export class ReconciliationService {
           WHERE a.cashbox_id = cb.id AND a.is_active LIMIT 1)
                                                    AS gl_account_code,
         cb.current_balance::numeric(14,2)          AS stored_balance,
+        -- PR-FIN-PAYACCT-4D-CASHBOX-BALANCE-VOID-FIX-1: filter is_void=false
+        -- so txn_balance reflects the active ledger (consistent with the
+        -- post-fix rebuildCashboxBalance + the per-ref drift view).
         COALESCE((
           SELECT SUM(CASE WHEN direction = 'in' THEN amount ELSE -amount END)
             FROM cashbox_transactions
            WHERE cashbox_id = cb.id
+             AND COALESCE(is_void, false) = false
         ), 0)::numeric(14,2)                       AS txn_balance,
         COALESCE((
           SELECT SUM(jl.debit - jl.credit)
