@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Search,
@@ -3045,10 +3046,31 @@ function Modal({
   onClose: () => void;
   size?: 'md' | 'xl';
 }) {
-  return (
+  // PR-FIN-RETURNS-SHIFT-ACCOUNTING-FILTER-AND-CANCEL-MODAL — render
+  // via createPortal at document.body so the modal's `fixed inset-0`
+  // is positioned relative to the viewport regardless of any
+  // ancestor's containing-block side effects.
+  //
+  // Specifically: the parent `DetailsModal` wraps the return-details
+  // body and uses `backdrop-blur-sm`, which (per W3C) establishes a
+  // containing block for descendant `position: fixed` elements.
+  // Without the portal, an action modal (cancel / approve / refund /
+  // reject) opened from inside the details modal got pinned to the
+  // top of the details modal box — which, combined with the user
+  // having scrolled down inside the details panel, made the action
+  // modal appear "at the very top of the page" / off-screen.
+  //
+  // The portal hops the modal out of that subtree so its `fixed`
+  // resolves against the real viewport — visible immediately
+  // regardless of the underlying scroll state.
+  return createPortal(
     <div
-      className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+      className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-[60] flex items-center justify-center p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-label={title}
       onClick={onClose}
+      data-testid={`returns-modal-portal-${title}`}
     >
       <div
         className={`bg-white rounded-2xl shadow-2xl w-full ${
@@ -3061,13 +3083,15 @@ function Modal({
           <button
             onClick={onClose}
             className="text-slate-400 hover:text-slate-700"
+            aria-label="إغلاق"
           >
             <XCircle size={22} />
           </button>
         </div>
         <div className="p-6">{children}</div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -4134,6 +4158,7 @@ function CancelReturnModal({
             className="input w-full text-sm"
             rows={3}
             data-testid="returns-cancel-reason"
+            autoFocus
           />
         </div>
 

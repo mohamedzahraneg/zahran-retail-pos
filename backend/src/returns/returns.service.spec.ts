@@ -192,8 +192,29 @@ describe('ReturnsService.list — filter wiring', () => {
     const svc = await buildService(ds);
     await svc.list({ accounting_status: 'cashbox_not_linked' } as any);
 
-    expect(calls[0].sql).toMatch(/FROM base b\s+WHERE accounting_status\s*=\s*\$\d+/);
+    // PR-FIN-RETURNS-SHIFT-ACCOUNTING-FILTER-AND-CANCEL-MODAL — the
+    // alias-producing layer is now the `enriched` CTE, and the WHERE
+    // sits on the outermost `FROM enriched` SELECT so the alias is a
+    // real column. The original `FROM base b … WHERE accounting_status`
+    // shape would have errored on Postgres because aliases aren't
+    // visible in the same SELECT's WHERE.
+    expect(calls[0].sql).toMatch(
+      /FROM enriched\s+WHERE accounting_status\s*=\s*\$\d+/,
+    );
     expect(calls[0].params).toEqual(['cashbox_not_linked', 50, 0]);
+  });
+
+  it('the alias `accounting_status` is NOT referenced in WHERE on the same SELECT level (Postgres rejects that)', async () => {
+    const { ds, calls } = makeFakeDs([[]]);
+    const svc = await buildService(ds);
+    await svc.list({ accounting_status: 'needs_review' } as any);
+    const sql = calls[0].sql;
+
+    // Defense-in-depth: assert the broken pattern is gone.
+    expect(sql).not.toMatch(/FROM base b\s+WHERE accounting_status/);
+    // And the new structure is present.
+    expect(sql).toMatch(/enriched AS \(/);
+    expect(sql).toMatch(/FROM enriched\s+WHERE accounting_status/);
   });
 
   it('combines status + customer_id + q + date_from + refund_method correctly', async () => {

@@ -714,7 +714,14 @@ export class ReturnsService {
     }
 
     // accounting_status filter is applied AFTER the SELECT computes the
-    // column, by wrapping the base query in an outer SELECT.
+    // column. PR-FIN-RETURNS-SHIFT-ACCOUNTING-FILTER-FIX — the prior
+    // implementation tried to reference the SELECT-list alias
+    // `accounting_status` directly in the same query's WHERE clause,
+    // which Postgres rejects with `column "accounting_status" does not
+    // exist` (aliases are not visible in WHERE; only ORDER BY/HAVING
+    // see them). The fix below wraps the alias-producing layer in a
+    // second CTE (`enriched`) so the filter can target a real column
+    // of the outermost SELECT.
     const accountingFilter = q.accounting_status
       ? (() => {
           params.push(q.accounting_status);
@@ -784,45 +791,53 @@ export class ReturnsService {
         LEFT JOIN users      u2 ON u2.id = r.approved_by
         LEFT JOIN users      u3 ON u3.id = r.refunded_by
         ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+      ),
+      enriched AS (
+        SELECT
+          b.*,
+          -- Computed accounting_status:
+          --   not_applicable: pending/rejected (no JE expected)
+          --   je_missing:     approved/refunded but no active JE
+          --   cashbox_not_linked: JE exists but cash leg cashbox_id NULL
+          --   matched:        JE present + (no unlinked cash leg) + (refund CT present iff cash refund)
+          --   needs_review:   anything else
+          CASE
+            WHEN b.status IN ('pending','rejected') THEN 'not_applicable'
+            WHEN b.journal_entry_id IS NULL THEN 'je_missing'
+            WHEN b.has_unlinked_cash_leg = true THEN 'cashbox_not_linked'
+            WHEN b.refund_method = 'cash'
+              AND b.status = 'refunded'
+              AND b.refund_cashbox_transaction_id IS NULL THEN 'needs_review'
+            ELSE 'matched'
+          END AS accounting_status,
+          -- Computed inventory_status:
+          --   not_applicable: no restock-eligible items OR pending/rejected
+          --   restored:       approved/refunded with restock-eligible items
+          --                   (the approve flow restocks symmetrically; we
+          --                   don't yet match against stock_movements at
+          --                   the row level — that's a 1B/1C concern)
+          CASE
+            WHEN b.status IN ('pending','rejected') THEN 'not_applicable'
+            WHEN b.restock_eligible_items = 0       THEN 'not_applicable'
+            ELSE 'restored'
+          END AS inventory_status,
+          -- Match status: top-line operational badge for the row.
+          CASE
+            WHEN b.status IN ('pending','rejected') THEN 'pending'
+            WHEN b.journal_entry_id IS NULL THEN 'needs_review'
+            WHEN b.has_unlinked_cash_leg = true THEN 'needs_review'
+            ELSE 'matched'
+          END AS match_status
+        FROM base b
       )
-      SELECT
-        b.*,
-        -- Computed accounting_status:
-        --   not_applicable: pending/rejected (no JE expected)
-        --   je_missing:     approved/refunded but no active JE
-        --   cashbox_not_linked: JE exists but cash leg cashbox_id NULL
-        --   matched:        JE present + (no unlinked cash leg) + (refund CT present iff cash refund)
-        --   needs_review:   anything else
-        CASE
-          WHEN b.status IN ('pending','rejected') THEN 'not_applicable'
-          WHEN b.journal_entry_id IS NULL THEN 'je_missing'
-          WHEN b.has_unlinked_cash_leg = true THEN 'cashbox_not_linked'
-          WHEN b.refund_method = 'cash'
-            AND b.status = 'refunded'
-            AND b.refund_cashbox_transaction_id IS NULL THEN 'needs_review'
-          ELSE 'matched'
-        END AS accounting_status,
-        -- Computed inventory_status:
-        --   not_applicable: no restock-eligible items OR pending/rejected
-        --   restored:       approved/refunded with restock-eligible items
-        --                   (the approve flow restocks symmetrically; we
-        --                   don't yet match against stock_movements at
-        --                   the row level — that's a 1B/1C concern)
-        CASE
-          WHEN b.status IN ('pending','rejected') THEN 'not_applicable'
-          WHEN b.restock_eligible_items = 0       THEN 'not_applicable'
-          ELSE 'restored'
-        END AS inventory_status,
-        -- Match status: top-line operational badge for the row.
-        CASE
-          WHEN b.status IN ('pending','rejected') THEN 'pending'
-          WHEN b.journal_entry_id IS NULL THEN 'needs_review'
-          WHEN b.has_unlinked_cash_leg = true THEN 'needs_review'
-          ELSE 'matched'
-        END AS match_status
-      FROM base b
+      -- PR-FIN-RETURNS-SHIFT-ACCOUNTING-FILTER-FIX — the WHERE on the
+      -- outermost SELECT can safely reference accounting_status
+      -- because it is a real column of the enriched CTE (not a
+      -- SELECT-list alias of the current query).
+      SELECT *
+      FROM enriched
       ${accountingFilter}
-      ORDER BY b.requested_at DESC
+      ORDER BY requested_at DESC
       LIMIT $${params.length - 1} OFFSET $${params.length}
       `,
       params,

@@ -641,3 +641,72 @@ describe('Returns — Phase 1E: safety', () => {
     ).toBeInTheDocument();
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────
+//  6. PR-FIN-RETURNS-SHIFT-ACCOUNTING-FILTER-AND-CANCEL-MODAL —
+//     cancel modal renders via portal, has dialog role + aria-modal,
+//     and auto-focuses the reason input so the user lands inside the
+//     overlay even when scrolled deep inside the details modal.
+// ─────────────────────────────────────────────────────────────────────
+
+describe('Returns — cancel-modal portal + dialog semantics + auto-focus', () => {
+  it('cancel modal renders at document.body via portal (escapes DetailsModal containing block)', async () => {
+    loginAdmin();
+    renderPage();
+    fireEvent.click(await screen.findByTestId('returns-row-r1'));
+    fireEvent.click(await screen.findByTestId('returns-action-cancel'));
+    const modal = await screen.findByTestId('returns-cancel-modal');
+    // Walk up from the modal — the first portal-root ancestor should
+    // be document.body, not nested inside the details-modal node.
+    let node: HTMLElement | null = modal;
+    let foundDetailsModalAncestor = false;
+    while (node && node !== document.body) {
+      if (node.dataset?.testid === 'returns-details-modal') {
+        foundDetailsModalAncestor = true;
+        break;
+      }
+      node = node.parentElement;
+    }
+    expect(foundDetailsModalAncestor).toBe(false);
+    // And the immediate portal wrapper sits directly under <body>.
+    const portalWrapper = modal.closest(
+      '[data-testid^="returns-modal-portal-"]',
+    );
+    expect(portalWrapper).not.toBeNull();
+    expect(portalWrapper!.parentElement).toBe(document.body);
+  });
+
+  it('portal wrapper has role="dialog" and aria-modal="true" with the modal title as aria-label', async () => {
+    loginAdmin();
+    renderPage();
+    fireEvent.click(await screen.findByTestId('returns-row-r1'));
+    fireEvent.click(await screen.findByTestId('returns-action-cancel'));
+    await screen.findByTestId('returns-cancel-modal');
+    const portalWrapper = document.querySelector(
+      '[data-testid^="returns-modal-portal-"]',
+    ) as HTMLElement;
+    expect(portalWrapper.getAttribute('role')).toBe('dialog');
+    expect(portalWrapper.getAttribute('aria-modal')).toBe('true');
+    expect(portalWrapper.getAttribute('aria-label')).toContain(
+      'إلغاء المرتجع',
+    );
+  });
+
+  it('reason input receives focus when the modal opens (autoFocus)', async () => {
+    loginAdmin();
+    renderPage();
+    fireEvent.click(await screen.findByTestId('returns-row-r1'));
+    fireEvent.click(await screen.findByTestId('returns-action-cancel'));
+    const reason = await screen.findByTestId('returns-cancel-reason');
+    expect(document.activeElement).toBe(reason);
+  });
+
+  it('still shows the spec\'d typed-confirm token CANCEL_RETURN_<return_no>', async () => {
+    loginAdmin();
+    renderPage();
+    fireEvent.click(await screen.findByTestId('returns-row-r1'));
+    fireEvent.click(await screen.findByTestId('returns-action-cancel'));
+    const modal = await screen.findByTestId('returns-cancel-modal');
+    expect(modal.textContent).toContain('CANCEL_RETURN_RET-2026-000001');
+  });
+});
