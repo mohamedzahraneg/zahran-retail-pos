@@ -380,7 +380,93 @@ export const accountsApi = {
       applied: Array<{ filename: string; applied_at: string }>;
       pending: string[];
     }>(api.get('/accounts/audit/migrations')),
+
+  /**
+   * PR-FIN-PAYACCT-4D-DRIFT-HISTORICAL-CLEANUP-1 — DRY RUN ONLY.
+   *
+   * Returns the candidate plan + before/after drift / balance projections
+   * for the historical cleanup. The frontend MUST NOT be wired to call
+   * the execute path: there is no `execute()` method here, no confirm
+   * token in the body, and `dryRun: true` is hard-coded.
+   *
+   * Execute remains an out-of-band action — only callable via a deliberate
+   * `dryRun=false` + confirm-token POST from a trusted operator session.
+   */
+  previewDriftCleanup: () =>
+    unwrap<DriftCleanupPreview>(
+      api.post('/accounts/audit/drift-cleanup/historical', { dryRun: true }),
+    ),
 };
+
+// ── Drift cleanup preview types (dry-run shape) ─────────────────────
+
+export interface DriftCleanupPatternACandidate {
+  invoice_no: string;
+  invoice_id: string;
+  cashbox_id: string;
+  sale_ct_count: number;
+  sale_ct_total: number;
+  voided_je_count: number;
+  active_entry_no: string;
+  active_je_cash: number;
+  duplicate_amount: number;
+}
+
+export interface DriftCleanupPatternARow {
+  ct_id: number;
+  invoice_id: string;
+  invoice_no: string;
+  cashbox_id: string;
+  amount: number;
+  created_at: string;
+  action: 'keep' | 'void';
+  reason: string;
+}
+
+export interface DriftCleanupPatternBCandidate {
+  return_no: string;
+  return_id: string;
+  cashbox_id: string;
+  je_id: string;
+  entry_no: string;
+  jl_id: string;
+  debit: number;
+  credit: number;
+  current_jl_cashbox_id: string | null;
+  proposed_jl_cashbox_id: string;
+  paired_ct_id: number;
+  ct_amount: number;
+}
+
+export interface DriftCleanupAmbiguousReturn {
+  return_no: string;
+  return_id: string;
+  reason: string;
+}
+
+export interface DriftCleanupCashboxImpact {
+  cashbox_id: string;
+  drift_before: number;
+  drift_after_expected: number;
+  current_balance_before: number;
+  current_balance_after_expected: number;
+}
+
+export interface DriftCleanupPreview {
+  executed: false;
+  patternA: {
+    candidates: DriftCleanupPatternACandidate[];
+    rows: DriftCleanupPatternARow[];
+    rowsToVoidCount: number;
+    voidAmountTotal: number;
+  };
+  patternB: {
+    candidates: DriftCleanupPatternBCandidate[];
+    ambiguous: DriftCleanupAmbiguousReturn[];
+    rowsToUpdateCount: number;
+  };
+  cashboxImpact: DriftCleanupCashboxImpact[];
+}
 
 // ── Audit types ──────────────────────────────────────────────────
 
