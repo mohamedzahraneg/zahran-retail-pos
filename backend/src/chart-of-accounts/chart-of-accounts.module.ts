@@ -11,6 +11,7 @@ import { CostCentersService } from './cost-centers.service';
 import { FxService } from './fx.service';
 import { ReconciliationService } from './reconciliation.service';
 import { FinancialEngineService } from './financial-engine.service';
+import { DriftHistoricalCleanupService } from './drift-historical-cleanup.service';
 
 @Global()
 @Module({
@@ -26,6 +27,7 @@ import { FinancialEngineService } from './financial-engine.service';
     FxService,
     ReconciliationService,
     FinancialEngineService,
+    DriftHistoricalCleanupService,
   ],
   controllers: [ChartOfAccountsController],
   exports: [
@@ -40,6 +42,7 @@ import { FinancialEngineService } from './financial-engine.service';
     FxService,
     ReconciliationService,
     FinancialEngineService,
+    DriftHistoricalCleanupService,
   ],
 })
 export class ChartOfAccountsModule {}

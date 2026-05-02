@@ -44,6 +44,10 @@ import {
 } from './cost-centers.service';
 import { FxService, UpsertRateDto } from './fx.service';
 import { ReconciliationService } from './reconciliation.service';
+import {
+  DriftHistoricalCleanupService,
+  EXECUTE_CONFIRM_TOKEN,
+} from './drift-historical-cleanup.service';
 import { MigrationsService } from '../database/migrations.service';
 import { Permissions } from '../common/decorators/roles.decorator';
 import {
@@ -98,6 +102,18 @@ class VoidJournalDtoIn {
   @IsString() @MinLength(3) reason: string;
 }
 
+/**
+ * PR-FIN-PAYACCT-4D-DRIFT-HISTORICAL-CLEANUP-1
+ * Body for `POST accounts/audit/drift-cleanup/historical`.
+ * dryRun=true (default) returns the candidate plan; dryRun=false +
+ * matching `confirm` token executes the soft-void + cashbox_id patch.
+ */
+class DriftHistoricalCleanupDtoIn {
+  @IsOptional() @IsBoolean() dryRun?: boolean;
+  @IsOptional() @IsString() confirm?: string;
+  @IsOptional() @IsBoolean() rebuildCashboxBalance?: boolean;
+}
+
 @ApiBearerAuth()
 @ApiTags('accounts')
 @Controller('accounts')
@@ -113,6 +129,7 @@ export class ChartOfAccountsController {
     private readonly costCenters: CostCentersService,
     private readonly fx: FxService,
     private readonly recon: ReconciliationService,
+    private readonly driftCleanup: DriftHistoricalCleanupService,
     private readonly migrations: MigrationsService,
   ) {}
 
@@ -704,4 +721,45 @@ export class ChartOfAccountsController {
   rebuildCashboxBalance(@Param('id') id: string) {
     return this.recon.rebuildCashboxBalance(id);
   }
+
+  /**
+   * PR-FIN-PAYACCT-4D-DRIFT-HISTORICAL-CLEANUP-1
+   *
+   * Generalized cleanup of the two historical drift patterns whose
+   * forward-fixes shipped in PR-FIN-PAYACCT-4D-DRIFT-ROOT-FIX-1:
+   *   • Pattern A — duplicate sale `cashbox_transactions` from
+   *                 historical postInvoiceEdit (soft-void duplicates)
+   *   • Pattern B — return refund JE cash legs missing `cashbox_id`
+   *                 (populate from returns.cashbox_id)
+   *
+   * Defaults to a dry run that returns the candidate plan + expected
+   * drift/balance impact. Execute requires both `dryRun=false` AND
+   * `confirm = "DRIFT_HISTORICAL_CLEANUP_2026_05"`.
+   *
+   * Detection is generalized (no hard-coded invoice/return IDs);
+   * execution operates only on candidate IDs computed inside the same
+   * transaction with row-level WHERE guards (idempotent).
+   */
+  @Post('audit/drift-cleanup/historical')
+  @Permissions('accounts.journal.post')
+  @ApiOperation({
+    summary:
+      'تنظيف عام لانحرافات الخزينة التاريخية (Pattern A + Pattern B) — dry-run افتراضيًا',
+  })
+  driftHistoricalCleanup(
+    @Body() dto: DriftHistoricalCleanupDtoIn,
+    @CurrentUser() user: JwtUser,
+  ) {
+    const dryRun = dto?.dryRun !== false; // default true
+    if (dryRun) return this.driftCleanup.dryRun();
+    return this.driftCleanup.execute({
+      confirm: dto?.confirm ?? '',
+      rebuildCashboxBalance: dto?.rebuildCashboxBalance,
+      actorUserId: user?.userId ?? null,
+    });
+  }
 }
+
+// re-export so the controller's confirm-token contract is documented
+// next to the route declaration above.
+export { EXECUTE_CONFIRM_TOKEN as DRIFT_HISTORICAL_CLEANUP_CONFIRM };
