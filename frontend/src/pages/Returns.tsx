@@ -437,9 +437,9 @@ export default function Returns() {
           testId="kpi-stock-impact"
         />
         <Kpi
-          label="يحتاج مراجعة"
+          label="يحتاج مراجعة محاسبية"
           value={String(kpis.needsReviewCount)}
-          sub="عملية محاسبية"
+          sub="عملية"
           tone={kpis.needsReviewCount > 0 ? 'rose' : 'slate'}
           testId="kpi-needs-review"
         />
