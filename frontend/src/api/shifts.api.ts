@@ -196,9 +196,24 @@ export interface ShiftSummary {
 
   // PR-21 — Refund / exchange cash visibility (sourced from
   // cashbox_transactions where reference_type IN ('return','exchange'))
+  // PR-FIN-RETURNS-SHIFT-CANCELLED-EXCLUDE-FROM-TOTALS — the totals
+  // below now exclude cancelled+reversal pairs so the wardia "تم
+  // صرف نقدي" / "تم استلام نقدي" displays reflect real cash
+  // movement only. The audit-only `cancelled_return_*` fields surface
+  // the cancelled-pair amounts for an informational footer.
   total_refund_cash_out: number;
   total_refund_cash_in: number;
   net_refund_cash_impact: number;
+  /** Sum of original refund-out CTs whose source return is now
+   *  `status='cancelled'`. Audit-only — NOT in `total_refund_cash_out`
+   *  or `total_cash_out`. */
+  cancelled_return_out_amount?: number;
+  /** Sum of cancellation reversal-in CTs (paired with the above).
+   *  Audit-only — NOT in `total_refund_cash_in` or `total_cash_in`. */
+  cancelled_return_reversal_amount?: number;
+  /** Always equals out − reversal; will be 0 in the steady state
+   *  because each cancelled return has exactly one reversal CT. */
+  cancelled_return_net?: number;
   refund_cash_movements: RefundCashMovement[];
 
   // Reconciliation

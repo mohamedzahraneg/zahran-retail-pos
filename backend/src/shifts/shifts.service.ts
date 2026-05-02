@@ -763,13 +763,46 @@ export class ShiftsService {
       };
     });
 
+    // PR-FIN-RETURNS-SHIFT-CANCELLED-EXCLUDE-FROM-TOTALS — totals
+    // reflect ACTUAL operational cash effect only. The cancelled
+    // refund's original-out and its cancellation reversal-in always
+    // come as a perfectly-balanced pair (same cashbox, same amount,
+    // opposite direction); including them in `totalRefundCashOut/In`
+    // would inflate both sides by the same amount and make the
+    // wardia "تم صرف نقدي" / "تم استلام نقدي" displays look like
+    // real money moved when nothing did.
+    //
+    // Both are now excluded from the active totals AND surfaced as
+    // separate audit-only fields (`cancelled_return_out_amount` /
+    // `cancelled_return_reversal_amount`) so the section footer can
+    // render them with a "لا يؤثر على صافي الوردية" hint.
+    //
+    // expected_closing is unchanged because the +350 / −350 in the
+    // legacy formula cancelled out — TB / cashbox balance untouched.
+    const isActiveCashImpact = (m: { is_reversal?: boolean; source_return_status?: string | null }) =>
+      m.source_return_status !== 'cancelled' && !m.is_reversal;
     const totalRefundCashOut = refund_cash_movements
-      .filter((m) => m.direction === 'out')
+      .filter((m) => m.direction === 'out' && isActiveCashImpact(m))
       .reduce((s, m) => s + m.amount, 0);
     const totalRefundCashIn = refund_cash_movements
-      .filter((m) => m.direction === 'in')
+      .filter((m) => m.direction === 'in' && isActiveCashImpact(m))
       .reduce((s, m) => s + m.amount, 0);
     const netRefundCashImpact = totalRefundCashOut - totalRefundCashIn;
+
+    // Audit-only totals — informational only, do NOT feed into
+    // active cash totals or expected_closing.
+    const cancelledReturnOutAmount = refund_cash_movements
+      .filter((m) =>
+        m.source_return_status === 'cancelled' &&
+        !m.is_reversal &&
+        m.direction === 'out',
+      )
+      .reduce((s, m) => s + m.amount, 0);
+    const cancelledReturnReversalAmount = refund_cash_movements
+      .filter((m) => m.is_reversal && m.direction === 'in')
+      .reduce((s, m) => s + m.amount, 0);
+    const cancelledReturnNet =
+      cancelledReturnOutAmount - cancelledReturnReversalAmount;
 
     // PR-21 — Use cashbox_transactions as the canonical source for
     // refund cash movement (totalRefundCashOut/In above). The legacy
@@ -863,9 +896,15 @@ export class ShiftsService {
       employee_cash_movements,
 
       // PR-21 — Refund / exchange cash visibility
+      // PR-FIN-RETURNS-SHIFT-CANCELLED-EXCLUDE-FROM-TOTALS — totals
+      // exclude cancelled+reversal pairs; audit-only fields surface
+      // the cancelled-pair amounts for the FE footer.
       total_refund_cash_out: totalRefundCashOut,
       total_refund_cash_in: totalRefundCashIn,
       net_refund_cash_impact: netRefundCashImpact,
+      cancelled_return_out_amount: cancelledReturnOutAmount,
+      cancelled_return_reversal_amount: cancelledReturnReversalAmount,
+      cancelled_return_net: cancelledReturnNet,
       refund_cash_movements,
 
       // reconciliation

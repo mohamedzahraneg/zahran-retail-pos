@@ -134,3 +134,53 @@ describe('shifts.api — RefundCashMovement type carries the cancel-aware flags'
     expect(legacy.source_return_status).toBeUndefined();
   });
 });
+
+describe('Shifts — cancelled-pair excluded from active totals (PR-FIN-RETURNS-SHIFT-CANCELLED-EXCLUDE-FROM-TOTALS)', () => {
+  it('per-row "أثر نقدي فعلي = 0" badge renders for cancelled-original AND reversal rows', () => {
+    expect(SHIFTS_SRC).toMatch(/أثر نقدي فعلي\s*=\s*0/);
+    // The badge testid is keyed by movement id so each row's badge is targetable.
+    expect(SHIFTS_SRC).toMatch(
+      /data-testid=\{`refund-cash-zero-impact-\$\{m\.id\}`\}/,
+    );
+    // Visibility predicate: cancelled OR is_reversal.
+    expect(SHIFTS_SRC).toMatch(
+      /m\.source_return_status\s*===\s*'cancelled'\s*\|\|[\s\S]+m\.is_reversal/,
+    );
+  });
+
+  it('reversal-row badge additionally calls out "(عكس نظامي)" so the user can tell the two row types apart', () => {
+    expect(SHIFTS_SRC).toMatch(/m\.is_reversal[\s\S]+\(عكس نظامي\)/);
+  });
+
+  it('audit-only footer renders "عمليات ملغاة" + "لا يؤثر على صافي الوردية" when cancelled_return_out_amount > 0', () => {
+    expect(SHIFTS_SRC).toMatch(/عمليات ملغاة/);
+    expect(SHIFTS_SRC).toMatch(/لا يؤثر على صافي الوردية/);
+    expect(SHIFTS_SRC).toMatch(
+      /data-testid="refund-cash-cancelled-footer"/,
+    );
+    // Conditional render: only when the cancelled-out amount is positive.
+    expect(SHIFTS_SRC).toMatch(
+      /s\.cancelled_return_out_amount\s*!=\s*null\s*&&[\s\S]+s\.cancelled_return_out_amount\s*>\s*0/,
+    );
+  });
+
+  it('amount cell uses muted/strikethrough styling for cancelled or reversal rows', () => {
+    expect(SHIFTS_SRC).toMatch(
+      /m\.source_return_status\s*===\s*'cancelled'\s*\|\|[\s\S]+m\.is_reversal[\s\S]+text-slate-400 line-through/,
+    );
+  });
+});
+
+describe('shifts.api — ShiftSummary type carries the audit-only cancelled fields', () => {
+  it('compiles with cancelled_return_* optional fields', () => {
+    // Importing the full ShiftSummary would pull in the entire shape;
+    // instead we ensure the fields exist by reading the source.
+    const SRC = readFileSync(
+      resolve(__dirname, '../../api/shifts.api.ts'),
+      'utf8',
+    );
+    expect(SRC).toMatch(/cancelled_return_out_amount\?:\s*number/);
+    expect(SRC).toMatch(/cancelled_return_reversal_amount\?:\s*number/);
+    expect(SRC).toMatch(/cancelled_return_net\?:\s*number/);
+  });
+});
