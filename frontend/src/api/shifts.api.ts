@@ -93,7 +93,7 @@ export interface EmployeeCashMovement {
 export interface RefundCashMovement {
   id: string;
   kind: 'return' | 'exchange';
-  /** Friendly Arabic label — مرتجع نقدي / فرق استبدال. */
+  /** Friendly Arabic label — مرتجع نقدي / فرق استبدال / مرتجع نقدي ملغي / عكس إلغاء مرتجع نقدي. */
   type_label: string;
   direction: 'in' | 'out';
   /** Friendly Arabic label — داخل / خارج. */
@@ -111,6 +111,20 @@ export interface RefundCashMovement {
   je_entry_no: string | null;
   accounting_impact: string;
   link_method: 'derived' | 'explicit';
+  // PR-FIN-RETURNS-SHIFT-CANCEL-AWARE — flags for cancellation-aware
+  // rendering. `is_reversal=true` means this row is the cancellation
+  // reversal (direction='in', category like reversal_*). When the
+  // source return is cancelled, the original-out row carries
+  // `source_return_status='cancelled'` so the FE can render a "ملغي"
+  // badge AND match it to the reversal-in row.
+  is_reversal?: boolean;
+  source_return_status?:
+    | 'pending'
+    | 'approved'
+    | 'refunded'
+    | 'rejected'
+    | 'cancelled'
+    | null;
 }
 
 /** PR-B1 — one row in the shift counted-cash adjustment audit. */

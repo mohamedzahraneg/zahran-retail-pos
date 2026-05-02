@@ -549,40 +549,109 @@ export class ShiftsService {
     //   4. UNION rows that have explicit shift_id = THIS shift but
     //      whose CT happens to fall outside the window (defense — same
     //      shift, atomic write, should never happen but cheap guard).
+    // PR-FIN-RETURNS-SHIFT-CANCEL-AWARE — the original SQL only picked
+    // CTs where reference_type IN ('return','exchange'). Cancellation
+    // reversal CTs created by `posting.reverseByReference` carry
+    // reference_type='other' (the engine's mapToEntityType maps
+    // 'reversal' → 'other') and reference_id=<original JE id>, so they
+    // were silently excluded. Result: a cancelled cash refund still
+    // appeared as outgoing, with no matching incoming row → user saw
+    // a cancelled return contributing to the shift's net cash impact.
+    //
+    // The fix below adds a second branch (`reversal_cts`) that finds
+    // reversal CTs in the same window/cashbox and resolves them back
+    // to the original return via the reversed JE chain:
+    //
+    //   reversal_ct.reference_type = 'other'
+    //   reversal_ct.category LIKE 'reversal_%'
+    //   reversal_ct.reference_id = reversal_je.id
+    //   reversal_je.reversal_of  = original_je.id
+    //   original_je.reference_type = 'return'
+    //   original_je.reference_id   = returns.id
+    //
+    // Each row carries its source return's status so the FE can render
+    // a "ملغي" badge AND group the original-out + reversal-in pair so
+    // the net effect for a cancelled cash return is zero.
     const refundCtRows = await this.ds.query(
       `
       WITH ct_in_window AS (
         SELECT ct.id, ct.amount, ct.direction, ct.reference_type, ct.reference_id,
-               ct.created_at, ct.user_id, ct.notes, ct.cashbox_id
+               ct.created_at, ct.user_id, ct.notes, ct.cashbox_id, ct.category
           FROM cashbox_transactions ct
          WHERE ct.cashbox_id = $1
            AND ct.created_at >= $2
            AND ct.created_at <= $3
-           AND ct.reference_type::text IN ('return','exchange')
+           AND ct.is_void = FALSE
+           AND (
+                 ct.reference_type::text IN ('return','exchange')
+                 OR (
+                   ct.reference_type::text = 'other'
+                   AND ct.category LIKE 'reversal_%'
+                 )
+               )
       ),
       ct_with_source AS (
         SELECT ct.*,
-               CASE ct.reference_type::text
-                 WHEN 'return'   THEN r.shift_id
-                 WHEN 'exchange' THEN e.shift_id
+               -- Resolve the source return for either the direct branch
+               -- (CT.reference_id IS the return id) or the reversal
+               -- branch (CT.reference_id IS the reversal-JE id whose
+               -- reversal_of points at the original return JE).
+               CASE
+                 WHEN ct.reference_type::text = 'return'   THEN r_direct.id
+                 WHEN ct.reference_type::text = 'other'    THEN r_via_je.id
+                 ELSE NULL
+               END AS resolved_return_id,
+               CASE
+                 WHEN ct.reference_type::text = 'return'   THEN r_direct.shift_id
+                 WHEN ct.reference_type::text = 'exchange' THEN e_direct.shift_id
+                 WHEN ct.reference_type::text = 'other'    THEN r_via_je.shift_id
+                 ELSE NULL
                END AS src_shift_id,
-               CASE ct.reference_type::text
-                 WHEN 'return'   THEN r.cashbox_id
-                 WHEN 'exchange' THEN e.cashbox_id
-               END AS src_cashbox_id
+               CASE
+                 WHEN ct.reference_type::text = 'return'   THEN r_direct.cashbox_id
+                 WHEN ct.reference_type::text = 'exchange' THEN e_direct.cashbox_id
+                 WHEN ct.reference_type::text = 'other'    THEN r_via_je.cashbox_id
+                 ELSE NULL
+               END AS src_cashbox_id,
+               CASE
+                 WHEN ct.reference_type::text = 'return'   THEN r_direct.status::text
+                 WHEN ct.reference_type::text = 'other'    THEN r_via_je.status::text
+                 ELSE NULL
+               END AS source_return_status,
+               (ct.reference_type::text = 'other')         AS is_reversal
           FROM ct_in_window ct
-          LEFT JOIN returns   r ON ct.reference_type::text = 'return'
-                                AND r.id = ct.reference_id
-          LEFT JOIN exchanges e ON ct.reference_type::text = 'exchange'
-                                AND e.id = ct.reference_id
+          LEFT JOIN returns   r_direct ON ct.reference_type::text = 'return'
+                                       AND r_direct.id = ct.reference_id
+          LEFT JOIN exchanges e_direct ON ct.reference_type::text = 'exchange'
+                                       AND e_direct.id = ct.reference_id
+          -- Bridge: reversal CT → reversal JE → original JE → return
+          LEFT JOIN journal_entries je_rev
+                                       ON ct.reference_type::text = 'other'
+                                       AND je_rev.id = ct.reference_id
+          LEFT JOIN journal_entries je_orig
+                                       ON je_orig.id = je_rev.reversal_of
+                                       AND je_orig.reference_type::text = 'return'
+          LEFT JOIN returns r_via_je   ON r_via_je.id = je_orig.reference_id
       ),
       eligible AS (
         SELECT ct.*,
                CASE
-                 WHEN ct.src_shift_id = $4              THEN 'explicit'
-                 WHEN ct.src_shift_id IS NULL
+                 -- Direct (return/exchange) branch — same explicit/derived
+                 -- semantics as before.
+                 WHEN ct.reference_type::text IN ('return','exchange')
+                  AND ct.src_shift_id = $4              THEN 'explicit'
+                 WHEN ct.reference_type::text IN ('return','exchange')
+                  AND ct.src_shift_id IS NULL
                   AND ct.src_cashbox_id IS NULL         THEN 'derived'
-                 ELSE NULL  -- another shift's row, or a direct-cashbox row
+                 -- Reversal branch — include only when the bridged
+                 -- return belongs to THIS shift (covers the legacy
+                 -- "no shift_id" case the same way).
+                 WHEN ct.reference_type::text = 'other'
+                  AND ct.resolved_return_id IS NOT NULL
+                  AND (ct.src_shift_id = $4
+                    OR (ct.src_shift_id IS NULL AND ct.src_cashbox_id IS NULL))
+                                                        THEN 'reversal'
+                 ELSE NULL
                END AS link_method
           FROM ct_with_source ct
       )
@@ -595,26 +664,38 @@ export class ShiftsService {
              ct.user_id AS created_by,
              u.full_name AS created_by_name,
              ct.notes,
+             ct.category::text AS category,
+             ct.is_reversal AS is_reversal,
+             ct.source_return_status AS source_return_status,
              cb.name_ar AS cashbox_name,
-             r.return_no AS return_no,
-             r.refund_method::text AS refund_method,
-             e.exchange_no AS exchange_no,
-             COALESCE(cust_r.full_name, cust_e.full_name) AS customer_name,
-             je.entry_no AS je_entry_no,
+             COALESCE(r_direct.return_no, r_via_je.return_no) AS return_no,
+             COALESCE(r_direct.refund_method::text,
+                      r_via_je.refund_method::text)            AS refund_method,
+             e_direct.exchange_no AS exchange_no,
+             COALESCE(cust_r.full_name, cust_e.full_name)      AS customer_name,
+             COALESCE(je_direct.entry_no, je_rev.entry_no)     AS je_entry_no,
              ct.link_method AS link_method,
              $5::text AS shift_no
         FROM eligible ct
         LEFT JOIN cashboxes cb         ON cb.id = ct.cashbox_id
         LEFT JOIN users u              ON u.id  = ct.user_id
-        LEFT JOIN returns r            ON ct.reference_type::text = 'return'
-                                       AND r.id = ct.reference_id
-        LEFT JOIN exchanges e          ON ct.reference_type::text = 'exchange'
-                                       AND e.id = ct.reference_id
-        LEFT JOIN customers cust_r     ON cust_r.id = r.customer_id
-        LEFT JOIN customers cust_e     ON cust_e.id = e.customer_id
-        LEFT JOIN journal_entries je   ON je.reference_type::text IN ('return','exchange')
-                                       AND je.reference_id = ct.reference_id
-                                       AND je.is_void = FALSE
+        LEFT JOIN returns r_direct     ON ct.reference_type::text = 'return'
+                                       AND r_direct.id = ct.reference_id
+        LEFT JOIN exchanges e_direct   ON ct.reference_type::text = 'exchange'
+                                       AND e_direct.id = ct.reference_id
+        LEFT JOIN journal_entries je_rev
+                                       ON ct.reference_type::text = 'other'
+                                       AND je_rev.id = ct.reference_id
+        LEFT JOIN journal_entries je_orig
+                                       ON je_orig.id = je_rev.reversal_of
+                                       AND je_orig.reference_type::text = 'return'
+        LEFT JOIN returns r_via_je     ON r_via_je.id = je_orig.reference_id
+        LEFT JOIN customers cust_r     ON cust_r.id = COALESCE(r_direct.customer_id, r_via_je.customer_id)
+        LEFT JOIN customers cust_e     ON cust_e.id = e_direct.customer_id
+        LEFT JOIN journal_entries je_direct
+                                       ON je_direct.reference_type::text IN ('return','exchange')
+                                       AND je_direct.reference_id = ct.reference_id
+                                       AND je_direct.is_void = FALSE
        WHERE ct.link_method IS NOT NULL
        ORDER BY ct.created_at DESC
       `,
@@ -623,11 +704,23 @@ export class ShiftsService {
 
     const refund_cash_movements: any[] = refundCtRows.map((c: any) => {
       const amt = Number(c.amount);
-      const isReturn = c.reference_type === 'return';
+      const isReversal = c.is_reversal === true;
+      const isReturn = c.reference_type === 'return' || isReversal;
+      const isCancelled = c.source_return_status === 'cancelled';
       return {
         id: c.ct_id,
-        kind: c.reference_type, // 'return' | 'exchange'
-        type_label: isReturn ? 'مرتجع نقدي' : 'فرق استبدال',
+        kind: isReturn ? 'return' : 'exchange',
+        // PR-FIN-RETURNS-SHIFT-CANCEL-AWARE — distinct labels:
+        //   • original cancelled refund row → "مرتجع نقدي ملغي"
+        //   • cancellation reversal row     → "عكس إلغاء مرتجع نقدي"
+        //   • normal return / exchange      → unchanged labels
+        type_label: isReversal
+          ? 'عكس إلغاء مرتجع نقدي'
+          : isReturn
+            ? isCancelled
+              ? 'مرتجع نقدي ملغي'
+              : 'مرتجع نقدي'
+            : 'فرق استبدال',
         direction: c.direction,
         direction_label: c.direction === 'out' ? 'خارج' : 'داخل',
         amount: amt,
@@ -636,18 +729,25 @@ export class ShiftsService {
           : c.exchange_no || null,
         customer_name: c.customer_name || null,
         cashbox_name: c.cashbox_name || null,
-        shift_no: c.shift_no || null, // PR-R1 — populated for the
-                                      // closing shift (always THIS one
-                                      // since direct-cashbox + cross-shift
-                                      // rows are excluded in the WHERE)
+        shift_no: c.shift_no || null,
         created_at: c.created_at,
         created_by_name: c.created_by_name || null,
         je_entry_no: c.je_entry_no || null,
         accounting_impact:
           c.direction === 'out'
             ? `DR مردودات مبيعات / CR ${c.cashbox_name ?? 'cashbox'}`
-            : `DR ${c.cashbox_name ?? 'cashbox'} / CR إيرادات`,
-        link_method: c.link_method as 'explicit' | 'derived',
+            : isReversal
+              ? `DR ${c.cashbox_name ?? 'cashbox'} / CR مردودات مبيعات (عكس إلغاء)`
+              : `DR ${c.cashbox_name ?? 'cashbox'} / CR إيرادات`,
+        link_method: (c.link_method === 'reversal'
+          ? 'explicit'
+          : c.link_method) as 'explicit' | 'derived',
+        // PR-FIN-RETURNS-SHIFT-CANCEL-AWARE — surface so the FE can:
+        //  1. Render a "ملغي" badge on the cancelled-original row.
+        //  2. Pair the row with its reversal counterpart (same return_no).
+        //  3. Show "عكس" next to reversal rows.
+        is_reversal: isReversal,
+        source_return_status: c.source_return_status ?? null,
       };
     });
 
