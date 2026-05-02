@@ -196,8 +196,10 @@ describe('Returns — layout', () => {
     ).toBeInTheDocument();
 
     // KPI cards (6)
-    expect(screen.getByTestId('kpi-today-returns')).toBeInTheDocument();
-    expect(screen.getByTestId('kpi-today-exchanges')).toBeInTheDocument();
+    // PR-FIN-RETURNS-UX-0D renamed these from kpi-today-* to kpi-total-*
+    // to reflect the new visible-scope semantics.
+    expect(screen.getByTestId('kpi-total-returns')).toBeInTheDocument();
+    expect(screen.getByTestId('kpi-total-exchanges')).toBeInTheDocument();
     expect(screen.getByTestId('kpi-pending')).toBeInTheDocument();
     expect(screen.getByTestId('kpi-refunded')).toBeInTheDocument();
     expect(screen.getByTestId('kpi-stock-impact')).toBeInTheDocument();
