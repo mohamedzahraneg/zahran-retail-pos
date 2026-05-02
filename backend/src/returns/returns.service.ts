@@ -506,24 +506,32 @@ export class ReturnsService {
       // but possible for a return that was approved without GL post).
       // Proceed with stock + row update; cancellation_entry_id stays NULL.
 
-      // 6. Capture the reversal CT id for cash refunds. The engine
-      //    creates the reversing CT inside `reverseByReference` with
-      //    `direction='in'`, `reference_type='return'`,
-      //    `reference_id=<return_id>`, and a category prefixed with
-      //    `reversal_`. We pick the latest such row for this return.
+      // 6. Capture the reversal CT id for cash refunds.
+      //    PR-FIN-RETURNS-SHIFT-CANCEL-AWARE — original PR-1C lookup
+      //    queried by `reference_type='return', reference_id=<return_id>`,
+      //    but the engine's `recordTransaction` runs the cash leg
+      //    through `mapToEntityType('reversal')` which yields 'other',
+      //    and uses `reference_id=<reversal JE id>`. So the CT lives at
+      //    ('other', <reversal JE id>) — the old query never matched
+      //    and `cancellation_cashbox_transaction_id` was always NULL.
+      //
+      //    The corrected lookup walks the reversal-JE bridge:
+      //      reversal_ct.reference_id = reversal_je.id
+      //      reversal_je.reversal_of  = original_je.id
+      //      original_je.reference_id = <return_id>
       let cancellationCtId: string | null = null;
-      if (ret.refund_method === 'cash') {
+      if (ret.refund_method === 'cash' && cancellationEntryId) {
         const [ctRow] = await em.query(
           `SELECT id::text AS id
              FROM cashbox_transactions
-            WHERE reference_type = 'return'
-              AND reference_id = $1
+            WHERE reference_type::text = 'other'
+              AND reference_id::text = $1
               AND direction = 'in'
               AND is_void = FALSE
               AND category LIKE 'reversal_%'
             ORDER BY id DESC
             LIMIT 1`,
-          [id],
+          [cancellationEntryId],
         );
         cancellationCtId = ctRow?.id ?? null;
       }

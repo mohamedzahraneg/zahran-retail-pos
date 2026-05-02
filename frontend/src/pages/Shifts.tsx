@@ -1266,7 +1266,11 @@ function ShiftDetailModal({ shift, onClose }: { shift: Shift; onClose: () => voi
                   </thead>
                   <tbody>
                     {s.refund_cash_movements.map((m) => (
-                      <tr key={m.id} className="border-t border-slate-100">
+                      <tr
+                        key={m.id}
+                        className="border-t border-slate-100"
+                        data-testid={`refund-cash-row-${m.id}`}
+                      >
                         <td className="px-2 py-1.5 font-mono tabular-nums whitespace-nowrap">
                           {new Date(m.created_at).toLocaleString('en-GB', {
                             timeZone: 'Africa/Cairo',
@@ -1276,9 +1280,28 @@ function ShiftDetailModal({ shift, onClose }: { shift: Shift; onClose: () => voi
                         <td className="px-2 py-1.5 font-mono text-[11px]">{m.reference_no || '—'}</td>
                         <td className="px-2 py-1.5">{m.customer_name || '—'}</td>
                         <td className="px-2 py-1.5">
-                          <span className="chip text-[10px] bg-rose-50 text-rose-700 border-rose-200">
+                          <span
+                            className={`chip text-[10px] ${
+                              m.source_return_status === 'cancelled'
+                                ? 'bg-slate-100 text-slate-600 border-slate-300 line-through'
+                                : m.is_reversal
+                                  ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                  : 'bg-rose-50 text-rose-700 border-rose-200'
+                            }`}
+                          >
                             {m.type_label}
                           </span>
+                          {/* PR-FIN-RETURNS-SHIFT-CANCEL-AWARE — explicit
+                              cancellation badge so the row is unmistakable. */}
+                          {m.source_return_status === 'cancelled' &&
+                            !m.is_reversal && (
+                              <span
+                                className="chip text-[10px] bg-slate-200 text-slate-700 border-slate-300 mr-1"
+                                data-testid={`refund-cash-cancelled-badge-${m.id}`}
+                              >
+                                ملغي
+                              </span>
+                            )}
                         </td>
                         <td className="px-2 py-1.5">
                           <span
