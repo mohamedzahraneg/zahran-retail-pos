@@ -2,6 +2,7 @@ import {
   ArrayMinSize,
   IsArray,
   IsBoolean,
+  IsDateString,
   IsEnum,
   IsIn,
   IsNumber,
@@ -237,4 +238,53 @@ export class ListReturnsQueryDto {
   @ApiPropertyOptional() @IsOptional() @IsString() q?: string;
   @ApiPropertyOptional() @IsOptional() limit?: string;
   @ApiPropertyOptional() @IsOptional() offset?: string;
+
+  // PR-FIN-RETURNS-UX-1A: read-side filter additions. All optional, all
+  // backwards compatible.
+  @ApiPropertyOptional({
+    description: 'Inclusive lower bound on requested_at (YYYY-MM-DD).',
+  })
+  @IsOptional()
+  @IsDateString()
+  date_from?: string;
+
+  @ApiPropertyOptional({
+    description: 'Inclusive upper bound on requested_at (YYYY-MM-DD).',
+  })
+  @IsOptional()
+  @IsDateString()
+  date_to?: string;
+
+  @ApiPropertyOptional({
+    enum: ['cash', 'card', 'instapay', 'bank_transfer'],
+  })
+  @IsOptional()
+  @IsIn(['cash', 'card', 'instapay', 'bank_transfer'])
+  refund_method?: 'cash' | 'card' | 'instapay' | 'bank_transfer';
+
+  @ApiPropertyOptional({
+    description:
+      'Diagnostic filter by computed accounting health. Useful for the operations dashboard.',
+    enum: [
+      'matched',
+      'je_missing',
+      'cashbox_not_linked',
+      'needs_review',
+      'not_applicable',
+    ],
+  })
+  @IsOptional()
+  @IsIn([
+    'matched',
+    'je_missing',
+    'cashbox_not_linked',
+    'needs_review',
+    'not_applicable',
+  ])
+  accounting_status?:
+    | 'matched'
+    | 'je_missing'
+    | 'cashbox_not_linked'
+    | 'needs_review'
+    | 'not_applicable';
 }
