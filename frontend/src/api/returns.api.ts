@@ -44,6 +44,21 @@ export interface InvoiceLookup {
 }
 
 // ---- Return list/detail ---------------------------------------------------
+//
+// PR-FIN-RETURNS-UX-1A added the read-side enrichment fields below to
+// every list row + detail header. They are all optional/nullable so any
+// older caller that only reads the legacy shape still compiles.
+export type ReturnAccountingStatus =
+  | 'matched'
+  | 'je_missing'
+  | 'cashbox_not_linked'
+  | 'needs_review'
+  | 'not_applicable';
+
+export type ReturnInventoryStatus = 'restored' | 'not_applicable';
+
+export type ReturnMatchStatus = 'matched' | 'needs_review' | 'pending';
+
 export interface ReturnListItem {
   id: string;
   return_no: string;
@@ -57,6 +72,8 @@ export interface ReturnListItem {
   approved_at: string | null;
   refunded_at: string | null;
   rejected_at: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
   original_invoice_id: string;
   invoice_no: string | null;
   customer_id: string | null;
@@ -64,6 +81,24 @@ export interface ReturnListItem {
   customer_phone: string | null;
   items_count: number;
   units_count: number;
+  // PR-FIN-RETURNS-UX-1A enrichment
+  cashbox_id?: string | null;
+  cashbox_name?: string | null;
+  requested_by?: string | null;
+  requested_by_name?: string | null;
+  approved_by?: string | null;
+  approved_by_name?: string | null;
+  refunded_by?: string | null;
+  refunded_by_name?: string | null;
+  journal_entry_id?: string | null;
+  journal_entry_no?: string | null;
+  journal_entry_posted_at?: string | null;
+  refund_cashbox_transaction_id?: number | null;
+  has_unlinked_cash_leg?: boolean | null;
+  accounting_status?: ReturnAccountingStatus;
+  inventory_status?: ReturnInventoryStatus;
+  match_status?: ReturnMatchStatus;
+  restock_eligible_items?: number | null;
 }
 
 export interface ReturnItem {

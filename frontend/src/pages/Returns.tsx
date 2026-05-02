@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Search,
@@ -10,8 +10,16 @@ import {
   CheckCircle2,
   Banknote,
   AlertCircle,
+  AlertTriangle,
   Clock,
   ChevronLeft,
+  CalendarDays,
+  Filter,
+  ShieldCheck,
+  Boxes,
+  User,
+  FileText,
+  Ban,
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import {
@@ -22,6 +30,8 @@ import {
   InvoiceLookup,
   InvoiceLookupItem,
   ReturnDetails,
+  ReturnListItem,
+  ReturnAccountingStatus,
   ItemCondition,
 } from '@/api/returns.api';
 import { productsApi } from '@/api/products.api';
@@ -30,6 +40,7 @@ import {
   CashSourceSelector,
   CashSource,
 } from '@/components/CashSourceSelector';
+import { formatArabicDateTime } from '@/lib/format-arabic-date';
 
 const EGP = (n: number | string) => `${Number(n).toFixed(0)} ج.م`;
 
@@ -82,282 +93,896 @@ const METHOD_LABELS: Record<PaymentMethod, string> = {
 };
 
 // ============================================================================
+// PR-FIN-RETURNS-UX-1D — Returns & Exchanges as an after-sales operations
+// center. Master-detail layout, 6 KPI cards, 8 tabs, server-driven
+// filters (date range, type, status, refund method, accounting health)
+// and client-side sort. Diagnostic only — no settlement / cancel UI.
+// Cancellation lives in PR 1E (after PR 1B + 1C).
+// ============================================================================
+
+type Tab =
+  | 'all'
+  | 'returns'
+  | 'exchanges'
+  | 'pending'
+  | 'approved'
+  | 'refunded'
+  | 'rejected'
+  | 'needs_review';
+
+type SortKey = 'newest' | 'oldest' | 'amount_high' | 'amount_low';
+
+type DatePreset = 'today' | 'week' | 'month' | 'custom';
+
+interface UnifiedOperation {
+  id: string;
+  operationType: 'return' | 'exchange';
+  // Returns: return_no; Exchanges: exchange_no
+  number: string;
+  status: string;
+  amount: number; // Returns: net_refund; Exchanges: price_difference
+  refund_method: string | null;
+  invoice_no: string | null;
+  customer_name: string | null;
+  customer_phone: string | null;
+  units_count: number | null;
+  // Operator + timestamp (preferred per status)
+  operator_name: string | null;
+  performed_at: string | null;
+  created_at: string | null;
+  // Diagnostic flags (returns only; exchanges default to 'pending')
+  accounting_status: ReturnAccountingStatus | 'not_applicable';
+  inventory_status: 'restored' | 'not_applicable';
+  match_status: 'matched' | 'needs_review' | 'pending';
+  journal_entry_no: string | null;
+  cashbox_name: string | null;
+  // back-pointer to the raw row (for the details panel)
+  raw: any;
+}
+
+function todayISODate(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+function shiftDateISO(days: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() - days);
+  return d.toISOString().slice(0, 10);
+}
+
+function operatorFor(r: ReturnListItem): {
+  name: string | null;
+  performedAt: string | null;
+} {
+  // Pick the most recent meaningful actor + timestamp by status.
+  if (r.status === 'refunded') {
+    return {
+      name: r.refunded_by_name ?? r.approved_by_name ?? r.requested_by_name ?? null,
+      performedAt: r.refunded_at ?? r.approved_at ?? r.requested_at ?? null,
+    };
+  }
+  if (r.status === 'approved') {
+    return {
+      name: r.approved_by_name ?? r.requested_by_name ?? null,
+      performedAt: r.approved_at ?? r.requested_at ?? null,
+    };
+  }
+  if (r.status === 'rejected') {
+    return {
+      name: r.requested_by_name ?? null,
+      performedAt: r.rejected_at ?? r.requested_at ?? null,
+    };
+  }
+  return { name: r.requested_by_name ?? null, performedAt: r.requested_at };
+}
+
+function unifyReturn(r: ReturnListItem): UnifiedOperation {
+  const { name, performedAt } = operatorFor(r);
+  return {
+    id: r.id,
+    operationType: 'return',
+    number: r.return_no,
+    status: r.status,
+    amount: Number(r.net_refund),
+    refund_method: r.refund_method,
+    invoice_no: r.invoice_no,
+    customer_name: r.customer_name,
+    customer_phone: r.customer_phone,
+    units_count: r.units_count,
+    operator_name: name,
+    performed_at: performedAt,
+    created_at: r.created_at ?? r.requested_at,
+    accounting_status: r.accounting_status ?? 'not_applicable',
+    inventory_status: r.inventory_status ?? 'not_applicable',
+    match_status: r.match_status ?? 'pending',
+    journal_entry_no: r.journal_entry_no ?? null,
+    cashbox_name: r.cashbox_name ?? null,
+    raw: r,
+  };
+}
+function unifyExchange(e: any): UnifiedOperation {
+  return {
+    id: e.id,
+    operationType: 'exchange',
+    number: e.exchange_no,
+    status: e.status,
+    amount: Number(e.price_difference ?? 0),
+    refund_method: null,
+    invoice_no: e.original_invoice_no,
+    customer_name: e.customer_name,
+    customer_phone: e.customer_phone,
+    units_count: null,
+    operator_name: null, // exchanges don't yet expose operator names; falls back to غير معروف in UI
+    performed_at: e.completed_at ?? e.created_at ?? null,
+    created_at: e.created_at ?? null,
+    accounting_status: 'not_applicable',
+    inventory_status: 'not_applicable',
+    match_status: 'pending',
+    journal_entry_no: null,
+    cashbox_name: null,
+    raw: e,
+  };
+}
+
+const TAB_DEFS: Array<{ v: Tab; label: string; icon: typeof Receipt }> = [
+  { v: 'all',          label: 'الكل',             icon: Receipt },
+  { v: 'returns',      label: 'المرتجعات',         icon: Receipt },
+  { v: 'exchanges',    label: 'الاستبدالات',       icon: ArrowLeftRight },
+  { v: 'pending',      label: 'بانتظار الموافقة',  icon: Clock },
+  { v: 'approved',     label: 'تمت',              icon: CheckCircle2 },
+  { v: 'refunded',     label: 'تم الصرف',          icon: Banknote },
+  { v: 'rejected',     label: 'مرفوضة',           icon: XCircle },
+  { v: 'needs_review', label: 'يحتاج مراجعة',      icon: AlertTriangle },
+];
+
+// ============================================================================
 export default function Returns() {
-  const [tab, setTab] = useState<'returns' | 'exchanges'>('returns');
-  const [status, setStatus] = useState<ReturnStatus | 'all'>('all');
+  const [tab, setTab] = useState<Tab>('all');
   const [q, setQ] = useState('');
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [showCreate, setShowCreate] = useState(false);
+  const [showCreate, setShowCreate] = useState<null | 'return' | 'exchange'>(null);
 
-  const { data: returns, isLoading } = useQuery({
-    queryKey: ['returns', status, q],
+  // Filters
+  const [datePreset, setDatePreset] = useState<DatePreset>('month');
+  const [dateFrom, setDateFrom] = useState<string>(shiftDateISO(30));
+  const [dateTo, setDateTo] = useState<string>(todayISODate());
+  const [refundMethod, setRefundMethod] = useState<PaymentMethod | 'all'>('all');
+  const [accountingFilter, setAccountingFilter] =
+    useState<ReturnAccountingStatus | 'all'>('all');
+  const [sort, setSort] = useState<SortKey>('newest');
+
+  // Date preset → from/to
+  useEffect(() => {
+    if (datePreset === 'custom') return;
+    const today = todayISODate();
+    if (datePreset === 'today') {
+      setDateFrom(today);
+      setDateTo(today);
+    } else if (datePreset === 'week') {
+      setDateFrom(shiftDateISO(6));
+      setDateTo(today);
+    } else if (datePreset === 'month') {
+      setDateFrom(shiftDateISO(30));
+      setDateTo(today);
+    }
+  }, [datePreset]);
+
+  // Server-side params for /returns. We always fetch returns; exchanges
+  // are a separate endpoint and merged client-side for the "all" tab.
+  const returnsParams = useMemo(() => {
+    const p: any = { limit: 200 };
+    if (q) p.q = q;
+    if (dateFrom) p.date_from = dateFrom;
+    if (dateTo) p.date_to = dateTo;
+    if (refundMethod !== 'all') p.refund_method = refundMethod;
+    if (tab === 'pending')   p.status = 'pending';
+    if (tab === 'approved')  p.status = 'approved';
+    if (tab === 'refunded')  p.status = 'refunded';
+    if (tab === 'rejected')  p.status = 'rejected';
+    if (tab === 'needs_review') p.accounting_status = 'needs_review';
+    if (accountingFilter !== 'all' && tab !== 'needs_review') {
+      p.accounting_status = accountingFilter;
+    }
+    return p;
+  }, [q, dateFrom, dateTo, refundMethod, tab, accountingFilter]);
+
+  const fetchReturns = tab !== 'exchanges';
+  const fetchExchanges = tab === 'all' || tab === 'exchanges';
+
+  const { data: returns = [], isLoading: loadingReturns } = useQuery({
+    queryKey: ['returns', returnsParams],
+    queryFn: () => returnsApi.list(returnsParams),
+    enabled: fetchReturns,
+  });
+
+  const { data: exchanges = [], isLoading: loadingExchanges } = useQuery({
+    queryKey: ['exchanges', q, dateFrom, dateTo],
     queryFn: () =>
-      returnsApi.list({
-        status: status === 'all' ? undefined : status,
+      returnsApi.listExchanges({
         q: q || undefined,
         limit: 200,
       }),
-    enabled: tab === 'returns',
+    enabled: fetchExchanges,
   });
 
-  const { data: exchanges } = useQuery({
-    queryKey: ['exchanges', q],
-    queryFn: () => returnsApi.listExchanges({ q: q || undefined, limit: 200 }),
-    enabled: tab === 'exchanges',
-  });
+  const ops: UnifiedOperation[] = useMemo(() => {
+    const a: UnifiedOperation[] = [];
+    if (fetchReturns) a.push(...returns.map(unifyReturn));
+    if (fetchExchanges) a.push(...exchanges.map(unifyExchange));
+    // Sort
+    const sorted = a.slice();
+    sorted.sort((x, y) => {
+      if (sort === 'amount_high') return y.amount - x.amount;
+      if (sort === 'amount_low') return x.amount - y.amount;
+      const ax = x.performed_at ?? x.created_at ?? '';
+      const ay = y.performed_at ?? y.created_at ?? '';
+      if (sort === 'oldest') return ax.localeCompare(ay);
+      return ay.localeCompare(ax); // newest
+    });
+    return sorted;
+  }, [returns, exchanges, fetchReturns, fetchExchanges, sort]);
 
-  const pendingCount = returns?.filter((r) => r.status === 'pending').length ?? 0;
-  const refundedTotal =
-    returns?.reduce(
-      (s, r) => (r.status === 'refunded' ? s + Number(r.net_refund) : s),
+  // KPIs from the loaded slice (today-scope when "today" preset).
+  const todayISO = todayISODate();
+  const isToday = (iso: string | null | undefined) =>
+    !!iso && iso.slice(0, 10) === todayISO;
+  const kpis = useMemo(() => {
+    const todaysReturns = returns.filter((r) => isToday(r.requested_at));
+    const todaysExchanges = exchanges.filter((e: any) =>
+      isToday(e.created_at),
+    );
+    const refundedToday = returns.filter(
+      (r) => r.status === 'refunded' && isToday(r.refunded_at),
+    );
+    const pending = returns.filter((r) => r.status === 'pending');
+    const refundedTotal = refundedToday.reduce(
+      (s, r) => s + Number(r.net_refund),
       0,
-    ) ?? 0;
+    );
+    const stockReturned = returns
+      .filter((r) => r.inventory_status === 'restored')
+      .reduce((s, r) => s + (r.units_count ?? 0), 0);
+    const needsReview = returns.filter(
+      (r) =>
+        r.match_status === 'needs_review' ||
+        r.accounting_status === 'cashbox_not_linked' ||
+        r.accounting_status === 'je_missing',
+    ).length;
+    return {
+      todayReturnsCount: todaysReturns.length,
+      todayReturnsTotal: todaysReturns.reduce(
+        (s, r) => s + Number(r.net_refund),
+        0,
+      ),
+      todayExchangesCount: todaysExchanges.length,
+      todayExchangesDelta: todaysExchanges.reduce(
+        (s, e: any) => s + Number(e.price_difference ?? 0),
+        0,
+      ),
+      pendingCount: pending.length,
+      refundedToday: refundedTotal,
+      refundedTodayCount: refundedToday.length,
+      stockReturnedUnits: stockReturned,
+      needsReviewCount: needsReview,
+    };
+  }, [returns, exchanges]);
 
   return (
-    <div className="space-y-6">
-      {/* Header ============================================================ */}
-      <div className="flex flex-wrap items-center justify-between gap-4">
+    <div className="space-y-5" data-testid="returns-page">
+      {/* Header */}
+      <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 className="text-3xl font-black text-slate-900">
             المرتجعات والاستبدال
           </h1>
           <p className="text-slate-500 mt-1">
-            إدارة مرتجعات العملاء + استبدال المنتجات
+            إدارة المرتجعات، الاستبدالات، ردّ المبالغ، وتأثيرها على المخزون والخزنة
           </p>
         </div>
-        <button
-          onClick={() => setShowCreate(true)}
-          className="btn-primary flex items-center gap-2"
-        >
-          <Plus size={18} /> {tab === 'returns' ? 'مرتجع جديد' : 'استبدال جديد'}
-        </button>
-      </div>
-
-      {/* KPIs ============================================================== */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <KpiCard
-          label="بانتظار الموافقة"
-          value={String(pendingCount)}
-          icon={Clock}
-          tint="from-amber-500 to-orange-500"
-        />
-        <KpiCard
-          label="إجمالي المردود"
-          value={EGP(refundedTotal)}
-          icon={Banknote}
-          tint="from-emerald-500 to-teal-500"
-        />
-        <KpiCard
-          label="إجمالي السجلات"
-          value={String(returns?.length ?? 0)}
-          icon={Receipt}
-          tint="from-brand-500 to-purple-500"
-        />
-      </div>
-
-      {/* Tabs ============================================================== */}
-      <div className="flex gap-2 border-b border-slate-200">
-        {(
-          [
-            { v: 'returns', t: 'المرتجعات', icon: Receipt },
-            { v: 'exchanges', t: 'الاستبدال', icon: ArrowLeftRight },
-          ] as const
-        ).map(({ v, t, icon: Icon }) => (
+        <div className="flex gap-2">
           <button
-            key={v}
-            onClick={() => {
-              setTab(v);
-              setSelectedId(null);
-            }}
-            className={`px-5 py-2.5 font-medium flex items-center gap-2 border-b-2 -mb-px transition-colors ${
-              tab === v
-                ? 'border-brand-500 text-brand-700'
-                : 'border-transparent text-slate-500 hover:text-slate-800'
-            }`}
+            onClick={() => setShowCreate('return')}
+            className="btn-primary flex items-center gap-2"
+            data-testid="returns-action-new-return"
           >
-            <Icon size={16} /> {t}
+            <Plus size={18} /> مرتجع جديد
           </button>
-        ))}
+          <button
+            onClick={() => setShowCreate('exchange')}
+            className="px-4 py-2 rounded-lg border border-slate-300 bg-white text-sm font-bold text-slate-700 hover:bg-slate-50 inline-flex items-center gap-2"
+            data-testid="returns-action-new-exchange"
+          >
+            <ArrowLeftRight size={16} /> استبدال جديد
+          </button>
+        </div>
       </div>
 
-      {/* Filters =========================================================== */}
-      <div className="card p-4 flex flex-wrap items-center gap-3">
+      {/* KPIs — 6 cards */}
+      <div
+        className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3"
+        data-testid="returns-kpis"
+      >
+        <Kpi
+          label="مرتجعات اليوم"
+          value={String(kpis.todayReturnsCount)}
+          sub={EGP(kpis.todayReturnsTotal)}
+          tone="brand"
+          testId="kpi-today-returns"
+        />
+        <Kpi
+          label="استبدالات اليوم"
+          value={String(kpis.todayExchangesCount)}
+          sub={EGP(kpis.todayExchangesDelta)}
+          tone="violet"
+          testId="kpi-today-exchanges"
+        />
+        <Kpi
+          label="بانتظار الموافقة"
+          value={String(kpis.pendingCount)}
+          sub="عملية"
+          tone="amber"
+          testId="kpi-pending"
+        />
+        <Kpi
+          label="تم الصرف"
+          value={EGP(kpis.refundedToday)}
+          sub={`${kpis.refundedTodayCount} عملية`}
+          tone="emerald"
+          testId="kpi-refunded"
+        />
+        <Kpi
+          label="أثر المخزون"
+          value={String(kpis.stockReturnedUnits)}
+          sub="قطعة عادت للمخزن"
+          tone="sky"
+          testId="kpi-stock-impact"
+        />
+        <Kpi
+          label="يحتاج مراجعة"
+          value={String(kpis.needsReviewCount)}
+          sub="عملية محاسبية"
+          tone={kpis.needsReviewCount > 0 ? 'rose' : 'slate'}
+          testId="kpi-needs-review"
+        />
+      </div>
+
+      {/* Tabs */}
+      <div
+        className="flex gap-1 border-b border-slate-200 overflow-x-auto"
+        data-testid="returns-tabs"
+      >
+        {TAB_DEFS.map(({ v, label, icon: Icon }) => {
+          const active = tab === v;
+          return (
+            <button
+              key={v}
+              onClick={() => {
+                setTab(v);
+                setSelectedId(null);
+              }}
+              className={`px-4 py-2.5 text-sm font-bold flex items-center gap-1.5 border-b-2 -mb-px transition-colors whitespace-nowrap ${
+                active
+                  ? 'border-brand-500 text-brand-700'
+                  : 'border-transparent text-slate-500 hover:text-slate-800'
+              }`}
+              data-testid={`returns-tab-${v}`}
+            >
+              <Icon size={14} /> {label}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Filters */}
+      <div
+        className="card p-3 flex flex-wrap items-center gap-2"
+        data-testid="returns-filters"
+      >
         <div className="relative flex-1 min-w-[260px]">
-          <Search
-            className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400"
-            size={18}
-          />
+          <Search className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
           <input
             type="search"
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="ابحث برقم المرتجع أو الفاتورة أو العميل..."
-            className="input pr-10 w-full"
+            placeholder="ابحث برقم العملية أو الفاتورة أو العميل أو الهاتف..."
+            className="input pr-9 w-full text-sm"
+            data-testid="returns-filter-search"
           />
         </div>
-        {tab === 'returns' && (
-          <div className="flex gap-2 flex-wrap">
-            {(
-              ['all', 'pending', 'approved', 'refunded', 'rejected'] as const
-            ).map((s) => (
-              <button
-                key={s}
-                onClick={() => setStatus(s)}
-                className={`px-4 py-2 rounded-lg border text-sm font-medium transition-all ${
-                  status === s
-                    ? 'bg-brand-500 text-white border-brand-500 shadow-sm'
-                    : 'bg-white text-slate-600 border-slate-200 hover:border-brand-300'
-                }`}
-              >
-                {s === 'all' ? 'الكل' : STATUS_META[s].label}
-              </button>
-            ))}
+
+        {/* Date preset */}
+        <div className="flex gap-1" data-testid="returns-filter-date-preset">
+          {([
+            { v: 'today', t: 'اليوم' },
+            { v: 'week', t: 'الأسبوع' },
+            { v: 'month', t: 'الشهر' },
+            { v: 'custom', t: 'مخصص' },
+          ] as const).map(({ v, t }) => (
+            <button
+              key={v}
+              onClick={() => setDatePreset(v)}
+              className={`px-3 py-1.5 rounded-md text-xs font-bold border ${
+                datePreset === v
+                  ? 'bg-brand-500 text-white border-brand-500'
+                  : 'bg-white text-slate-600 border-slate-200'
+              }`}
+              data-testid={`returns-filter-date-${v}`}
+            >
+              {t}
+            </button>
+          ))}
+        </div>
+
+        {datePreset === 'custom' && (
+          <div className="flex gap-1 items-center text-xs">
+            <CalendarDays size={14} className="text-slate-400" />
+            <input
+              type="date"
+              value={dateFrom}
+              onChange={(e) => setDateFrom(e.target.value)}
+              className="input text-xs px-2 py-1"
+              data-testid="returns-filter-date-from"
+            />
+            <span className="text-slate-400">→</span>
+            <input
+              type="date"
+              value={dateTo}
+              onChange={(e) => setDateTo(e.target.value)}
+              className="input text-xs px-2 py-1"
+              data-testid="returns-filter-date-to"
+            />
           </div>
         )}
+
+        {/* Refund method */}
+        <select
+          value={refundMethod}
+          onChange={(e) => setRefundMethod(e.target.value as any)}
+          className="input text-sm py-1"
+          data-testid="returns-filter-refund-method"
+        >
+          <option value="all">كل طرق الرد</option>
+          <option value="cash">كاش</option>
+          <option value="card">بطاقة</option>
+          <option value="instapay">انستا باي</option>
+          <option value="bank_transfer">تحويل بنكي</option>
+        </select>
+
+        {/* Accounting status */}
+        <select
+          value={accountingFilter}
+          onChange={(e) => setAccountingFilter(e.target.value as any)}
+          className="input text-sm py-1"
+          data-testid="returns-filter-accounting"
+        >
+          <option value="all">كل حالات المحاسبة</option>
+          <option value="matched">مطابق</option>
+          <option value="needs_review">يحتاج مراجعة</option>
+          <option value="je_missing">القيد غير موجود</option>
+          <option value="cashbox_not_linked">سطر النقد غير مربوط</option>
+        </select>
+
+        {/* Sort */}
+        <select
+          value={sort}
+          onChange={(e) => setSort(e.target.value as SortKey)}
+          className="input text-sm py-1"
+          data-testid="returns-filter-sort"
+        >
+          <option value="newest">الأحدث أولاً</option>
+          <option value="oldest">الأقدم أولاً</option>
+          <option value="amount_high">المبلغ من الأعلى</option>
+          <option value="amount_low">المبلغ من الأقل</option>
+        </select>
       </div>
 
-      {/* Grid ============================================================= */}
-      <div className="grid grid-cols-1 lg:grid-cols-[1fr_480px] gap-6">
+      {/* Master/Detail */}
+      <div className="grid grid-cols-1 lg:grid-cols-[1fr_520px] gap-5">
         {/* List */}
-        <div className="card overflow-hidden">
-          {tab === 'returns' ? (
-            isLoading ? (
-              <LoadingState />
-            ) : !returns?.length ? (
-              <EmptyState tab="returns" onCreate={() => setShowCreate(true)} />
-            ) : (
-              <div className="divide-y divide-slate-100">
-                {returns.map((r) => (
-                  <ReturnRow
-                    key={r.id}
-                    r={r}
-                    isActive={selectedId === r.id}
-                    onClick={() => setSelectedId(r.id)}
-                  />
-                ))}
-              </div>
-            )
-          ) : !exchanges?.length ? (
-            <EmptyState tab="exchanges" onCreate={() => setShowCreate(true)} />
+        <div className="card overflow-hidden" data-testid="returns-list">
+          {(loadingReturns && fetchReturns) ||
+          (loadingExchanges && fetchExchanges) ? (
+            <LoadingState />
+          ) : ops.length === 0 ? (
+            <EmptyState
+              tab={tab === 'exchanges' ? 'exchanges' : 'returns'}
+              onCreate={() =>
+                setShowCreate(tab === 'exchanges' ? 'exchange' : 'return')
+              }
+            />
           ) : (
             <div className="divide-y divide-slate-100">
-              {exchanges.map((e) => (
-                <ExchangeRow key={e.id} e={e} />
+              {ops.map((op) => (
+                <ReturnRow
+                  key={`${op.operationType}:${op.id}`}
+                  op={op}
+                  isActive={selectedId === op.id}
+                  onClick={() => setSelectedId(op.id)}
+                />
               ))}
             </div>
           )}
         </div>
 
         {/* Details */}
-        <div>
-          {tab === 'returns' && selectedId ? (
+        <div data-testid="returns-details-pane">
+          {selectedId &&
+          ops.find((o) => o.id === selectedId)?.operationType === 'return' ? (
             <ReturnDetailsPanel
               id={selectedId}
               onClose={() => setSelectedId(null)}
             />
+          ) : selectedId ? (
+            <ExchangeDetailsPanel
+              op={ops.find((o) => o.id === selectedId)!}
+              onClose={() => setSelectedId(null)}
+            />
           ) : (
-            <div className="card p-12 text-center text-slate-400">
+            <div
+              className="card p-12 text-center text-slate-400"
+              data-testid="returns-details-empty"
+            >
               <Package size={48} className="mx-auto mb-3 text-slate-300" />
-              <p>
-                {tab === 'returns'
-                  ? 'اختر مرتجع من القائمة لعرض التفاصيل'
-                  : 'قائمة الاستبدال لعرض السجلات'}
-              </p>
+              <p>اختر عملية لعرض التفاصيل</p>
             </div>
           )}
         </div>
       </div>
 
-      {/* Create modal ====================================================== */}
-      {showCreate && tab === 'returns' && (
-        <CreateReturnModal onClose={() => setShowCreate(false)} />
+      {/* Create modals */}
+      {showCreate === 'return' && (
+        <CreateReturnModal onClose={() => setShowCreate(null)} />
       )}
-      {showCreate && tab === 'exchanges' && (
-        <CreateExchangeModal onClose={() => setShowCreate(false)} />
+      {showCreate === 'exchange' && (
+        <CreateExchangeModal onClose={() => setShowCreate(null)} />
       )}
     </div>
   );
 }
 
+// ─── small helpers used by the new layout ─────────────────────────────
+
+function Kpi({
+  label,
+  value,
+  sub,
+  tone,
+  testId,
+}: {
+  label: string;
+  value: string;
+  sub: string;
+  tone: 'brand' | 'violet' | 'amber' | 'emerald' | 'sky' | 'rose' | 'slate';
+  testId?: string;
+}) {
+  const palette = {
+    brand:   'border-brand-200   bg-brand-50   text-brand-800',
+    violet:  'border-violet-200  bg-violet-50  text-violet-800',
+    amber:   'border-amber-200   bg-amber-50   text-amber-800',
+    emerald: 'border-emerald-200 bg-emerald-50 text-emerald-800',
+    sky:     'border-sky-200     bg-sky-50     text-sky-800',
+    rose:    'border-rose-200    bg-rose-50    text-rose-800',
+    slate:   'border-slate-200   bg-slate-50   text-slate-700',
+  }[tone];
+  return (
+    <div className={`rounded-xl border p-3 ${palette}`} data-testid={testId}>
+      <div className="text-[11px] font-bold opacity-80">{label}</div>
+      <div className="text-xl font-black font-mono mt-1">{value}</div>
+      <div className="text-[10px] opacity-70 mt-0.5">{sub}</div>
+    </div>
+  );
+}
+
+const USER_FALLBACK = 'غير معروف';
+function nameOr(name: string | null | undefined): string {
+  return name && name.trim() ? name : USER_FALLBACK;
+}
+function dateOr(iso: string | null | undefined): string {
+  return iso ? formatArabicDateTime(iso) : '—';
+}
+
+function KV({
+  label,
+  value,
+  mono,
+}: {
+  label: string;
+  value: string;
+  mono?: boolean;
+}) {
+  return (
+    <div className="border border-slate-100 rounded-md p-1.5">
+      <div className="text-[10px] text-slate-500">{label}</div>
+      <div className={`font-bold ${mono ? 'font-mono' : ''} text-slate-800`}>
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function TimelineEvent({
+  when,
+  who,
+  label,
+}: {
+  when: string | null | undefined;
+  who: string | null | undefined;
+  label: string;
+}) {
+  return (
+    <li className="relative">
+      <span className="absolute -start-[15px] top-1.5 w-2 h-2 rounded-full bg-brand-500" />
+      <div className="text-slate-700 font-bold">{label}</div>
+      <div className="text-[11px] text-slate-500 flex items-center gap-2 flex-wrap">
+        <span className="font-mono">{dateOr(when)}</span>
+        <span>•</span>
+        <span>{nameOr(who)}</span>
+      </div>
+    </li>
+  );
+}
+
+const ACCOUNTING_LABEL: Record<string, string> = {
+  matched: 'مطابق',
+  needs_review: 'يحتاج مراجعة',
+  je_missing: 'القيد غير موجود',
+  cashbox_not_linked: 'سطر النقد غير مربوط',
+  not_applicable: '—',
+};
+const INVENTORY_LABEL: Record<string, string> = {
+  restored: 'مكتمل',
+  not_applicable: '—',
+};
+
 // ============================================================================
-// Rows
+// Rows — enriched per RETURNS-UX-1D
 // ============================================================================
 function ReturnRow({
-  r,
+  op,
   isActive,
   onClick,
 }: {
-  r: any;
+  op: UnifiedOperation;
   isActive: boolean;
   onClick: () => void;
 }) {
-  const meta = STATUS_META[r.status as ReturnStatus];
+  const meta =
+    op.operationType === 'return'
+      ? STATUS_META[op.status as ReturnStatus] ?? STATUS_META.pending
+      : {
+          label:
+            op.status === 'completed' ? 'مكتمل' :
+            op.status === 'cancelled' ? 'ملغي' : 'بانتظار',
+          color:
+            op.status === 'completed'
+              ? 'bg-emerald-100 text-emerald-800 border-emerald-200'
+              : op.status === 'cancelled'
+              ? 'bg-rose-100 text-rose-800 border-rose-200'
+              : 'bg-amber-100 text-amber-800 border-amber-200',
+          icon: ArrowLeftRight as typeof CheckCircle2,
+        };
   const Icon = meta.icon;
+  const typeBadge =
+    op.operationType === 'return'
+      ? { label: 'مرتجع', color: 'bg-slate-100 text-slate-700 border-slate-200' }
+      : { label: 'استبدال', color: 'bg-violet-100 text-violet-800 border-violet-200' };
+
   return (
     <button
       onClick={onClick}
-      className={`w-full text-right px-5 py-4 hover:bg-brand-50/40 transition-colors flex items-center gap-4 ${
+      className={`w-full text-right px-5 py-4 hover:bg-brand-50/40 transition-colors flex items-start gap-4 ${
         isActive ? 'bg-brand-50' : ''
       }`}
+      data-testid={`returns-row-${op.id}`}
     >
-      <div
-        className={`px-2.5 py-1 rounded-md border text-xs font-bold inline-flex items-center gap-1 ${meta.color}`}
-      >
-        <Icon size={12} /> {meta.label}
+      <div className="flex flex-col gap-1.5 min-w-[110px]">
+        <div className={`px-2 py-0.5 rounded-md border text-[11px] font-bold inline-flex items-center gap-1 ${typeBadge.color}`}>
+          {typeBadge.label}
+        </div>
+        <div className={`px-2 py-0.5 rounded-md border text-[11px] font-bold inline-flex items-center gap-1 ${meta.color}`}>
+          <Icon size={11} /> {meta.label}
+        </div>
       </div>
 
       <div className="flex-1 min-w-0">
-        <div className="flex items-baseline gap-3">
-          <div className="font-mono font-bold text-slate-800">{r.return_no}</div>
-          <span className="text-xs text-slate-500">
-            من فاتورة {r.invoice_no}
-          </span>
+        <div className="flex items-baseline gap-3 flex-wrap">
+          <div className="font-mono font-bold text-slate-800">{op.number}</div>
+          {op.invoice_no && (
+            <span className="text-xs text-slate-500">
+              من فاتورة {op.invoice_no}
+            </span>
+          )}
         </div>
-        <div className="text-sm text-slate-600 flex items-center gap-3 mt-0.5">
-          <span>{r.customer_name || '—'}</span>
+        <div className="text-sm text-slate-600 mt-0.5 flex items-center gap-2 flex-wrap">
+          <span>{op.customer_name ?? '—'}</span>
+          {op.units_count != null && (
+            <>
+              <span>•</span>
+              <span>{op.units_count} قطعة</span>
+            </>
+          )}
+          {op.refund_method && (
+            <>
+              <span>•</span>
+              <span>{METHOD_LABELS[op.refund_method as PaymentMethod] ?? op.refund_method}</span>
+            </>
+          )}
+        </div>
+        {/* Operator + timestamp — every row, every op type */}
+        <div
+          className="text-[11px] text-slate-500 mt-1 flex items-center gap-2 flex-wrap"
+          data-testid={`returns-row-${op.id}-meta`}
+        >
+          <span className="inline-flex items-center gap-1">
+            <User size={10} /> نفّذها: {nameOr(op.operator_name)}
+          </span>
           <span>•</span>
-          <span>{r.units_count} قطعة</span>
-          <span>•</span>
-          <span>{REASON_LABELS[r.reason as ReturnReason]}</span>
+          <span className="font-mono">{dateOr(op.performed_at)}</span>
+        </div>
+        {/* Diagnostic badges */}
+        <div className="flex gap-1.5 mt-1.5 flex-wrap" data-testid={`returns-row-${op.id}-badges`}>
+          <Badge
+            label={
+              op.inventory_status === 'restored' ? 'المخزون: مكتمل' : 'المخزون: —'
+            }
+            tone={op.inventory_status === 'restored' ? 'emerald' : 'slate'}
+            testId="badge-inventory"
+          />
+          <Badge
+            label={`المحاسبة: ${ACCOUNTING_LABEL[op.accounting_status] ?? '—'}`}
+            tone={
+              op.accounting_status === 'matched'
+                ? 'emerald'
+                : op.accounting_status === 'not_applicable'
+                ? 'slate'
+                : 'rose'
+            }
+            testId="badge-accounting"
+          />
+          <Badge
+            label={
+              op.match_status === 'matched'
+                ? 'المطابقة: سليمة'
+                : op.match_status === 'pending'
+                ? 'المطابقة: —'
+                : 'المطابقة: تحتاج مراجعة'
+            }
+            tone={
+              op.match_status === 'matched'
+                ? 'emerald'
+                : op.match_status === 'pending'
+                ? 'slate'
+                : 'rose'
+            }
+            testId="badge-match"
+          />
         </div>
       </div>
 
-      <div className="text-left">
-        <div className="font-bold text-slate-900">
-          {EGP(r.net_refund)}
+      <div className="text-left min-w-[90px]">
+        <div className="font-bold text-slate-900 font-mono">
+          {op.amount > 0 && op.operationType === 'exchange' ? '+' : ''}
+          {EGP(op.amount)}
         </div>
-        {Number(r.restocking_fee) > 0 && (
-          <div className="text-xs text-amber-700">
-            رسوم {EGP(r.restocking_fee)}
-          </div>
+        {op.operationType === 'exchange' && (
+          <div className="text-[10px] text-slate-500">فرق السعر</div>
         )}
       </div>
     </button>
   );
 }
 
-function ExchangeRow({ e }: { e: any }) {
-  const diff = Number(e.price_difference);
+function Badge({
+  label,
+  tone,
+  testId,
+}: {
+  label: string;
+  tone: 'emerald' | 'slate' | 'rose' | 'amber';
+  testId?: string;
+}) {
+  const palette = {
+    emerald: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+    slate:   'bg-slate-50   text-slate-600   border-slate-200',
+    rose:    'bg-rose-50    text-rose-700    border-rose-200',
+    amber:   'bg-amber-50   text-amber-800   border-amber-200',
+  }[tone];
   return (
-    <div className="px-5 py-4 flex items-center gap-4">
-      <ArrowLeftRight className="text-brand-500" size={18} />
-      <div className="flex-1">
-        <div className="font-mono font-bold">{e.exchange_no}</div>
-        <div className="text-sm text-slate-600">
-          من {e.original_invoice_no} ← إلى {e.new_invoice_no || '—'} ·{' '}
-          {e.customer_name || '—'}
+    <span
+      className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${palette}`}
+      data-testid={testId}
+    >
+      {label}
+    </span>
+  );
+}
+
+// ============================================================================
+// Exchange details panel — minimal split view (returned vs replacement +
+// price delta). Reuses the existing ExchangeListItem shape; full detail
+// API is /exchanges/:id and can be wired later when 1A enriches it.
+// ============================================================================
+function ExchangeDetailsPanel({
+  op,
+  onClose,
+}: {
+  op: UnifiedOperation;
+  onClose: () => void;
+}) {
+  const e = op.raw;
+  const delta = Number(e?.price_difference ?? 0);
+  const noCash = delta === 0;
+  return (
+    <div className="card p-5 space-y-4" data-testid="exchange-details-panel">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <ArrowLeftRight size={18} className="text-violet-700" />
+          <h3 className="font-black text-lg">{op.number}</h3>
+          <span className="text-[11px] px-2 py-0.5 rounded-full bg-violet-100 text-violet-800 font-bold">
+            استبدال
+          </span>
+        </div>
+        <button
+          onClick={onClose}
+          className="text-slate-400 hover:text-slate-600"
+          aria-label="إغلاق"
+        >
+          <ChevronLeft size={18} />
+        </button>
+      </div>
+
+      <div className="text-sm text-slate-600">
+        من فاتورة <span className="font-mono">{e?.original_invoice_no ?? '—'}</span>
+        <span className="mx-2">←</span>
+        إلى فاتورة <span className="font-mono">{e?.new_invoice_no ?? '—'}</span>
+      </div>
+
+      {/* Returned vs replacement summary */}
+      <div className="grid grid-cols-2 gap-3" data-testid="exchange-split">
+        <div className="border border-slate-200 rounded-lg p-3 bg-slate-50">
+          <div className="text-[11px] font-bold text-slate-600 mb-1">المُرجَع</div>
+          <div className="font-mono text-base font-black text-slate-900">
+            {EGP(Number(e?.returned_value ?? 0))}
+          </div>
+          <div className="text-[10px] text-slate-500 mt-1">عاد إلى المخزن</div>
+        </div>
+        <div className="border border-violet-200 rounded-lg p-3 bg-violet-50">
+          <div className="text-[11px] font-bold text-violet-700 mb-1">البديل</div>
+          <div className="font-mono text-base font-black text-violet-900">
+            {EGP(Number(e?.new_items_value ?? 0))}
+          </div>
+          <div className="text-[10px] text-violet-700/80 mt-1">صُرف من المخزن</div>
         </div>
       </div>
-      <div className="text-left">
-        <div
-          className={`font-bold ${
-            diff > 0 ? 'text-amber-700' : diff < 0 ? 'text-emerald-700' : 'text-slate-500'
-          }`}
-        >
-          {diff > 0 ? '+' : ''}
-          {EGP(diff)}
+
+      <div
+        className={`rounded-lg p-3 ${
+          delta > 0
+            ? 'bg-amber-50 border border-amber-200'
+            : delta < 0
+            ? 'bg-emerald-50 border border-emerald-200'
+            : 'bg-slate-50 border border-slate-200'
+        }`}
+        data-testid="exchange-price-delta"
+      >
+        <div className="text-xs font-bold mb-1">فرق السعر</div>
+        <div className="font-mono text-lg font-black">
+          {delta > 0 ? '+' : ''}
+          {EGP(delta)}
         </div>
-        <div className="text-xs text-slate-500">فرق السعر</div>
+        <div className="text-[11px] mt-1">
+          {noCash
+            ? 'لا يوجد أثر نقدي على الخزنة'
+            : delta > 0
+            ? 'العميل دفع الفرق'
+            : 'تم رد الفرق للعميل'}
+        </div>
+      </div>
+
+      <div className="text-[11px] text-slate-500 border-t border-slate-100 pt-3">
+        <div>أنشئت: <span className="font-mono">{dateOr(e?.created_at)}</span></div>
+        {e?.completed_at && (
+          <div>اكتملت: <span className="font-mono">{dateOr(e.completed_at)}</span></div>
+        )}
       </div>
     </div>
   );
@@ -493,6 +1118,204 @@ function ReturnDetailsPanel({
               </div>
             ))}
           </div>
+        </section>
+
+        {/* PR-FIN-RETURNS-UX-1D — operator/timestamp section. Every actor
+            who touched the return shows up here with full DD/MM/YYYY HH:mm:ss. */}
+        <section data-testid="returns-detail-operator-timestamps">
+          <div className="font-bold text-slate-700 mb-2 flex items-center gap-1.5">
+            <User size={14} /> المنفّذ والأوقات
+          </div>
+          <div className="grid grid-cols-2 gap-2 text-xs">
+            <KV label="أنشأه" value={nameOr((r as any).requested_by_name)} />
+            <KV label="تاريخ ووقت الإنشاء" value={dateOr(r.requested_at)} mono />
+            <KV
+              label="تمت الموافقة بواسطة"
+              value={r.approved_by_name ? nameOr(r.approved_by_name) : '—'}
+            />
+            <KV label="وقت الموافقة" value={dateOr(r.approved_at)} mono />
+            <KV
+              label="تم الصرف بواسطة"
+              value={r.refunded_by_name ? nameOr(r.refunded_by_name) : '—'}
+            />
+            <KV label="وقت الصرف" value={dateOr(r.refunded_at)} mono />
+            {r.rejected_at && (
+              <>
+                <KV label="تم الرفض في" value={dateOr(r.rejected_at)} mono />
+                <KV label="آخر تحديث" value={dateOr((r as any).updated_at)} mono />
+              </>
+            )}
+          </div>
+        </section>
+
+        {/* Refund / payment section */}
+        <section data-testid="returns-detail-refund-section">
+          <div className="font-bold text-slate-700 mb-2 flex items-center gap-1.5">
+            <Banknote size={14} /> رد المبلغ
+          </div>
+          <div className="rounded-lg border border-slate-200 p-3 text-sm">
+            {r.refund_method ? (
+              <>
+                <div className="flex items-center justify-between">
+                  <span>طريقة الصرف</span>
+                  <span className="font-bold">{METHOD_LABELS[r.refund_method]}</span>
+                </div>
+                {r.refund_method === 'cash' && (r as any).cashbox_name && (
+                  <div className="flex items-center justify-between mt-1">
+                    <span>الخزنة</span>
+                    <span className="font-bold">{(r as any).cashbox_name}</span>
+                  </div>
+                )}
+                {(r as any).refund_cashbox_transaction_id && (
+                  <div className="flex items-center justify-between mt-1">
+                    <span>حركة الخزنة</span>
+                    <span className="font-mono text-xs">
+                      CT #{(r as any).refund_cashbox_transaction_id}
+                    </span>
+                  </div>
+                )}
+                <div className="flex items-center justify-between mt-1 pt-1 border-t border-slate-100">
+                  <span>صافي المبلغ</span>
+                  <span className="font-bold font-mono">{EGP(r.net_refund)}</span>
+                </div>
+              </>
+            ) : (
+              <div className="text-slate-500">لا توجد طريقة صرف بعد</div>
+            )}
+          </div>
+        </section>
+
+        {/* Inventory impact */}
+        <section data-testid="returns-detail-inventory-section">
+          <div className="font-bold text-slate-700 mb-2 flex items-center gap-1.5">
+            <Boxes size={14} /> أثر المخزون
+          </div>
+          <div className="rounded-lg border border-slate-200 p-3 text-sm">
+            <div className="flex items-center justify-between">
+              <span>قطع عادت للمخزن</span>
+              <span className="font-bold font-mono">
+                {r.items.filter((it) => it.back_to_stock && it.condition === 'resellable').reduce((s, it) => s + it.quantity, 0)}
+              </span>
+            </div>
+            <div className="flex items-center justify-between mt-1">
+              <span>قطع غير قابلة للبيع</span>
+              <span className="font-bold font-mono">
+                {r.items.filter((it) => !it.back_to_stock || it.condition !== 'resellable').reduce((s, it) => s + it.quantity, 0)}
+              </span>
+            </div>
+            <div className="mt-2">
+              <Badge
+                label={`الحالة: ${INVENTORY_LABEL[(r as any).inventory_status ?? 'not_applicable']}`}
+                tone={(r as any).inventory_status === 'restored' ? 'emerald' : 'slate'}
+              />
+            </div>
+          </div>
+        </section>
+
+        {/* Accounting diagnostic — diagnostic only, no settlement action */}
+        <section data-testid="returns-detail-accounting-section">
+          <div className="font-bold text-slate-700 mb-2 flex items-center gap-1.5">
+            <ShieldCheck size={14} /> الحالة المحاسبية
+          </div>
+          <div className="rounded-lg border border-slate-200 p-3 text-sm space-y-1.5">
+            <div className="flex items-center justify-between">
+              <span>القيد المحاسبي</span>
+              <span className="font-mono text-xs">
+                {(r as any).journal_entry_no ?? 'غير موجود'}
+              </span>
+            </div>
+            {(r as any).journal_entry_posted_at && (
+              <div className="flex items-center justify-between">
+                <span>وقت الترحيل</span>
+                <span className="font-mono text-xs">
+                  {dateOr((r as any).journal_entry_posted_at)}
+                </span>
+              </div>
+            )}
+            <div className="flex items-center justify-between">
+              <span>الخزنة في القيد</span>
+              <span>
+                {(r as any).has_unlinked_cash_leg
+                  ? <span className="text-rose-700 font-bold">غير مربوطة ⚠</span>
+                  : (r as any).cashbox_name
+                  ? <span className="font-bold">{(r as any).cashbox_name}</span>
+                  : <span className="text-slate-500">—</span>}
+              </span>
+            </div>
+            <div className="pt-1.5 border-t border-slate-100 flex flex-wrap gap-1.5">
+              <Badge
+                label={`المحاسبة: ${ACCOUNTING_LABEL[(r as any).accounting_status ?? 'not_applicable']}`}
+                tone={
+                  (r as any).accounting_status === 'matched'
+                    ? 'emerald'
+                    : (r as any).accounting_status === 'not_applicable'
+                    ? 'slate'
+                    : 'rose'
+                }
+              />
+              <Badge
+                label={
+                  (r as any).match_status === 'matched'
+                    ? 'المطابقة: سليمة'
+                    : (r as any).match_status === 'pending'
+                    ? 'المطابقة: —'
+                    : 'المطابقة: تحتاج مراجعة'
+                }
+                tone={
+                  (r as any).match_status === 'matched'
+                    ? 'emerald'
+                    : (r as any).match_status === 'pending'
+                    ? 'slate'
+                    : 'rose'
+                }
+              />
+            </div>
+            <div className="text-[11px] text-slate-500 pt-1">
+              عرض تشخيصي فقط — لا توجد إجراءات تصحيح من هذه الواجهة.
+            </div>
+          </div>
+        </section>
+
+        {/* Timeline — operator + DD/MM/YYYY HH:mm:ss for every state change */}
+        <section data-testid="returns-detail-timeline">
+          <div className="font-bold text-slate-700 mb-2 flex items-center gap-1.5">
+            <Clock size={14} /> الجدول الزمني
+          </div>
+          <ol className="border-s-2 border-slate-200 ps-3 space-y-2 text-sm">
+            <TimelineEvent
+              when={r.requested_at}
+              who={(r as any).requested_by_name}
+              label="إنشاء المرتجع"
+            />
+            {r.approved_at && (
+              <TimelineEvent
+                when={r.approved_at}
+                who={r.approved_by_name}
+                label="الموافقة + رجوع المنتج للمخزون"
+              />
+            )}
+            {(r as any).journal_entry_posted_at && (
+              <TimelineEvent
+                when={(r as any).journal_entry_posted_at}
+                who="النظام"
+                label={`إنشاء القيد ${(r as any).journal_entry_no ?? ''}`.trim()}
+              />
+            )}
+            {r.refunded_at && (
+              <TimelineEvent
+                when={r.refunded_at}
+                who={r.refunded_by_name}
+                label="صرف المبلغ"
+              />
+            )}
+            {r.rejected_at && (
+              <TimelineEvent
+                when={r.rejected_at}
+                who={(r as any).requested_by_name}
+                label="رفض العملية"
+              />
+            )}
+          </ol>
         </section>
 
         {/* Actions */}
