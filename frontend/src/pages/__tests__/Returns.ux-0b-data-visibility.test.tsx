@@ -222,9 +222,13 @@ describe('Returns — Phase 0b: diagnostic banner', () => {
 
     const banner = await screen.findByTestId('returns-diagnostic-banner');
     expect(banner).toBeInTheDocument();
-    // Counts are visible.
+    // PR-FIN-RETURNS-UX-0B — spec'd Arabic header literal must render.
+    expect(banner.textContent).toContain('تشخيص تحميل البيانات');
+    // Counts are visible (with their spec'd labels).
     const rCount = screen.getByTestId('returns-diag-returns-count');
     const xCount = screen.getByTestId('returns-diag-exchanges-count');
+    expect(rCount.textContent).toContain('عدد المرتجعات المحمّلة');
+    expect(xCount.textContent).toContain('عدد الاستبدالات المحمّلة');
     expect(rCount.textContent).toMatch(/0/);
     expect(xCount.textContent).toMatch(/0/);
     // State + filters are visible.
@@ -256,6 +260,22 @@ describe('Returns — Phase 0b: diagnostic banner', () => {
     expect(
       screen.queryByTestId('returns-diagnostic-banner'),
     ).toBeNull();
+  });
+
+  it('renders the shape-warning row with its spec\'d Arabic label when __shapeWarning is tagged', async () => {
+    // Hand-craft a tagged empty array — the same shape `normalizeListResponse`
+    // produces when the BE payload is unrecognized.
+    const tagged: any[] = [];
+    Object.defineProperty(tagged, '__shapeWarning', {
+      value: 'unexpected payload shape',
+      enumerable: false,
+    });
+    listMock.mockResolvedValue(tagged);
+    listExchangesMock.mockResolvedValue([]);
+    renderPage();
+    const warn = await screen.findByTestId('returns-diag-shape-warning');
+    expect(warn.textContent).toContain('تحذير شكل الاستجابة');
+    expect(warn.textContent).toContain('unexpected payload shape');
   });
 });
 
@@ -297,6 +317,8 @@ describe('Returns — Phase 0b: non-array payload safety', () => {
     const banner = await screen.findByTestId('returns-diagnostic-banner');
     expect(banner).toBeInTheDocument();
     const mapErr = await screen.findByTestId('returns-diag-map-error');
+    // PR-FIN-RETURNS-UX-0B — spec'd Arabic label for the map-error row.
+    expect(mapErr.textContent).toContain('خطأ تحويل البيانات');
     expect(mapErr.textContent).toContain('non-array');
   });
 });

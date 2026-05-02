@@ -733,7 +733,7 @@ export default function Returns() {
             data-testid="returns-diagnostic-banner"
           >
             <div className="font-bold mb-1">
-              تشخيص مؤقت — يظهر عندما تكون القائمة فارغة (Phase 0b)
+              تشخيص تحميل البيانات
             </div>
             <div data-testid="returns-diag-returns-count">
               عدد المرتجعات المحمّلة:{' '}
@@ -769,7 +769,7 @@ export default function Returns() {
                 className="mt-2 text-rose-800 font-bold"
                 data-testid="returns-diag-shape-warning"
               >
-                ⚠️ shape warning: {String(shapeWarning)} — see console.
+                ⚠️ تحذير شكل الاستجابة: {String(shapeWarning)} — راجع الـ console.
               </div>
             )}
             {mapErrorMessage && (
@@ -777,7 +777,7 @@ export default function Returns() {
                 className="mt-2 text-rose-800 font-bold"
                 data-testid="returns-diag-map-error"
               >
-                ⚠️ map error: {mapErrorMessage}
+                ⚠️ خطأ تحويل البيانات: {mapErrorMessage}
               </div>
             )}
           </div>
