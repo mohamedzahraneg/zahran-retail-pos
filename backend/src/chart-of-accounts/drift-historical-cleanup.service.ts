@@ -411,14 +411,55 @@ export class DriftHistoricalCleanupService {
 
   // ── private: drift / balance ───────────────────────────────────────
 
+  /**
+   * PR-FIN-PAYACCT-4D-DRIFT-HISTORICAL-CLEANUP-HOTFIX-2
+   *
+   * Compute drift directly from the live tables, NOT from
+   * `v_cashbox_gl_drift`. The view's CT-side proxy is
+   * `cashboxes.current_balance` — a stored value that is only refreshed
+   * by `ReconciliationService.rebuildCashboxBalance` (which runs AFTER
+   * this transaction commits). Inside the cleanup tx, soft-voided CTs
+   * have not yet propagated to `current_balance`, while patched
+   * `journal_lines.cashbox_id` rows DO immediately affect `gl_net`. The
+   * view therefore reports a stale CT side vs a fresh GL side, yielding
+   * a false-positive non-zero drift that aborts the cleanup.
+   *
+   * The correct comparison is:
+   *   ct_active_signed  := Σ(in − out) over cashbox_transactions where
+   *                        cashbox_id = X AND is_void = false
+   *   gl_net            := Σ(debit − credit) over journal_lines.cashbox_id = X
+   *                        on posted, non-void JEs
+   *   drift             := ct_active_signed − gl_net
+   *
+   * This matches the per-ref view's semantics (CT-active vs JE-active)
+   * and stays consistent with the cleanup writes during the same
+   * transaction. Pre-cleanup, this formula yields the same value as
+   * the view (because `current_balance` equals the active CT sum);
+   * post-cleanup-tx (pre-rebuild), it correctly returns 0.
+   */
   private async computeMainDrift(
     runner: { query: (sql: string, p?: any[]) => Promise<any> },
     cashboxId: string,
   ): Promise<number> {
     const [r] = await runner.query(
-      `SELECT COALESCE(drift_amount, 0)::numeric(14,2) AS drift
-         FROM v_cashbox_gl_drift
-        WHERE cashbox_id = $1`,
+      `WITH ct_total AS (
+         SELECT COALESCE(SUM(
+                  CASE WHEN direction = 'in' THEN amount ELSE -amount END
+                ), 0) AS ct_signed
+           FROM cashbox_transactions
+          WHERE cashbox_id = $1
+            AND COALESCE(is_void, false) = false
+       ),
+       gl_total AS (
+         SELECT COALESCE(SUM(jl.debit) - SUM(jl.credit), 0) AS gl_net
+           FROM journal_entries je
+           JOIN journal_lines jl ON jl.entry_id = je.id
+          WHERE je.is_posted = true
+            AND je.is_void   = false
+            AND jl.cashbox_id = $1
+       )
+       SELECT (ct_total.ct_signed - gl_total.gl_net)::numeric(14,2) AS drift
+         FROM ct_total CROSS JOIN gl_total`,
       [cashboxId],
     );
     return Number(r?.drift ?? 0);
