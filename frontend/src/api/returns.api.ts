@@ -1,6 +1,15 @@
 import { api, unwrap } from './client';
 
-export type ReturnStatus = 'pending' | 'approved' | 'refunded' | 'rejected';
+// PR-FIN-RETURNS-UX-0A — `'cancelled'` is added defensively after PR-1B
+// extended the BE enum + PR-1C shipped the cancel endpoint. The FE has
+// no cancel UI yet (that's PR 1E), but mapping/badging code must not
+// crash if the BE legitimately returns a cancelled row.
+export type ReturnStatus =
+  | 'pending'
+  | 'approved'
+  | 'refunded'
+  | 'rejected'
+  | 'cancelled';
 export type ReturnReason =
   | 'defective'
   | 'wrong_size'
@@ -214,6 +223,18 @@ export const returnsApi = {
     q?: string;
     limit?: number;
     offset?: number;
+    // PR-FIN-RETURNS-UX-0A — surface the read-side filters PR-1A added
+    // on the backend so callers can pass them in a typed way. All
+    // optional; the BE accepts them or omits them transparently.
+    date_from?: string;
+    date_to?: string;
+    refund_method?: PaymentMethod;
+    accounting_status?:
+      | 'matched'
+      | 'je_missing'
+      | 'cashbox_not_linked'
+      | 'needs_review'
+      | 'not_applicable';
   }) => unwrap<ReturnListItem[]>(api.get('/returns', { params })),
 
   get: (id: string) => unwrap<ReturnDetails>(api.get(`/returns/${id}`)),
