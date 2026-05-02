@@ -195,7 +195,11 @@ export class DriftHistoricalCleanupService {
    *
    * Transaction scope:
    *   1. acquire xact-scoped advisory lock (serialize concurrent runs)
-   *   2. SET LOCAL app.engine_context = 'engine:drift-historical-cleanup'
+   *   2. set transaction-local app.engine_context via set_config(name, $1, true)
+   *      — Postgres rejects bind parameters in `SET LOCAL ... = $1`, so we
+   *      go through the function form which DOES accept binds. The third
+   *      argument `true` makes it transaction-scoped, equivalent to
+   *      `SET LOCAL`.
    *   3. recompute candidates inside the tx
    *   4. soft-void duplicate sale CTs (Pattern A) with WHERE is_void=false guard
    *   5. patch journal_lines.cashbox_id (Pattern B) with WHERE cashbox_id IS NULL guard
@@ -225,8 +229,15 @@ export class DriftHistoricalCleanupService {
       // 1. serialize concurrent cleanup runs
       await em.query(`SELECT pg_advisory_xact_lock($1)`, [ADVISORY_LOCK_KEY]);
 
-      // 2. silent engine context — avoids engine_bypass_alerts log
-      await em.query(`SET LOCAL app.engine_context = $1`, [ENGINE_CONTEXT]);
+      // 2. silent engine context — avoids engine_bypass_alerts log.
+      //    Use set_config(name, value, is_local) instead of `SET LOCAL ... = $1`
+      //    because Postgres rejects bind parameters in the SET LOCAL grammar
+      //    with `syntax error at or near "$1"`. With is_local=true the value
+      //    is rolled back at end-of-transaction, identical to SET LOCAL semantics.
+      await em.query(
+        `SELECT set_config('app.engine_context', $1, true)`,
+        [ENGINE_CONTEXT],
+      );
 
       // 3. recompute candidates inside the tx so we operate on the live set
       const aRows = await this.planPatternARows(
