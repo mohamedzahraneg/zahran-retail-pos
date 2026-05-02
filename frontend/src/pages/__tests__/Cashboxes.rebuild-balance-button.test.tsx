@@ -156,7 +156,12 @@ function renderPage() {
   );
 }
 
-let confirmSpy: ReturnType<typeof vi.spyOn>;
+// vi.spyOn returns a typed MockInstance whose generic parameters don't
+// satisfy the default `ReturnType<typeof vi.spyOn>` shape; using `any`
+// keeps the test infra simple without leaking type noise into the
+// production typecheck.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let confirmSpy: any;
 
 beforeEach(() => {
   vi.clearAllMocks();
