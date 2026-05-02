@@ -382,6 +382,21 @@ export const accountsApi = {
     }>(api.get('/accounts/audit/migrations')),
 
   /**
+   * PR-FIN-PAYACCT-4D-CASHBOX-BALANCE-REBUILD-BUTTON-FE
+   *
+   * Sanctioned rebuild of `cashboxes.current_balance` from the active
+   * cashbox-transactions log (post PR-FIN-PAYACCT-4D-CASHBOX-BALANCE-VOID-FIX-1
+   * the SUM filters `is_void=false`). The button on Cashboxes.tsx fires
+   * this exactly once per click after an explicit confirm dialog. There
+   * is no rebuild-all wrapper here — that would have to be a separate
+   * deliberate action.
+   */
+  rebuildCashboxBalance: (cashboxId: string) =>
+    unwrap<{ cashbox_id: string; new_balance: number }>(
+      api.post(`/accounts/audit/rebuild-cashbox-balance/${cashboxId}`, {}),
+    ),
+
+  /**
    * PR-FIN-PAYACCT-4D-DRIFT-HISTORICAL-CLEANUP-1 — DRY RUN.
    *
    * Returns the candidate plan + before/after drift / balance projections.

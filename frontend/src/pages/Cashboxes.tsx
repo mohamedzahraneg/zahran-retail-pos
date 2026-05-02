@@ -94,6 +94,7 @@ import {
   type PaymentProvider,
   METHOD_LABEL_AR,
 } from '@/api/payments.api';
+import { accountsApi } from '@/api/accounts.api';
 import { PaymentProviderLogo } from '@/components/payments/PaymentProviderLogo';
 import { PaymentAccountModal } from '@/components/payment-accounts/PaymentAccountModal';
 import { UnattachedReconciliationPanel } from '@/components/payment-accounts/UnattachedReconciliationPanel';
@@ -591,6 +592,54 @@ export default function Cashboxes() {
     toast.success('تم تحديث البيانات');
   }
 
+  // PR-FIN-PAYACCT-4D-CASHBOX-BALANCE-REBUILD-BUTTON-FE
+  // Sanctioned rebuild path: re-derive `cashboxes.current_balance` from
+  // the active cashbox-transactions log (the post-VOID-FIX-1 helper
+  // filters `is_void=false`). Fires the existing
+  //   POST /accounts/audit/rebuild-cashbox-balance/:id
+  // endpoint exactly once per click after an explicit confirm dialog.
+  // Operates on the main cash cashbox only; rebuild-all is intentionally
+  // not wired here.
+  const rebuildBalanceMutation = useMutation({
+    mutationFn: (cashboxId: string) =>
+      accountsApi.rebuildCashboxBalance(cashboxId),
+    onSuccess: (r) => {
+      const formatted = Number(r.new_balance).toLocaleString('en-US', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      });
+      toast.success(`تم إعادة بناء رصيد الخزنة: ${formatted} ج.م`);
+      // Invalidate everything that displays cashbox balances or drift.
+      qc.invalidateQueries({ queryKey: ['cashboxes'] });
+      qc.invalidateQueries({ queryKey: ['payment-accounts-balances'] });
+      qc.invalidateQueries({ queryKey: ['cashbox-gl-drift'] });
+      qc.invalidateQueries({ queryKey: ['cashbox-movements-today'] });
+      // The CashboxDetailsModal reads its own data via cashbox-details
+      // queries — invalidate any that exist.
+      qc.invalidateQueries({ queryKey: ['cashbox-details'] });
+    },
+    onError: (err: any) => {
+      toast.error(
+        err?.response?.data?.message ||
+          err?.message ||
+          'فشل إعادة بناء الرصيد',
+      );
+    },
+  });
+
+  function handleRebuildMainCashboxBalance() {
+    if (!cashCashbox) {
+      toast.error('لا توجد خزنة نقدية رئيسية نشطة');
+      return;
+    }
+    if (rebuildBalanceMutation.isPending) return;
+    const ok = window.confirm(
+      'سيتم إعادة حساب رصيد الخزنة الرئيسية من الحركات النشطة فقط',
+    );
+    if (!ok) return;
+    rebuildBalanceMutation.mutate(cashCashbox.id);
+  }
+
   const cashCashbox = boxes.find((c) => c.kind === 'cash' && c.is_active);
 
   // ── Render ─────────────────────────────────────────────────────────
@@ -626,6 +675,32 @@ export default function Cashboxes() {
           >
             <RefreshCcw size={14} /> تحديث الأرصدة
           </button>
+          {/* PR-FIN-PAYACCT-4D-CASHBOX-BALANCE-REBUILD-BUTTON-FE
+              Sanctioned rebuild action for the main cash cashbox. Calls the
+              existing audit/rebuild-cashbox-balance/:id endpoint exactly
+              once per click after a confirm dialog. Disabled while
+              pending. Same permission gate as the drift-cleanup preview
+              (`accounts.journal.post`) since the action writes to
+              `cashboxes.current_balance`. */}
+          {canPreviewDriftCleanup && cashCashbox && (
+            <button
+              type="button"
+              onClick={handleRebuildMainCashboxBalance}
+              disabled={rebuildBalanceMutation.isPending}
+              className={`px-3 py-2 rounded-lg border text-sm font-bold inline-flex items-center gap-1.5 ${
+                rebuildBalanceMutation.isPending
+                  ? 'border-slate-200 bg-slate-100 text-slate-400 cursor-not-allowed'
+                  : 'border-emerald-300 bg-emerald-50 text-emerald-800 hover:bg-emerald-100'
+              }`}
+              data-testid="treasury-rebuild-main-cashbox-balance"
+              title="إعادة حساب رصيد الخزنة الرئيسية من الحركات النشطة فقط"
+            >
+              {rebuildBalanceMutation.isPending && (
+                <RefreshCcw size={14} className="animate-spin" />
+              )}
+              إعادة بناء رصيد الخزنة
+            </button>
+          )}
           {/* PR-FIN-PAYACCT-4D-DRIFT-HISTORICAL-CLEANUP-1 — owner-only diagnostic.
               DRY RUN ONLY: opens a read-only preview of the historical
               cleanup plan. Cannot trigger execute from this UI. */}
