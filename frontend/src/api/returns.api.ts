@@ -302,6 +302,18 @@ export const returnsApi = {
   reject: (id: string, reason: string) =>
     unwrap<ReturnDetails>(api.post(`/returns/${id}/reject`, { reason })),
 
+  // PR-FIN-RETURNS-UX-1E — admin cancellation. The BE shipped this in
+  // PR-1C with @Roles('admin') + @Permissions('returns.cancel'). The
+  // FE caller MUST gate visibility on the same surface so a non-admin
+  // never sees the button. The `confirm` token must equal
+  // `CANCEL_RETURN_<return_no>` exactly — the BE rejects mismatches
+  // with HTTP 400. Non-cash refunded returns are rejected by the BE
+  // with the spec'd Arabic diagnostic.
+  cancelReturn: (
+    id: string,
+    payload: { reason: string; confirm: string },
+  ) => unwrap<ReturnDetails>(api.post(`/returns/${id}/cancel`, payload)),
+
   // Exchanges
   exchange: (payload: CreateExchangePayload) =>
     unwrap<{

@@ -215,30 +215,19 @@ describe('Returns — Phase 0b: production-shape happy path', () => {
 // ─────────────────────────────────────────────────────────────────────
 
 describe('Returns — Phase 0b: diagnostic banner', () => {
-  it('appears when list is empty (no error, no loading) and shows counts + filters', async () => {
+  it('does NOT appear merely because list is empty (PR-1E narrowed the trigger)', async () => {
+    // PR-FIN-RETURNS-UX-1E — the banner now ONLY fires on a real
+    // shape/map error. The empty-list state is communicated by the
+    // "no data" / "filtered empty" cards inside the table; the
+    // technical diagnostic banner stays hidden during normal healthy
+    // empty states so the page is no longer cluttered with debug chrome.
     listMock.mockResolvedValue([]);
     listExchangesMock.mockResolvedValue([]);
     renderPage();
-
-    const banner = await screen.findByTestId('returns-diagnostic-banner');
-    expect(banner).toBeInTheDocument();
-    // PR-FIN-RETURNS-UX-0B — spec'd Arabic header literal must render.
-    expect(banner.textContent).toContain('تشخيص تحميل البيانات');
-    // Counts are visible (with their spec'd labels).
-    const rCount = screen.getByTestId('returns-diag-returns-count');
-    const xCount = screen.getByTestId('returns-diag-exchanges-count');
-    expect(rCount.textContent).toContain('عدد المرتجعات المحمّلة');
-    expect(xCount.textContent).toContain('عدد الاستبدالات المحمّلة');
-    expect(rCount.textContent).toMatch(/0/);
-    expect(xCount.textContent).toMatch(/0/);
-    // State + filters are visible.
-    expect(screen.getByTestId('returns-diag-state').textContent).toMatch(
-      /success/,
-    );
-    const filters = screen.getByTestId('returns-diag-filters');
-    expect(filters.textContent).toContain('tab=');
-    expect(filters.textContent).toContain('datePreset=');
-    expect(filters.textContent).toContain('q=');
+    // Wait for the data to settle (the empty-data card or the
+    // diagnostic banner are both inside the page).
+    await screen.findByTestId('returns-empty-no-data');
+    expect(screen.queryByTestId('returns-diagnostic-banner')).toBeNull();
   });
 
   it('does NOT appear when at least one row is present', async () => {

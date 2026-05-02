@@ -185,19 +185,16 @@ beforeEach(() => {
 // ─────────────────────────────────────────────────────────────────────
 
 describe('Returns — layout', () => {
-  it('renders title + subtitle + 6 KPI cards + 8 tabs + filters + master-detail', async () => {
+  it('renders title + subtitle + 6 KPI cards + 9 tabs + smart filter bar + full-width table', async () => {
     renderPage();
     await screen.findByTestId('returns-page');
 
-    // Title + subtitle
     expect(screen.getByText('المرتجعات والاستبدال')).toBeInTheDocument();
     expect(
       screen.getByText(/إدارة المرتجعات، الاستبدالات/),
     ).toBeInTheDocument();
 
     // KPI cards (6)
-    // PR-FIN-RETURNS-UX-0D renamed these from kpi-today-* to kpi-total-*
-    // to reflect the new visible-scope semantics.
     expect(screen.getByTestId('kpi-total-returns')).toBeInTheDocument();
     expect(screen.getByTestId('kpi-total-exchanges')).toBeInTheDocument();
     expect(screen.getByTestId('kpi-pending')).toBeInTheDocument();
@@ -205,7 +202,7 @@ describe('Returns — layout', () => {
     expect(screen.getByTestId('kpi-stock-impact')).toBeInTheDocument();
     expect(screen.getByTestId('kpi-needs-review')).toBeInTheDocument();
 
-    // 8 tabs
+    // 9 tabs (PR-FIN-RETURNS-UX-0A added 'cancelled' defensively).
     for (const t of [
       'all',
       'returns',
@@ -214,22 +211,30 @@ describe('Returns — layout', () => {
       'approved',
       'refunded',
       'rejected',
+      'cancelled',
       'needs_review',
     ]) {
       expect(screen.getByTestId(`returns-tab-${t}`)).toBeInTheDocument();
     }
 
-    // Filters bar
+    // PR-FIN-RETURNS-UX-1E — smart filter bar (search + quick chips +
+    // advanced popover toggle + sort) replaces the prior stacked row.
+    expect(screen.getByTestId('returns-smart-filters')).toBeInTheDocument();
     expect(screen.getByTestId('returns-filter-search')).toBeInTheDocument();
-    expect(screen.getByTestId('returns-filter-date-preset')).toBeInTheDocument();
-    expect(screen.getByTestId('returns-filter-refund-method')).toBeInTheDocument();
-    expect(screen.getByTestId('returns-filter-accounting')).toBeInTheDocument();
+    expect(screen.getByTestId('returns-filter-quick-chips')).toBeInTheDocument();
+    expect(
+      screen.getByTestId('returns-filter-advanced-toggle'),
+    ).toBeInTheDocument();
     expect(screen.getByTestId('returns-filter-sort')).toBeInTheDocument();
 
-    // Master + detail panes
+    // PR-FIN-RETURNS-UX-1E — full-width table replaced the master-detail
+    // layout. The "اختر عملية لعرض التفاصيل" pane is gone; details now
+    // live in a centered modal opened on row click.
     expect(screen.getByTestId('returns-list')).toBeInTheDocument();
-    expect(screen.getByTestId('returns-details-empty')).toBeInTheDocument();
-    expect(screen.getByText('اختر عملية لعرض التفاصيل')).toBeInTheDocument();
+    expect(screen.queryByTestId('returns-details-pane')).toBeNull();
+    expect(
+      screen.queryByText('اختر عملية لعرض التفاصيل'),
+    ).toBeNull();
   });
 });
 
@@ -238,10 +243,12 @@ describe('Returns — layout', () => {
 // ─────────────────────────────────────────────────────────────────────
 
 describe('Returns — filter wiring', () => {
-  it('clicking "اليوم" preset sends date_from = date_to = today', async () => {
+  it('clicking "اليوم" quick chip sends date_from = date_to = today', async () => {
     renderPage();
-    await screen.findByTestId('returns-filter-date-today');
-    fireEvent.click(screen.getByTestId('returns-filter-date-today'));
+    // PR-FIN-RETURNS-UX-1E renamed the chip testid from
+    // returns-filter-date-today to returns-quick-chip-today.
+    await screen.findByTestId('returns-quick-chip-today');
+    fireEvent.click(screen.getByTestId('returns-quick-chip-today'));
     await waitFor(() => {
       const last = listMock.mock.calls.at(-1)?.[0] ?? {};
       expect(last.date_from).toBe(last.date_to);
@@ -252,10 +259,14 @@ describe('Returns — filter wiring', () => {
 
   it('refund_method filter threads into the request', async () => {
     renderPage();
-    await screen.findByTestId('returns-filter-refund-method');
-    fireEvent.change(screen.getByTestId('returns-filter-refund-method'), {
-      target: { value: 'cash' },
-    });
+    // PR-FIN-RETURNS-UX-1E moved this select into the advanced popover.
+    fireEvent.click(
+      await screen.findByTestId('returns-filter-advanced-toggle'),
+    );
+    fireEvent.change(
+      await screen.findByTestId('returns-filter-refund-method'),
+      { target: { value: 'cash' } },
+    );
     await waitFor(() => {
       const last = listMock.mock.calls.at(-1)?.[0] ?? {};
       expect(last.refund_method).toBe('cash');
@@ -264,10 +275,14 @@ describe('Returns — filter wiring', () => {
 
   it('accounting_status filter threads into the request', async () => {
     renderPage();
-    await screen.findByTestId('returns-filter-accounting');
-    fireEvent.change(screen.getByTestId('returns-filter-accounting'), {
-      target: { value: 'cashbox_not_linked' },
-    });
+    // PR-FIN-RETURNS-UX-1E moved this select into the advanced popover.
+    fireEvent.click(
+      await screen.findByTestId('returns-filter-advanced-toggle'),
+    );
+    fireEvent.change(
+      await screen.findByTestId('returns-filter-accounting'),
+      { target: { value: 'cashbox_not_linked' } },
+    );
     await waitFor(() => {
       const last = listMock.mock.calls.at(-1)?.[0] ?? {};
       expect(last.accounting_status).toBe('cashbox_not_linked');
@@ -318,17 +333,18 @@ describe('Returns — filter wiring', () => {
 describe('Returns — row enrichment', () => {
   it('row shows operator name + DD/MM/YYYY HH:mm:ss + 3 diagnostic badges', async () => {
     renderPage();
+    // PR-FIN-RETURNS-UX-1E — row is now a `<tr>` cell row instead of a
+    // button with `-meta` / `-badges` sub-testids. All the same content
+    // lives in the row's textContent.
     const r = await screen.findByTestId('returns-row-r1');
-    // Operator name
-    const meta = await screen.findByTestId('returns-row-r1-meta');
-    expect(meta.textContent).toContain('محمود زهران');
+    // Operator name (from the المنفذ column)
+    expect(r.textContent).toContain('محمود زهران');
     // Timestamp formatted (Arabic-Indic digits via Intl 'ar-EG')
-    expect(meta.textContent).toMatch(/[\d٠-٩]{2}\/[\d٠-٩]{2}\/[\d٠-٩]{4}/);
-    // Three badges with the inventory / accounting / match labels
-    const badges = await screen.findByTestId('returns-row-r1-badges');
-    expect(badges.textContent).toContain('المخزون');
-    expect(badges.textContent).toContain('المحاسبة');
-    expect(badges.textContent).toContain('المطابقة');
+    expect(r.textContent).toMatch(/[\d٠-٩]{2}\/[\d٠-٩]{2}\/[\d٠-٩]{4}/);
+    // The header columns are present in the table (proxy for badges).
+    expect(screen.getByText('المخزون')).toBeInTheDocument();
+    expect(screen.getByText('المحاسبة')).toBeInTheDocument();
+    expect(screen.getByText('المطابقة')).toBeInTheDocument();
     // The row container holds the operation number
     expect(r.textContent).toContain('RET-2026-000001');
   });
@@ -351,8 +367,8 @@ describe('Returns — row enrichment', () => {
       }),
     ]);
     renderPage();
-    const meta = await screen.findByTestId('returns-row-r2-meta');
-    expect(meta.textContent).toContain('غير معروف');
+    const r = await screen.findByTestId('returns-row-r2');
+    expect(r.textContent).toContain('غير معروف');
   });
 
   it('row badges reflect cashbox_not_linked diagnostic when accounting_status says so', async () => {
@@ -366,9 +382,9 @@ describe('Returns — row enrichment', () => {
       }),
     ]);
     renderPage();
-    const badges = await screen.findByTestId('returns-row-r3-badges');
-    expect(badges.textContent).toContain('سطر النقد غير مربوط');
-    expect(badges.textContent).toContain('تحتاج مراجعة');
+    const r = await screen.findByTestId('returns-row-r3');
+    expect(r.textContent).toContain('سطر النقد غير مربوط');
+    expect(r.textContent).toContain('تحتاج مراجعة');
   });
 });
 

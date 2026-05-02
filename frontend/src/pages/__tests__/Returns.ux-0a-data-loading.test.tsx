@@ -183,11 +183,13 @@ describe('Returns — Phase 0a: initial-load filter defaults', () => {
     expect(await screen.findByTestId('returns-row-r-old')).toBeInTheDocument();
   });
 
-  it('exposes the new "الكل" date-preset chip and it is selected by default', async () => {
+  it('exposes the new "الكل" quick chip and it is selected by default', async () => {
     renderPage();
-    const chipAll = await screen.findByTestId('returns-filter-date-all');
+    // PR-FIN-RETURNS-UX-1E renamed the testid from
+    // returns-filter-date-all to returns-quick-chip-all, but the
+    // semantics (default-active when no filters are applied) survive.
+    const chipAll = await screen.findByTestId('returns-quick-chip-all');
     expect(chipAll).toBeInTheDocument();
-    // Active chip carries the brand-500 background class.
     expect(chipAll.className).toContain('bg-brand-500');
   });
 });
