@@ -1316,10 +1316,34 @@ function ShiftDetailModal({ shift, onClose }: { shift: Shift; onClose: () => voi
                         </td>
                         <td
                           className={`px-2 py-1.5 font-bold tabular-nums ${
-                            m.direction === 'out' ? 'text-rose-600' : 'text-emerald-700'
+                            m.source_return_status === 'cancelled' ||
+                            m.is_reversal
+                              ? 'text-slate-400 line-through'
+                              : m.direction === 'out'
+                                ? 'text-rose-600'
+                                : 'text-emerald-700'
                           }`}
                         >
                           {EGP(m.amount)}
+                          {/* PR-FIN-RETURNS-SHIFT-CANCELLED-EXCLUDE-FROM-TOTALS
+                              — every cancelled-pair row gets an explicit
+                              "أثر نقدي فعلي = 0" sub-badge so the user
+                              never has to guess that strikethrough means
+                              "doesn't count". */}
+                          {(m.source_return_status === 'cancelled' ||
+                            m.is_reversal) && (
+                            <div
+                              className="text-[10px] font-normal text-slate-500 mt-0.5"
+                              data-testid={`refund-cash-zero-impact-${m.id}`}
+                            >
+                              أثر نقدي فعلي = 0
+                              {m.is_reversal && (
+                                <span className="mr-1 text-slate-400">
+                                  (عكس نظامي)
+                                </span>
+                              )}
+                            </div>
+                          )}
                         </td>
                         <td className="px-2 py-1.5 text-slate-600">{m.cashbox_name || '—'}</td>
                         <td className="px-2 py-1.5 font-mono text-[11px] text-slate-700">
@@ -1355,6 +1379,33 @@ function ShiftDetailModal({ shift, onClose }: { shift: Shift; onClose: () => voi
                   </tbody>
                 </table>
               </div>
+              {/* PR-FIN-RETURNS-SHIFT-CANCELLED-EXCLUDE-FROM-TOTALS —
+                  audit-only sub-footer. Renders ONLY when the shift
+                  contains a cancelled refund (and its reversal) so a
+                  reader can verify the cancelled pair exists without
+                  it polluting the active operational totals above. */}
+              {s.cancelled_return_out_amount != null &&
+                s.cancelled_return_out_amount > 0 && (
+                  <div
+                    className="border-t border-dashed border-slate-200 px-3 py-2 text-[11px] flex items-center justify-between bg-slate-50/30"
+                    data-testid="refund-cash-cancelled-footer"
+                  >
+                    <span className="text-slate-500">
+                      عمليات ملغاة (مع حركتها العكسية):{' '}
+                      <span className="font-bold tabular-nums text-slate-600">
+                        {EGP(s.cancelled_return_out_amount)}
+                      </span>{' '}
+                      خارج ↔{' '}
+                      <span className="font-bold tabular-nums text-slate-600">
+                        {EGP(s.cancelled_return_reversal_amount ?? 0)}
+                      </span>{' '}
+                      داخل
+                    </span>
+                    <span className="text-slate-500">
+                      لا يؤثر على صافي الوردية
+                    </span>
+                  </div>
+                )}
               <div className="border-t border-slate-200 px-3 py-2 text-xs flex items-center justify-between bg-slate-50/50">
                 <span className="text-slate-600">
                   خارج: <span className="font-bold tabular-nums text-rose-600">{EGP(s.total_refund_cash_out)}</span>

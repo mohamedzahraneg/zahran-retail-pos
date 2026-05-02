@@ -25,12 +25,12 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-describe('ShiftsService.summary — refund_cash_movements cancel-aware SQL', () => {
-  const SRC = readFileSync(
-    resolve(__dirname, './shifts.service.ts'),
-    'utf8',
-  );
+const SRC = readFileSync(
+  resolve(__dirname, './shifts.service.ts'),
+  'utf8',
+);
 
+describe('ShiftsService.summary — refund_cash_movements cancel-aware SQL', () => {
   it('CT scan WHERE clause now also accepts reference_type=other + category LIKE reversal_%', () => {
     expect(SRC).toMatch(
       /reference_type::text\s*=\s*'other'[\s\S]+category\s+LIKE\s+'reversal_%'/,
@@ -99,5 +99,44 @@ describe('ShiftsService.summary — refund_cash_movements cancel-aware SQL', () 
     expect(window).not.toMatch(/^\s*DELETE\s/im);
     expect(window).not.toMatch(/^\s*UPDATE\s/im);
     expect(window).not.toMatch(/fn_record_cashbox_txn/);
+  });
+});
+
+describe('ShiftsService.summary — cancelled-pair excluded from active totals (PR-FIN-RETURNS-SHIFT-CANCELLED-EXCLUDE-FROM-TOTALS)', () => {
+  it('totalRefundCashOut filter excludes cancelled-original AND reversal rows', () => {
+    expect(SRC).toMatch(
+      /totalRefundCashOut\s*=\s*refund_cash_movements[\s\S]+isActiveCashImpact/,
+    );
+    expect(SRC).toMatch(
+      /isActiveCashImpact[\s\S]+source_return_status\s*!==\s*'cancelled'[\s\S]+!m\.is_reversal/,
+    );
+  });
+
+  it('totalRefundCashIn filter applies the same isActiveCashImpact gate', () => {
+    expect(SRC).toMatch(
+      /totalRefundCashIn\s*=\s*refund_cash_movements[\s\S]+isActiveCashImpact/,
+    );
+  });
+
+  it('audit-only totals are computed for cancelled rows (out, reversal, net)', () => {
+    expect(SRC).toMatch(/cancelledReturnOutAmount[\s\S]+source_return_status\s*===\s*'cancelled'/);
+    expect(SRC).toMatch(/cancelledReturnReversalAmount[\s\S]+m\.is_reversal/);
+    expect(SRC).toMatch(/cancelledReturnNet\s*=\s*cancelledReturnOutAmount\s*-\s*cancelledReturnReversalAmount/);
+  });
+
+  it('response shape exposes the new audit-only fields', () => {
+    expect(SRC).toMatch(/cancelled_return_out_amount:\s*cancelledReturnOutAmount/);
+    expect(SRC).toMatch(/cancelled_return_reversal_amount:\s*cancelledReturnReversalAmount/);
+    expect(SRC).toMatch(/cancelled_return_net:\s*cancelledReturnNet/);
+  });
+
+  it('expected_closing math is unchanged because cancelled pair was already net-zero', () => {
+    // The legacy formula included +reversal in the in-side and +out
+    // in the out-side, which cancelled out. The new formula excludes
+    // both, so opening + activeIn - activeOut = same numerical value.
+    // We pin that the formula structure is preserved.
+    expect(SRC).toMatch(
+      /expectedClosing\s*=\s*Number\(shift\.opening_balance[\s\S]+totalCashIn\s*-\s*totalCashOut/,
+    );
   });
 });
