@@ -1104,9 +1104,15 @@ export class ReturnsService {
   //  helpers
   // ==========================================================================
 
+  // PR-FIN-RETURNS-UX-1B widened the underlying enum to include
+  // 'cancelled'. The signature here is widened to accept that bucket
+  // so PR 1C's cancel endpoint can write `mustBeStatus(id, ['approved',
+  // 'refunded'])` and reject an already-cancelled row. Existing
+  // callers (approve / refund / reject) keep their original allowed
+  // lists — no behavior change in this PR.
   private async mustBeStatus(
     id: string,
-    allowed: Array<'pending' | 'approved' | 'refunded' | 'rejected'>,
+    allowed: Array<'pending' | 'approved' | 'refunded' | 'rejected' | 'cancelled'>,
   ): Promise<ReturnEntity> {
     const ret = await this.repo.findOne({ where: { id } });
     if (!ret) throw new NotFoundException(`Return ${id} not found`);

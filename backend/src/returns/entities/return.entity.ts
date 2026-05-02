@@ -23,7 +23,7 @@ export class ReturnEntity {
   warehouse_id: string;
 
   @Column({ type: 'varchar', length: 16, default: 'pending' })
-  status: 'pending' | 'approved' | 'refunded' | 'rejected';
+  status: 'pending' | 'approved' | 'refunded' | 'rejected' | 'cancelled';
 
   @Column({ type: 'varchar', length: 30, default: 'other' })
   reason:
@@ -72,4 +72,21 @@ export class ReturnEntity {
 
   @Column({ type: 'text', nullable: true })
   notes: string | null;
+
+  // PR-FIN-RETURNS-UX-1B — admin cancellation audit trail. Schema only;
+  // write logic ships in PR-FIN-RETURNS-UX-1C (POST /returns/:id/cancel).
+  @Column({ type: 'timestamptz', nullable: true })
+  cancelled_at: Date | null;
+
+  @Column({ type: 'uuid', nullable: true })
+  cancelled_by: string | null;
+
+  @Column({ type: 'text', nullable: true })
+  cancel_reason: string | null;
+
+  @Column({ type: 'uuid', nullable: true })
+  cancellation_entry_id: string | null;
+
+  @Column({ type: 'bigint', nullable: true })
+  cancellation_cashbox_transaction_id: string | null;
 }
