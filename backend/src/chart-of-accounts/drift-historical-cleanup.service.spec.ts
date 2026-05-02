@@ -21,6 +21,9 @@
  * tolerated when the service short-circuits queries).
  */
 
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
 import { Test } from '@nestjs/testing';
 import { DataSource } from 'typeorm';
 
@@ -91,7 +94,11 @@ const PAT_DRIFT = /v_cashbox_gl_drift/;
 const PAT_BAL = /FROM cashboxes WHERE id/;
 const PAT_EXPECTED_BAL = /CASE WHEN direction='in' THEN amount ELSE -amount/;
 const PAT_LOCK = /pg_advisory_xact_lock/;
-const PAT_SET_CTX = /SET LOCAL app\.engine_context/;
+/** PR-FIN-PAYACCT-4D-DRIFT-HISTORICAL-CLEANUP-HOTFIX-1:
+ *  the engine context is set via set_config (function form) rather than
+ *  `SET LOCAL ... = $1` because Postgres rejects bind parameters in that
+ *  grammar with `syntax error at or near "$1"`. */
+const PAT_SET_CTX = /set_config\('app\.engine_context'/;
 const PAT_UPDATE_CT = /UPDATE cashbox_transactions/;
 const PAT_UPDATE_JL = /UPDATE journal_lines/;
 
@@ -692,5 +699,102 @@ describe('DriftHistoricalCleanupService — detection SQL contracts', () => {
     expect(out.patternB.ambiguous).toHaveLength(1);
     expect(out.patternB.ambiguous[0].return_no).toBe('RET-X');
     for (const c of emCalls) expect(c.sql).not.toMatch(/^\s*UPDATE\s/i);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+//  PR-FIN-PAYACCT-4D-DRIFT-HISTORICAL-CLEANUP-HOTFIX-1
+//  Regression tests: the engine context MUST be set via set_config(),
+//  NEVER via `SET LOCAL ... = $1` (Postgres rejects bind params in that
+//  grammar with `syntax error at or near "$1"`).
+// ─────────────────────────────────────────────────────────────────────
+
+describe('DriftHistoricalCleanupService — engine_context bind-safety hotfix', () => {
+  it('source does NOT contain `SET LOCAL app.engine_context = $1`', () => {
+    // Defense-in-depth: a regression of the original bug would re-introduce
+    // the parameterized SET LOCAL statement. Lock the file content against
+    // it. Comments referencing the bug for context are allowed; only the
+    // executable statement is forbidden.
+    const src = readFileSync(
+      resolve(__dirname, './drift-historical-cleanup.service.ts'),
+      'utf8',
+    );
+    // Strip JS comments so we only inspect executable code. Block + line.
+    const codeOnly = src
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+    expect(codeOnly).not.toMatch(/SET\s+LOCAL\s+app\.engine_context\s*=\s*\$\d+/);
+    // Spot-check: the new form IS present in the executable source.
+    expect(codeOnly).toMatch(/set_config\(\s*'app\.engine_context'\s*,\s*\$1\s*,\s*true\s*\)/);
+  });
+
+  it('engine_context is set via set_config(name, $1, true) BEFORE any UPDATE, with engine:* value', async () => {
+    const { ds, emCalls } = makeFakeDs(
+      script([
+        // pre-tx dry-run snapshot — minimal (no candidates)
+        [PAT_A_DETECT, [A_CANDIDATE]],
+        [PAT_A_ROWS, A_ROWS],
+        [PAT_B_DETECT, []],
+        [PAT_B_AMBIGUOUS, []],
+        [PAT_DRIFT, [{ drift: 1000 }]],
+        [PAT_BAL, [{ bal: 32930 }]],
+        [PAT_EXPECTED_BAL, [{ bal: 31930 }]],
+        // inside tx
+        [PAT_LOCK, []],
+        [PAT_SET_CTX, []],
+        [PAT_A_DETECT, [A_CANDIDATE]],
+        [PAT_A_ROWS, A_ROWS],
+        [PAT_B_DETECT, []],
+        [PAT_UPDATE_CT, [[], 1]],
+        [PAT_UPDATE_CT, [[], 1]],
+        // idempotency check
+        [PAT_A_DETECT, []],
+        [PAT_B_DETECT, []],
+        // drift check passes
+        [PAT_DRIFT, [{ drift: 0 }]],
+      ]),
+    );
+    const recon = {
+      rebuildCashboxBalance: jest
+        .fn()
+        .mockResolvedValue({ cashbox_id: 'cb', new_balance: 0 }),
+    };
+    const svc = await buildModule({ ds, recon });
+    await svc.execute({
+      confirm: EXECUTE_CONFIRM_TOKEN,
+      rebuildCashboxBalance: true,
+    });
+
+    // 1. The set_config call must exist exactly once inside the tx.
+    const ctxCalls = emCalls.filter((c) => PAT_SET_CTX.test(c.sql));
+    expect(ctxCalls).toHaveLength(1);
+
+    // 2. The SQL shape is the function form with a bound parameter — it
+    //    must NOT be the rejected `SET LOCAL ... = $1` shape.
+    const ctxCall = ctxCalls[0];
+    expect(ctxCall.sql).toMatch(
+      /SELECT\s+set_config\(\s*'app\.engine_context'\s*,\s*\$1\s*,\s*true\s*\)/,
+    );
+    expect(ctxCall.sql).not.toMatch(/SET\s+LOCAL/i);
+    expect(ctxCall.sql).not.toMatch(/=\s*\$\d+/);
+
+    // 3. The bound parameter is the silent (no-alert) `engine:*` value.
+    expect(ctxCall.params).toEqual(['engine:drift-historical-cleanup']);
+    expect((ctxCall.params[0] as string).startsWith('engine:')).toBe(true);
+    expect((ctxCall.params[0] as string).startsWith('service:')).toBe(false);
+
+    // 4. The set_config call fires BEFORE any UPDATE inside the tx.
+    const ctxIdx = emCalls.findIndex((c) => PAT_SET_CTX.test(c.sql));
+    const firstUpdateIdx = emCalls.findIndex((c) =>
+      /^\s*UPDATE\s/i.test(c.sql),
+    );
+    expect(ctxIdx).toBeGreaterThan(-1);
+    expect(firstUpdateIdx).toBeGreaterThan(-1);
+    expect(firstUpdateIdx).toBeGreaterThan(ctxIdx);
+
+    // 5. The advisory lock fires before set_config (ordering preserved).
+    const lockIdx = emCalls.findIndex((c) => PAT_LOCK.test(c.sql));
+    expect(lockIdx).toBeGreaterThan(-1);
+    expect(lockIdx).toBeLessThan(ctxIdx);
   });
 });
