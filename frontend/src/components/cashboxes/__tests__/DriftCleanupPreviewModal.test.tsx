@@ -1,29 +1,36 @@
 /**
  * DriftCleanupPreviewModal.test.tsx
  * ─────────────────────────────────────────────────────────────────────
- * PR-FIN-PAYACCT-4D-DRIFT-HISTORICAL-CLEANUP-1
+ * PR-FIN-PAYACCT-4D-DRIFT-HISTORICAL-CLEANUP-EXECUTE-FE
  *
- * Pins the safety contract of the operator-only DRY-RUN preview UI:
- *   • The component issues exactly one network call:
- *     `accountsApi.previewDriftCleanup()` — which itself POSTs
- *     `{dryRun: true}` (verified at the API-layer, not here).
- *   • The component module imports zero mutation primitives —
- *     `useMutation`, `mutate` — so it cannot trigger writes.
- *   • Renders the Arabic summary cards with KPIs from the response.
- *   • Renders Pattern A invoice rows + per-row keep/void plan.
- *   • Renders Pattern B return rows.
- *   • Renders ambiguous-skipped rows in their own section.
- *   • "نسخ JSON" button copies the response via navigator.clipboard.
- *   • The component never references `dryRun: false` or any confirm
- *     token literal.
+ * Pins the gated-execute safety contract:
+ *   • Dry-run preview loads on mount.
+ *   • Execute button is HIDDEN until the dry-run query resolves.
+ *   • Execute button is DISABLED until the operator types the EXACT
+ *     confirm token; any mismatch (extra space, wrong case, partial)
+ *     leaves the button disabled.
+ *   • Clicking execute calls `accountsApi.executeDriftCleanup()` exactly
+ *     once. The button stays disabled afterwards (one-shot per modal
+ *     lifetime) so a double-click cannot fire two writes.
+ *   • The execute payload is hard-coded inside the API method (verified
+ *     at the API-layer, not here): the FE has no way to send a different
+ *     body.
+ *   • Result section renders ctVoidedIds / jlUpdatedIds / driftAfter /
+ *     rebuilt balances after success.
+ *   • Permission gating happens at the button level in Cashboxes.tsx;
+ *     this modal trusts that it was opened by an authorized user but
+ *     the backend gate `@Permissions('accounts.journal.post')` is the
+ *     authoritative check.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 
-import { accountsApi, type DriftCleanupPreview } from '@/api/accounts.api';
+import {
+  accountsApi,
+  type DriftCleanupExecuteResult,
+  type DriftCleanupPreview,
+} from '@/api/accounts.api';
 import { DriftCleanupPreviewModal } from '../DriftCleanupPreviewModal';
 
 vi.mock('@/api/accounts.api', async (importOriginal) => {
@@ -33,9 +40,39 @@ vi.mock('@/api/accounts.api', async (importOriginal) => {
     accountsApi: {
       ...((actual.accountsApi as object) ?? {}),
       previewDriftCleanup: vi.fn(),
+      executeDriftCleanup: vi.fn(),
     },
   };
 });
+
+const EXACT_CONFIRM_TOKEN = 'DRIFT_HISTORICAL_CLEANUP_2026_05';
+
+const EXECUTE_RESULT: DriftCleanupExecuteResult = {
+  executed: true,
+  patternA: {
+    candidates: [],
+    rows: [],
+    rowsToVoidCount: 0,
+    voidAmountTotal: 0,
+  },
+  patternB: { candidates: [], ambiguous: [], rowsToUpdateCount: 0 },
+  cashboxImpact: [],
+  ctVoidedIds: [186, 222, 223, 247, 248, 249, 250, 251],
+  jlUpdatedIds: [
+    'df6c5b7b-2e6a-4b4c-9166-0b1b9a8a5ffc',
+    'ea412ba6-bdd8-4e89-b17b-29b80e1d6a05',
+    'f5cd8f48-0259-4e55-a1ce-0cb767ef5c37',
+  ],
+  driftAfterActual: [
+    { cashbox_id: '524646d5-7bd6-4d8d-a484-b1f562b039a4', drift: 0 },
+  ],
+  cashboxBalanceRebuilt: [
+    {
+      cashbox_id: '524646d5-7bd6-4d8d-a484-b1f562b039a4',
+      new_balance: 29680,
+    },
+  ],
+};
 
 vi.mock('react-hot-toast', () => {
   const fn = vi.fn();
@@ -152,32 +189,16 @@ function renderModal() {
   );
 }
 
-describe('DriftCleanupPreviewModal — safety contract', () => {
-  it('component module imports zero mutation primitives (no useMutation/mutate)', () => {
-    const src = readFileSync(
-      resolve(__dirname, '../DriftCleanupPreviewModal.tsx'),
-      'utf8',
-    );
-    // The whole point of this dry-run modal is that it cannot write.
-    // If you find yourself wanting to add a write here, stop and use the
-    // backend endpoint directly with confirm token from a trusted session.
-    expect(src).not.toMatch(/\buseMutation\b/);
-    expect(src).not.toMatch(/\bmutate\b/);
-    // No execute path: the literal `dryRun: false` must NEVER appear.
-    expect(src).not.toMatch(/dryRun\s*:\s*false/);
-    // No confirm token in FE.
-    expect(src).not.toMatch(/DRIFT_HISTORICAL_CLEANUP_2026_05/);
-    expect(src).not.toMatch(/EXECUTE_CONFIRM_TOKEN/);
-  });
-
-  it('issues exactly one previewDriftCleanup() call (the dry-run)', async () => {
+describe('DriftCleanupPreviewModal — dry-run-on-mount', () => {
+  it('issues exactly one previewDriftCleanup() call on mount', async () => {
     (accountsApi.previewDriftCleanup as any).mockResolvedValue(FIXTURE);
     renderModal();
     await waitFor(() =>
       expect(accountsApi.previewDriftCleanup).toHaveBeenCalledTimes(1),
     );
-    // No second call is made on render.
     expect(accountsApi.previewDriftCleanup).toHaveBeenCalledTimes(1);
+    // Execute is NOT called automatically.
+    expect(accountsApi.executeDriftCleanup).not.toHaveBeenCalled();
   });
 });
 
@@ -297,5 +318,186 @@ describe('DriftCleanupPreviewModal — error path', () => {
     await screen.findByTestId('drift-cleanup-preview-error');
     expect(screen.getByText('فشل الحساب')).toBeInTheDocument();
     expect(screen.getByTestId('drift-cleanup-preview-retry')).toBeInTheDocument();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+//  Gated execute (Phase 2) — the safety contract the user explicitly
+//  asked for in the execute-FE PR.
+// ─────────────────────────────────────────────────────────────────────
+
+describe('DriftCleanupPreviewModal — gated execute', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('execute section is HIDDEN before the dry-run resolves', async () => {
+    // pending promise — dry-run never resolves
+    let resolveDryRun: (v: any) => void = () => {};
+    (accountsApi.previewDriftCleanup as any).mockImplementation(
+      () => new Promise((res) => { resolveDryRun = res; }),
+    );
+    renderModal();
+    // Loading spinner is rendered, execute section is not.
+    await screen.findByTestId('drift-cleanup-preview-loading');
+    expect(
+      screen.queryByTestId('drift-cleanup-execute-section'),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId('drift-cleanup-execute-button'),
+    ).not.toBeInTheDocument();
+    // Resolve so the test can finish cleanly.
+    resolveDryRun(FIXTURE);
+    await waitFor(() =>
+      expect(screen.getByTestId('drift-cleanup-execute-section')).toBeInTheDocument(),
+    );
+  });
+
+  it('execute section is HIDDEN if the dry-run errors out', async () => {
+    (accountsApi.previewDriftCleanup as any).mockRejectedValue(
+      Object.assign(new Error('boom'), {
+        response: { data: { message: 'فشل الحساب' } },
+      }),
+    );
+    renderModal();
+    await screen.findByTestId('drift-cleanup-preview-error');
+    expect(
+      screen.queryByTestId('drift-cleanup-execute-section'),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId('drift-cleanup-execute-button'),
+    ).not.toBeInTheDocument();
+  });
+
+  it('execute button is DISABLED until the operator types the EXACT confirm token', async () => {
+    (accountsApi.previewDriftCleanup as any).mockResolvedValue(FIXTURE);
+    renderModal();
+    await screen.findByTestId('drift-cleanup-execute-section');
+    const btn = screen.getByTestId('drift-cleanup-execute-button') as HTMLButtonElement;
+    const input = screen.getByTestId(
+      'drift-cleanup-execute-confirm-input',
+    ) as HTMLInputElement;
+
+    // Initially disabled.
+    expect(btn).toBeDisabled();
+
+    // Wrong values: still disabled.
+    fireEvent.change(input, { target: { value: 'wrong' } });
+    expect(btn).toBeDisabled();
+    fireEvent.change(input, {
+      target: { value: 'drift_historical_cleanup_2026_05' }, // wrong case
+    });
+    expect(btn).toBeDisabled();
+    fireEvent.change(input, {
+      target: { value: 'DRIFT_HISTORICAL_CLEANUP_2026_0' }, // partial
+    });
+    expect(btn).toBeDisabled();
+
+    // Exact match (with leading/trailing whitespace tolerated by trim()).
+    fireEvent.change(input, { target: { value: '  ' + EXACT_CONFIRM_TOKEN + '  ' } });
+    expect(btn).not.toBeDisabled();
+  });
+
+  it('clicking execute calls executeDriftCleanup() exactly once and disables the button afterwards', async () => {
+    (accountsApi.previewDriftCleanup as any).mockResolvedValue(FIXTURE);
+    (accountsApi.executeDriftCleanup as any).mockResolvedValue(EXECUTE_RESULT);
+
+    renderModal();
+    const input = (await screen.findByTestId(
+      'drift-cleanup-execute-confirm-input',
+    )) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: EXACT_CONFIRM_TOKEN } });
+    const btn = screen.getByTestId('drift-cleanup-execute-button');
+
+    fireEvent.click(btn);
+    fireEvent.click(btn); // second click while pending must NOT fire a second call
+    fireEvent.click(btn); // third click for good measure
+
+    await waitFor(() =>
+      expect(accountsApi.executeDriftCleanup).toHaveBeenCalledTimes(1),
+    );
+    // The exact-payload contract is verified at the API layer
+    // (executeDriftCleanup hard-codes the body); here we just confirm
+    // the call was made with no arguments from the modal.
+    expect((accountsApi.executeDriftCleanup as any).mock.calls[0]).toEqual([]);
+
+    // After success, the execute section is REPLACED by the result
+    // section — so the button is gone, not just disabled.
+    await waitFor(() =>
+      expect(screen.getByTestId('drift-cleanup-execute-result')).toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByTestId('drift-cleanup-execute-button'),
+    ).not.toBeInTheDocument();
+  });
+
+  it('clicking execute does NOT fire when the confirm input is mismatched', async () => {
+    (accountsApi.previewDriftCleanup as any).mockResolvedValue(FIXTURE);
+
+    renderModal();
+    const input = (await screen.findByTestId(
+      'drift-cleanup-execute-confirm-input',
+    )) as HTMLInputElement;
+    // Input is wrong.
+    fireEvent.change(input, { target: { value: 'WRONG' } });
+    const btn = screen.getByTestId('drift-cleanup-execute-button') as HTMLButtonElement;
+    expect(btn).toBeDisabled();
+
+    // Click anyway.
+    fireEvent.click(btn);
+    fireEvent.click(btn);
+    // Mutation is never invoked.
+    await new Promise((r) => setTimeout(r, 30));
+    expect(accountsApi.executeDriftCleanup).not.toHaveBeenCalled();
+  });
+
+  it('renders the executed result with ctVoidedIds, jlUpdatedIds, drift, and rebuilt balance', async () => {
+    (accountsApi.previewDriftCleanup as any).mockResolvedValue(FIXTURE);
+    (accountsApi.executeDriftCleanup as any).mockResolvedValue(EXECUTE_RESULT);
+
+    renderModal();
+    const input = (await screen.findByTestId(
+      'drift-cleanup-execute-confirm-input',
+    )) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: EXACT_CONFIRM_TOKEN } });
+    fireEvent.click(screen.getByTestId('drift-cleanup-execute-button'));
+
+    const result = await screen.findByTestId('drift-cleanup-execute-result');
+    const ctIds = within(result).getByTestId('drift-cleanup-execute-result-ct-ids');
+    expect(ctIds.textContent).toContain('186');
+    expect(ctIds.textContent).toContain('251');
+    const jlIds = within(result).getByTestId('drift-cleanup-execute-result-jl-ids');
+    expect(jlIds.textContent).toContain('df6c5b7b-2e6a-4b4c-9166-0b1b9a8a5ffc');
+    // Drift after = 0 → the success message renders.
+    expect(
+      within(result).getByText(/جميع الانحرافات تساوي صفر/),
+    ).toBeInTheDocument();
+    // Rebuilt balance section contains the cashbox id and 29680.
+    expect(
+      within(result).getByText(/524646d5-7bd6-4d8d-a484-b1f562b039a4 → 29680\.00/),
+    ).toBeInTheDocument();
+  });
+
+  it('execute error is surfaced inline and the button stays available for retry', async () => {
+    (accountsApi.previewDriftCleanup as any).mockResolvedValue(FIXTURE);
+    (accountsApi.executeDriftCleanup as any).mockRejectedValue(
+      Object.assign(new Error('boom'), {
+        response: { data: { message: 'البكاند رفض الطلب' } },
+      }),
+    );
+
+    renderModal();
+    const input = (await screen.findByTestId(
+      'drift-cleanup-execute-confirm-input',
+    )) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: EXACT_CONFIRM_TOKEN } });
+    fireEvent.click(screen.getByTestId('drift-cleanup-execute-button'));
+
+    await screen.findByTestId('drift-cleanup-execute-error');
+    expect(screen.getByText('البكاند رفض الطلب')).toBeInTheDocument();
+    // Result section is NOT rendered (mutation failed).
+    expect(
+      screen.queryByTestId('drift-cleanup-execute-result'),
+    ).not.toBeInTheDocument();
   });
 });

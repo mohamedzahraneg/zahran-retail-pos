@@ -1,30 +1,48 @@
 /**
- * DriftCleanupPreviewModal — PR-FIN-PAYACCT-4D-DRIFT-HISTORICAL-CLEANUP-1
+ * DriftCleanupPreviewModal — PR-FIN-PAYACCT-4D-DRIFT-HISTORICAL-CLEANUP
  *
- * TEMPORARY operator-only diagnostic UI for previewing the historical
- * drift-cleanup plan. DRY RUN ONLY:
- *   • POSTs `{dryRun: true}` to /accounts/audit/drift-cleanup/historical
- *   • renders the JSON response in a readable Arabic summary
- *   • exposes a "نسخ JSON" button so the operator can paste the raw
- *     response back to engineering for review
+ * Operator-only UI for the historical drift cleanup. Two-phase flow:
  *
- * NON-GOALS:
- *   • No execute button — the UI physically cannot trigger the
- *     execute branch of the endpoint. Execution requires an
- *     out-of-band POST with the confirm token from a trusted
- *     operator session.
- *   • No confirm-token input field anywhere in this component.
+ *   1. PREVIEW (dry-run) — POSTs {dryRun: true} on mount and renders
+ *      the candidate plan + before/after drift / balance projections
+ *      in a readable Arabic summary.
+ *
+ *   2. EXECUTE (one-shot) — only after the dry-run loads AND the
+ *      operator types the exact confirm token, the execute button
+ *      appears. Clicking it issues a single POST with the hard-coded
+ *      execute payload (no parameters) and renders the resulting
+ *      ctVoidedIds / jlUpdatedIds / drift-after / rebuilt balance.
+ *
+ * Safety invariants:
+ *   • Execute button is HIDDEN until the dry-run query has resolved.
+ *   • Execute button is DISABLED until `confirm` input.trim() ===
+ *     EXACT_CONFIRM_TOKEN ('DRIFT_HISTORICAL_CLEANUP_2026_05').
+ *   • Execute fires AT MOST ONCE per modal lifetime — the button
+ *     disables itself the moment the mutation starts and stays
+ *     disabled forever after success.
+ *   • Execute payload is hard-coded inside accountsApi.executeDriftCleanup
+ *     — the FE has no way to send a different payload.
+ *   • Backend gate is @Permissions('accounts.journal.post') AND its
+ *     own server-side confirm-token check; this UI is defense-in-depth.
  */
 
-import { useEffect, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useEffect, useRef, useState } from 'react';
+import { useMutation, useQuery } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
-import { Copy, Loader2, AlertTriangle, X } from 'lucide-react';
+import { Copy, Loader2, AlertTriangle, X, ShieldAlert, Check } from 'lucide-react';
 
 import {
   accountsApi,
+  type DriftCleanupExecuteResult,
   type DriftCleanupPreview,
 } from '@/api/accounts.api';
+
+/**
+ * The literal the operator must type into the confirm input to enable
+ * the execute button. Identical to the backend's EXECUTE_CONFIRM_TOKEN
+ * (matched server-side; the FE check is defense-in-depth).
+ */
+const EXACT_CONFIRM_TOKEN = 'DRIFT_HISTORICAL_CLEANUP_2026_05';
 
 const EGP = (n: number | string | null | undefined) => {
   const v = Number(n ?? 0);
@@ -45,11 +63,14 @@ interface Props {
 
 export function DriftCleanupPreviewModal({ onClose }: Props) {
   const [copied, setCopied] = useState(false);
+  const [confirmInput, setConfirmInput] = useState('');
+  // Synchronous one-shot guard: a `disabled` prop only takes effect on the
+  // next React render, so rapid back-to-back clicks (or a stuck keypress)
+  // can otherwise fire the mutation multiple times. This ref flips the
+  // moment the click handler runs and is checked before mutate().
+  const firedRef = useRef(false);
 
-  // The query is the ONE network call this component ever makes.
-  // No mutation, no execute path — the UI never POSTs the execute
-  // branch (which the backend would only accept with a confirm token
-  // anyway).
+  // PHASE 1 — read-only dry-run on mount.
   const { data, isLoading, error, refetch } = useQuery<
     DriftCleanupPreview,
     Error
@@ -60,6 +81,31 @@ export function DriftCleanupPreviewModal({ onClose }: Props) {
     refetchOnWindowFocus: false,
     retry: false,
   });
+
+  // PHASE 2 — gated execute. The mutation is wired but the button
+  // that triggers it is hidden until the dry-run loads AND the
+  // operator types the exact confirm token. The button is disabled
+  // once the mutation starts and stays disabled forever after success
+  // so it can fire at most once per modal lifetime.
+  const executeMutation = useMutation<DriftCleanupExecuteResult, Error>({
+    mutationFn: () => accountsApi.executeDriftCleanup(),
+    onSuccess: () => {
+      toast.success('تم تنفيذ التنظيف بنجاح');
+    },
+    onError: (e) => {
+      toast.error(
+        (e as any)?.response?.data?.message ||
+          e.message ||
+          'فشل تنفيذ التنظيف',
+      );
+    },
+  });
+
+  const dryRunReady = !isLoading && !error && !!data;
+  const confirmMatches = confirmInput.trim() === EXACT_CONFIRM_TOKEN;
+  const executeAlreadyFired =
+    executeMutation.isPending || executeMutation.isSuccess;
+  const canExecute = dryRunReady && confirmMatches && !executeAlreadyFired;
 
   useEffect(() => {
     if (error) {
@@ -72,8 +118,12 @@ export function DriftCleanupPreviewModal({ onClose }: Props) {
   }, [error]);
 
   function copyJson() {
-    if (!data) return;
-    const text = JSON.stringify(data, null, 2);
+    // After execute success the executed payload (with ctVoidedIds /
+    // jlUpdatedIds) is the more useful thing to copy; otherwise copy
+    // the dry-run plan.
+    const payload = executeMutation.data ?? data;
+    if (!payload) return;
+    const text = JSON.stringify(payload, null, 2);
     navigator.clipboard
       .writeText(text)
       .then(() => {
@@ -155,11 +205,36 @@ export function DriftCleanupPreviewModal({ onClose }: Props) {
             <PreviewBody data={data} onCopy={copyJson} copied={copied} />
           )}
 
+          {/* PHASE 2 — execute, gated. Hidden until dry-run loaded. */}
+          {dryRunReady && !executeMutation.isSuccess && (
+            <ExecuteSection
+              confirmInput={confirmInput}
+              onConfirmChange={setConfirmInput}
+              expectedToken={EXACT_CONFIRM_TOKEN}
+              canExecute={canExecute}
+              isExecuting={executeMutation.isPending}
+              onExecute={() => {
+                if (firedRef.current || !canExecute) return;
+                firedRef.current = true;
+                executeMutation.mutate();
+              }}
+              executeError={executeMutation.error}
+            />
+          )}
+
+          {/* PHASE 2 result — replaces the execute section once the
+              mutation succeeds. */}
+          {executeMutation.isSuccess && executeMutation.data && (
+            <ExecuteResultSection result={executeMutation.data} />
+          )}
+
           <div className="border-t border-slate-100 pt-3 text-[11px] text-slate-500 leading-relaxed">
             <p>
-              هذه الواجهة <strong>للمعاينة فقط</strong> ولا تكتب أي شيء على قاعدة
-              البيانات. لتنفيذ التنظيف فعليًا يجب إرسال طلب منفصل مع رمز التأكيد
-              من جلسة مشغّل موثّقة — وهذا غير متاح من هذه الواجهة بأي حال.
+              المرحلة 1: المعاينة (قراءة فقط) تُحمَّل تلقائيًا عند فتح النافذة.
+              المرحلة 2: لتفعيل زر التنفيذ يجب أن يكتمل تحميل المعاينة، ثم تكتب
+              رمز التأكيد بالكامل في الحقل أدناه. زر التنفيذ يعمل لمرة واحدة فقط
+              لكل فتح للنافذة. الواجهة الخلفية تتحقق من رمز التأكيد مرة أخرى من
+              جانبها كطبقة دفاع إضافية.
             </p>
           </div>
         </div>
@@ -489,6 +564,205 @@ function Section({
     >
       <h4 className="font-bold text-sm text-slate-800 mb-2">{title}</h4>
       {children}
+    </section>
+  );
+}
+
+// ─── Phase 2: execute (gated) ─────────────────────────────────────────
+
+function ExecuteSection({
+  confirmInput,
+  onConfirmChange,
+  expectedToken,
+  canExecute,
+  isExecuting,
+  onExecute,
+  executeError,
+}: {
+  confirmInput: string;
+  onConfirmChange: (v: string) => void;
+  expectedToken: string;
+  canExecute: boolean;
+  isExecuting: boolean;
+  onExecute: () => void;
+  executeError: Error | null;
+}) {
+  const matched = confirmInput.trim() === expectedToken;
+  return (
+    <section
+      className="border border-rose-200 bg-rose-50/40 rounded-xl p-4"
+      data-testid="drift-cleanup-execute-section"
+    >
+      <div className="flex items-center gap-2 mb-2">
+        <ShieldAlert size={16} className="text-rose-700" />
+        <h4 className="font-bold text-sm text-rose-800">
+          المرحلة 2 — تنفيذ التنظيف (لا يمكن التراجع)
+        </h4>
+      </div>
+      <p className="text-xs text-rose-700/90 mb-3 leading-relaxed">
+        التنفيذ سيُلغي صفوف <code>cashbox_transactions</code> المحدّدة وسيُحدّث
+        عمود <code>cashbox_id</code> فقط على صفوف <code>journal_lines</code>{' '}
+        المحدّدة، ثم سيُعيد بناء رصيد الخزنة. لتفعيل الزر اكتب رمز التأكيد
+        التالي بالضبط:{' '}
+        <code className="px-1.5 py-0.5 bg-white border border-rose-200 rounded font-mono text-[11px]">
+          {expectedToken}
+        </code>
+      </p>
+
+      <label className="block mb-3">
+        <span className="text-xs font-bold text-slate-700 mb-1 block">
+          رمز التأكيد
+        </span>
+        <input
+          type="text"
+          value={confirmInput}
+          onChange={(e) => onConfirmChange(e.target.value)}
+          placeholder={expectedToken}
+          autoComplete="off"
+          spellCheck={false}
+          className={`w-full px-3 py-2 rounded-md border text-sm font-mono ${
+            matched
+              ? 'border-emerald-400 bg-emerald-50 text-emerald-900'
+              : 'border-slate-300 bg-white text-slate-800'
+          }`}
+          data-testid="drift-cleanup-execute-confirm-input"
+        />
+        {matched ? (
+          <span className="text-[11px] text-emerald-700 font-bold mt-1 inline-flex items-center gap-1">
+            <Check size={12} /> رمز صحيح — زر التنفيذ مُفعَّل
+          </span>
+        ) : (
+          <span className="text-[11px] text-slate-500 mt-1 block">
+            زر التنفيذ مُعطَّل حتى يطابق الرمز بالضبط.
+          </span>
+        )}
+      </label>
+
+      {executeError && (
+        <div
+          className="mb-3 border border-rose-300 bg-rose-100 text-rose-800 text-xs p-2 rounded"
+          data-testid="drift-cleanup-execute-error"
+        >
+          {(executeError as any)?.response?.data?.message || executeError.message}
+        </div>
+      )}
+
+      <div className="flex justify-end">
+        <button
+          type="button"
+          onClick={onExecute}
+          disabled={!canExecute}
+          className={`px-4 py-2 rounded-lg text-sm font-bold inline-flex items-center gap-1.5 ${
+            canExecute
+              ? 'bg-rose-600 text-white hover:bg-rose-700'
+              : 'bg-slate-200 text-slate-500 cursor-not-allowed'
+          }`}
+          data-testid="drift-cleanup-execute-button"
+        >
+          {isExecuting && <Loader2 size={14} className="animate-spin" />}
+          تنفيذ تنظيف الفروقات التاريخية
+        </button>
+      </div>
+    </section>
+  );
+}
+
+// ─── Phase 2 result ───────────────────────────────────────────────────
+
+function ExecuteResultSection({ result }: { result: DriftCleanupExecuteResult }) {
+  const totalRebuilt = result.cashboxBalanceRebuilt.reduce(
+    (acc, b) => acc + Number(b.new_balance),
+    0,
+  );
+  const allZero = result.driftAfterActual.every(
+    (d) => Math.abs(Number(d.drift)) < 0.005,
+  );
+  return (
+    <section
+      className="border border-emerald-300 bg-emerald-50 rounded-xl p-4"
+      data-testid="drift-cleanup-execute-result"
+    >
+      <div className="flex items-center gap-2 mb-3">
+        <Check size={18} className="text-emerald-700" />
+        <h4 className="font-bold text-sm text-emerald-800">
+          تم تنفيذ التنظيف بنجاح
+        </h4>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3 text-sm">
+        <div className="bg-white rounded-md border border-emerald-200 p-3">
+          <div className="text-[11px] font-bold text-emerald-700 mb-1">
+            صفوف cashbox_transactions الملغاة
+          </div>
+          <div
+            className="font-mono text-xs text-slate-800 break-all"
+            data-testid="drift-cleanup-execute-result-ct-ids"
+          >
+            {result.ctVoidedIds.length === 0
+              ? '— (no rows)'
+              : result.ctVoidedIds.join(', ')}
+          </div>
+          <div className="text-[10px] text-emerald-700/80 mt-1">
+            ({result.ctVoidedIds.length} صف)
+          </div>
+        </div>
+        <div className="bg-white rounded-md border border-emerald-200 p-3">
+          <div className="text-[11px] font-bold text-emerald-700 mb-1">
+            صفوف journal_lines المُحدَّثة
+          </div>
+          <div
+            className="font-mono text-[10px] text-slate-800 break-all"
+            data-testid="drift-cleanup-execute-result-jl-ids"
+          >
+            {result.jlUpdatedIds.length === 0
+              ? '— (no rows)'
+              : result.jlUpdatedIds.join(', ')}
+          </div>
+          <div className="text-[10px] text-emerald-700/80 mt-1">
+            ({result.jlUpdatedIds.length} صف)
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-md border border-emerald-200 p-3 mb-3">
+        <div className="text-[11px] font-bold text-emerald-700 mb-1">
+          الانحراف الفعلي بعد التنفيذ
+        </div>
+        <ul className="text-xs text-slate-700 space-y-0.5">
+          {result.driftAfterActual.map((d) => (
+            <li key={d.cashbox_id} className="font-mono">
+              {d.cashbox_id} → {Number(d.drift).toFixed(2)}
+            </li>
+          ))}
+        </ul>
+        <div
+          className={`text-[11px] font-bold mt-1 ${
+            allZero ? 'text-emerald-700' : 'text-rose-700'
+          }`}
+        >
+          {allZero
+            ? '✓ جميع الانحرافات تساوي صفر'
+            : '⚠ توجد انحرافات متبقية — راجع البيانات'}
+        </div>
+      </div>
+
+      {result.cashboxBalanceRebuilt.length > 0 && (
+        <div className="bg-white rounded-md border border-emerald-200 p-3">
+          <div className="text-[11px] font-bold text-emerald-700 mb-1">
+            رصيد الخزنة بعد إعادة الحساب
+          </div>
+          <ul className="text-xs text-slate-700 space-y-0.5">
+            {result.cashboxBalanceRebuilt.map((b) => (
+              <li key={b.cashbox_id} className="font-mono">
+                {b.cashbox_id} → {Number(b.new_balance).toFixed(2)}
+              </li>
+            ))}
+          </ul>
+          <div className="text-[10px] text-emerald-700/80 mt-1">
+            مجموع الأرصدة الجديدة: {totalRebuilt.toFixed(2)}
+          </div>
+        </div>
+      )}
     </section>
   );
 }
