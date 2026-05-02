@@ -592,10 +592,23 @@ export class ShiftsService {
       ),
       ct_with_source AS (
         SELECT ct.*,
-               -- Resolve the source return for either the direct branch
-               -- (CT.reference_id IS the return id) or the reversal
-               -- branch (CT.reference_id IS the reversal-JE id whose
-               -- reversal_of points at the original return JE).
+               -- Resolve the source return.
+               --
+               -- IMPORTANT note on what reference_id actually points to
+               -- on the reversal CT row: the engine recordTransaction
+               -- writes paired CT rows with reference_id =
+               -- spec.reference_id, and posting.reverseByReference
+               -- passes reference_id: orig.id (the ORIGINAL JE id, NOT
+               -- the newly-created reversal JE id). So the reversal
+               -- CT.reference_id already points directly at the
+               -- original return JE — a single hop suffices.
+               --
+               -- The first iteration of this PR (PR-FIN-RETURNS-SHIFT-
+               -- CANCEL-AWARE, merged at 3fb11f0) used a 3-hop bridge
+               -- (reversal_je via reversal_of), which never matched
+               -- because the CT actually points at the original JE
+               -- where reversal_of IS NULL. Fixed in PR-FIN-RETURNS-
+               -- SHIFT-CANCEL-AWARE-BRIDGE-FIX.
                CASE
                  WHEN ct.reference_type::text = 'return'   THEN r_direct.id
                  WHEN ct.reference_type::text = 'other'    THEN r_via_je.id
@@ -624,12 +637,10 @@ export class ShiftsService {
                                        AND r_direct.id = ct.reference_id
           LEFT JOIN exchanges e_direct ON ct.reference_type::text = 'exchange'
                                        AND e_direct.id = ct.reference_id
-          -- Bridge: reversal CT → reversal JE → original JE → return
-          LEFT JOIN journal_entries je_rev
-                                       ON ct.reference_type::text = 'other'
-                                       AND je_rev.id = ct.reference_id
+          -- One-hop bridge: reversal CT.reference_id → original JE id → return.
           LEFT JOIN journal_entries je_orig
-                                       ON je_orig.id = je_rev.reversal_of
+                                       ON ct.reference_type::text = 'other'
+                                       AND je_orig.id = ct.reference_id
                                        AND je_orig.reference_type::text = 'return'
           LEFT JOIN returns r_via_je   ON r_via_je.id = je_orig.reference_id
       ),
@@ -673,7 +684,7 @@ export class ShiftsService {
                       r_via_je.refund_method::text)            AS refund_method,
              e_direct.exchange_no AS exchange_no,
              COALESCE(cust_r.full_name, cust_e.full_name)      AS customer_name,
-             COALESCE(je_direct.entry_no, je_rev.entry_no)     AS je_entry_no,
+             COALESCE(je_direct.entry_no, je_orig.entry_no)    AS je_entry_no,
              ct.link_method AS link_method,
              $5::text AS shift_no
         FROM eligible ct
@@ -683,11 +694,12 @@ export class ShiftsService {
                                        AND r_direct.id = ct.reference_id
         LEFT JOIN exchanges e_direct   ON ct.reference_type::text = 'exchange'
                                        AND e_direct.id = ct.reference_id
-        LEFT JOIN journal_entries je_rev
-                                       ON ct.reference_type::text = 'other'
-                                       AND je_rev.id = ct.reference_id
+        -- PR-FIN-RETURNS-SHIFT-CANCEL-AWARE-BRIDGE-FIX — replaced the
+        -- broken 3-hop reversal_je → reversal_of bridge with a single
+        -- hop directly to the original return JE.
         LEFT JOIN journal_entries je_orig
-                                       ON je_orig.id = je_rev.reversal_of
+                                       ON ct.reference_type::text = 'other'
+                                       AND je_orig.id = ct.reference_id
                                        AND je_orig.reference_type::text = 'return'
         LEFT JOIN returns r_via_je     ON r_via_je.id = je_orig.reference_id
         LEFT JOIN customers cust_r     ON cust_r.id = COALESCE(r_direct.customer_id, r_via_je.customer_id)
