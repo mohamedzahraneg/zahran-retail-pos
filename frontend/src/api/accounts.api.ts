@@ -382,19 +382,35 @@ export const accountsApi = {
     }>(api.get('/accounts/audit/migrations')),
 
   /**
-   * PR-FIN-PAYACCT-4D-DRIFT-HISTORICAL-CLEANUP-1 — DRY RUN ONLY.
+   * PR-FIN-PAYACCT-4D-DRIFT-HISTORICAL-CLEANUP-1 — DRY RUN.
    *
-   * Returns the candidate plan + before/after drift / balance projections
-   * for the historical cleanup. The frontend MUST NOT be wired to call
-   * the execute path: there is no `execute()` method here, no confirm
-   * token in the body, and `dryRun: true` is hard-coded.
-   *
-   * Execute remains an out-of-band action — only callable via a deliberate
-   * `dryRun=false` + confirm-token POST from a trusted operator session.
+   * Returns the candidate plan + before/after drift / balance projections.
    */
   previewDriftCleanup: () =>
     unwrap<DriftCleanupPreview>(
       api.post('/accounts/audit/drift-cleanup/historical', { dryRun: true }),
+    ),
+
+  /**
+   * PR-FIN-PAYACCT-4D-DRIFT-HISTORICAL-CLEANUP-EXECUTE-FE — EXECUTE.
+   *
+   * Issues the one-shot historical drift cleanup. The body is hard-coded
+   * (no parameters): the FE has no way to issue a different payload, and
+   * the backend rejects any other shape. The UI gates this call behind
+   * the dry-run preview + an exact-token confirmation input + an
+   * @Permissions('accounts.journal.post') backend gate.
+   *
+   * Idempotent at the backend: re-runs against an empty candidate set
+   * are no-ops, but the UI also one-shots the button to avoid double-
+   * fire from rapid clicks.
+   */
+  executeDriftCleanup: () =>
+    unwrap<DriftCleanupExecuteResult>(
+      api.post('/accounts/audit/drift-cleanup/historical', {
+        dryRun: false,
+        confirm: 'DRIFT_HISTORICAL_CLEANUP_2026_05',
+        rebuildCashboxBalance: true,
+      }),
     ),
 };
 
@@ -466,6 +482,17 @@ export interface DriftCleanupPreview {
     rowsToUpdateCount: number;
   };
   cashboxImpact: DriftCleanupCashboxImpact[];
+}
+
+export interface DriftCleanupExecuteResult {
+  executed: true;
+  patternA: DriftCleanupPreview['patternA'];
+  patternB: DriftCleanupPreview['patternB'];
+  cashboxImpact: DriftCleanupCashboxImpact[];
+  ctVoidedIds: number[];
+  jlUpdatedIds: string[];
+  driftAfterActual: { cashbox_id: string; drift: number }[];
+  cashboxBalanceRebuilt: { cashbox_id: string; new_balance: number }[];
 }
 
 // ── Audit types ──────────────────────────────────────────────────
