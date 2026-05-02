@@ -445,53 +445,66 @@ export default function Returns() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [returns, exchanges, fetchReturns, fetchExchanges, sort]);
 
-  // KPIs from the loaded slice (today-scope when "today" preset).
-  // PR-FIN-RETURNS-UX-0B — Array.isArray guards mirror the ops
-  // derivation. A non-array `returns`/`exchanges` (which the api
-  // adapter normalizes away in the happy path) must NOT crash the
-  // KPI tiles.
-  const todayISO = todayISODate();
-  const isToday = (iso: string | null | undefined) =>
-    !!iso && iso.slice(0, 10) === todayISO;
+  // PR-FIN-RETURNS-UX-0D — KPI scope fix.
+  //
+  // Old behavior (PR-1D / 0a / 0b): KPI tiles were hard-scoped to "today"
+  // for مرتجعات اليوم / استبدالات اليوم / تم الصرف while the list below
+  // already reflected the active filters. With the default preset now
+  // 'all' (PR-0a), the user saw 4 visible refunded rows but KPIs that
+  // read 0 — confusing.
+  //
+  // New behavior: every tile sums/counts the SAME arrays the list
+  // renders from (`safeReturns` / `safeExchanges`), which the BE has
+  // already filtered by tab / date_from / date_to / refund_method /
+  // accounting_status / search-q. So:
+  //   • datePreset=الكل  → KPIs reflect the full result set
+  //   • datePreset=اليوم → BE returns today only → KPIs reflect today
+  //   • status filter, search, etc. → BE filters → KPIs follow
+  //
+  // The `isToday` helper is gone; callers that want today's slice can
+  // pick the اليوم date preset and the BE will filter accordingly.
+  // Array.isArray guards from PR-0b are kept untouched.
   const kpis = useMemo(() => {
     const safeReturns = Array.isArray(returns) ? returns : [];
     const safeExchanges = Array.isArray(exchanges) ? exchanges : [];
-    const todaysReturns = safeReturns.filter((r) => isToday(r.requested_at));
-    const todaysExchanges = safeExchanges.filter((e: any) =>
-      isToday(e.created_at),
-    );
-    const refundedToday = safeReturns.filter(
-      (r) => r.status === 'refunded' && isToday(r.refunded_at),
-    );
-    const pending = safeReturns.filter((r) => r.status === 'pending');
-    const refundedTotal = refundedToday.reduce(
-      (s, r) => s + Number(r.net_refund),
+
+    const returnsTotal = safeReturns.reduce(
+      (s, r) => s + safeNumber(r.net_refund),
       0,
     );
-    const stockReturned = safeReturns
+    const exchangesDelta = safeExchanges.reduce(
+      (s, e: any) => s + safeNumber(e?.price_difference),
+      0,
+    );
+
+    const refunded = safeReturns.filter((r) => r.status === 'refunded');
+    const refundedTotal = refunded.reduce(
+      (s, r) => s + safeNumber(r.net_refund),
+      0,
+    );
+
+    const pending = safeReturns.filter((r) => r.status === 'pending');
+
+    const stockReturnedUnits = safeReturns
       .filter((r) => r.inventory_status === 'restored')
       .reduce((s, r) => s + (r.units_count ?? 0), 0);
+
     const needsReview = safeReturns.filter(
       (r) =>
         r.match_status === 'needs_review' ||
         r.accounting_status === 'cashbox_not_linked' ||
         r.accounting_status === 'je_missing',
     ).length;
+
     return {
-      todayReturnsCount: todaysReturns.length,
-      todayReturnsTotal: todaysReturns.reduce(
-        (s, r) => s + Number(r.net_refund),
-        0,
-      ),
-      todayExchangesCount: todaysExchanges.length,
-      todayExchangesDelta: todaysExchanges.reduce(
-        (s, e: any) => s + Number(e.price_difference ?? 0),
-        0,
-      ),
+      returnsCount: safeReturns.length,
+      returnsTotal,
+      exchangesCount: safeExchanges.length,
+      exchangesDelta,
       pendingCount: pending.length,
-      refundedToday: refundedTotal,
-      refundedTodayCount: refundedToday.length,
-      stockReturnedUnits: stockReturned,
+      refundedTotal,
+      refundedCount: refunded.length,
+      stockReturnedUnits,
       needsReviewCount: needsReview,
     };
   }, [returns, exchanges]);
@@ -526,24 +539,39 @@ export default function Returns() {
         </div>
       </div>
 
-      {/* KPIs — 6 cards */}
+      {/* PR-FIN-RETURNS-UX-0D — KPIs now reflect the visible/filtered
+           scope rather than today-only. Subtitle clarifies the scope so
+           the user is never surprised by the number. Testids retained
+           with `-total-` aliases added so existing assertions and new
+           ones can both bind cleanly. */}
+      <div className="flex items-baseline justify-between gap-2 -mb-1">
+        <div className="text-sm font-bold text-slate-700" data-testid="returns-kpis-title">
+          ملخص العمليات
+        </div>
+        <div
+          className="text-[11px] text-slate-500"
+          data-testid="returns-kpis-scope-hint"
+        >
+          حسب الفلاتر الحالية
+        </div>
+      </div>
       <div
         className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3"
         data-testid="returns-kpis"
       >
         <Kpi
-          label="مرتجعات اليوم"
-          value={String(kpis.todayReturnsCount)}
-          sub={EGP(kpis.todayReturnsTotal)}
+          label="إجمالي المرتجعات"
+          value={String(kpis.returnsCount)}
+          sub={EGP(kpis.returnsTotal)}
           tone="brand"
-          testId="kpi-today-returns"
+          testId="kpi-total-returns"
         />
         <Kpi
-          label="استبدالات اليوم"
-          value={String(kpis.todayExchangesCount)}
-          sub={EGP(kpis.todayExchangesDelta)}
+          label="إجمالي الاستبدالات"
+          value={String(kpis.exchangesCount)}
+          sub={EGP(kpis.exchangesDelta)}
           tone="violet"
-          testId="kpi-today-exchanges"
+          testId="kpi-total-exchanges"
         />
         <Kpi
           label="بانتظار الموافقة"
@@ -554,8 +582,8 @@ export default function Returns() {
         />
         <Kpi
           label="تم الصرف"
-          value={EGP(kpis.refundedToday)}
-          sub={`${kpis.refundedTodayCount} عملية`}
+          value={EGP(kpis.refundedTotal)}
+          sub={`${kpis.refundedCount} عملية`}
           tone="emerald"
           testId="kpi-refunded"
         />
