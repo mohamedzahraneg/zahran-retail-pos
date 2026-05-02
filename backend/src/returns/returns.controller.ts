@@ -11,6 +11,7 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { ReturnsService } from './returns.service';
 import {
   ApproveReturnDto,
+  CancelReturnDto,
   CreateExchangeDto,
   CreateReturnDto,
   ListReturnsQueryDto,
@@ -90,6 +91,27 @@ export class ReturnsController {
     @CurrentUser() user: JwtUser,
   ) {
     return this.svc.reject(id, dto, user.userId);
+  }
+
+  // PR-FIN-RETURNS-UX-1C — admin-only cancellation. Stacks @Roles
+  // (admin only) AND @Permissions('returns.cancel') — both must pass.
+  // Method-level @Permissions overrides the class-level
+  // @Permissions('returns.view') via PermissionsGuard's
+  // getAllAndOverride. Existing approve/refund/reject roles remain
+  // untouched.
+  @Post('returns/:id/cancel')
+  @Roles('admin')
+  @Permissions('returns.cancel')
+  @ApiOperation({
+    summary:
+      'إلغاء مرتجع — أدمن فقط (يعكس النقد والمخزون والقيد المحاسبي)',
+  })
+  cancel(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CancelReturnDto,
+    @CurrentUser() user: JwtUser,
+  ) {
+    return this.svc.cancel(id, dto, user.userId);
   }
 
   // -------- Exchanges -------------------------------------------------------

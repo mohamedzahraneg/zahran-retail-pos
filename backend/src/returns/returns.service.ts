@@ -10,6 +10,7 @@ import { DataSource, Repository } from 'typeorm';
 import { ReturnEntity } from './entities/return.entity';
 import {
   ApproveReturnDto,
+  CancelReturnDto,
   CreateExchangeDto,
   CreateReturnDto,
   ListReturnsQueryDto,
@@ -18,6 +19,7 @@ import {
 } from './dto/return.dto';
 import { AccountingPostingService } from '../chart-of-accounts/posting.service';
 import { FinancialEngineService } from '../chart-of-accounts/financial-engine.service';
+import { AuditService } from '../audit/audit.service';
 
 @Injectable()
 export class ReturnsService {
@@ -27,6 +29,7 @@ export class ReturnsService {
     private readonly ds: DataSource,
     @Optional() private readonly posting?: AccountingPostingService,
     @Optional() private readonly engine?: FinancialEngineService,
+    @Optional() private readonly audit?: AuditService,
   ) {}
 
   // ==========================================================================
@@ -382,6 +385,268 @@ export class ReturnsService {
       [id, `\n[Rejected by ${userId}] ${dto.reason}`],
     );
     return this.findOne(id);
+  }
+
+  // ==========================================================================
+  //  CANCEL  (admin-only — PR-FIN-RETURNS-UX-1C)
+  // ==========================================================================
+  /**
+   * Admin-only cancellation of an `approved` or `refunded` return. Runs
+   * everything in a single DB transaction:
+   *
+   *   1. Lock the return row (`SELECT … FOR UPDATE`) and re-check status.
+   *   2. Validate the typed confirmation token `CANCEL_RETURN_<return_no>`.
+   *   3. Reject non-cash refunded returns with the spec's diagnostic —
+   *      `returns` has no `payment_account_id` linkage yet, so we cannot
+   *      safely reverse a card / instapay / bank_transfer refund.
+   *   4. Reverse the GL via `posting.reverseByReference('return', id, …)`
+   *      — the canonical engine primitive that swaps DR/CR, preserves
+   *      every dimension (cashbox_id, party tags, warehouse_id),
+   *      reverses the paired cashbox transactions automatically (cash
+   *      refunds), and is idempotent on the original entry id. The
+   *      original journal_lines debit/credit values are NOT edited; the
+   *      original entry header is flipped to `is_void=TRUE` by the
+   *      engine — accepted behavior per PR 1C decision.
+   *   5. Reverse stock for every back_to_stock=TRUE return_item with an
+   *      inline UPDATE + INSERT … RETURNING id, capturing the new
+   *      `stock_movements.id` for the linkage table. We use
+   *      `movement_type='adjustment_out'`, `direction='out'`,
+   *      `reference_type='return'`, `reference_id=<return_id>`, and a
+   *      `notes` prefix `return_cancel_stock_reversal:<return_no>` so
+   *      the audit trail joins cleanly without changing
+   *      `fn_adjust_stock`.
+   *   6. Stamp `returns.status='cancelled'` plus the audit fields and
+   *      the reversal entry/CT id linkages added in mig 122.
+   *   7. Best-effort activity-log write (`action='void'`, `entity='return'`)
+   *      via `AuditService` — never throws.
+   *
+   * Idempotency: a second cancel attempt fails fast at step 1 because
+   * `mustBeStatus` (called via the FOR-UPDATE re-check below) sees
+   * `status='cancelled'` and throws `ConflictException` (HTTP 409). The
+   * row lock guarantees exactly-once semantics under concurrent calls.
+   */
+  async cancel(id: string, dto: CancelReturnDto, userId: string) {
+    const posting = this.posting;
+    if (!posting) {
+      throw new BadRequestException(
+        'AccountingPostingService غير متاح — لا يمكن إلغاء المرتجع',
+      );
+    }
+    const reasonTrimmed = (dto.reason ?? '').trim();
+    if (reasonTrimmed.length === 0) {
+      throw new BadRequestException('سبب الإلغاء مطلوب');
+    }
+
+    return this.ds.transaction(async (em) => {
+      // 1. Lock the row and load the fields we need.
+      const [ret] = await em.query(
+        `SELECT id, return_no, status, refund_method,
+                net_refund, cashbox_id, warehouse_id
+           FROM returns
+          WHERE id = $1
+          FOR UPDATE`,
+        [id],
+      );
+      if (!ret) {
+        throw new NotFoundException(`Return ${id} not found`);
+      }
+      // 2. Status guard. ConflictException (HTTP 409) on already-cancelled
+      //    or any non-eligible state — same shape `mustBeStatus` uses for
+      //    the other transitions.
+      if (ret.status === 'cancelled') {
+        throw new ConflictException('المرتجع ملغى بالفعل');
+      }
+      if (ret.status !== 'approved' && ret.status !== 'refunded') {
+        throw new ConflictException(
+          `المرتجع حالته "${ret.status}" — الإلغاء مسموح فقط للحالات: approved, refunded`,
+        );
+      }
+
+      // 3. Confirmation token must match exactly.
+      const expectedConfirm = `CANCEL_RETURN_${ret.return_no}`;
+      if (dto.confirm !== expectedConfirm) {
+        throw new BadRequestException(
+          `يجب كتابة رمز التأكيد بالضبط: ${expectedConfirm}`,
+        );
+      }
+
+      // 4. Non-cash refund guard — reject with the spec's diagnostic
+      //    (HTTP 422). returns has no payment_account_id yet, so we
+      //    cannot safely identify the payment account to reverse.
+      if (
+        ret.status === 'refunded' &&
+        ret.refund_method &&
+        ret.refund_method !== 'cash'
+      ) {
+        throw new BadRequestException(
+          'إلغاء مرتجع غير نقدي يحتاج ربط حساب دفع غير متاح حالياً',
+        );
+      }
+
+      // 5. Reverse the GL via the canonical engine primitive. This also
+      //    reverses the paired cashbox_transactions when the refund was
+      //    cash. Idempotent on the original entry id.
+      const reverseRes: any = await posting.reverseByReference(
+        'return',
+        id,
+        `إلغاء مرتجع ${ret.return_no}: ${reasonTrimmed}`,
+        userId,
+        em,
+      );
+      let cancellationEntryId: string | null = null;
+      if (reverseRes && typeof reverseRes === 'object') {
+        if (reverseRes.error) {
+          throw new BadRequestException(
+            `فشل عكس قيد المرتجع: ${reverseRes.error}`,
+          );
+        }
+        cancellationEntryId = reverseRes.entry_id ?? null;
+      }
+      // reverseRes === null → no live JE existed for this return (rare
+      // but possible for a return that was approved without GL post).
+      // Proceed with stock + row update; cancellation_entry_id stays NULL.
+
+      // 6. Capture the reversal CT id for cash refunds. The engine
+      //    creates the reversing CT inside `reverseByReference` with
+      //    `direction='in'`, `reference_type='return'`,
+      //    `reference_id=<return_id>`, and a category prefixed with
+      //    `reversal_`. We pick the latest such row for this return.
+      let cancellationCtId: string | null = null;
+      if (ret.refund_method === 'cash') {
+        const [ctRow] = await em.query(
+          `SELECT id::text AS id
+             FROM cashbox_transactions
+            WHERE reference_type = 'return'
+              AND reference_id = $1
+              AND direction = 'in'
+              AND is_void = FALSE
+              AND category LIKE 'reversal_%'
+            ORDER BY id DESC
+            LIMIT 1`,
+          [id],
+        );
+        cancellationCtId = ctRow?.id ?? null;
+      }
+
+      // 7. Reverse stock for back_to_stock items. Inline UPDATE + INSERT
+      //    so we can capture `stock_movements.id` from RETURNING and
+      //    populate the linkage table. We re-derive unit_cost the same
+      //    way `postReturn` does so the cost side stays consistent.
+      const items = await em.query(
+        `SELECT ri.id, ri.variant_id, ri.quantity, ri.back_to_stock,
+                ri.condition,
+                COALESCE(
+                  ii.unit_cost,
+                  (SELECT cost_price FROM product_variants WHERE id = ri.variant_id),
+                  0
+                )::numeric(14,2) AS unit_cost
+           FROM return_items ri
+           LEFT JOIN invoice_items ii ON ii.id = ri.original_invoice_item_id
+          WHERE ri.return_id = $1
+            AND ri.back_to_stock = TRUE`,
+        [id],
+      );
+
+      const reversedMovementIds: string[] = [];
+      for (const it of items) {
+        const qty = Number(it.quantity);
+        if (!(qty > 0)) continue;
+
+        // Deduct stock atomically. We don't insert if the row doesn't
+        // exist (it must exist — approve created it).
+        await em.query(
+          `UPDATE stock
+              SET quantity_on_hand = quantity_on_hand - $1,
+                  updated_at = NOW()
+            WHERE variant_id = $2 AND warehouse_id = $3`,
+          [qty, it.variant_id, ret.warehouse_id],
+        );
+
+        // Insert reversal stock_movement; capture id via RETURNING.
+        const [smRow] = await em.query(
+          `INSERT INTO stock_movements
+              (variant_id, warehouse_id, movement_type, direction,
+               quantity, unit_cost, reference_type, reference_id,
+               notes, user_id)
+           VALUES
+              ($1, $2,
+               'adjustment_out'::stock_movement_type,
+               'out'::txn_direction,
+               $3, $4,
+               'return'::entity_type, $5,
+               $6, $7)
+           RETURNING id`,
+          [
+            it.variant_id,
+            ret.warehouse_id,
+            qty,
+            Number(it.unit_cost),
+            id,
+            `return_cancel_stock_reversal:${ret.return_no}`,
+            userId,
+          ],
+        );
+        const smId = String(smRow.id);
+        reversedMovementIds.push(smId);
+
+        // 7b. Linkage row — unique(return_id, stock_movement_id) makes
+        //     ON CONFLICT a no-op on retry (the outer status guard would
+        //     already have blocked re-entry, but keep the safety net).
+        await em.query(
+          `INSERT INTO return_cancellation_stock_movements
+             (return_id, stock_movement_id)
+           VALUES ($1, $2)
+           ON CONFLICT (return_id, stock_movement_id) DO NOTHING`,
+          [id, smId],
+        );
+      }
+
+      // 8. Stamp the cancellation audit fields on the return row.
+      await em.query(
+        `UPDATE returns
+            SET status                              = 'cancelled',
+                cancelled_at                        = NOW(),
+                cancelled_by                        = $2,
+                cancel_reason                       = $3,
+                cancellation_entry_id               = $4,
+                cancellation_cashbox_transaction_id = $5
+          WHERE id = $1`,
+        [
+          id,
+          userId,
+          reasonTrimmed,
+          cancellationEntryId,
+          cancellationCtId,
+        ],
+      );
+
+      // 9. Best-effort activity log. AuditService.writeActivity never
+      //    throws (it catches internally) — wrap anyway in case the
+      //    service is unavailable in tests.
+      if (this.audit) {
+        try {
+          await this.audit.writeActivity({
+            user_id: userId,
+            action: 'void',
+            entity: 'return',
+            entity_id: id,
+            summary: `إلغاء مرتجع ${ret.return_no}: ${reasonTrimmed}`,
+            extra: {
+              kind: 'cancel_return',
+              return_no: ret.return_no,
+              reason: reasonTrimmed,
+              cancellation_entry_id: cancellationEntryId,
+              cancellation_cashbox_transaction_id: cancellationCtId,
+              stock_movements_reversed: reversedMovementIds,
+            },
+          });
+        } catch {
+          /* swallowed — audit is best-effort */
+        }
+      }
+
+      return this.findOne(id);
+    });
   }
 
   // ==========================================================================

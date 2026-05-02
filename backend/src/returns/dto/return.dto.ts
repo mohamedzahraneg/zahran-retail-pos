@@ -10,6 +10,7 @@ import {
   IsString,
   IsUUID,
   Min,
+  MinLength,
   ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
@@ -121,6 +122,25 @@ export class ApproveReturnDto {
 
 export class RejectReturnDto {
   @ApiProperty() @IsString() reason: string;
+}
+
+// PR-FIN-RETURNS-UX-1C — admin-only cancellation. The `confirm` token
+// must equal `CANCEL_RETURN_<return_no>` exactly; the service compares
+// it against the looked-up return and rejects with HTTP 400 otherwise.
+// `reason` is persisted on `returns.cancel_reason` and surfaces on the
+// detail / list views.
+export class CancelReturnDto {
+  @ApiProperty({ description: 'سبب الإلغاء (مطلوب)', minLength: 1 })
+  @IsString()
+  @MinLength(1)
+  reason: string;
+
+  @ApiProperty({
+    description:
+      'رمز التأكيد. يجب كتابته بالضبط: CANCEL_RETURN_<return_no>',
+  })
+  @IsString()
+  confirm: string;
 }
 
 export class RefundReturnDto {
