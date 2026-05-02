@@ -68,6 +68,16 @@ const STATUS_META: Record<
     color: 'bg-rose-100 text-rose-800 border-rose-200',
     icon: XCircle,
   },
+  // PR-FIN-RETURNS-UX-0A — defensive only. Backend can return
+  // `status='cancelled'` after PR-1B/1C. There is no cancel button on
+  // this page yet (PR 1E owns the UI). Rose tone matches `rejected`
+  // because both are terminal "not paid out" states; `Ban` icon
+  // distinguishes admin-cancellation from rejection.
+  cancelled: {
+    label: 'ملغي',
+    color: 'bg-rose-100 text-rose-800 border-rose-200',
+    icon: Ban,
+  },
 };
 
 const REASON_LABELS: Record<ReturnReason, string> = {
@@ -108,11 +118,20 @@ type Tab =
   | 'approved'
   | 'refunded'
   | 'rejected'
+  // PR-FIN-RETURNS-UX-0A — 'cancelled' added defensively. The filter
+  // now sends `status=cancelled` to the BE list endpoint (mig 122 added
+  // the enum value). No production rows have this state today, but the
+  // UI must not break when one appears.
+  | 'cancelled'
   | 'needs_review';
 
 type SortKey = 'newest' | 'oldest' | 'amount_high' | 'amount_low';
 
-type DatePreset = 'today' | 'week' | 'month' | 'custom';
+// PR-FIN-RETURNS-UX-0A — default landed on `'month'` previously which
+// silently hides any return older than 30 days. The spec calls for the
+// initial load to show every existing row; `'all'` is the new default
+// and skips date_from/date_to entirely.
+type DatePreset = 'all' | 'today' | 'week' | 'month' | 'custom';
 
 interface UnifiedOperation {
   id: string;
@@ -175,22 +194,34 @@ function operatorFor(r: ReturnListItem): {
   return { name: r.requested_by_name ?? null, performedAt: r.requested_at };
 }
 
+// PR-FIN-RETURNS-UX-0A — `safeNumber` coerces `null|undefined|''|NaN`
+// into 0 instead of letting `Number(null)` (=0) or `Number(undefined)`
+// (=NaN) leak into KPI sums and sort comparators.
+function safeNumber(v: unknown): number {
+  if (v == null) return 0;
+  const n = typeof v === 'number' ? v : Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
 function unifyReturn(r: ReturnListItem): UnifiedOperation {
   const { name, performedAt } = operatorFor(r);
+  // PR-FIN-RETURNS-UX-0A — every optional field defaults defensively so
+  // a sparse BE row (or a row with future fields the FE doesn't know
+  // about) renders as fallback chrome instead of crashing the page.
   return {
     id: r.id,
     operationType: 'return',
-    number: r.return_no,
-    status: r.status,
-    amount: Number(r.net_refund),
-    refund_method: r.refund_method,
-    invoice_no: r.invoice_no,
-    customer_name: r.customer_name,
-    customer_phone: r.customer_phone,
-    units_count: r.units_count,
-    operator_name: name,
-    performed_at: performedAt,
-    created_at: r.created_at ?? r.requested_at,
+    number: r.return_no ?? '—',
+    status: r.status ?? 'pending',
+    amount: safeNumber(r.net_refund),
+    refund_method: r.refund_method ?? null,
+    invoice_no: r.invoice_no ?? null,
+    customer_name: r.customer_name ?? null,
+    customer_phone: r.customer_phone ?? null,
+    units_count: r.units_count ?? null,
+    operator_name: name ?? null,
+    performed_at: performedAt ?? null,
+    created_at: r.created_at ?? r.requested_at ?? null,
     accounting_status: r.accounting_status ?? 'not_applicable',
     inventory_status: r.inventory_status ?? 'not_applicable',
     match_status: r.match_status ?? 'pending',
@@ -200,20 +231,24 @@ function unifyReturn(r: ReturnListItem): UnifiedOperation {
   };
 }
 function unifyExchange(e: any): UnifiedOperation {
+  // PR-FIN-RETURNS-UX-0A — same defensive treatment as unifyReturn so
+  // a sparse exchange row never reaches the rendering pipeline as
+  // `undefined`. Operator names aren't projected by the BE yet —
+  // surfaces as `غير معروف` via `nameOr` in the row UI.
   return {
-    id: e.id,
+    id: e?.id ?? '',
     operationType: 'exchange',
-    number: e.exchange_no,
-    status: e.status,
-    amount: Number(e.price_difference ?? 0),
+    number: e?.exchange_no ?? '—',
+    status: e?.status ?? 'pending',
+    amount: safeNumber(e?.price_difference),
     refund_method: null,
-    invoice_no: e.original_invoice_no,
-    customer_name: e.customer_name,
-    customer_phone: e.customer_phone,
+    invoice_no: e?.original_invoice_no ?? null,
+    customer_name: e?.customer_name ?? null,
+    customer_phone: e?.customer_phone ?? null,
     units_count: null,
-    operator_name: null, // exchanges don't yet expose operator names; falls back to غير معروف in UI
-    performed_at: e.completed_at ?? e.created_at ?? null,
-    created_at: e.created_at ?? null,
+    operator_name: null,
+    performed_at: e?.completed_at ?? e?.created_at ?? null,
+    created_at: e?.created_at ?? null,
     accounting_status: 'not_applicable',
     inventory_status: 'not_applicable',
     match_status: 'pending',
@@ -231,6 +266,7 @@ const TAB_DEFS: Array<{ v: Tab; label: string; icon: typeof Receipt }> = [
   { v: 'approved',     label: 'تمت',              icon: CheckCircle2 },
   { v: 'refunded',     label: 'تم الصرف',          icon: Banknote },
   { v: 'rejected',     label: 'مرفوضة',           icon: XCircle },
+  { v: 'cancelled',    label: 'ملغية',            icon: Ban },
   { v: 'needs_review', label: 'يحتاج مراجعة',      icon: AlertTriangle },
 ];
 
@@ -241,20 +277,27 @@ export default function Returns() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState<null | 'return' | 'exchange'>(null);
 
+  // PR-FIN-RETURNS-UX-0A — defaults that don't hide existing rows.
+  //   • datePreset='all' → no date_from / date_to sent on first load.
+  //   • dateFrom/dateTo are still wired up for the 'custom' branch.
   // Filters
-  const [datePreset, setDatePreset] = useState<DatePreset>('month');
-  const [dateFrom, setDateFrom] = useState<string>(shiftDateISO(30));
-  const [dateTo, setDateTo] = useState<string>(todayISODate());
+  const [datePreset, setDatePreset] = useState<DatePreset>('all');
+  const [dateFrom, setDateFrom] = useState<string>('');
+  const [dateTo, setDateTo] = useState<string>('');
   const [refundMethod, setRefundMethod] = useState<PaymentMethod | 'all'>('all');
   const [accountingFilter, setAccountingFilter] =
     useState<ReturnAccountingStatus | 'all'>('all');
   const [sort, setSort] = useState<SortKey>('newest');
 
-  // Date preset → from/to
+  // Date preset → from/to. `'all'` clears both ends so the BE applies no
+  // date filter.
   useEffect(() => {
     if (datePreset === 'custom') return;
     const today = todayISODate();
-    if (datePreset === 'today') {
+    if (datePreset === 'all') {
+      setDateFrom('');
+      setDateTo('');
+    } else if (datePreset === 'today') {
       setDateFrom(today);
       setDateTo(today);
     } else if (datePreset === 'week') {
@@ -268,6 +311,9 @@ export default function Returns() {
 
   // Server-side params for /returns. We always fetch returns; exchanges
   // are a separate endpoint and merged client-side for the "all" tab.
+  // PR-FIN-RETURNS-UX-0A — only attach date_from/date_to when both ends
+  // are non-empty. With datePreset='all' (the new default), the BE
+  // receives no date filter at all and returns every visible row.
   const returnsParams = useMemo(() => {
     const p: any = { limit: 200 };
     if (q) p.q = q;
@@ -278,6 +324,7 @@ export default function Returns() {
     if (tab === 'approved')  p.status = 'approved';
     if (tab === 'refunded')  p.status = 'refunded';
     if (tab === 'rejected')  p.status = 'rejected';
+    if (tab === 'cancelled') p.status = 'cancelled';
     if (tab === 'needs_review') p.accounting_status = 'needs_review';
     if (accountingFilter !== 'all' && tab !== 'needs_review') {
       p.accounting_status = accountingFilter;
@@ -285,16 +332,59 @@ export default function Returns() {
     return p;
   }, [q, dateFrom, dateTo, refundMethod, tab, accountingFilter]);
 
+  // Are any user-controlled filters narrowing the result set right now?
+  // Used to distinguish "no rows match your filters" from "no returns
+  // exist yet" in the empty-state branches below.
+  const filtersActive =
+    !!q ||
+    !!dateFrom ||
+    !!dateTo ||
+    refundMethod !== 'all' ||
+    accountingFilter !== 'all' ||
+    tab !== 'all';
+
+  // PR-FIN-RETURNS-UX-0A — single helper used by the filtered-empty
+  // state's "مسح الفلاتر" button. Resets every user-controlled filter
+  // back to its initial-load value so the next render shows every row
+  // the BE returned.
+  const clearAllFilters = () => {
+    setQ('');
+    setDatePreset('all');
+    setDateFrom('');
+    setDateTo('');
+    setRefundMethod('all');
+    setAccountingFilter('all');
+    setTab('all');
+    setSelectedId(null);
+  };
+
   const fetchReturns = tab !== 'exchanges';
   const fetchExchanges = tab === 'all' || tab === 'exchanges';
 
-  const { data: returns = [], isLoading: loadingReturns } = useQuery({
+  // PR-FIN-RETURNS-UX-0A — surface `isError`, `error`, `refetch` so the
+  // page can render a visible error / auth state instead of silently
+  // collapsing failures into an empty list. The QueryClient defaults
+  // already retry twice on failure (`main.tsx`), so anything reaching
+  // `isError===true` here has genuinely failed.
+  const {
+    data: returns = [],
+    isLoading: loadingReturns,
+    isError: returnsHasError,
+    error: returnsError,
+    refetch: refetchReturns,
+  } = useQuery({
     queryKey: ['returns', returnsParams],
     queryFn: () => returnsApi.list(returnsParams),
     enabled: fetchReturns,
   });
 
-  const { data: exchanges = [], isLoading: loadingExchanges } = useQuery({
+  const {
+    data: exchanges = [],
+    isLoading: loadingExchanges,
+    isError: exchangesHasError,
+    error: exchangesError,
+    refetch: refetchExchanges,
+  } = useQuery({
     queryKey: ['exchanges', q, dateFrom, dateTo],
     queryFn: () =>
       returnsApi.listExchanges({
@@ -492,6 +582,7 @@ export default function Returns() {
         {/* Date preset */}
         <div className="flex gap-1" data-testid="returns-filter-date-preset">
           {([
+            { v: 'all', t: 'الكل' },
             { v: 'today', t: 'اليوم' },
             { v: 'week', t: 'الأسبوع' },
             { v: 'month', t: 'الشهر' },
@@ -579,28 +670,58 @@ export default function Returns() {
       <div className="grid grid-cols-1 lg:grid-cols-[1fr_520px] gap-5">
         {/* List */}
         <div className="card overflow-hidden" data-testid="returns-list">
-          {(loadingReturns && fetchReturns) ||
-          (loadingExchanges && fetchExchanges) ? (
-            <LoadingState />
-          ) : ops.length === 0 ? (
-            <EmptyState
-              tab={tab === 'exchanges' ? 'exchanges' : 'returns'}
-              onCreate={() =>
-                setShowCreate(tab === 'exchanges' ? 'exchange' : 'return')
-              }
-            />
-          ) : (
-            <div className="divide-y divide-slate-100">
-              {ops.map((op) => (
-                <ReturnRow
-                  key={`${op.operationType}:${op.id}`}
-                  op={op}
-                  isActive={selectedId === op.id}
-                  onClick={() => setSelectedId(op.id)}
+          {(() => {
+            // PR-FIN-RETURNS-UX-0A — explicit precedence so the user
+            // sees the most diagnostic state available:
+            //   1. error (auth / generic)  ← was previously silent
+            //   2. loading
+            //   3. filtered-empty           ← was conflated with #4
+            //   4. no-data-yet
+            //   5. rows
+            const showReturnsError = returnsHasError && fetchReturns;
+            const showExchangesError = exchangesHasError && fetchExchanges;
+            if (showReturnsError || showExchangesError) {
+              return (
+                <ErrorState
+                  error={showReturnsError ? returnsError : exchangesError}
+                  onRetry={() => {
+                    if (showReturnsError) refetchReturns();
+                    if (showExchangesError) refetchExchanges();
+                  }}
                 />
-              ))}
-            </div>
-          )}
+              );
+            }
+            const isLoading =
+              (loadingReturns && fetchReturns) ||
+              (loadingExchanges && fetchExchanges);
+            if (isLoading) return <LoadingState />;
+            if (ops.length === 0) {
+              if (filtersActive) {
+                return <FilteredEmptyState onClearFilters={clearAllFilters} />;
+              }
+              // No filters active → tab is necessarily 'all', so the
+              // page-wide empty state defaults to the returns variant
+              // (the dominant operation type on this screen).
+              return (
+                <EmptyState
+                  tab="returns"
+                  onCreate={() => setShowCreate('return')}
+                />
+              );
+            }
+            return (
+              <div className="divide-y divide-slate-100">
+                {ops.map((op) => (
+                  <ReturnRow
+                    key={`${op.operationType}:${op.id}`}
+                    op={op}
+                    isActive={selectedId === op.id}
+                    onClick={() => setSelectedId(op.id)}
+                  />
+                ))}
+              </div>
+            );
+          })()}
         </div>
 
         {/* Details */}
@@ -2683,10 +2804,10 @@ function EmptyState({
   onCreate: () => void;
 }) {
   return (
-    <div className="p-16 text-center">
+    <div className="p-16 text-center" data-testid="returns-empty-no-data">
       <div className="text-6xl mb-4">{tab === 'returns' ? '↩️' : '🔄'}</div>
       <h3 className="text-xl font-bold text-slate-800 mb-2">
-        {tab === 'returns' ? 'لا توجد مرتجعات' : 'لا توجد عمليات استبدال'}
+        {tab === 'returns' ? 'لا توجد مرتجعات بعد' : 'لا توجد عمليات استبدال'}
       </h3>
       <p className="text-slate-500 mb-5">
         {tab === 'returns'
@@ -2696,6 +2817,131 @@ function EmptyState({
       <button onClick={onCreate} className="btn-primary">
         <Plus size={18} className="inline ml-1" />{' '}
         {tab === 'returns' ? 'مرتجع جديد' : 'استبدال جديد'}
+      </button>
+    </div>
+  );
+}
+
+// PR-FIN-RETURNS-UX-0A — empty state when filters narrow the result to
+// zero. Distinct from `EmptyState` (no data exists) so the user knows
+// the dataset isn't necessarily empty — they may just need to widen
+// their filters.
+function FilteredEmptyState({ onClearFilters }: { onClearFilters: () => void }) {
+  return (
+    <div className="p-16 text-center" data-testid="returns-empty-filtered">
+      <div className="text-6xl mb-4 opacity-60">🔍</div>
+      <h3 className="text-xl font-bold text-slate-800 mb-2">
+        لا توجد عمليات مطابقة للفلاتر
+      </h3>
+      <p className="text-slate-500 mb-5">
+        جرّب توسيع نطاق التاريخ أو إزالة بعض الفلاتر للحصول على نتائج.
+      </p>
+      <button
+        onClick={onClearFilters}
+        className="px-4 py-2 rounded-lg bg-slate-100 text-slate-700 font-bold hover:bg-slate-200"
+        data-testid="returns-empty-clear-filters"
+      >
+        مسح الفلاتر
+      </button>
+    </div>
+  );
+}
+
+// PR-FIN-RETURNS-UX-0A — extract HTTP status from an axios-like error
+// without importing axios types here. The api client emits standard
+// AxiosError shapes so `err.response?.status` is the canonical signal.
+function httpStatusOf(err: unknown): number | null {
+  if (!err || typeof err !== 'object') return null;
+  const e = err as any;
+  const s = e?.response?.status;
+  return typeof s === 'number' ? s : null;
+}
+function errorMessageOf(err: unknown): string {
+  if (!err || typeof err !== 'object') return '';
+  const e = err as any;
+  const msg = e?.response?.data?.message ?? e?.message ?? '';
+  if (Array.isArray(msg)) return String(msg[0] ?? '');
+  return String(msg ?? '');
+}
+
+// PR-FIN-RETURNS-UX-0A — visible error card. Replaces the silent empty
+// list that the previous implementation rendered on any failure.
+function ErrorState({
+  error,
+  onRetry,
+}: {
+  error: unknown;
+  onRetry: () => void;
+}) {
+  const status = httpStatusOf(error);
+  const beMsg = errorMessageOf(error);
+  if (status === 401 || status === 403) {
+    return (
+      <div
+        className="p-12 text-center"
+        data-testid="returns-error-unauthorized"
+      >
+        <div className="mx-auto w-12 h-12 rounded-full bg-amber-100 text-amber-700 flex items-center justify-center mb-4">
+          <ShieldCheck size={26} />
+        </div>
+        <h3 className="text-xl font-bold text-slate-800 mb-2">
+          غير مصرح أو انتهت الجلسة
+        </h3>
+        <p className="text-slate-500 mb-5">
+          {status === 403
+            ? 'حسابك لا يملك صلاحية رؤية هذه الصفحة. تواصل مع الأدمن لإضافة صلاحية returns.view.'
+            : 'يرجى إعادة تسجيل الدخول للمتابعة.'}
+        </p>
+        <div className="flex gap-2 justify-center text-sm">
+          <a
+            href="/login"
+            className="px-4 py-2 rounded-lg bg-brand-500 text-white font-bold"
+            data-testid="returns-error-login-link"
+          >
+            تسجيل الدخول
+          </a>
+          <button
+            onClick={onRetry}
+            className="px-4 py-2 rounded-lg bg-slate-100 text-slate-700 font-bold hover:bg-slate-200"
+            data-testid="returns-error-retry"
+          >
+            إعادة المحاولة
+          </button>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div
+      className="p-12 text-center"
+      data-testid="returns-error-generic"
+    >
+      <div className="mx-auto w-12 h-12 rounded-full bg-rose-100 text-rose-700 flex items-center justify-center mb-4">
+        <AlertCircle size={26} />
+      </div>
+      <h3 className="text-xl font-bold text-slate-800 mb-2">
+        تعذر تحميل المرتجعات
+      </h3>
+      <p
+        className="text-slate-500 mb-1 max-w-md mx-auto"
+        data-testid="returns-error-message"
+      >
+        {beMsg || 'حدث خطأ غير متوقع أثناء جلب البيانات من الخادم.'}
+      </p>
+      {status != null && (
+        <p
+          className="text-xs font-mono text-slate-400 mb-5"
+          data-testid="returns-error-status"
+        >
+          HTTP {status}
+        </p>
+      )}
+      <button
+        onClick={onRetry}
+        className="px-4 py-2 rounded-lg bg-brand-500 text-white font-bold hover:bg-brand-600"
+        data-testid="returns-error-retry"
+      >
+        إعادة المحاولة
       </button>
     </div>
   );
