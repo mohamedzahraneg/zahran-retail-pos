@@ -279,7 +279,9 @@ describe('Returns — Phase 0d: KPIs follow filtered BE response', () => {
     listMock.mockResolvedValue([
       row({ id: 'today', return_no: 'RET-2026-000005', net_refund: '100' }),
     ]);
-    fireEvent.click(screen.getByTestId('returns-filter-date-today'));
+    // PR-FIN-RETURNS-UX-1E renamed returns-filter-date-today to
+    // returns-quick-chip-today.
+    fireEvent.click(screen.getByTestId('returns-quick-chip-today'));
 
     await waitFor(() => {
       expect(

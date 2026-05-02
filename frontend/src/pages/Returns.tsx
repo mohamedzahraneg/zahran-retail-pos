@@ -6,6 +6,7 @@ import {
   Receipt,
   Package,
   ArrowLeftRight,
+  ArrowUpDown,
   XCircle,
   CheckCircle2,
   Banknote,
@@ -16,10 +17,13 @@ import {
   CalendarDays,
   Filter,
   ShieldCheck,
+  ShieldAlert,
   Boxes,
+  Eye,
   User,
   FileText,
   Ban,
+  X,
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import {
@@ -41,6 +45,7 @@ import {
   CashSource,
 } from '@/components/CashSourceSelector';
 import { formatArabicDateTime } from '@/lib/format-arabic-date';
+import { useAuthStore } from '@/stores/auth.store';
 
 const EGP = (n: number | string) => `${Number(n).toFixed(0)} ج.م`;
 
@@ -630,131 +635,47 @@ export default function Returns() {
         })}
       </div>
 
-      {/* Filters */}
-      <div
-        className="card p-3 flex flex-wrap items-center gap-2"
-        data-testid="returns-filters"
-      >
-        <div className="relative flex-1 min-w-[260px]">
-          <Search className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-          <input
-            type="search"
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            placeholder="ابحث برقم العملية أو الفاتورة أو العميل أو الهاتف..."
-            className="input pr-9 w-full text-sm"
-            data-testid="returns-filter-search"
-          />
-        </div>
+      {/* PR-FIN-RETURNS-UX-1E — smart filter bar.
+           Search input always visible · quick chips for common scopes ·
+           "فلاتر" button opens advanced popover · "ترتيب" dropdown.
+           Active-filter chips render below with one-click removal +
+           "مسح الفلاتر" reset. */}
+      <SmartFilterBar
+        q={q}
+        setQ={setQ}
+        datePreset={datePreset}
+        setDatePreset={setDatePreset}
+        dateFrom={dateFrom}
+        dateTo={dateTo}
+        setDateFrom={setDateFrom}
+        setDateTo={setDateTo}
+        refundMethod={refundMethod}
+        setRefundMethod={setRefundMethod}
+        accountingFilter={accountingFilter}
+        setAccountingFilter={setAccountingFilter}
+        tab={tab}
+        setTab={setTab}
+        sort={sort}
+        setSort={setSort}
+        filtersActive={filtersActive}
+        onClearFilters={clearAllFilters}
+      />
 
-        {/* Date preset */}
-        <div className="flex gap-1" data-testid="returns-filter-date-preset">
-          {([
-            { v: 'all', t: 'الكل' },
-            { v: 'today', t: 'اليوم' },
-            { v: 'week', t: 'الأسبوع' },
-            { v: 'month', t: 'الشهر' },
-            { v: 'custom', t: 'مخصص' },
-          ] as const).map(({ v, t }) => (
-            <button
-              key={v}
-              onClick={() => setDatePreset(v)}
-              className={`px-3 py-1.5 rounded-md text-xs font-bold border ${
-                datePreset === v
-                  ? 'bg-brand-500 text-white border-brand-500'
-                  : 'bg-white text-slate-600 border-slate-200'
-              }`}
-              data-testid={`returns-filter-date-${v}`}
-            >
-              {t}
-            </button>
-          ))}
-        </div>
-
-        {datePreset === 'custom' && (
-          <div className="flex gap-1 items-center text-xs">
-            <CalendarDays size={14} className="text-slate-400" />
-            <input
-              type="date"
-              value={dateFrom}
-              onChange={(e) => setDateFrom(e.target.value)}
-              className="input text-xs px-2 py-1"
-              data-testid="returns-filter-date-from"
-            />
-            <span className="text-slate-400">→</span>
-            <input
-              type="date"
-              value={dateTo}
-              onChange={(e) => setDateTo(e.target.value)}
-              className="input text-xs px-2 py-1"
-              data-testid="returns-filter-date-to"
-            />
-          </div>
-        )}
-
-        {/* Refund method */}
-        <select
-          value={refundMethod}
-          onChange={(e) => setRefundMethod(e.target.value as any)}
-          className="input text-sm py-1"
-          data-testid="returns-filter-refund-method"
-        >
-          <option value="all">كل طرق الرد</option>
-          <option value="cash">كاش</option>
-          <option value="card">بطاقة</option>
-          <option value="instapay">انستا باي</option>
-          <option value="bank_transfer">تحويل بنكي</option>
-        </select>
-
-        {/* Accounting status */}
-        <select
-          value={accountingFilter}
-          onChange={(e) => setAccountingFilter(e.target.value as any)}
-          className="input text-sm py-1"
-          data-testid="returns-filter-accounting"
-        >
-          <option value="all">كل حالات المحاسبة</option>
-          <option value="matched">مطابق</option>
-          <option value="needs_review">يحتاج مراجعة</option>
-          <option value="je_missing">القيد غير موجود</option>
-          <option value="cashbox_not_linked">سطر النقد غير مربوط</option>
-        </select>
-
-        {/* Sort */}
-        <select
-          value={sort}
-          onChange={(e) => setSort(e.target.value as SortKey)}
-          className="input text-sm py-1"
-          data-testid="returns-filter-sort"
-        >
-          <option value="newest">الأحدث أولاً</option>
-          <option value="oldest">الأقدم أولاً</option>
-          <option value="amount_high">المبلغ من الأعلى</option>
-          <option value="amount_low">المبلغ من الأقل</option>
-        </select>
-      </div>
-
-      {/* PR-FIN-RETURNS-UX-0B — visible diagnostic strip. Only appears
-           when the list area has no rows AND no error AND no loading is
-           in flight. Surfaces the exact runtime state to the user so a
-           silent "blank screen" can never happen again. Removable in a
-           later cleanup PR once the user confirms data is visible. */}
+      {/* PR-FIN-RETURNS-UX-1E — diagnostic banner now ONLY appears when
+           there is a genuine shape/map error. The "empty list" trigger
+           from Phase 0b is removed because the empty-state cards inside
+           the table already communicate that scenario clearly. */}
       {(() => {
+        const shapeWarning =
+          (returns as any)?.__shapeWarning ??
+          (exchanges as any)?.__shapeWarning ??
+          null;
+        if (mapErrorMessage == null && shapeWarning == null) return null;
         const showReturnsError = returnsHasError && fetchReturns;
         const showExchangesError = exchangesHasError && fetchExchanges;
         const isLoading =
           (loadingReturns && fetchReturns) ||
           (loadingExchanges && fetchExchanges);
-        const showBanner =
-          !showReturnsError &&
-          !showExchangesError &&
-          !isLoading &&
-          ops.length === 0;
-        if (!showBanner && mapErrorMessage == null) return null;
-        const shapeWarning =
-          (returns as any)?.__shapeWarning ??
-          (exchanges as any)?.__shapeWarning ??
-          null;
         return (
           <div
             className="card border-2 border-dashed border-amber-300 bg-amber-50 p-3 text-xs leading-6 font-mono text-amber-900"
@@ -812,91 +733,74 @@ export default function Returns() {
         );
       })()}
 
-      {/* Master/Detail */}
-      <div className="grid grid-cols-1 lg:grid-cols-[1fr_520px] gap-5">
-        {/* List */}
-        <div
-          className="card overflow-hidden min-h-[200px]"
-          data-testid="returns-list"
-        >
-          {(() => {
-            // PR-FIN-RETURNS-UX-0A — explicit precedence so the user
-            // sees the most diagnostic state available:
-            //   1. error (auth / generic)  ← was previously silent
-            //   2. loading
-            //   3. filtered-empty           ← was conflated with #4
-            //   4. no-data-yet
-            //   5. rows
-            const showReturnsError = returnsHasError && fetchReturns;
-            const showExchangesError = exchangesHasError && fetchExchanges;
-            if (showReturnsError || showExchangesError) {
-              return (
-                <ErrorState
-                  error={showReturnsError ? returnsError : exchangesError}
-                  onRetry={() => {
-                    if (showReturnsError) refetchReturns();
-                    if (showExchangesError) refetchExchanges();
-                  }}
-                />
-              );
-            }
-            const isLoading =
-              (loadingReturns && fetchReturns) ||
-              (loadingExchanges && fetchExchanges);
-            if (isLoading) return <LoadingState />;
-            if (ops.length === 0) {
-              if (filtersActive) {
-                return <FilteredEmptyState onClearFilters={clearAllFilters} />;
-              }
-              // No filters active → tab is necessarily 'all', so the
-              // page-wide empty state defaults to the returns variant
-              // (the dominant operation type on this screen).
-              return (
-                <EmptyState
-                  tab="returns"
-                  onCreate={() => setShowCreate('return')}
-                />
-              );
+      {/* PR-FIN-RETURNS-UX-1E — full-width table replaces the prior
+           master-detail layout. Click anywhere on a row (or the "عرض"
+           button) opens the centered details modal. The empty/error/
+           loading branches keep the precedence chain from PR-0a. */}
+      <div
+        className="card overflow-hidden min-h-[200px]"
+        data-testid="returns-list"
+      >
+        {(() => {
+          const showReturnsError = returnsHasError && fetchReturns;
+          const showExchangesError = exchangesHasError && fetchExchanges;
+          if (showReturnsError || showExchangesError) {
+            return (
+              <ErrorState
+                error={showReturnsError ? returnsError : exchangesError}
+                onRetry={() => {
+                  if (showReturnsError) refetchReturns();
+                  if (showExchangesError) refetchExchanges();
+                }}
+              />
+            );
+          }
+          const isLoading =
+            (loadingReturns && fetchReturns) ||
+            (loadingExchanges && fetchExchanges);
+          if (isLoading) return <LoadingState />;
+          if (ops.length === 0) {
+            if (filtersActive) {
+              return <FilteredEmptyState onClearFilters={clearAllFilters} />;
             }
             return (
-              <div className="divide-y divide-slate-100">
-                {ops.map((op) => (
-                  <ReturnRow
-                    key={`${op.operationType}:${op.id}`}
-                    op={op}
-                    isActive={selectedId === op.id}
-                    onClick={() => setSelectedId(op.id)}
-                  />
-                ))}
-              </div>
+              <EmptyState
+                tab="returns"
+                onCreate={() => setShowCreate('return')}
+              />
             );
-          })()}
-        </div>
-
-        {/* Details */}
-        <div data-testid="returns-details-pane">
-          {selectedId &&
-          ops.find((o) => o.id === selectedId)?.operationType === 'return' ? (
-            <ReturnDetailsPanel
-              id={selectedId}
-              onClose={() => setSelectedId(null)}
+          }
+          return (
+            <ReturnsDataTable
+              ops={ops}
+              onRowClick={(id) => setSelectedId(id)}
             />
-          ) : selectedId ? (
-            <ExchangeDetailsPanel
-              op={ops.find((o) => o.id === selectedId)!}
-              onClose={() => setSelectedId(null)}
-            />
-          ) : (
-            <div
-              className="card p-12 text-center text-slate-400"
-              data-testid="returns-details-empty"
-            >
-              <Package size={48} className="mx-auto mb-3 text-slate-300" />
-              <p>اختر عملية لعرض التفاصيل</p>
-            </div>
-          )}
-        </div>
+          );
+        })()}
       </div>
+
+      {/* PR-FIN-RETURNS-UX-1E — centered details modal. Wraps the
+           existing ReturnDetailsPanel / ExchangeDetailsPanel content. */}
+      {selectedId &&
+        (() => {
+          const op = ops.find((o) => o.id === selectedId);
+          if (!op) return null;
+          return (
+            <DetailsModal onClose={() => setSelectedId(null)}>
+              {op.operationType === 'return' ? (
+                <ReturnDetailsPanel
+                  id={selectedId}
+                  onClose={() => setSelectedId(null)}
+                />
+              ) : (
+                <ExchangeDetailsPanel
+                  op={op}
+                  onClose={() => setSelectedId(null)}
+                />
+              )}
+            </DetailsModal>
+          );
+        })()}
 
       {/* Create modals */}
       {showCreate === 'return' && (
@@ -1273,9 +1177,15 @@ function ReturnDetailsPanel({
     queryKey: ['return', id],
     queryFn: () => returnsApi.get(id),
   });
-  const [action, setAction] = useState<'approve' | 'refund' | 'reject' | null>(
-    null,
-  );
+  const [action, setAction] = useState<
+    'approve' | 'refund' | 'reject' | 'cancel' | null
+  >(null);
+  // PR-FIN-RETURNS-UX-1E — admin cancel UI is gated client-side on
+  // (role=admin) AND (permission=returns.cancel) AND (status in
+  // approved/refunded). The BE re-checks all three; this gate is
+  // visibility-only.
+  const isAdmin = useAuthStore((s) => s.hasRole('admin'));
+  const canCancel = useAuthStore((s) => s.hasPermission('returns.cancel'));
 
   if (isLoading || !data) return <LoadingState />;
   const r = data as ReturnDetails;
@@ -1620,6 +1530,22 @@ function ReturnDetailsPanel({
             <b>{METHOD_LABELS[r.refund_method]}</b>
           </div>
         )}
+
+        {/* PR-FIN-RETURNS-UX-1E — admin cancel button. Visible only when
+            user is admin AND has returns.cancel AND the return is in
+            approved or refunded state. The BE re-validates all three
+            in PR-1C's POST /returns/:id/cancel. */}
+        {isAdmin &&
+          canCancel &&
+          (r.status === 'approved' || r.status === 'refunded') && (
+            <button
+              onClick={() => setAction('cancel')}
+              className="w-full bg-rose-50 hover:bg-rose-100 text-rose-700 border-2 border-dashed border-rose-300 font-bold py-2.5 rounded-lg text-sm flex items-center justify-center gap-2"
+              data-testid="returns-action-cancel"
+            >
+              <Ban size={16} /> إلغاء المرتجع
+            </button>
+          )}
       </div>
 
       {action === 'approve' && (
@@ -1649,6 +1575,18 @@ function ReturnDetailsPanel({
           onSuccess={() => {
             setAction(null);
             refresh();
+          }}
+        />
+      )}
+      {action === 'cancel' && (
+        <CancelReturnModal
+          ret={r}
+          onClose={() => setAction(null)}
+          onSuccess={() => {
+            setAction(null);
+            refresh();
+            qc.invalidateQueries({ queryKey: ['return', r.id] });
+            qc.invalidateQueries({ queryKey: ['returns'] });
           }}
         />
       )}
@@ -3522,5 +3460,730 @@ function WalkinReturnForm(props: {
         {props.submitting ? 'جاري الإنشاء...' : 'إنشاء المرتجع المباشر'}
       </button>
     </div>
+  );
+}
+
+// ============================================================================
+// PR-FIN-RETURNS-UX-1E — Smart filter bar
+//   • Search input always visible.
+//   • Quick chips: الكل / اليوم / الأسبوع / الشهر / يحتاج مراجعة /
+//     تم الصرف / بانتظار الموافقة. Each chip maps to a (datePreset|tab)
+//     pair so the BE narrows the result set on click.
+//   • "فلاتر" button toggles a popover with custom date range, status,
+//     refund method, accounting status, inventory hint.
+//   • "ترتيب" dropdown drives the client-side sort.
+//   • Active filters render below as removable chips; "مسح الفلاتر"
+//     resets every filter to its initial-load default.
+// ============================================================================
+
+interface SmartFilterBarProps {
+  q: string;
+  setQ: (v: string) => void;
+  datePreset: DatePreset;
+  setDatePreset: (v: DatePreset) => void;
+  dateFrom: string;
+  dateTo: string;
+  setDateFrom: (v: string) => void;
+  setDateTo: (v: string) => void;
+  refundMethod: PaymentMethod | 'all';
+  setRefundMethod: (v: PaymentMethod | 'all') => void;
+  accountingFilter: ReturnAccountingStatus | 'all';
+  setAccountingFilter: (v: ReturnAccountingStatus | 'all') => void;
+  tab: Tab;
+  setTab: (v: Tab) => void;
+  sort: SortKey;
+  setSort: (v: SortKey) => void;
+  filtersActive: boolean;
+  onClearFilters: () => void;
+}
+
+const SORT_LABELS: Record<SortKey, string> = {
+  newest: 'الأحدث أولاً',
+  oldest: 'الأقدم أولاً',
+  amount_high: 'المبلغ من الأكبر',
+  amount_low: 'المبلغ من الأصغر',
+};
+
+function SmartFilterBar(props: SmartFilterBarProps) {
+  const [openAdvanced, setOpenAdvanced] = useState(false);
+
+  // Quick-chip semantics: each chip targets a (datePreset, tab) pair.
+  // Clicking sets both and clears any conflicting filter.
+  const QUICK_CHIPS: Array<{
+    id: string;
+    label: string;
+    icon: typeof Receipt;
+    isActive: () => boolean;
+    apply: () => void;
+  }> = [
+    {
+      id: 'all',
+      label: 'الكل',
+      icon: Receipt,
+      isActive: () =>
+        props.datePreset === 'all' && props.tab === 'all' && !props.q,
+      apply: () => {
+        props.setDatePreset('all');
+        props.setTab('all');
+      },
+    },
+    {
+      id: 'today',
+      label: 'اليوم',
+      icon: CalendarDays,
+      isActive: () => props.datePreset === 'today',
+      apply: () => props.setDatePreset('today'),
+    },
+    {
+      id: 'week',
+      label: 'الأسبوع',
+      icon: CalendarDays,
+      isActive: () => props.datePreset === 'week',
+      apply: () => props.setDatePreset('week'),
+    },
+    {
+      id: 'month',
+      label: 'الشهر',
+      icon: CalendarDays,
+      isActive: () => props.datePreset === 'month',
+      apply: () => props.setDatePreset('month'),
+    },
+    {
+      id: 'needs_review',
+      label: 'يحتاج مراجعة',
+      icon: AlertTriangle,
+      isActive: () => props.tab === 'needs_review',
+      apply: () => props.setTab('needs_review'),
+    },
+    {
+      id: 'refunded',
+      label: 'تم الصرف',
+      icon: Banknote,
+      isActive: () => props.tab === 'refunded',
+      apply: () => props.setTab('refunded'),
+    },
+    {
+      id: 'pending',
+      label: 'بانتظار الموافقة',
+      icon: Clock,
+      isActive: () => props.tab === 'pending',
+      apply: () => props.setTab('pending'),
+    },
+  ];
+
+  return (
+    <div data-testid="returns-smart-filters">
+      <div className="card p-3 flex flex-wrap items-center gap-2">
+        {/* Search */}
+        <div className="relative flex-1 min-w-[260px]">
+          <Search
+            className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400"
+            size={16}
+          />
+          <input
+            type="search"
+            value={props.q}
+            onChange={(e) => props.setQ(e.target.value)}
+            placeholder="ابحث برقم العملية أو الفاتورة أو العميل أو الهاتف..."
+            className="input pr-9 w-full text-sm"
+            data-testid="returns-filter-search"
+          />
+        </div>
+
+        {/* Quick chips */}
+        <div
+          className="flex gap-1 flex-wrap"
+          data-testid="returns-filter-quick-chips"
+        >
+          {QUICK_CHIPS.map(({ id, label, icon: Icon, isActive, apply }) => {
+            const active = isActive();
+            return (
+              <button
+                key={id}
+                onClick={apply}
+                className={`px-2.5 py-1.5 rounded-md text-xs font-bold border inline-flex items-center gap-1 ${
+                  active
+                    ? 'bg-brand-500 text-white border-brand-500'
+                    : 'bg-white text-slate-600 border-slate-200 hover:border-brand-300'
+                }`}
+                data-testid={`returns-quick-chip-${id}`}
+              >
+                <Icon size={12} /> {label}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Advanced filters button */}
+        <button
+          onClick={() => setOpenAdvanced((v) => !v)}
+          className={`px-3 py-1.5 rounded-md text-xs font-bold border inline-flex items-center gap-1 ${
+            openAdvanced
+              ? 'bg-slate-900 text-white border-slate-900'
+              : 'bg-white text-slate-700 border-slate-200 hover:border-slate-400'
+          }`}
+          data-testid="returns-filter-advanced-toggle"
+        >
+          <Filter size={12} /> فلاتر
+        </button>
+
+        {/* Sort */}
+        <div className="relative inline-flex items-center">
+          <ArrowUpDown
+            className="absolute right-2 text-slate-400 pointer-events-none"
+            size={14}
+          />
+          <select
+            value={props.sort}
+            onChange={(e) => props.setSort(e.target.value as SortKey)}
+            className="input text-xs pr-7 py-1.5"
+            data-testid="returns-filter-sort"
+          >
+            {(['newest', 'oldest', 'amount_high', 'amount_low'] as const).map(
+              (k) => (
+                <option key={k} value={k}>
+                  {SORT_LABELS[k]}
+                </option>
+              ),
+            )}
+          </select>
+        </div>
+      </div>
+
+      {/* Advanced filter popover */}
+      {openAdvanced && (
+        <div
+          className="card p-4 mt-2 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3"
+          data-testid="returns-filter-advanced-popover"
+        >
+          <div>
+            <label className="text-[11px] text-slate-500 mb-1 block">
+              نطاق تاريخ مخصص
+            </label>
+            <div className="flex gap-1 items-center text-xs">
+              <input
+                type="date"
+                value={props.dateFrom}
+                onChange={(e) => {
+                  props.setDateFrom(e.target.value);
+                  props.setDatePreset('custom');
+                }}
+                className="input text-xs px-2 py-1"
+                data-testid="returns-filter-date-from"
+              />
+              <span className="text-slate-400">→</span>
+              <input
+                type="date"
+                value={props.dateTo}
+                onChange={(e) => {
+                  props.setDateTo(e.target.value);
+                  props.setDatePreset('custom');
+                }}
+                className="input text-xs px-2 py-1"
+                data-testid="returns-filter-date-to"
+              />
+            </div>
+          </div>
+
+          <div>
+            <label className="text-[11px] text-slate-500 mb-1 block">
+              طريقة الرد
+            </label>
+            <select
+              value={props.refundMethod}
+              onChange={(e) => props.setRefundMethod(e.target.value as any)}
+              className="input text-sm py-1 w-full"
+              data-testid="returns-filter-refund-method"
+            >
+              <option value="all">كل طرق الرد</option>
+              <option value="cash">كاش</option>
+              <option value="card">بطاقة</option>
+              <option value="instapay">انستا باي</option>
+              <option value="bank_transfer">تحويل بنكي</option>
+            </select>
+          </div>
+
+          <div>
+            <label className="text-[11px] text-slate-500 mb-1 block">
+              الحالة المحاسبية
+            </label>
+            <select
+              value={props.accountingFilter}
+              onChange={(e) =>
+                props.setAccountingFilter(e.target.value as any)
+              }
+              className="input text-sm py-1 w-full"
+              data-testid="returns-filter-accounting"
+            >
+              <option value="all">كل حالات المحاسبة</option>
+              <option value="matched">مطابق</option>
+              <option value="needs_review">يحتاج مراجعة</option>
+              <option value="je_missing">القيد غير موجود</option>
+              <option value="cashbox_not_linked">سطر النقد غير مربوط</option>
+            </select>
+          </div>
+
+          <div>
+            <label className="text-[11px] text-slate-500 mb-1 block">
+              الحالة
+            </label>
+            <select
+              value={props.tab}
+              onChange={(e) => props.setTab(e.target.value as Tab)}
+              className="input text-sm py-1 w-full"
+              data-testid="returns-filter-status"
+            >
+              <option value="all">كل الحالات</option>
+              <option value="pending">بانتظار الموافقة</option>
+              <option value="approved">معتمد</option>
+              <option value="refunded">تم الصرف</option>
+              <option value="rejected">مرفوض</option>
+              <option value="cancelled">ملغي</option>
+            </select>
+          </div>
+        </div>
+      )}
+
+      {/* Active filter chips + clear-all */}
+      {props.filtersActive && (
+        <div
+          className="flex gap-1 mt-2 items-center flex-wrap"
+          data-testid="returns-active-filter-chips"
+        >
+          {props.q && (
+            <ActiveChip
+              label={`بحث: "${props.q}"`}
+              onRemove={() => props.setQ('')}
+              testId="returns-active-chip-q"
+            />
+          )}
+          {props.datePreset !== 'all' && (
+            <ActiveChip
+              label={`تاريخ: ${
+                props.datePreset === 'today'
+                  ? 'اليوم'
+                  : props.datePreset === 'week'
+                    ? 'الأسبوع'
+                    : props.datePreset === 'month'
+                      ? 'الشهر'
+                      : 'مخصص'
+              }`}
+              onRemove={() => props.setDatePreset('all')}
+              testId="returns-active-chip-date"
+            />
+          )}
+          {props.refundMethod !== 'all' && (
+            <ActiveChip
+              label={`طريقة الرد: ${METHOD_LABELS[props.refundMethod]}`}
+              onRemove={() => props.setRefundMethod('all')}
+              testId="returns-active-chip-refund-method"
+            />
+          )}
+          {props.accountingFilter !== 'all' && (
+            <ActiveChip
+              label={`المحاسبة: ${ACCOUNTING_LABEL[props.accountingFilter] ?? props.accountingFilter}`}
+              onRemove={() => props.setAccountingFilter('all')}
+              testId="returns-active-chip-accounting"
+            />
+          )}
+          {props.tab !== 'all' && (
+            <ActiveChip
+              label={`الحالة: ${TAB_DEFS.find((t) => t.v === props.tab)?.label ?? props.tab}`}
+              onRemove={() => props.setTab('all')}
+              testId="returns-active-chip-tab"
+            />
+          )}
+          <button
+            onClick={props.onClearFilters}
+            className="px-2.5 py-1 rounded-md text-xs font-bold bg-slate-100 text-slate-700 hover:bg-slate-200 mr-auto"
+            data-testid="returns-clear-filters"
+          >
+            مسح الفلاتر
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ActiveChip({
+  label,
+  onRemove,
+  testId,
+}: {
+  label: string;
+  onRemove: () => void;
+  testId?: string;
+}) {
+  return (
+    <span
+      className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-brand-50 text-brand-800 border border-brand-200 text-[11px] font-bold"
+      data-testid={testId}
+    >
+      {label}
+      <button
+        onClick={onRemove}
+        className="rounded-full hover:bg-brand-100 p-0.5"
+        aria-label={`إزالة فلتر ${label}`}
+      >
+        <X size={11} />
+      </button>
+    </span>
+  );
+}
+
+// ============================================================================
+// PR-FIN-RETURNS-UX-1E — Full-width data table
+// ============================================================================
+
+const TABLE_HEADERS = [
+  'رقم العملية',
+  'النوع',
+  'الحالة',
+  'الفاتورة الأصلية',
+  'العميل',
+  'المبلغ',
+  'طريقة الرد / فرق الاستبدال',
+  'المنفذ',
+  'التاريخ والوقت',
+  'المخزون',
+  'المحاسبة',
+  'المطابقة',
+  'إجراءات',
+];
+
+function ReturnsDataTable({
+  ops,
+  onRowClick,
+}: {
+  ops: UnifiedOperation[];
+  onRowClick: (id: string) => void;
+}) {
+  return (
+    <div className="overflow-x-auto" data-testid="returns-data-table">
+      <table className="w-full text-sm border-collapse">
+        <thead className="bg-slate-50 text-xs">
+          <tr>
+            {TABLE_HEADERS.map((h) => (
+              <th
+                key={h}
+                className="px-3 py-2.5 text-right font-bold text-slate-700 whitespace-nowrap border-b border-slate-200"
+              >
+                {h}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-slate-100">
+          {ops.map((op) => {
+            const meta =
+              op.operationType === 'return'
+                ? STATUS_META[op.status as ReturnStatus] ??
+                  STATUS_META.pending
+                : {
+                    label:
+                      op.status === 'completed'
+                        ? 'مكتمل'
+                        : op.status === 'cancelled'
+                          ? 'ملغي'
+                          : 'بانتظار',
+                    color:
+                      op.status === 'completed'
+                        ? 'bg-emerald-100 text-emerald-800 border-emerald-200'
+                        : op.status === 'cancelled'
+                          ? 'bg-rose-100 text-rose-800 border-rose-200'
+                          : 'bg-amber-100 text-amber-800 border-amber-200',
+                    icon: ArrowLeftRight as typeof CheckCircle2,
+                  };
+            const Icon = meta.icon;
+            return (
+              <tr
+                key={`${op.operationType}:${op.id}`}
+                onClick={() => onRowClick(op.id)}
+                className="hover:bg-brand-50/40 cursor-pointer"
+                data-testid={`returns-row-${op.id}`}
+              >
+                <td className="px-3 py-2 font-mono font-bold text-slate-800 whitespace-nowrap">
+                  {op.number}
+                </td>
+                <td className="px-3 py-2 whitespace-nowrap">
+                  <span
+                    className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[11px] font-bold ${
+                      op.operationType === 'return'
+                        ? 'bg-slate-100 text-slate-700 border-slate-200'
+                        : 'bg-violet-100 text-violet-800 border-violet-200'
+                    }`}
+                  >
+                    {op.operationType === 'return' ? 'مرتجع' : 'استبدال'}
+                  </span>
+                </td>
+                <td className="px-3 py-2 whitespace-nowrap">
+                  <span
+                    className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[11px] font-bold ${meta.color}`}
+                  >
+                    <Icon size={10} /> {meta.label}
+                  </span>
+                </td>
+                <td className="px-3 py-2 font-mono text-xs text-slate-600 whitespace-nowrap">
+                  {op.invoice_no ?? '—'}
+                </td>
+                <td className="px-3 py-2 text-slate-700">
+                  {op.customer_name ?? '—'}
+                </td>
+                <td className="px-3 py-2 font-mono font-bold text-slate-800 whitespace-nowrap">
+                  {EGP(op.amount)}
+                </td>
+                <td className="px-3 py-2 text-xs text-slate-600 whitespace-nowrap">
+                  {op.refund_method
+                    ? METHOD_LABELS[op.refund_method as PaymentMethod] ??
+                      op.refund_method
+                    : op.operationType === 'exchange'
+                      ? `فرق ${EGP(op.amount)}`
+                      : '—'}
+                </td>
+                <td className="px-3 py-2 text-xs text-slate-700 whitespace-nowrap">
+                  <span className="inline-flex items-center gap-1">
+                    <User size={10} /> {nameOr(op.operator_name)}
+                  </span>
+                </td>
+                <td className="px-3 py-2 font-mono text-xs text-slate-600 whitespace-nowrap">
+                  {dateOr(op.performed_at)}
+                </td>
+                <td className="px-3 py-2 whitespace-nowrap">
+                  <Badge
+                    label={INVENTORY_LABEL[op.inventory_status] ?? '—'}
+                    tone={
+                      op.inventory_status === 'restored' ? 'emerald' : 'slate'
+                    }
+                  />
+                </td>
+                <td className="px-3 py-2 whitespace-nowrap">
+                  <Badge
+                    label={ACCOUNTING_LABEL[op.accounting_status] ?? '—'}
+                    tone={
+                      op.accounting_status === 'matched'
+                        ? 'emerald'
+                        : op.accounting_status === 'not_applicable'
+                          ? 'slate'
+                          : 'amber'
+                    }
+                  />
+                </td>
+                <td className="px-3 py-2 whitespace-nowrap">
+                  <Badge
+                    label={
+                      op.match_status === 'matched'
+                        ? 'سليمة'
+                        : op.match_status === 'needs_review'
+                          ? 'تحتاج مراجعة'
+                          : 'بانتظار'
+                    }
+                    tone={
+                      op.match_status === 'matched'
+                        ? 'emerald'
+                        : op.match_status === 'needs_review'
+                          ? 'rose'
+                          : 'slate'
+                    }
+                  />
+                </td>
+                <td className="px-3 py-2 whitespace-nowrap">
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onRowClick(op.id);
+                    }}
+                    className="px-2.5 py-1 rounded-md text-xs font-bold border border-brand-300 text-brand-700 hover:bg-brand-50 inline-flex items-center gap-1"
+                    data-testid={`returns-row-view-${op.id}`}
+                  >
+                    <Eye size={12} /> عرض
+                  </button>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ============================================================================
+// PR-FIN-RETURNS-UX-1E — Centered details modal wrapper
+//   Wraps the existing ReturnDetailsPanel / ExchangeDetailsPanel content
+//   in a centered overlay with backdrop + close X. Body scrolls if long.
+// ============================================================================
+function DetailsModal({
+  children,
+  onClose,
+}: {
+  children: React.ReactNode;
+  onClose: () => void;
+}) {
+  return (
+    <div
+      className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-start justify-center p-4 overflow-y-auto"
+      onClick={onClose}
+      data-testid="returns-details-modal"
+    >
+      <div
+        className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl my-8"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// PR-FIN-RETURNS-UX-1E — Admin cancel modal
+//   Visibility is gated by the calling component (admin role +
+//   returns.cancel permission + status approved/refunded). The form
+//   requires a non-empty reason AND the typed token
+//   `CANCEL_RETURN_<return_no>` exactly. The submit button is locked
+//   until both are valid AND a single in-flight guard prevents
+//   double-submit.
+// ============================================================================
+function CancelReturnModal({
+  ret,
+  onClose,
+  onSuccess,
+}: {
+  ret: ReturnDetails;
+  onClose: () => void;
+  onSuccess: (updated: ReturnDetails) => void;
+}) {
+  const [reason, setReason] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const expectedToken = `CANCEL_RETURN_${ret.return_no}`;
+  const reasonValid = reason.trim().length > 0;
+  const confirmValid = confirm === expectedToken;
+
+  const mutation = useMutation({
+    mutationFn: () =>
+      returnsApi.cancelReturn(ret.id, {
+        reason: reason.trim(),
+        confirm,
+      }),
+    onSuccess: (updated) => {
+      toast.success(`تم إلغاء المرتجع ${ret.return_no}`);
+      onSuccess(updated);
+    },
+    onError: (err: any) => {
+      const msg =
+        err?.response?.data?.message ?? err?.message ?? 'فشل إلغاء المرتجع';
+      toast.error(Array.isArray(msg) ? msg[0] : String(msg));
+    },
+  });
+
+  const submitDisabled =
+    !reasonValid || !confirmValid || mutation.isPending;
+
+  return (
+    <Modal title={`إلغاء المرتجع ${ret.return_no}`} onClose={onClose} size="xl">
+      <div className="space-y-4 text-sm" data-testid="returns-cancel-modal">
+        {/* Warning */}
+        <div className="rounded-lg border-2 border-amber-300 bg-amber-50 p-3 text-amber-900">
+          <div className="flex items-start gap-2">
+            <ShieldAlert size={18} className="mt-0.5 shrink-0" />
+            <div>
+              <div className="font-bold">تحذير قبل الإلغاء</div>
+              <p className="text-xs mt-0.5">
+                سيتم إنشاء أثر عكسي، ولن يتم حذف المرتجع الأصلي.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {/* Impact summary */}
+        <div className="grid grid-cols-2 gap-2 text-xs">
+          <KV label="رقم المرتجع" value={ret.return_no} mono />
+          <KV
+            label="العميل"
+            value={ret.customer_name ?? '—'}
+          />
+          <KV label="الفاتورة الأصلية" value={ret.invoice_no ?? '—'} mono />
+          <KV label="صافي المبلغ" value={EGP(ret.net_refund)} mono />
+          <KV
+            label="طريقة الصرف"
+            value={ret.refund_method ? METHOD_LABELS[ret.refund_method] : '—'}
+          />
+          <KV
+            label="الخزنة المتأثرة"
+            value={(ret as any).cashbox_name ?? '—'}
+          />
+        </div>
+
+        <div className="rounded-lg border border-slate-200 p-3 text-xs text-slate-600 space-y-1">
+          <div className="font-bold text-slate-700 mb-1">أثر الإلغاء</div>
+          <div>• إعادة المبلغ للخزنة (إن كان نقدياً)</div>
+          <div>• خصم الأصناف المعادة من المخزون</div>
+          <div>• إنشاء قيد محاسبي عكسي مرتبط بالقيد الأصلي</div>
+        </div>
+
+        {/* Reason */}
+        <div>
+          <label className="text-xs font-bold text-slate-700 mb-1 block">
+            سبب الإلغاء <span className="text-rose-600">*</span>
+          </label>
+          <textarea
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            placeholder="مثال: تم إنشاء المرتجع بالخطأ على فاتورة مختلفة..."
+            className="input w-full text-sm"
+            rows={3}
+            data-testid="returns-cancel-reason"
+          />
+        </div>
+
+        {/* Typed confirm token */}
+        <div>
+          <label className="text-xs font-bold text-slate-700 mb-1 block">
+            للتأكيد، اكتب:{' '}
+            <span className="font-mono text-rose-700">{expectedToken}</span>
+          </label>
+          <input
+            type="text"
+            value={confirm}
+            onChange={(e) => setConfirm(e.target.value)}
+            placeholder={expectedToken}
+            className="input w-full text-sm font-mono"
+            data-testid="returns-cancel-confirm"
+          />
+          {confirm.length > 0 && !confirmValid && (
+            <p className="text-[11px] text-rose-600 mt-1">
+              الرمز غير مطابق
+            </p>
+          )}
+        </div>
+
+        {/* Actions */}
+        <div className="flex gap-2 pt-2">
+          <button
+            onClick={onClose}
+            className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold py-2 rounded-lg text-sm"
+            data-testid="returns-cancel-close"
+          >
+            تراجع
+          </button>
+          <button
+            onClick={() => {
+              if (submitDisabled) return;
+              mutation.mutate();
+            }}
+            disabled={submitDisabled}
+            className={`flex-1 font-bold py-2 rounded-lg text-sm ${
+              submitDisabled
+                ? 'bg-rose-200 text-rose-400 cursor-not-allowed'
+                : 'bg-rose-600 hover:bg-rose-700 text-white'
+            }`}
+            data-testid="returns-cancel-submit"
+          >
+            {mutation.isPending ? 'جاري الإلغاء...' : 'تأكيد الإلغاء'}
+          </button>
+        </div>
+      </div>
+    </Modal>
   );
 }
