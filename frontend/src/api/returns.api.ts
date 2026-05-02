@@ -1,5 +1,41 @@
 import { api, unwrap } from './client';
 
+// PR-FIN-RETURNS-UX-0B — defensive list-shape adapter. The BE list
+// endpoints currently return raw arrays wrapped in the global
+// `{success, data, meta}` envelope, but historically the codebase has
+// also seen `{rows, total}`, `{items}`, and bare `{data}` envelopes.
+// `unwrap()` already strips the outer envelope; this normalizer
+// guards against any inner-shape surprise so a future BE rewrite
+// doesn't silently render the page blank.
+//
+// Returns `[]` (with a console.warn) if the payload cannot be
+// recognized as any known shape — never throws, never crashes the
+// caller. The page-level diagnostic banner reads `__shapeWarning`
+// off the array to surface the issue to the user.
+export function normalizeListResponse<T>(raw: unknown): T[] {
+  if (Array.isArray(raw)) return raw as T[];
+  if (raw && typeof raw === 'object') {
+    const r = raw as Record<string, unknown>;
+    if (Array.isArray(r.rows)) return r.rows as T[];
+    if (Array.isArray(r.data)) return r.data as T[];
+    if (Array.isArray(r.items)) return r.items as T[];
+    if (Array.isArray(r.results)) return r.results as T[];
+  }
+  if (typeof console !== 'undefined' && console.warn) {
+    console.warn(
+      '[returns.api] normalizeListResponse: unexpected payload shape',
+      raw,
+    );
+  }
+  // Tag the empty array so the diagnostic banner can flag the issue.
+  const out: any[] = [];
+  Object.defineProperty(out, '__shapeWarning', {
+    value: 'unexpected payload shape',
+    enumerable: false,
+  });
+  return out as T[];
+}
+
 // PR-FIN-RETURNS-UX-0A — `'cancelled'` is added defensively after PR-1B
 // extended the BE enum + PR-1C shipped the cancel endpoint. The FE has
 // no cancel UI yet (that's PR 1E), but mapping/badging code must not
@@ -217,7 +253,7 @@ export const returnsApi = {
       net_refund: number;
     }>(api.post('/returns', payload)),
 
-  list: (params?: {
+  list: async (params?: {
     status?: ReturnStatus;
     customer_id?: string;
     q?: string;
@@ -235,7 +271,13 @@ export const returnsApi = {
       | 'cashbox_not_linked'
       | 'needs_review'
       | 'not_applicable';
-  }) => unwrap<ReturnListItem[]>(api.get('/returns', { params })),
+  }) => {
+    // PR-FIN-RETURNS-UX-0B — pass payload through `normalizeListResponse`
+    // so a future BE shape change (or transient `{rows, total}` style
+    // envelope) cannot silently leave the page blank.
+    const raw = await unwrap<unknown>(api.get('/returns', { params }));
+    return normalizeListResponse<ReturnListItem>(raw);
+  },
 
   get: (id: string) => unwrap<ReturnDetails>(api.get(`/returns/${id}`)),
 
@@ -272,8 +314,11 @@ export const returnsApi = {
       price_difference: number;
     }>(api.post('/exchanges', payload)),
 
-  listExchanges: (params?: { q?: string; limit?: number; offset?: number }) =>
-    unwrap<ExchangeListItem[]>(api.get('/exchanges', { params })),
+  listExchanges: async (params?: { q?: string; limit?: number; offset?: number }) => {
+    // PR-FIN-RETURNS-UX-0B — same defensive normalization as `list()`.
+    const raw = await unwrap<unknown>(api.get('/exchanges', { params }));
+    return normalizeListResponse<ExchangeListItem>(raw);
+  },
 
   getExchange: (id: string) =>
     unwrap<any>(api.get(`/exchanges/${id}`)),

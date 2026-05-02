@@ -394,44 +394,84 @@ export default function Returns() {
     enabled: fetchExchanges,
   });
 
+  // PR-FIN-RETURNS-UX-0B — `unifyReturn`/`unifyExchange` are already
+  // null-safe but we wrap the whole derivation in try/catch as a final
+  // belt-and-suspenders guard. If a single bad row would otherwise
+  // explode and unmount the page, we surface the count + the first
+  // exception message in a diagnostic banner instead of going blank.
+  const [mapErrorMessage, setMapErrorMessage] = useState<string | null>(null);
   const ops: UnifiedOperation[] = useMemo(() => {
-    const a: UnifiedOperation[] = [];
-    if (fetchReturns) a.push(...returns.map(unifyReturn));
-    if (fetchExchanges) a.push(...exchanges.map(unifyExchange));
-    // Sort
-    const sorted = a.slice();
-    sorted.sort((x, y) => {
-      if (sort === 'amount_high') return y.amount - x.amount;
-      if (sort === 'amount_low') return x.amount - y.amount;
-      const ax = x.performed_at ?? x.created_at ?? '';
-      const ay = y.performed_at ?? y.created_at ?? '';
-      if (sort === 'oldest') return ax.localeCompare(ay);
-      return ay.localeCompare(ax); // newest
-    });
-    return sorted;
+    try {
+      const a: UnifiedOperation[] = [];
+      if (fetchReturns) {
+        if (Array.isArray(returns)) {
+          a.push(...returns.map(unifyReturn));
+        } else if (mapErrorMessage == null) {
+          // The api adapter normalizes shapes, so a non-array here
+          // means an unexpected runtime state we want surfaced.
+          setMapErrorMessage('returnsApi.list() returned a non-array payload');
+        }
+      }
+      if (fetchExchanges) {
+        if (Array.isArray(exchanges)) {
+          a.push(...exchanges.map(unifyExchange));
+        } else if (mapErrorMessage == null) {
+          setMapErrorMessage(
+            'returnsApi.listExchanges() returned a non-array payload',
+          );
+        }
+      }
+      const sorted = a.slice();
+      sorted.sort((x, y) => {
+        if (sort === 'amount_high') return y.amount - x.amount;
+        if (sort === 'amount_low') return x.amount - y.amount;
+        const ax = x.performed_at ?? x.created_at ?? '';
+        const ay = y.performed_at ?? y.created_at ?? '';
+        if (sort === 'oldest') return ax.localeCompare(ay);
+        return ay.localeCompare(ax); // newest
+      });
+      if (mapErrorMessage != null && Array.isArray(returns) && Array.isArray(exchanges)) {
+        // Auto-clear the banner once both inputs become arrays again.
+        setMapErrorMessage(null);
+      }
+      return sorted;
+    } catch (err: any) {
+      const msg = err?.message ?? String(err);
+      if (mapErrorMessage !== msg) setMapErrorMessage(msg);
+      return [];
+    }
+    // mapErrorMessage intentionally omitted from deps — we only update
+    // it as a side-effect, not consume it for re-derivation.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [returns, exchanges, fetchReturns, fetchExchanges, sort]);
 
   // KPIs from the loaded slice (today-scope when "today" preset).
+  // PR-FIN-RETURNS-UX-0B — Array.isArray guards mirror the ops
+  // derivation. A non-array `returns`/`exchanges` (which the api
+  // adapter normalizes away in the happy path) must NOT crash the
+  // KPI tiles.
   const todayISO = todayISODate();
   const isToday = (iso: string | null | undefined) =>
     !!iso && iso.slice(0, 10) === todayISO;
   const kpis = useMemo(() => {
-    const todaysReturns = returns.filter((r) => isToday(r.requested_at));
-    const todaysExchanges = exchanges.filter((e: any) =>
+    const safeReturns = Array.isArray(returns) ? returns : [];
+    const safeExchanges = Array.isArray(exchanges) ? exchanges : [];
+    const todaysReturns = safeReturns.filter((r) => isToday(r.requested_at));
+    const todaysExchanges = safeExchanges.filter((e: any) =>
       isToday(e.created_at),
     );
-    const refundedToday = returns.filter(
+    const refundedToday = safeReturns.filter(
       (r) => r.status === 'refunded' && isToday(r.refunded_at),
     );
-    const pending = returns.filter((r) => r.status === 'pending');
+    const pending = safeReturns.filter((r) => r.status === 'pending');
     const refundedTotal = refundedToday.reduce(
       (s, r) => s + Number(r.net_refund),
       0,
     );
-    const stockReturned = returns
+    const stockReturned = safeReturns
       .filter((r) => r.inventory_status === 'restored')
       .reduce((s, r) => s + (r.units_count ?? 0), 0);
-    const needsReview = returns.filter(
+    const needsReview = safeReturns.filter(
       (r) =>
         r.match_status === 'needs_review' ||
         r.accounting_status === 'cashbox_not_linked' ||
@@ -666,10 +706,91 @@ export default function Returns() {
         </select>
       </div>
 
+      {/* PR-FIN-RETURNS-UX-0B — visible diagnostic strip. Only appears
+           when the list area has no rows AND no error AND no loading is
+           in flight. Surfaces the exact runtime state to the user so a
+           silent "blank screen" can never happen again. Removable in a
+           later cleanup PR once the user confirms data is visible. */}
+      {(() => {
+        const showReturnsError = returnsHasError && fetchReturns;
+        const showExchangesError = exchangesHasError && fetchExchanges;
+        const isLoading =
+          (loadingReturns && fetchReturns) ||
+          (loadingExchanges && fetchExchanges);
+        const showBanner =
+          !showReturnsError &&
+          !showExchangesError &&
+          !isLoading &&
+          ops.length === 0;
+        if (!showBanner && mapErrorMessage == null) return null;
+        const shapeWarning =
+          (returns as any)?.__shapeWarning ??
+          (exchanges as any)?.__shapeWarning ??
+          null;
+        return (
+          <div
+            className="card border-2 border-dashed border-amber-300 bg-amber-50 p-3 text-xs leading-6 font-mono text-amber-900"
+            data-testid="returns-diagnostic-banner"
+          >
+            <div className="font-bold mb-1">
+              تشخيص مؤقت — يظهر عندما تكون القائمة فارغة (Phase 0b)
+            </div>
+            <div data-testid="returns-diag-returns-count">
+              عدد المرتجعات المحمّلة:{' '}
+              <span className="font-bold">
+                {Array.isArray(returns) ? returns.length : 'N/A (not-array)'}
+              </span>
+            </div>
+            <div data-testid="returns-diag-exchanges-count">
+              عدد الاستبدالات المحمّلة:{' '}
+              <span className="font-bold">
+                {Array.isArray(exchanges) ? exchanges.length : 'N/A (not-array)'}
+              </span>
+            </div>
+            <div data-testid="returns-diag-state">
+              الحالة:{' '}
+              <span className="font-bold">
+                {isLoading
+                  ? 'loading'
+                  : showReturnsError || showExchangesError
+                    ? 'error'
+                    : 'success'}
+              </span>
+            </div>
+            <div data-testid="returns-diag-filters">
+              الفلاتر النشطة: tab=<b>{tab}</b> · datePreset=
+              <b>{datePreset}</b> · q=<b>"{q}"</b> · refundMethod=
+              <b>{refundMethod}</b> · accountingFilter=
+              <b>{accountingFilter}</b> · date_from=
+              <b>"{dateFrom}"</b> · date_to=<b>"{dateTo}"</b>
+            </div>
+            {shapeWarning && (
+              <div
+                className="mt-2 text-rose-800 font-bold"
+                data-testid="returns-diag-shape-warning"
+              >
+                ⚠️ shape warning: {String(shapeWarning)} — see console.
+              </div>
+            )}
+            {mapErrorMessage && (
+              <div
+                className="mt-2 text-rose-800 font-bold"
+                data-testid="returns-diag-map-error"
+              >
+                ⚠️ map error: {mapErrorMessage}
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
       {/* Master/Detail */}
       <div className="grid grid-cols-1 lg:grid-cols-[1fr_520px] gap-5">
         {/* List */}
-        <div className="card overflow-hidden" data-testid="returns-list">
+        <div
+          className="card overflow-hidden min-h-[200px]"
+          data-testid="returns-list"
+        >
           {(() => {
             // PR-FIN-RETURNS-UX-0A — explicit precedence so the user
             // sees the most diagnostic state available:
