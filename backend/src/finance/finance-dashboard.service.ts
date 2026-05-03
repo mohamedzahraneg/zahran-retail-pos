@@ -68,8 +68,9 @@
  *   filter with `i.status <> 'cancelled' AND i.voided_at IS NULL`.
  */
 
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import { DataSource } from 'typeorm';
+import { CashboxGlDriftHelper } from '../cash-desk/cashbox-gl-drift.helper';
 import {
   ConfidenceTier,
   DashboardFilters,
@@ -78,7 +79,15 @@ import {
 
 @Injectable()
 export class FinanceDashboardService {
-  constructor(private readonly ds: DataSource) {}
+  constructor(
+    private readonly ds: DataSource,
+    // PR-FIN-DASHBOARD-DRIFT-CANCEL-AWARE — `@Optional()` mirrors
+    // the `cash-desk.service.ts` pattern. The helper is registered
+    // in finance.module.ts so it WILL be present in production; the
+    // optional decorator lets unit tests construct the service
+    // without booting the helper.
+    @Optional() private readonly driftHelper?: CashboxGlDriftHelper,
+  ) {}
 
   // ─── Public entry ────────────────────────────────────────────────
   async dashboard(filters: DashboardFilters): Promise<FinanceDashboardResponse> {
@@ -269,22 +278,46 @@ export class FinanceDashboardService {
     const r = rows[0] ?? {};
     const imbalance = Number(r.total_debit ?? 0) - Number(r.total_credit ?? 0);
     const balanceDriftCount = Number(r.cashbox_balance_drift_count ?? 0);
-    const driftAbs = Number(r.drift_abs ?? 0);
+    const rawDriftCount = Number(r.drift_count ?? 0);
+    const rawDriftAbs   = Number(r.drift_abs ?? 0);
     const bypass7d = Number(r.bypass_7d ?? 0);
     const unbalanced = Number(r.unbalanced_count ?? 0);
+
+    // PR-FIN-DASHBOARD-DRIFT-CANCEL-AWARE — subtract phantom drift
+    // rows from cancelled-return clusters before reporting the
+    // operator-facing KPI. `v_cashbox_drift_per_ref` splits each
+    // cancelled return into 3 rows that the view alone can't merge;
+    // operationally the cluster nets to zero, so we exclude its
+    // count + |amount| contribution. Same normalization the
+    // cash-desk gl-drift endpoint already applies (PR #246).
+    //
+    // If the helper isn't injected (only happens in defensive unit
+    // tests that construct the service without it), we degrade
+    // gracefully by reporting the raw view numbers — matches the
+    // pre-PR behaviour for those callers.
+    let phantomCount = 0;
+    let phantomAbs = 0;
+    if (this.driftHelper) {
+      const stats = await this.driftHelper.clusterPhantomGlobalStats();
+      phantomCount = stats.rows;
+      phantomAbs = stats.absTotal;
+    }
+    const adjustedDriftCount = Math.max(0, rawDriftCount - phantomCount);
+    const adjustedDriftAbs   = Math.max(0, rawDriftAbs - phantomAbs);
 
     let overall: 'healthy' | 'warning' | 'critical' = 'healthy';
     if (Math.abs(imbalance) > 0.01 || unbalanced > 0 || balanceDriftCount > 0) {
       overall = 'critical';
-    } else if (driftAbs > 0 || bypass7d > 0) {
+    } else if (adjustedDriftAbs > 0 || bypass7d > 0) {
       overall = 'warning';
     }
 
     return {
       trial_balance_imbalance: round2(imbalance),
       cashbox_balance_drift_count: balanceDriftCount,
-      cashbox_drift_total: round2(driftAbs),
-      cashbox_drift_count: Number(r.drift_count ?? 0),
+      // Operator-facing KPI: cancel-aware adjusted figures.
+      cashbox_drift_total: round2(adjustedDriftAbs),
+      cashbox_drift_count: adjustedDriftCount,
       engine_bypass_alerts_7d: bypass7d,
       engine_bypass_alerts_last_seen:
         r.bypass_last_seen instanceof Date
