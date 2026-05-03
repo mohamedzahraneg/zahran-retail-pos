@@ -49,10 +49,12 @@ function buildFixture(overrides: Partial<Data> = {}): Data {
       overall: 'healthy',
     },
     liquidity: {
+      // PR-FIN-DASHBOARD-LIQUIDITY-GL renamed `cards_total` →
+      // `checks_total` to match GL 1115 (الشيكات).
       cashboxes_total: 100,
       banks_total: 200,
       wallets_total: 50,
-      cards_total: 0,
+      checks_total: 0,
       total_cash_equivalents: 350,
     },
     daily_expenses: {
