@@ -105,6 +105,7 @@ import { DriftCleanupPreviewModal } from '@/components/cashboxes/DriftCleanupPre
 import { InstitutionLogo } from '@/components/InstitutionLogo';
 import { useAuthStore } from '@/stores/auth.store';
 import { uuidOrNull, isMissingUuid } from '@/lib/uuid-or-null';
+import { displayCashboxBalance } from '@/lib/cashboxBalanceDisplay';
 
 /**
  * Icon used by `CashboxFormModal` (kept verbatim from earlier PRs) to
@@ -730,33 +731,14 @@ export default function Cashboxes() {
         </div>
       </div>
 
-      {/* Right rail (RTL: rail is the FIRST grid child → renders RIGHT) + main column */}
+      {/* Right rail (RTL: rail is the FIRST grid child → renders RIGHT) + main column.
+          PR-FIN-CASHBOXES-TREASURY-GRID — the cash-only summary tile that
+          used to live here has been promoted to a full-width responsive
+          grid of *all* active cashboxes at the top of the main column,
+          so a freshly-created ewallet/bank/check cashbox shows up
+          automatically. The rail keeps quick-actions + alerts. */}
       <div className="grid grid-cols-1 xl:grid-cols-[320px_1fr] gap-4" data-testid="treasury-grid">
         <aside className="space-y-3 xl:order-first" data-testid="treasury-rail">
-          {cashCashbox && (
-            <div
-              className="rounded-2xl border border-slate-200 bg-emerald-50/30 p-4"
-              data-testid="treasury-rail-cash-summary"
-            >
-              <div className="flex items-center gap-2 mb-1">
-                <Wallet size={14} className="text-emerald-700" />
-                <span className="font-bold text-sm text-emerald-800">نقدي</span>
-              </div>
-              <div className="text-[11px] text-emerald-700">{cashCashbox.name_ar}</div>
-              <div className="text-2xl font-black text-emerald-800 font-mono mt-1">
-                {EGP(cashCashbox.current_balance)}
-              </div>
-              <button
-                type="button"
-                onClick={() => setCashboxDetailsId(cashCashbox.id)}
-                className="text-[11px] text-emerald-700 hover:underline mt-1 block"
-                data-testid="treasury-rail-cash-details"
-              >
-                عرض التفاصيل ←
-              </button>
-            </div>
-          )}
-
           {canManageAccounts && (
             <div
               className="rounded-2xl border border-slate-200 bg-white p-4 space-y-2"
@@ -779,6 +761,48 @@ export default function Cashboxes() {
         </aside>
 
         <div className="space-y-4 min-w-0">
+          {/* PR-FIN-CASHBOXES-TREASURY-GRID — responsive grid of every
+              active cashbox (cash + ewallet + bank + check). Cards
+              auto-appear when a new cashbox is created (no hardcoded
+              ids). Sort: cash kind first, then ewallet/bank/check, then
+              name_ar within kind. Each card opens the same
+              CashboxDetailsModal as the legacy cash tile. */}
+          {(() => {
+            const activeBoxes = boxes.filter((b) => b.is_active);
+            const KIND_ORDER: Record<CashboxKind, number> = {
+              cash: 0, ewallet: 1, bank: 2, check: 3,
+            };
+            const sortedBoxes = [...activeBoxes].sort((a, b) => {
+              const ko = (KIND_ORDER[a.kind] ?? 9) - (KIND_ORDER[b.kind] ?? 9);
+              if (ko !== 0) return ko;
+              return a.name_ar.localeCompare(b.name_ar, 'ar');
+            });
+            if (sortedBoxes.length === 0) {
+              return (
+                <div
+                  className="rounded-2xl border border-dashed border-slate-300 bg-slate-50/60 p-6 text-center text-sm text-slate-600"
+                  data-testid="treasury-cashboxes-empty"
+                >
+                  لا توجد خزائن نشطة. أضف خزينة جديدة من إعدادات المخزن.
+                </div>
+              );
+            }
+            return (
+              <div
+                className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3"
+                data-testid="treasury-cashboxes-grid"
+              >
+                {sortedBoxes.map((cb) => (
+                  <TreasuryCashboxCard
+                    key={cb.id}
+                    cashbox={cb}
+                    onOpenDetails={() => setCashboxDetailsId(cb.id)}
+                  />
+                ))}
+              </div>
+            );
+          })()}
+
           {/* KPI row — 7 tiles */}
           <div
             className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-2"
@@ -1201,6 +1225,94 @@ function QuickAction({
       <span className="text-pink-600">{icon}</span>
       <span className="font-bold">{label}</span>
     </button>
+  );
+}
+
+/**
+ * PR-FIN-CASHBOXES-TREASURY-GRID — single uniform card for every active
+ * cashbox in the treasury grid. Routes the balance figure through
+ * `displayCashboxBalance` so cash drawers show the canonical
+ * `current_balance` while ewallet/bank/check show the GL-derived
+ * `accounting_balance` with the explicit "الرصيد المحاسبي" label
+ * (matches the labels shipped in PR-FIN-PAYMENTS-WALLET-DISPLAY-BALANCE).
+ *
+ * Both the card body and the explicit "عرض التفاصيل" button trigger
+ * the same `onOpenDetails` callback — the page hands back the cashbox
+ * id which `setCashboxDetailsId` feeds into the existing
+ * `CashboxDetailsModal`. Card per-id testids are
+ * `treasury-cashbox-card-<id>` and `treasury-cashbox-card-details-<id>`.
+ */
+function TreasuryCashboxCard({
+  cashbox,
+  onOpenDetails,
+}: {
+  cashbox: Cashbox;
+  onOpenDetails: () => void;
+}) {
+  const Icon = KIND_ICON[cashbox.kind] ?? Wallet;
+  const display = displayCashboxBalance(cashbox);
+  const isCash = cashbox.kind === 'cash';
+  const balanceLabel = isCash ? 'رصيد الخزنة' : 'الرصيد المحاسبي';
+  const tone = isCash
+    ? { border: 'border-emerald-200', bg: 'bg-emerald-50/30', text: 'text-emerald-800', sub: 'text-emerald-700' }
+    : cashbox.kind === 'ewallet'
+      ? { border: 'border-purple-200', bg: 'bg-purple-50/30', text: 'text-purple-800', sub: 'text-purple-700' }
+      : cashbox.kind === 'bank'
+        ? { border: 'border-indigo-200', bg: 'bg-indigo-50/30', text: 'text-indigo-800', sub: 'text-indigo-700' }
+        : { border: 'border-amber-200', bg: 'bg-amber-50/30', text: 'text-amber-800', sub: 'text-amber-700' };
+  return (
+    <div
+      data-testid={`treasury-cashbox-card-${cashbox.id}`}
+      className={`rounded-2xl border ${tone.border} ${tone.bg} p-4 cursor-pointer hover:shadow-sm transition`}
+      onClick={onOpenDetails}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onOpenDetails();
+        }
+      }}
+    >
+      <div className="flex items-center gap-2 mb-1">
+        <Icon size={14} className={tone.sub} />
+        <span className={`font-bold text-sm ${tone.text}`}>{KIND_LABEL[cashbox.kind]}</span>
+      </div>
+      <div className={`text-[11px] ${tone.sub} truncate`}>{cashbox.name_ar}</div>
+      <div
+        className="text-[10px] font-medium text-slate-500 mt-2"
+        data-testid={`treasury-cashbox-card-balance-label-${cashbox.id}`}
+      >
+        {balanceLabel}
+      </div>
+      <div className={`text-2xl font-black ${tone.text} font-mono leading-tight`}>
+        {EGP(display.amount)}
+        {display.kind === 'accounting' && (
+          <span
+            className="ms-2 text-[10px] font-bold bg-sky-50 text-sky-700 border border-sky-200 rounded px-1.5 py-0.5 align-middle"
+            title={`الرصيد المحاسبي من حساب GL ${display.glCode} — مجموع لكل خزائن نفس النوع`}
+          >
+            محاسبي
+          </span>
+        )}
+        {display.kind === 'unlinked' && (
+          <span
+            className="ms-2 text-[10px] font-bold bg-amber-50 text-amber-700 border border-amber-200 rounded px-1.5 py-0.5 align-middle"
+            title="لا يوجد حساب محاسبي مرتبط — العرض ٠"
+          >
+            غير مربوط
+          </span>
+        )}
+      </div>
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); onOpenDetails(); }}
+        className={`text-[11px] ${tone.sub} hover:underline mt-2 block`}
+        data-testid={`treasury-cashbox-card-details-${cashbox.id}`}
+      >
+        عرض التفاصيل ←
+      </button>
+    </div>
   );
 }
 
