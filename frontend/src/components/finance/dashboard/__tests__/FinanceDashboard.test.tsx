@@ -383,4 +383,117 @@ describe('<FinanceDashboard />', () => {
       expect(screen.getByText(/محسوب من: GL 211/)).toBeInTheDocument();
     });
   });
+
+  /**
+   * PR-FIN-DASHBOARD-EMPLOYEES-SIGN — the employees card was reading
+   * the BE's `total_owed_to` field as if it meant "owed TO employees",
+   * but the BE field actually carries SUM-of-positive balances, which
+   * by the `v_employee_gl_balance` sign convention means EMPLOYEES OWE
+   * BUSINESS ("على الموظف"). The fix relabels in the FE only — the BE
+   * contract is preserved. These specs pin the new direction-aware
+   * labels and the production-style fixture so the bug can't regress.
+   */
+  describe('EmployeesBalanceCard — sign convention', () => {
+    function employeesFixture(employees: Data['balances']['employees']): Data {
+      return buildFixture({
+        balances: {
+          customers: { total_due: 0, count: 0, top: null },
+          suppliers: {
+            total_due: 0, count: 0, top: null,
+            effective_source: 'none',
+            sources_checked: ['suppliers_table', 'gl_211', 'purchases'],
+          },
+          employees,
+        },
+      });
+    }
+
+    it('positive balances render under "إجمالي على الموظفين" (NOT "إجمالي له")', async () => {
+      renderPage(employeesFixture({ total_owed_to: 200, total_owed_by: 50, net: 150 }));
+      await waitFor(() =>
+        expect(screen.getByTestId('card-employees-balance')).toBeInTheDocument(),
+      );
+      // Card title still reads "أرصدة الموظفين"
+      expect(screen.getByText('أرصدة الموظفين')).toBeInTheDocument();
+      // The positives row label is the new direction-correct text.
+      expect(screen.getByText('إجمالي على الموظفين')).toBeInTheDocument();
+      // The legacy mislabel must be gone.
+      expect(screen.queryByText('إجمالي له')).toBeNull();
+      // The value next to the new label equals the BE's total_owed_to.
+      expect(screen.getByTestId('employees-owed-by').textContent).toMatch(/200/);
+    });
+
+    it('negative balances render under "إجمالي للموظفين" (NOT "إجمالي عليه")', async () => {
+      renderPage(employeesFixture({ total_owed_to: 200, total_owed_by: 50, net: 150 }));
+      await waitFor(() =>
+        expect(screen.getByTestId('card-employees-balance')).toBeInTheDocument(),
+      );
+      expect(screen.getByText('إجمالي للموظفين')).toBeInTheDocument();
+      expect(screen.queryByText('إجمالي عليه')).toBeNull();
+      // The value next to the new label equals the BE's total_owed_by.
+      expect(screen.getByTestId('employees-owed-to').textContent).toMatch(/50/);
+    });
+
+    it('positive net renders "صافي على الموظفين" with absolute value', async () => {
+      renderPage(employeesFixture({ total_owed_to: 200, total_owed_by: 50, net: 150 }));
+      await waitFor(() =>
+        expect(screen.getByTestId('card-employees-balance')).toBeInTheDocument(),
+      );
+      expect(screen.getByText('صافي على الموظفين')).toBeInTheDocument();
+      expect(screen.queryByText('صافي للموظفين')).toBeNull();
+      expect(screen.queryByText('متوازن')).toBeNull();
+      expect(screen.getByTestId('employees-net').textContent).toMatch(/150/);
+    });
+
+    it('negative net renders "صافي للموظفين" with absolute value', async () => {
+      renderPage(employeesFixture({ total_owed_to: 0, total_owed_by: 300, net: -300 }));
+      await waitFor(() =>
+        expect(screen.getByTestId('card-employees-balance')).toBeInTheDocument(),
+      );
+      expect(screen.getByText('صافي للموظفين')).toBeInTheDocument();
+      expect(screen.queryByText('صافي على الموظفين')).toBeNull();
+      // |−300| = 300 — net is rendered as absolute value, direction in the label.
+      expect(screen.getByTestId('employees-net').textContent).toMatch(/300/);
+    });
+
+    it('zero net renders "متوازن" (no direction)', async () => {
+      renderPage(employeesFixture({ total_owed_to: 0, total_owed_by: 0, net: 0 }));
+      await waitFor(() =>
+        expect(screen.getByTestId('card-employees-balance')).toBeInTheDocument(),
+      );
+      expect(screen.getByText('متوازن')).toBeInTheDocument();
+      expect(screen.queryByText('صافي على الموظفين')).toBeNull();
+      expect(screen.queryByText('صافي للموظفين')).toBeNull();
+    });
+
+    it('production-style fixture (محمد الظباطي 2080 + أبو يوسف 70) shows إجمالي على الموظفين = 2,150', async () => {
+      // Synthetic two-employee fixture per spec — mirrors the live data
+      // with مدير النظام omitted so the assertion total is exactly 2,150.
+      renderPage(employeesFixture({
+        total_owed_to: 2150,   // 2080 + 70 — sum of positives in BE field naming
+        total_owed_by: 0,
+        net: 2150,
+      }));
+      await waitFor(() =>
+        expect(screen.getByTestId('card-employees-balance')).toBeInTheDocument(),
+      );
+      // Direction-correct label, with the 2,150 figure in the positives row.
+      expect(screen.getByText('إجمالي على الموظفين')).toBeInTheDocument();
+      expect(screen.getByTestId('employees-owed-by').textContent).toMatch(/2,150/);
+      // The "للموظفين" row reads zero — nothing the business owes.
+      expect(screen.getByTestId('employees-owed-to').textContent).toMatch(/0/);
+      // Net direction is "على" (positive net), value is the absolute 2,150.
+      expect(screen.getByText('صافي على الموظفين')).toBeInTheDocument();
+      expect(screen.getByTestId('employees-net').textContent).toMatch(/2,150/);
+    });
+
+    it('caption explains the sign convention so future readers cannot misinterpret', async () => {
+      renderPage(employeesFixture({ total_owed_to: 100, total_owed_by: 0, net: 100 }));
+      await waitFor(() =>
+        expect(screen.getByTestId('card-employees-balance')).toBeInTheDocument(),
+      );
+      expect(screen.getByTestId('employees-sign-caption')).toBeInTheDocument();
+      expect(screen.getByText('الموجب يعني عهد/سلف على الموظف')).toBeInTheDocument();
+    });
+  });
 });

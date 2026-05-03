@@ -163,11 +163,43 @@ const SUPPLIER_SOURCE_LABEL_AR: Record<
   none: '—',
 };
 
+/**
+ * PR-FIN-DASHBOARD-EMPLOYEES-SIGN — labels were inverted relative to
+ * the rest of the system. `v_employee_gl_balance.balance` is
+ * `SUM(debit) - SUM(credit)` over GL 1123 (employee receivable) and
+ * 213 (employee accruals), so:
+ *
+ *   · positive balance ⇒ debit > credit ⇒ EMPLOYEE OWES BUSINESS
+ *     ("على الموظف" / "عليه")
+ *   · negative balance ⇒ credit > debit ⇒ BUSINESS OWES EMPLOYEE
+ *     ("للموظف" / "له")
+ *
+ * The legacy BE field names `total_owed_to` / `total_owed_by`
+ * promised the opposite of what they store (`total_owed_to` actually
+ * carries SUM-of-positives, i.e. amounts owed BY employees). Renaming
+ * them would break any external API consumer, so we rebind in the
+ * display layer instead. The mapping is fixed at this single render
+ * site — the contract drift is documented inline.
+ */
 function EmployeesBalanceCard({
   data,
 }: {
   data: FinanceDashboard['balances']['employees'];
 }) {
+  // Re-spell the BE fields under their actual semantics.
+  // `total_owed_to`  = SUM of positives = "إجمالي على الموظفين"
+  // `total_owed_by`  = SUM of |negatives| = "إجمالي للموظفين"
+  // `net > 0`        = direction ⇒ "صافي على الموظفين"
+  // `net < 0`        = direction ⇒ "صافي للموظفين"
+  // `net = 0`        = balanced ⇒ "متوازن"
+  const owedByEmployees = data.total_owed_to;
+  const owedToEmployees = data.total_owed_by;
+  const netLabel =
+    data.net > 0
+      ? 'صافي على الموظفين'
+      : data.net < 0
+        ? 'صافي للموظفين'
+        : 'متوازن';
   return (
     <KpiCard
       title="أرصدة الموظفين"
@@ -176,22 +208,31 @@ function EmployeesBalanceCard({
       testId="card-employees-balance"
     >
       <KpiRow
-        label="إجمالي له"
-        value={fmtEGP(data.total_owed_to)}
+        label="إجمالي على الموظفين"
+        value={fmtEGP(owedByEmployees)}
         tone="positive"
+        testId="employees-owed-by"
       />
       <KpiRow
-        label="إجمالي عليه"
-        value={fmtEGP(data.total_owed_by)}
+        label="إجمالي للموظفين"
+        value={fmtEGP(owedToEmployees)}
         tone="negative"
+        testId="employees-owed-to"
       />
       <div className="border-t border-slate-200 dark:border-slate-700 pt-2 mt-1">
         <KpiRow
-          label="صافي الرصيد"
-          value={fmtEGP(data.net)}
+          label={netLabel}
+          value={fmtEGP(Math.abs(data.net))}
           emphasis
-          tone={data.net >= 0 ? 'positive' : 'negative'}
+          tone={data.net > 0 ? 'positive' : data.net < 0 ? 'negative' : 'neutral'}
+          testId="employees-net"
         />
+      </div>
+      <div
+        className="text-[10px] text-slate-500 dark:text-slate-400 mt-1 leading-relaxed"
+        data-testid="employees-sign-caption"
+      >
+        الموجب يعني عهد/سلف على الموظف
       </div>
     </KpiCard>
   );
