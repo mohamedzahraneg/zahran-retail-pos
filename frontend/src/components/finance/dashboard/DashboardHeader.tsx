@@ -1,10 +1,23 @@
 /**
- * DashboardHeader — PR-FIN-2
+ * DashboardHeader — PR-FIN-2 + PR-FIN-DASHBOARD-RTL-HEADER
  *
- * Title bar matching the approved image:
+ * Title bar matching the approved image (consistent across mobile +
+ * desktop in RTL):
  *   · right-aligned title  "لوحة الحسابات والمالية"
  *   · subtitle             "نظرة شاملة على الوضع المالي لحظيًا"
  *   · left-aligned actions (Refresh / Print / Export Excel)
+ *
+ * RTL layout
+ * ──────────
+ * The page wraps everything in `dir="rtl"` (FinanceDashboard.tsx:72).
+ * In an RTL flex row with `justify-between`, the FIRST DOM child sits
+ * on the right and the LAST sits on the left — exactly matching the
+ * approved image when the title comes first in JSX. The previous
+ * implementation used `order-2 lg:order-1` / `order-1 lg:order-2`
+ * which silently inverted the layout on `lg` breakpoints, dropping
+ * the title to the left side. The fix is to reorder the JSX
+ * naturally (title first, actions second) and drop the brittle
+ * `order-*` classes entirely.
  *
  * Print + Export delegate to callbacks the parent provides; the
  * dashboard ships with a default print() that respects RTL via the
@@ -30,7 +43,26 @@ export function DashboardHeader({
       className="flex items-start justify-between gap-3 flex-wrap"
       data-testid="finance-dashboard-header"
     >
-      <div className="order-2 lg:order-1 flex items-center gap-2">
+      {/* Title block — first in DOM. In RTL flex this sits on the
+          RIGHT (where the title belongs visually). */}
+      <div className="flex items-start gap-3" data-testid="dashboard-header-title-block">
+        <div className="w-10 h-10 rounded-xl bg-brand-50 dark:bg-brand-900/40 text-brand-700 dark:text-brand-300 flex items-center justify-center shrink-0">
+          <BarChart3 size={20} />
+        </div>
+        <div className="text-right">
+          <h1 className="text-xl font-black text-slate-900 dark:text-slate-100">
+            لوحة الحسابات والمالية
+          </h1>
+          <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+            نظرة شاملة على الوضع المالي لحظيًا
+          </p>
+        </div>
+      </div>
+
+      {/* Action buttons — last in DOM. In RTL flex this sits on the
+          LEFT. No `order-*` classes — relying on natural JSX order
+          keeps the layout consistent across all breakpoints. */}
+      <div className="flex items-center gap-2" data-testid="dashboard-header-actions">
         <button
           type="button"
           onClick={onRefresh}
@@ -59,20 +91,6 @@ export function DashboardHeader({
           <FileSpreadsheet size={14} />
           تصدير Excel
         </button>
-      </div>
-
-      <div className="order-1 lg:order-2 flex items-start gap-3">
-        <div className="text-right">
-          <h1 className="text-xl font-black text-slate-900 dark:text-slate-100">
-            لوحة الحسابات والمالية
-          </h1>
-          <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-            نظرة شاملة على الوضع المالي لحظيًا
-          </p>
-        </div>
-        <div className="w-10 h-10 rounded-xl bg-brand-50 dark:bg-brand-900/40 text-brand-700 dark:text-brand-300 flex items-center justify-center shrink-0">
-          <BarChart3 size={20} />
-        </div>
       </div>
     </header>
   );
