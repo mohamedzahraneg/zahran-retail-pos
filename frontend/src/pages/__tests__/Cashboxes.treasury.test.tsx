@@ -449,13 +449,18 @@ describe('<Cashboxes /> — PR-FIN-PAYACCT-4D-UX-FIX table-first layout', () => 
     expect(within(posRow).getByText('غير مربوط بخزنة')).toBeInTheDocument();
   });
 
-  // ─── 13. Right-rail cash summary uses /cash-desk/cashboxes data ──
-  it('right-rail cash summary card renders the cash cashbox name + balance from API', async () => {
+  // ─── 13. Treasury cashbox card uses /cash-desk/cashboxes data ──
+  // PR-FIN-CASHBOXES-TREASURY-GRID — the legacy single cash tile
+  // (`treasury-rail-cash-summary`) was promoted to a per-cashbox card
+  // grid keyed by id (`treasury-cashbox-card-<id>`). This test still
+  // pins the cash cashbox content; equivalent coverage for ewallet/
+  // bank/check cards lives in `Cashboxes.treasury-grid.test.tsx`.
+  it('treasury cashbox card renders the cash cashbox name + balance from API', async () => {
     renderPage();
     await waitFor(() =>
-      expect(screen.getByTestId('treasury-rail-cash-summary')).toBeInTheDocument(),
+      expect(screen.getByTestId('treasury-cashbox-card-cb-cash')).toBeInTheDocument(),
     );
-    const card = screen.getByTestId('treasury-rail-cash-summary');
+    const card = screen.getByTestId('treasury-cashbox-card-cb-cash');
     expect(within(card).getByText('الخزينة الرئيسية')).toBeInTheDocument();
     expect(card.textContent).toMatch(/23,105/);
   });
@@ -579,14 +584,16 @@ describe('<Cashboxes /> — PR-FIN-PAYACCT-4D-UX-FIX table-first layout', () => 
   });
 
   // ─── PR-FIN-PAYACCT-4D-UX-FIX-4: cashbox details + deep-link ────
-  it('PR-4D-UX-FIX-4: rail "عرض التفاصيل" opens the cashbox-details modal (not just a filter)', async () => {
+  // Updated for PR-FIN-CASHBOXES-TREASURY-GRID: the per-cashbox cards
+  // expose `treasury-cashbox-card-details-<id>` triggers; the click
+  // contract (open the same `cashbox-details-modal`) is unchanged.
+  it('PR-4D-UX-FIX-4: card "عرض التفاصيل" opens the cashbox-details modal (not just a filter)', async () => {
     renderPage();
-    // Rail cash-summary card renders for the active cash cashbox.
     await waitFor(() =>
-      expect(screen.getByTestId('treasury-rail-cash-summary')).toBeInTheDocument(),
+      expect(screen.getByTestId('treasury-cashbox-card-cb-cash')).toBeInTheDocument(),
     );
     expect(screen.queryByTestId('cashbox-details-modal')).toBeNull();
-    fireEvent.click(screen.getByTestId('treasury-rail-cash-details'));
+    fireEvent.click(screen.getByTestId('treasury-cashbox-card-details-cb-cash'));
     await waitFor(() =>
       expect(screen.getByTestId('cashbox-details-modal')).toBeInTheDocument(),
     );
