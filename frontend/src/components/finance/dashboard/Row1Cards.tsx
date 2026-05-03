@@ -251,7 +251,7 @@ function TodayExpensesCard({
 }) {
   return (
     <KpiCard
-      title="المصروفات (اليوم / الفترة)"
+      title="المصروفات النقدية (اليوم / الفترة)"
       icon={<Receipt size={18} />}
       tone="rose"
       testId="card-today-expenses"
@@ -290,6 +290,21 @@ function TodayExpensesCard({
           value={fmtNumber(data.period_count)}
           testId="expenses-period-count"
         />
+        {/* PR-FIN-DASHBOARD-EXPENSES-CASH-BASIS-REVERT — informational
+            breakdown rows. The headline `period_total` already includes
+            both buckets; these rows let the operator see how much of
+            it is employee advances vs other operating cash. They sum
+            to the headline exactly. */}
+        <KpiRow
+          label="منها سلف موظفين"
+          value={fmtEGP(data.period_advances_total)}
+          testId="expenses-period-advances"
+        />
+        <KpiRow
+          label="منها مصروفات تشغيلية أخرى"
+          value={fmtEGP(data.period_non_advances_total)}
+          testId="expenses-period-non-advances"
+        />
         {data.period_largest ? (
           <>
             <KpiRow
@@ -306,6 +321,12 @@ function TodayExpensesCard({
         ) : (
           <KpiRow label="أكبر مصروف في الفترة" value="—" />
         )}
+      </div>
+      <div
+        className="text-[10px] text-slate-500 dark:text-slate-400 mt-1 leading-relaxed"
+        data-testid="expenses-cash-basis-caption"
+      >
+        كل النقدية التي خرجت من الخزائن خلال الفترة، تشمل السلف والمصروفات التشغيلية
       </div>
     </KpiCard>
   );

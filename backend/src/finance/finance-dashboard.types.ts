@@ -78,6 +78,21 @@ export interface FinanceDashboardResponse {
     period_total: number;
     period_count: number;
     period_largest: { category: string | null; amount: number } | null;
+    /**
+     * PR-FIN-DASHBOARD-EXPENSES-CASH-BASIS-REVERT — informational
+     * breakdown rows. The HEADLINE `period_total` / `period_count`
+     * INCLUDE advances (cash-basis dashboard rule). The breakdown
+     * lets the FE optionally show:
+     *   · period_advances_total/count    — `expenses.is_advance = TRUE`
+     *   · period_non_advances_total/count — `expenses.is_advance = FALSE/NULL`
+     * The two break down into period_total exactly (no overlap,
+     * no missing rows). Wage accruals are NOT in the headline by
+     * design — they would double-count cash advances.
+     */
+    period_advances_total: number;
+    period_advances_count: number;
+    period_non_advances_total: number;
+    period_non_advances_count: number;
   };
 
   balances: {
