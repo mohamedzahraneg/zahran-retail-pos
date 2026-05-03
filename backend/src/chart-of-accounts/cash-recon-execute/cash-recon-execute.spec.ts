@@ -362,11 +362,20 @@ describe('script source — global invariants', () => {
 // ─── Renderer ─────────────────────────────────────────────────────
 describe('renderResult — formatted Markdown report', () => {
   it('renders the snapshot Δ table + per-row actions + safety footer', () => {
+    // Authoritative after-state (computed via SQL simulation against
+    // the live snapshot). The +95 residual represents the unchanged
+    // pieces the user's chosen options don't fully balance:
+    //   · Row 2 tag-only leaves the GL +5 unmatched on the cash side
+    //   · Row 4 voids CT-245 but the JE-378 reversal's +350 stays on
+    //     tagged_gl with no compensating CT (Option A leaves it; Option
+    //     B would have added a counter-CT and ended at the same +95
+    //     because of how the bf7e6e27/other taxonomy CT pair offsets).
+    // Net residual: +95 EGP, NOT zero.
     const md = renderResult({
       mode: 'dry-run',
       committed: false,
       before: { current_balance: 34155, active_ct_sum: 34155, tagged_gl_1111: 34505, untagged_gl_1111: -2095, global_gl_1111: 32410, per_cashbox_drift: -350, global_gap: 1745 },
-      after:  { current_balance: 32505, active_ct_sum: 32505, tagged_gl_1111: 32510, untagged_gl_1111: -5, global_gl_1111: 32505, per_cashbox_drift: -5, global_gap: 0 },
+      after:  { current_balance: 32505, active_ct_sum: 32505, tagged_gl_1111: 32410, untagged_gl_1111: 0, global_gl_1111: 32410, per_cashbox_drift: 95, global_gap: 95 },
       rows: [
         { row_id: 'row-1', option: '1a', actions: [{ step: 'UPDATE expenses', status: 'executed' }] },
         { row_id: 'row-2', option: '2',  actions: [{ step: 'UPDATE journal_lines', status: 'executed' }] },
@@ -377,7 +386,8 @@ describe('renderResult — formatted Markdown report', () => {
     expect(md).toMatch(/# Cash\/GL cleanup — DRY-RUN/);
     expect(md).toMatch(/Committed: \*\*NO\*\*/);
     expect(md).toMatch(/\| current_balance \| 34155\.00 \| 32505\.00 \| -1650\.00 \|/);
-    expect(md).toMatch(/\| global_gap \| 1745\.00 \| 0\.00 \| -1745\.00 \|/);
+    // global_gap moves from +1,745 → +95 (NOT zero — see comment above).
+    expect(md).toMatch(/\| global_gap \| 1745\.00 \| 95\.00 \| -1650\.00 \|/);
     expect(md).toMatch(/### row-1 \(option 1a\)/);
     expect(md).toMatch(/### row-4 \(option 4a\)/);
     expect(md).toMatch(/cleanup: PR-CASH-RECON-EXEC#1a/);
