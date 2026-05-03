@@ -67,6 +67,7 @@ import {
   MoreVertical,
   AlertTriangle,
   Edit3,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   ChevronsLeft,
@@ -94,14 +95,18 @@ import {
   type PaymentProvider,
   METHOD_LABEL_AR,
 } from '@/api/payments.api';
-import { accountsApi } from '@/api/accounts.api';
+// PR-FIN-CASHBOXES-TREASURY-CLEANUP — `accountsApi`,
+// `UnattachedReconciliationPanel` and `DriftCleanupPreviewModal` are
+// no longer wired into the /cashboxes page. The modules + their BE
+// endpoints stay in the codebase for future ad-hoc diagnostic use,
+// but the daily-use treasury page no longer surfaces them. Removing
+// the imports here so this file's dependencies reflect what it
+// actually renders.
 import { PaymentProviderLogo } from '@/components/payments/PaymentProviderLogo';
 import { PaymentAccountModal } from '@/components/payment-accounts/PaymentAccountModal';
-import { UnattachedReconciliationPanel } from '@/components/payment-accounts/UnattachedReconciliationPanel';
 import { PaymentAccountAlerts } from '@/components/payment-accounts/PaymentAccountAlerts';
 import { PaymentAccountDetailsPanel } from '@/components/payment-accounts/PaymentAccountDetailsPanel';
 import { CashboxDetailsModal } from '@/components/cashboxes/CashboxDetailsModal';
-import { DriftCleanupPreviewModal } from '@/components/cashboxes/DriftCleanupPreviewModal';
 import { InstitutionLogo } from '@/components/InstitutionLogo';
 import { useAuthStore } from '@/stores/auth.store';
 import { uuidOrNull, isMissingUuid } from '@/lib/uuid-or-null';
@@ -286,9 +291,6 @@ export default function Cashboxes() {
   const hasPermission = useAuthStore((s) => s.hasPermission);
   const canManageCashboxes = hasPermission('cashdesk.manage_accounts');
   const canManageAccounts  = hasPermission('payment-accounts.manage');
-  // PR-FIN-PAYACCT-4D-DRIFT-HISTORICAL-CLEANUP-1 — operator-only diagnostic
-  // (DRY RUN ONLY; no execute path in this UI).
-  const canPreviewDriftCleanup = hasPermission('accounts.journal.post');
 
   // ── Filters ────────────────────────────────────────────────────────
   const [search, setSearch] = useState('');
@@ -324,8 +326,6 @@ export default function Cashboxes() {
   const [editingCashbox, setEditingCashbox]       = useState<Cashbox | null>(null);
   const [showTransfer, setShowTransfer]           = useState(false);
   const [showOverflow, setShowOverflow]           = useState(false);
-  // PR-FIN-PAYACCT-4D-DRIFT-HISTORICAL-CLEANUP-1 — preview modal
-  const [showDriftCleanupPreview, setShowDriftCleanupPreview] = useState(false);
 
   // PR-FIN-PAYACCT-4D-UX-FIX-4 — Settings deep-link consumer.
   // The Settings page links here with `?action=create-account&method=...`
@@ -593,55 +593,17 @@ export default function Cashboxes() {
     toast.success('تم تحديث البيانات');
   }
 
-  // PR-FIN-PAYACCT-4D-CASHBOX-BALANCE-REBUILD-BUTTON-FE
-  // Sanctioned rebuild path: re-derive `cashboxes.current_balance` from
-  // the active cashbox-transactions log (the post-VOID-FIX-1 helper
-  // filters `is_void=false`). Fires the existing
-  //   POST /accounts/audit/rebuild-cashbox-balance/:id
-  // endpoint exactly once per click after an explicit confirm dialog.
-  // Operates on the main cash cashbox only; rebuild-all is intentionally
-  // not wired here.
-  const rebuildBalanceMutation = useMutation({
-    mutationFn: (cashboxId: string) =>
-      accountsApi.rebuildCashboxBalance(cashboxId),
-    onSuccess: (r) => {
-      const formatted = Number(r.new_balance).toLocaleString('en-US', {
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2,
-      });
-      toast.success(`تم إعادة بناء رصيد الخزنة: ${formatted} ج.م`);
-      // Invalidate everything that displays cashbox balances or drift.
-      qc.invalidateQueries({ queryKey: ['cashboxes'] });
-      qc.invalidateQueries({ queryKey: ['payment-accounts-balances'] });
-      qc.invalidateQueries({ queryKey: ['cashbox-gl-drift'] });
-      qc.invalidateQueries({ queryKey: ['cashbox-movements-today'] });
-      // The CashboxDetailsModal reads its own data via cashbox-details
-      // queries — invalidate any that exist.
-      qc.invalidateQueries({ queryKey: ['cashbox-details'] });
-    },
-    onError: (err: any) => {
-      toast.error(
-        err?.response?.data?.message ||
-          err?.message ||
-          'فشل إعادة بناء الرصيد',
-      );
-    },
-  });
-
-  function handleRebuildMainCashboxBalance() {
-    if (!cashCashbox) {
-      toast.error('لا توجد خزنة نقدية رئيسية نشطة');
-      return;
-    }
-    if (rebuildBalanceMutation.isPending) return;
-    const ok = window.confirm(
-      'سيتم إعادة حساب رصيد الخزنة الرئيسية من الحركات النشطة فقط',
-    );
-    if (!ok) return;
-    rebuildBalanceMutation.mutate(cashCashbox.id);
-  }
-
-  const cashCashbox = boxes.find((c) => c.kind === 'cash' && c.is_active);
+  // PR-FIN-CASHBOXES-TREASURY-CLEANUP — the sanctioned rebuild path
+  // (POST /accounts/audit/rebuild-cashbox-balance/:id) and the
+  // historical drift-cleanup preview have been retired from the
+  // visible UI per operator decision: maintenance/debug surfaces no
+  // longer belong on the daily-use treasury page. The backend
+  // endpoints (`accountsApi.rebuildCashboxBalance`,
+  // `accountsApi.driftCleanupPreview`, `accountsApi.driftCleanupExecute`)
+  // are intentionally PRESERVED for future ad-hoc runs from a
+  // dedicated diagnostics surface; only the `/cashboxes` triggers
+  // are gone. The `cashCashbox` derivation that powered both
+  // buttons is also gone — there are no other consumers on this page.
 
   // ── Render ─────────────────────────────────────────────────────────
   return (
@@ -676,45 +638,22 @@ export default function Cashboxes() {
           >
             <RefreshCcw size={14} /> تحديث الأرصدة
           </button>
-          {/* PR-FIN-PAYACCT-4D-CASHBOX-BALANCE-REBUILD-BUTTON-FE
-              Sanctioned rebuild action for the main cash cashbox. Calls the
-              existing audit/rebuild-cashbox-balance/:id endpoint exactly
-              once per click after a confirm dialog. Disabled while
-              pending. Same permission gate as the drift-cleanup preview
-              (`accounts.journal.post`) since the action writes to
-              `cashboxes.current_balance`. */}
-          {canPreviewDriftCleanup && cashCashbox && (
-            <button
-              type="button"
-              onClick={handleRebuildMainCashboxBalance}
-              disabled={rebuildBalanceMutation.isPending}
-              className={`px-3 py-2 rounded-lg border text-sm font-bold inline-flex items-center gap-1.5 ${
-                rebuildBalanceMutation.isPending
-                  ? 'border-slate-200 bg-slate-100 text-slate-400 cursor-not-allowed'
-                  : 'border-emerald-300 bg-emerald-50 text-emerald-800 hover:bg-emerald-100'
-              }`}
-              data-testid="treasury-rebuild-main-cashbox-balance"
-              title="إعادة حساب رصيد الخزنة الرئيسية من الحركات النشطة فقط"
-            >
-              {rebuildBalanceMutation.isPending && (
-                <RefreshCcw size={14} className="animate-spin" />
-              )}
-              إعادة بناء رصيد الخزنة
-            </button>
-          )}
-          {/* PR-FIN-PAYACCT-4D-DRIFT-HISTORICAL-CLEANUP-1 — owner-only diagnostic.
-              DRY RUN ONLY: opens a read-only preview of the historical
-              cleanup plan. Cannot trigger execute from this UI. */}
-          {canPreviewDriftCleanup && (
-            <button
-              type="button"
-              onClick={() => setShowDriftCleanupPreview(true)}
-              className="px-3 py-2 rounded-lg border border-amber-300 bg-amber-50 text-sm font-bold text-amber-800 hover:bg-amber-100 inline-flex items-center gap-1.5"
-              data-testid="treasury-drift-cleanup-preview"
-              title="معاينة تنظيف فروقات الخزنة (قراءة فقط — لا تنفّذ أي تغييرات)"
-            >
-              معاينة تنظيف فروقات الخزنة
-            </button>
+          {/* PR-FIN-CASHBOXES-TREASURY-CLEANUP — the
+              "إعادة بناء رصيد الخزنة" and "معاينة تنظيف فروقات الخزنة"
+              buttons that lived here have been retired from the daily-use
+              treasury page. Their backend endpoints
+              (`accountsApi.rebuildCashboxBalance`,
+              `accountsApi.driftCleanupPreview`) are intentionally
+              preserved for future ad-hoc runs from a dedicated
+              diagnostics surface. */}
+          {canManageAccounts && (
+            <QuickActionsDropdown
+              onAddBank={() => setPaCreate({ open: true, method: 'bank_transfer' })}
+              onAddWallet={() => setPaCreate({ open: true, method: 'wallet' })}
+              onAddInstapay={() => setPaCreate({ open: true, method: 'instapay' })}
+              onAddCard={() => setPaCreate({ open: true, method: 'card_visa' })}
+              onAddCheck={() => setPaCreate({ open: true, method: 'check' })}
+            />
           )}
           <OverflowMenu
             open={showOverflow}
@@ -731,36 +670,21 @@ export default function Cashboxes() {
         </div>
       </div>
 
-      {/* Right rail (RTL: rail is the FIRST grid child → renders RIGHT) + main column.
-          PR-FIN-CASHBOXES-TREASURY-GRID — the cash-only summary tile that
-          used to live here has been promoted to a full-width responsive
-          grid of *all* active cashboxes at the top of the main column,
-          so a freshly-created ewallet/bank/check cashbox shows up
-          automatically. The rail keeps quick-actions + alerts. */}
-      <div className="grid grid-cols-1 xl:grid-cols-[320px_1fr] gap-4" data-testid="treasury-grid">
-        <aside className="space-y-3 xl:order-first" data-testid="treasury-rail">
-          {canManageAccounts && (
-            <div
-              className="rounded-2xl border border-slate-200 bg-white p-4 space-y-2"
-              data-testid="treasury-quick-actions"
-            >
-              <h3 className="font-bold text-sm text-slate-800 mb-2">إجراءات سريعة</h3>
-              <QuickAction onClick={() => setPaCreate({ open: true, method: 'bank_transfer' })} icon={<Building2 size={14} />}  label="إضافة حساب بنكي"          testId="quick-add-bank" />
-              <QuickAction onClick={() => setPaCreate({ open: true, method: 'wallet' })}        icon={<Smartphone size={14} />} label="إضافة محفظة إلكترونية"  testId="quick-add-wallet" />
-              <QuickAction onClick={() => setPaCreate({ open: true, method: 'instapay' })}      icon={<Smartphone size={14} />} label="إضافة حساب InstaPay"    testId="quick-add-instapay" />
-              <QuickAction onClick={() => setPaCreate({ open: true, method: 'card_visa' })}     icon={<CreditCard size={14} />} label="إضافة جهاز POS / بطاقة" testId="quick-add-card" />
-              <QuickAction onClick={() => setPaCreate({ open: true, method: 'check' })}         icon={<FileCheck size={14} />}  label="إضافة حساب شيكات"       testId="quick-add-check" />
-            </div>
-          )}
-
+      {/* PR-FIN-CASHBOXES-TREASURY-CLEANUP — main column is now full
+          width. The previous 320px right rail held two things:
+            1. "إجراءات سريعة" card → promoted to a single dropdown
+               button in the page header (`QuickActionsDropdown`).
+            2. <PaymentAccountAlerts /> → moved into the main column
+               above the cashbox grid so the operator sees drift /
+               no-default warnings without scanning a side panel.
+          The two-column grid + aside are gone. */}
+      <div className="space-y-4" data-testid="treasury-grid">
+        <div className="space-y-4 min-w-0">
           <PaymentAccountAlerts
             accounts={balances as unknown as PaymentAccount[]}
             balances={balances}
             drifts={drifts}
           />
-        </aside>
-
-        <div className="space-y-4 min-w-0">
           {/* PR-FIN-CASHBOXES-TREASURY-GRID — responsive grid of every
               active cashbox (cash + ewallet + bank + check). Cards
               auto-appear when a new cashbox is created (no hardcoded
@@ -1009,13 +933,12 @@ export default function Cashboxes() {
             onPageSizeChange={(n) => { setPageSize(n); setPage(1); }}
           />
 
-          {/* PR-FIN-PAYACCT-4D-UX-FIX-9 — historical-payment
-              reconciliation. Renders only when at least one bucket
-              of unattached rows exists. Cash entries surface the
-              "النقدية تُسجَّل عبر الخزنة" explanation; instapay
-              entries surface a guarded "ربط ..." action button for
-              admins. */}
-          <UnattachedReconciliationPanel canManage={canManageAccounts} />
+          {/* PR-FIN-CASHBOXES-TREASURY-CLEANUP — the
+              "سجلّ تاريخي للعمليات القديمة" /
+              "عمليات قديمة غير مرتبطة بحساب دفع" panel
+              (UnattachedReconciliationPanel) was retired from the
+              daily-use treasury page. The component file is preserved
+              for future re-use from a dedicated diagnostics surface. */}
 
           {/* Bottom 3 dashboard cards */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-3" data-testid="treasury-summary">
@@ -1168,13 +1091,6 @@ export default function Cashboxes() {
         );
       })()}
 
-      {/* PR-FIN-PAYACCT-4D-DRIFT-HISTORICAL-CLEANUP-1 — DRY RUN preview modal.
-          Read-only diagnostic; cannot trigger execute from this UI. */}
-      {showDriftCleanupPreview && (
-        <DriftCleanupPreviewModal
-          onClose={() => setShowDriftCleanupPreview(false)}
-        />
-      )}
     </div>
   );
 }
@@ -1213,27 +1129,6 @@ function KpiTile({
       <div className={`font-black text-slate-900 truncate ${valueClass ?? 'text-2xl'}`}>{value}</div>
       {suffix && <div className="text-[10px] text-slate-500 mt-0.5">{suffix}</div>}
     </div>
-  );
-}
-
-function QuickAction({
-  onClick, icon, label, testId,
-}: {
-  onClick: () => void;
-  icon: React.ReactNode;
-  label: string;
-  testId: string;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="w-full flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-200 bg-white text-sm text-slate-700 hover:bg-slate-50 hover:border-pink-300 transition"
-      data-testid={testId}
-    >
-      <span className="text-pink-600">{icon}</span>
-      <span className="font-bold">{label}</span>
-    </button>
   );
 }
 
@@ -1387,6 +1282,88 @@ function OverflowMenu({
               <button type="button" onClick={onAddCheck}   className="w-full text-right px-3 py-2 text-sm hover:bg-slate-50 inline-flex items-center gap-2" data-testid="overflow-add-check">   <FileCheck  size={14} /> إضافة حساب شيكات</button>
             </>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * PR-FIN-CASHBOXES-TREASURY-CLEANUP — header-level quick-actions
+ * dropdown that replaces the side-rail "إجراءات سريعة" card. One
+ * compact button labelled "إجراءات سريعة" (icon + caret), opens a
+ * menu of payment-account create shortcuts. Each item triggers the
+ * exact same `setPaCreate({ open: true, method })` flow the side
+ * card used, so the existing `PaymentAccountModal` with its
+ * pre-filled method opens unchanged. The dropdown closes on:
+ *   • click outside (mousedown listener)
+ *   • Escape key
+ *   • after any menu-item activation
+ * Keyboard: focusable button, role="menu" container, role="menuitem"
+ * children — works with Tab/Enter/Space natively.
+ *
+ * Per-item testids preserve the existing `quick-add-{bank|wallet|
+ * instapay|card|check}` keys so the four end-to-end Settings + create-
+ * flow tests don't have to be rewritten — they just need to open the
+ * dropdown first.
+ */
+function QuickActionsDropdown({
+  onAddBank, onAddWallet, onAddInstapay, onAddCard, onAddCheck,
+}: {
+  onAddBank: () => void;
+  onAddWallet: () => void;
+  onAddInstapay: () => void;
+  onAddCard: () => void;
+  onAddCheck: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    function onDoc(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') setOpen(false);
+    }
+    document.addEventListener('mousedown', onDoc);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDoc);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  function fire(handler: () => void) {
+    setOpen(false);
+    handler();
+  }
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        className="px-3 py-2 rounded-lg border border-pink-300 bg-pink-50 text-sm font-bold text-pink-700 hover:bg-pink-100 inline-flex items-center gap-1.5"
+        data-testid="treasury-quick-actions-dropdown"
+        title="إجراءات سريعة"
+      >
+        <Plus size={14} /> إجراءات سريعة
+        <ChevronDown size={12} className={`transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && (
+        <div
+          className="absolute left-0 mt-1 w-64 rounded-lg border border-slate-200 bg-white shadow-lg z-30"
+          role="menu"
+          data-testid="treasury-quick-actions-menu"
+        >
+          <button type="button" role="menuitem" onClick={() => fire(onAddBank)}     className="w-full text-right px-3 py-2 text-sm hover:bg-slate-50 inline-flex items-center gap-2" data-testid="quick-add-bank">     <Building2  size={14} /> إضافة حساب بنكي</button>
+          <button type="button" role="menuitem" onClick={() => fire(onAddWallet)}   className="w-full text-right px-3 py-2 text-sm hover:bg-slate-50 inline-flex items-center gap-2" data-testid="quick-add-wallet">   <Smartphone size={14} /> إضافة محفظة إلكترونية</button>
+          <button type="button" role="menuitem" onClick={() => fire(onAddInstapay)} className="w-full text-right px-3 py-2 text-sm hover:bg-slate-50 inline-flex items-center gap-2" data-testid="quick-add-instapay"> <Smartphone size={14} /> إضافة حساب InstaPay</button>
+          <button type="button" role="menuitem" onClick={() => fire(onAddCard)}     className="w-full text-right px-3 py-2 text-sm hover:bg-slate-50 inline-flex items-center gap-2" data-testid="quick-add-card">     <CreditCard size={14} /> إضافة جهاز POS / بطاقة</button>
+          <button type="button" role="menuitem" onClick={() => fire(onAddCheck)}    className="w-full text-right px-3 py-2 text-sm hover:bg-slate-50 inline-flex items-center gap-2" data-testid="quick-add-check">    <FileCheck  size={14} /> إضافة حساب شيكات</button>
         </div>
       )}
     </div>

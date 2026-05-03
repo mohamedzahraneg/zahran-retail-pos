@@ -283,12 +283,14 @@ describe('<Cashboxes /> — PR-FIN-PAYACCT-4D-UX-FIX table-first layout', () => 
     ).toBeInTheDocument();
   });
 
-  // ─── 2. Right-rail RTL position ────────────────────────────────
-  it('right-rail is the FIRST child of the responsive grid (renders on the RIGHT in RTL)', () => {
+  // ─── 2. Layout (post PR-FIN-CASHBOXES-TREASURY-CLEANUP) ────────
+  // The 320px right rail was retired and the page now uses a single
+  // full-width main column. The "treasury-rail" testid is gone; the
+  // alerts moved to the main column (asserted in a dedicated spec).
+  it('main treasury area renders without a side rail', () => {
     renderPage();
-    const grid = screen.getByTestId('treasury-grid');
-    const rail = screen.getByTestId('treasury-rail');
-    expect(grid.firstElementChild).toBe(rail);
+    expect(screen.getByTestId('treasury-grid')).toBeInTheDocument();
+    expect(screen.queryByTestId('treasury-rail')).toBeNull();
   });
 
   // ─── 3. DOM order: KPI → warnings → filters → table → bottom ───
@@ -395,11 +397,16 @@ describe('<Cashboxes /> — PR-FIN-PAYACCT-4D-UX-FIX table-first layout', () => 
   });
 
   // ─── 9. Cheque support ─────────────────────────────────────────
-  it('cheque support is reachable from the rail and the overflow menu', async () => {
+  // Updated for PR-FIN-CASHBOXES-TREASURY-CLEANUP: the side-rail
+  // "إجراءات سريعة" card was replaced by the
+  // `treasury-quick-actions-dropdown` button in the page header.
+  // The dropdown must be opened first to reveal `quick-add-check`.
+  it('cheque support is reachable from the quick-actions dropdown and the overflow menu', async () => {
     renderPage();
     await waitFor(() =>
-      expect(screen.getByTestId('treasury-quick-actions')).toBeInTheDocument(),
+      expect(screen.getByTestId('treasury-quick-actions-dropdown')).toBeInTheDocument(),
     );
+    fireEvent.click(screen.getByTestId('treasury-quick-actions-dropdown'));
     expect(screen.getByTestId('quick-add-check')).toBeInTheDocument();
     // Open the overflow → cashbox-side cheque entry must be present.
     fireEvent.click(screen.getByTestId('treasury-overflow'));
@@ -611,10 +618,12 @@ describe('<Cashboxes /> — PR-FIN-PAYACCT-4D-UX-FIX table-first layout', () => 
     // No ewallet cashbox in fixtures → empty-state will appear.
     cashboxesMock.mockResolvedValue([CASH_BOX, BANK_BOX]);
     renderPage();
+    // PR-FIN-CASHBOXES-TREASURY-CLEANUP — quick-add buttons now live
+    // inside the header dropdown; open it before clicking.
     await waitFor(() =>
-      expect(screen.getByTestId('quick-add-instapay')).toBeInTheDocument(),
+      expect(screen.getByTestId('treasury-quick-actions-dropdown')).toBeInTheDocument(),
     );
-    // Open PaymentAccountModal pre-filled to instapay.
+    fireEvent.click(screen.getByTestId('treasury-quick-actions-dropdown'));
     fireEvent.click(screen.getByTestId('quick-add-instapay'));
     await waitFor(() =>
       expect(screen.getByTestId('payment-account-modal-cashbox-empty')).toBeInTheDocument(),
@@ -633,8 +642,11 @@ describe('<Cashboxes /> — PR-FIN-PAYACCT-4D-UX-FIX table-first layout', () => 
   it('PR-4D-UX-FIX-4: vodafone_cash → kind=ewallet pre-filled "خزنة Vodafone Cash"', async () => {
     cashboxesMock.mockResolvedValue([CASH_BOX, BANK_BOX]);
     renderPage();
+    // PR-FIN-CASHBOXES-TREASURY-CLEANUP — wait on a stable header
+    // testid (the generic add button) instead of `quick-add-wallet`,
+    // which now lives inside the header dropdown.
     await waitFor(() =>
-      expect(screen.getByTestId('quick-add-wallet')).toBeInTheDocument(),
+      expect(screen.getByTestId('treasury-add-payment-account')).toBeInTheDocument(),
     );
     // Open the create-account modal first (no quick-add for vodafone_cash;
     // we use the generic "add payment account" and switch method).
@@ -661,8 +673,9 @@ describe('<Cashboxes /> — PR-FIN-PAYACCT-4D-UX-FIX table-first layout', () => 
     cashboxesMock.mockResolvedValue([CASH_BOX]);
     renderPage();
     await waitFor(() =>
-      expect(screen.getByTestId('quick-add-card')).toBeInTheDocument(),
+      expect(screen.getByTestId('treasury-quick-actions-dropdown')).toBeInTheDocument(),
     );
+    fireEvent.click(screen.getByTestId('treasury-quick-actions-dropdown'));
     fireEvent.click(screen.getByTestId('quick-add-card'));
     await waitFor(() =>
       expect(screen.getByTestId('payment-account-modal-cashbox-empty')).toBeInTheDocument(),
@@ -679,8 +692,9 @@ describe('<Cashboxes /> — PR-FIN-PAYACCT-4D-UX-FIX table-first layout', () => 
     cashboxesMock.mockResolvedValue([CASH_BOX]); // no bank → empty-state
     renderPage();
     await waitFor(() =>
-      expect(screen.getByTestId('quick-add-bank')).toBeInTheDocument(),
+      expect(screen.getByTestId('treasury-quick-actions-dropdown')).toBeInTheDocument(),
     );
+    fireEvent.click(screen.getByTestId('treasury-quick-actions-dropdown'));
     fireEvent.click(screen.getByTestId('quick-add-bank'));
     await waitFor(() =>
       expect(screen.getByTestId('payment-account-modal-cashbox-empty')).toBeInTheDocument(),
@@ -697,8 +711,9 @@ describe('<Cashboxes /> — PR-FIN-PAYACCT-4D-UX-FIX table-first layout', () => 
     cashboxesMock.mockResolvedValue([CASH_BOX]); // no check cashbox → empty-state
     renderPage();
     await waitFor(() =>
-      expect(screen.getByTestId('quick-add-check')).toBeInTheDocument(),
+      expect(screen.getByTestId('treasury-quick-actions-dropdown')).toBeInTheDocument(),
     );
+    fireEvent.click(screen.getByTestId('treasury-quick-actions-dropdown'));
     fireEvent.click(screen.getByTestId('quick-add-check'));
     await waitFor(() =>
       expect(screen.getByTestId('payment-account-modal-cashbox-empty')).toBeInTheDocument(),
