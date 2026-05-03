@@ -455,9 +455,18 @@ export default function Analytics() {
           scope="period"
           to="/returns"
         />
+        {/* PR-FIN-ANALYTICS-LIQUIDITY-GL — the BE numerator now sums
+            GL liquid-asset codes (1111 cash + 1113 bank + 1114 wallet
+            + 1115 check), posted-non-void only. The label is updated
+            to "السيولة المحاسبية" so the operator knows it's the
+            GL-derived figure (not the cash-drawer-only number from
+            the earlier formula). The tooltip spells out which
+            accounts roll up. */}
         <IndicatorTile
           icon={<Wallet size={16} />}
-          label="السيولة"
+          label="السيولة المحاسبية"
+          tooltip="تشمل النقدية والبنوك والمحافظ والشيكات من الأستاذ العام"
+          testId="kpi-liquidity"
           value={EGP(indValue(indicators?.cash_on_hand))}
           sub={`تكفي ${indValue(indicators?.cash_runway_days)} يوم`}
           color={
@@ -656,6 +665,8 @@ function IndicatorTile({
   color,
   scope,
   to,
+  tooltip,
+  testId,
 }: {
   icon: React.ReactNode;
   label: string;
@@ -665,6 +676,12 @@ function IndicatorTile({
   scope: KpiScope;
   /** Optional drill-down target. When set, tile shows "تفاصيل ←". */
   to?: string;
+  /** Optional native tooltip (`title=`) on the label — used for KPIs
+      whose definition isn't obvious from the label alone (e.g.
+      "السيولة المحاسبية" → which GL accounts roll up). */
+  tooltip?: string;
+  /** Optional `data-testid` on the tile root so specs can target it. */
+  testId?: string;
 }) {
   const cls: Record<string, string> = {
     emerald: 'bg-emerald-50 border-emerald-200 text-emerald-800',
@@ -674,9 +691,15 @@ function IndicatorTile({
     slate: 'bg-slate-50 border-slate-200 text-slate-800',
   };
   return (
-    <div className={`card p-3 border-2 min-w-0 h-full ${cls[color]}`}>
+    <div
+      className={`card p-3 border-2 min-w-0 h-full ${cls[color]}`}
+      data-testid={testId}
+    >
       <div className="flex items-center justify-between gap-1">
-        <div className="text-xs font-bold flex items-center gap-1 opacity-80 min-w-0 break-words">
+        <div
+          className="text-xs font-bold flex items-center gap-1 opacity-80 min-w-0 break-words"
+          title={tooltip}
+        >
           <span className="shrink-0">{icon}</span>
           <span className="break-words">{label}</span>
         </div>
