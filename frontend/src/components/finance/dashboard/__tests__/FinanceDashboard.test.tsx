@@ -64,6 +64,13 @@ function buildFixture(overrides: Partial<Data> = {}): Data {
       period_total: 250,
       period_count: 3,
       period_largest: { category: 'إيجار', amount: 150 },
+      // PR-FIN-DASHBOARD-EXPENSES-CASH-BASIS-REVERT — breakdown defaults
+      // (180 advances + 70 non-advances = 250 headline). The actual
+      // numbers don't matter for most specs; cash-basis specs override.
+      period_advances_total: 180,
+      period_advances_count: 2,
+      period_non_advances_total: 70,
+      period_non_advances_count: 1,
     },
     balances: {
       customers: { total_due: 1000, count: 5, top: { name: 'أحمد', amount: 400 } },
@@ -156,9 +163,11 @@ describe('<FinanceDashboard />', () => {
     expect(screen.getByText('أرصدة العملاء')).toBeInTheDocument();
     expect(screen.getByText('أرصدة الموردين')).toBeInTheDocument();
     expect(screen.getByText('أرصدة الموظفين')).toBeInTheDocument();
-    // PR-FIN-2-HOTFIX-4 — title relabeled to surface period totals.
+    // PR-FIN-DASHBOARD-EXPENSES-CASH-BASIS-REVERT — title relabeled
+    // from "المصروفات (...)" to "المصروفات النقدية (...)" to make the
+    // basis explicit (cash-basis card).
     expect(
-      screen.getByText('المصروفات (اليوم / الفترة)'),
+      screen.getByText('المصروفات النقدية (اليوم / الفترة)'),
     ).toBeInTheDocument();
     expect(screen.getByText('مؤشرات السلامة المالية')).toBeInTheDocument();
   });
@@ -317,14 +326,19 @@ describe('<FinanceDashboard />', () => {
           period_total: 3821,
           period_count: 17,
           period_largest: { category: 'كهرباء ومرافق', amount: 2000 },
+          period_advances_total: 800,
+          period_advances_count: 3,
+          period_non_advances_total: 3021,
+          period_non_advances_count: 14,
         },
       }));
       await waitFor(() =>
         expect(screen.getByTestId('card-today-expenses')).toBeInTheDocument(),
       );
-      // Title relabeled.
+      // PR-FIN-DASHBOARD-EXPENSES-CASH-BASIS-REVERT — title carries
+      // "النقدية" so the basis is explicit.
       expect(
-        screen.getByText('المصروفات (اليوم / الفترة)'),
+        screen.getByText('المصروفات النقدية (اليوم / الفترة)'),
       ).toBeInTheDocument();
       // Both sections render.
       expect(screen.getByTestId('expenses-today-total')).toBeInTheDocument();
@@ -494,6 +508,124 @@ describe('<FinanceDashboard />', () => {
       );
       expect(screen.getByTestId('employees-sign-caption')).toBeInTheDocument();
       expect(screen.getByText('الموجب يعني عهد/سلف على الموظف')).toBeInTheDocument();
+    });
+  });
+
+  /**
+   * PR-FIN-DASHBOARD-EXPENSES-CASH-BASIS-REVERT — the expenses card
+   * was switched to accrual-leaning by PR #257 (advances out, wage
+   * accruals in). The user clarified afterwards that the card must
+   * be cash-basis: every EGP that left the cash drawer for an
+   * operating purpose during the range is an "expense" on this card.
+   * Advances ARE included (cash physically left), wage accruals are
+   * NOT added to the headline (that would double-count the same
+   * wage event the advance pre-pays).
+   *
+   * These specs lock the new title, the cash-basis caption, the
+   * breakdown rows (sums to headline), and the production-style
+   * 7,796 fixture so the bug can't regress.
+   */
+  describe('TodayExpensesCard — cash-basis revert (PR-FIN-DASHBOARD-EXPENSES-CASH-BASIS-REVERT)', () => {
+    function expensesFixture(daily_expenses: Data['daily_expenses']): Data {
+      return buildFixture({ daily_expenses });
+    }
+
+    it('title is "المصروفات النقدية (...)" — basis is explicit', async () => {
+      renderPage();
+      await waitFor(() =>
+        expect(screen.getByTestId('card-today-expenses')).toBeInTheDocument(),
+      );
+      expect(
+        screen.getByText('المصروفات النقدية (اليوم / الفترة)'),
+      ).toBeInTheDocument();
+      // The unscoped pre-PR title is gone.
+      expect(screen.queryByText('المصروفات (اليوم / الفترة)')).toBeNull();
+    });
+
+    it('renders the cash-basis caption explaining the rule', async () => {
+      renderPage();
+      await waitFor(() =>
+        expect(screen.getByTestId('expenses-cash-basis-caption')).toBeInTheDocument(),
+      );
+      expect(
+        screen.getByText(
+          'كل النقدية التي خرجت من الخزائن خلال الفترة، تشمل السلف والمصروفات التشغيلية',
+        ),
+      ).toBeInTheDocument();
+    });
+
+    it('production-style fixture: period_total=7,796 with advances 4,051 + non-advances 3,745 — both rows render', async () => {
+      // The user's reported old/new bridge range is 2026-04-01..05-03.
+      // Headline restored to 7,796; breakdown rows sum to it exactly.
+      renderPage(expensesFixture({
+        today_total: 70,
+        today_count: 1,
+        today_largest: { category: 'سلف الموظفين', amount: 70 },
+        period_total: 7796,
+        period_count: 30,
+        period_largest: { category: 'سلف الموظفين', amount: 2000 },
+        period_advances_total: 4051,
+        period_advances_count: 15,
+        period_non_advances_total: 3745,
+        period_non_advances_count: 15,
+      }));
+      await waitFor(() =>
+        expect(screen.getByTestId('card-today-expenses')).toBeInTheDocument(),
+      );
+      // Headline restored to old (cash-basis) value.
+      expect(screen.getByTestId('expenses-period-total').textContent).toMatch(/7,796/);
+      expect(screen.getByTestId('expenses-period-count').textContent).toMatch(/30/);
+      // The advance-on-today (the 70 EGP that PR #257 was hiding) is back.
+      expect(screen.getByTestId('expenses-today-total').textContent).toMatch(/70/);
+      // Breakdown rows present + correct.
+      expect(screen.getByText('منها سلف موظفين')).toBeInTheDocument();
+      expect(screen.getByTestId('expenses-period-advances').textContent).toMatch(/4,051/);
+      expect(screen.getByText('منها مصروفات تشغيلية أخرى')).toBeInTheDocument();
+      expect(screen.getByTestId('expenses-period-non-advances').textContent).toMatch(/3,745/);
+    });
+
+    it('breakdown rows sum to headline exactly (no overlap, no missing)', async () => {
+      const fixture = expensesFixture({
+        today_total: 0,
+        today_count: 0,
+        today_largest: null,
+        period_total: 12345,
+        period_count: 7,
+        period_largest: { category: 'مستلزمات', amount: 5000 },
+        period_advances_total: 4321,
+        period_advances_count: 3,
+        period_non_advances_total: 8024,
+        period_non_advances_count: 4,
+      });
+      // 4,321 + 8,024 = 12,345 (headline) and 3 + 4 = 7 (count)
+      renderPage(fixture);
+      await waitFor(() =>
+        expect(screen.getByTestId('expenses-period-total')).toBeInTheDocument(),
+      );
+      expect(screen.getByTestId('expenses-period-total').textContent).toMatch(/12,345/);
+      expect(screen.getByTestId('expenses-period-advances').textContent).toMatch(/4,321/);
+      expect(screen.getByTestId('expenses-period-non-advances').textContent).toMatch(/8,024/);
+    });
+
+    it('legacy single-bucket fixture (zero breakdown) still renders cleanly', async () => {
+      renderPage(expensesFixture({
+        today_total: 0,
+        today_count: 0,
+        today_largest: null,
+        period_total: 0,
+        period_count: 0,
+        period_largest: null,
+        period_advances_total: 0,
+        period_advances_count: 0,
+        period_non_advances_total: 0,
+        period_non_advances_count: 0,
+      }));
+      await waitFor(() =>
+        expect(screen.getByTestId('card-today-expenses')).toBeInTheDocument(),
+      );
+      // No NaN/undefined leaking into either breakdown row.
+      expect(screen.getByTestId('expenses-period-advances').textContent).not.toMatch(/NaN|undefined/);
+      expect(screen.getByTestId('expenses-period-non-advances').textContent).not.toMatch(/NaN|undefined/);
     });
   });
 });

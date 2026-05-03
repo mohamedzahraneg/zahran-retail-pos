@@ -51,6 +51,11 @@ export interface FinanceDashboard {
   };
 
   // PR-FIN-2-HOTFIX-4 — both today's and the period's slices.
+  // PR-FIN-DASHBOARD-EXPENSES-CASH-BASIS-REVERT — `period_advances_*`
+  // and `period_non_advances_*` are an informational breakdown of
+  // `period_total` (they sum to it exactly). The headline figure is
+  // cash-basis: every EGP that left the cash drawer for an expense
+  // reference, advances included.
   daily_expenses: {
     today_total: number;
     today_count: number;
@@ -58,6 +63,10 @@ export interface FinanceDashboard {
     period_total: number;
     period_count: number;
     period_largest: { category: string | null; amount: number } | null;
+    period_advances_total: number;
+    period_advances_count: number;
+    period_non_advances_total: number;
+    period_non_advances_count: number;
   };
 
   balances: {
