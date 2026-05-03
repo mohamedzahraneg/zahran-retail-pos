@@ -99,8 +99,13 @@ export function PaymentAccountDetailsPanel({
     setRangeKey(k);
     if (k === 'custom') return; // operator types from/to themselves
     const range = resolveSmartRange(k);
-    setFrom(range.from);
-    setTo(range.to);
+    // PR-FIN-CASHBOXES-TREASURY-GRID-FIXES: 'all' returns undefined
+    // for both ends to mean "no date filter". The from/to state on
+    // this panel is a `string` (driving date inputs), so we coerce to
+    // empty string — the existing query-builder elsewhere already
+    // treats '' as undefined.
+    setFrom(range.from ?? '');
+    setTo(range.to ?? '');
     setPage(1);
   }
   // Pagination

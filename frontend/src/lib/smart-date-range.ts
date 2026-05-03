@@ -1,23 +1,26 @@
 /**
  * smart-date-range.ts — PR-FIN-PAYACCT-4D-UX-FIX-4
  *
- * Helpers for the 4 smart-filter chips used by both the cashbox
- * details modal and the per-account details panel:
+ * Helpers for the smart-filter chips used by both the cashbox details
+ * modal and the per-account details panel:
  *
  *   - اليوم          → start of today           ⟶ today
  *   - هذا الأسبوع    → start of current week    ⟶ today (Saturday-start, EG convention)
  *   - هذا الشهر      → start of current month   ⟶ today
+ *   - الكل           → no date filter (PR-FIN-CASHBOXES-TREASURY-GRID-FIXES)
  *   - مخصص           → operator-supplied from / to
  *
  * Each preset returns ISO YYYY-MM-DD strings sized for the backend's
- * `from` / `to` query params.
+ * `from` / `to` query params (or undefined for `'all'`).
  */
 
-export type SmartRangeKey = 'today' | 'week' | 'month' | 'custom';
+export type SmartRangeKey = 'today' | 'week' | 'month' | 'all' | 'custom';
 
 export interface SmartRange {
-  from: string;
-  to: string;
+  /** ISO YYYY-MM-DD or undefined (for `'all'` = no date filter). */
+  from: string | undefined;
+  /** ISO YYYY-MM-DD or undefined (for `'all'` = no date filter). */
+  to: string | undefined;
 }
 
 /** Format a Date as `YYYY-MM-DD` in local time. */
@@ -72,6 +75,9 @@ export function resolveSmartRange(
       return { from: isoDate(startOfWeekSaturday(now)), to: today };
     case 'month':
       return { from: isoDate(startOfMonth(now)), to: today };
+    case 'all':
+      // No date filter — caller should send neither `from` nor `to`.
+      return { from: undefined, to: undefined };
     case 'custom':
     default:
       return { from: isoDate(startOfMonth(now)), to: today };
@@ -82,5 +88,6 @@ export const SMART_RANGE_LABELS_AR: Record<SmartRangeKey, string> = {
   today: 'اليوم',
   week: 'هذا الأسبوع',
   month: 'هذا الشهر',
+  all: 'الكل',
   custom: 'مخصص',
 };
