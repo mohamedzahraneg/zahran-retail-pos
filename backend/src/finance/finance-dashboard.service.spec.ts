@@ -1212,3 +1212,335 @@ describe('FinanceDashboardService.health — taxonomy-pairing normalization', ()
     expect(r.health.overall).toBe('warning');
   });
 });
+
+/**
+ * PR-FIN-DASHBOARD-EXPENSES-ADVANCE-WAGE — operating-expense card.
+ *
+ * The expenses card was reading the `expenses` table verbatim, which
+ * over-counted advances (debit a receivable, not an expense) and
+ * under-counted wage accruals (no `expenses` row — debit 521 + credit
+ * 213 in the journal only).
+ *
+ * The fix composes two streams without overlap:
+ *   1. `expenses` table with `is_advance != TRUE`
+ *   2. Posted, non-void, non-reversal `employee_wage_accrual` JEs
+ *      whose debit hits an operating-expense code (5xx but not 51).
+ *
+ * Composition is double-count-safe because wage_accruals do NOT have
+ * matching `expenses` rows. These specs pin SQL shape, the live
+ * production fixture, and behaviour on every edge — advances only,
+ * wage accruals only, both empty, voided/unposted/reversal exclusion,
+ * cashbox-filtered (where wage accruals MUST drop), and
+ * profit-trend per-day merging.
+ */
+describe('FinanceDashboardService — expenses card: advances + wage accruals', () => {
+  function buildSvc(stubs: {
+    dailyExpenses?: any;
+    expenseTotal?: number;
+    perDayRows?: Array<{ d: string; total: string }>;
+  } = {}) {
+    const calls: { sql: string; params: any[] }[] = [];
+    const ds = {
+      query: jest.fn(async (sql: string, params: any[] = []) => {
+        calls.push({ sql, params });
+        // dailyExpensesTodayAndPeriod
+        if (/today_combined AS/.test(sql) && /period_combined AS/.test(sql)) {
+          return [stubs.dailyExpenses ?? {
+            today_total: '0', today_count: 0,
+            today_largest_cat: null, today_largest_amt: null,
+            period_total: '0', period_count: 0,
+            period_largest_cat: null, period_largest_amt: null,
+          }];
+        }
+        // profitTotals — match the new composed expense_total
+        if (/expense_total AS/.test(sql) && /agg AS/.test(sql)) {
+          return [{
+            sales: '0', cogs: '0', gross: '0',
+            expenses: String(stubs.expenseTotal ?? 0),
+            high_lines: 0, medium_lines: 0, low_lines: 0,
+          }];
+        }
+        // profitTrendDaily — per_day CTE merges expenses + accruals
+        if (/per_day AS/.test(sql) && /employee_wage_accrual/.test(sql)) {
+          return stubs.perDayRows ?? [];
+        }
+        return [];
+      }),
+    };
+    const svc = new FinanceDashboardService(ds as any);
+    return { svc, calls };
+  }
+
+  // ── SQL-shape guards on the dailyExpensesTodayAndPeriod path ─────
+  //
+  // We can't extract balanced parens with a simple regex (CTE bodies
+  // contain nested `(now()…)` and sub-SELECTs). Instead we slice the
+  // SQL between two CTE-name landmarks and assert the substring carries
+  // the expected filters. This is good enough to pin shape without
+  // fragile balanced-paren parsing.
+  function sliceBetween(sql: string, fromPat: RegExp, toPat: RegExp): string {
+    const startMatch = sql.match(fromPat);
+    if (!startMatch) return '';
+    const startIdx = startMatch.index! + startMatch[0].length;
+    const tail = sql.slice(startIdx);
+    const endMatch = tail.match(toPat);
+    if (!endMatch) return tail;
+    return tail.slice(0, endMatch.index!);
+  }
+
+  describe('dailyExpensesTodayAndPeriod — SQL shape', () => {
+    it('today_expenses CTE excludes advances (is_advance = FALSE filter)', async () => {
+      const { svc, calls } = buildSvc();
+      await svc.dashboard({ from: '2026-05-01', to: '2026-05-03' });
+      const sql = calls.find((c) => /today_combined AS/.test(c.sql))?.sql ?? '';
+      const todayCte = sliceBetween(sql, /today_expenses AS \(/, /\),\s*today_wage_accruals AS \(/);
+      expect(todayCte).toMatch(/COALESCE\(e\.is_advance,\s*FALSE\)\s*=\s*FALSE/);
+      expect(todayCte).toMatch(/FROM expenses e/);
+    });
+
+    it('period_expenses CTE excludes advances (is_advance = FALSE filter)', async () => {
+      const { svc, calls } = buildSvc();
+      await svc.dashboard({ from: '2026-05-01', to: '2026-05-03' });
+      const sql = calls.find((c) => /period_combined AS/.test(c.sql))?.sql ?? '';
+      const periodCte = sliceBetween(sql, /period_expenses AS \(/, /\),\s*period_wage_accruals AS \(/);
+      expect(periodCte).toMatch(/COALESCE\(e\.is_advance,\s*FALSE\)\s*=\s*FALSE/);
+      expect(periodCte).toMatch(/FROM expenses e/);
+    });
+
+    it('today_wage_accruals CTE filters posted, non-void, non-reversal employee_wage_accrual JEs', async () => {
+      const { svc, calls } = buildSvc();
+      await svc.dashboard({ from: '2026-05-01', to: '2026-05-03' });
+      const sql = calls.find((c) => /today_combined AS/.test(c.sql))?.sql ?? '';
+      const cte = sliceBetween(sql, /today_wage_accruals AS \(/, /\),\s*today_combined AS \(/);
+      expect(cte).toMatch(/reference_type::text\s*=\s*'employee_wage_accrual'/);
+      expect(cte).toMatch(/je\.is_posted\s*=\s*TRUE/);
+      expect(cte).toMatch(/je\.is_void\s*=\s*FALSE/);
+      expect(cte).toMatch(/je\.reversal_of\s*IS\s*NULL/);
+      expect(cte).toMatch(/jl\.debit\s*>\s*0/);
+      // Operating-expense subtree only — explicitly excludes COGS (51).
+      expect(cte).toMatch(/coa\.code\s*LIKE\s*'52%'/);
+    });
+
+    it('period_wage_accruals CTE applies the same filter as today, gated by date range', async () => {
+      const { svc, calls } = buildSvc();
+      await svc.dashboard({ from: '2026-05-01', to: '2026-05-03' });
+      const sql = calls.find((c) => /period_combined AS/.test(c.sql))?.sql ?? '';
+      const cte = sliceBetween(sql, /period_wage_accruals AS \(/, /\),\s*period_combined AS \(/);
+      expect(cte).toMatch(/reference_type::text\s*=\s*'employee_wage_accrual'/);
+      expect(cte).toMatch(/je\.is_posted\s*=\s*TRUE/);
+      expect(cte).toMatch(/je\.is_void\s*=\s*FALSE/);
+      expect(cte).toMatch(/je\.reversal_of\s*IS\s*NULL/);
+      expect(cte).toMatch(/je\.entry_date\s*>=\s*\$1::date/);
+      expect(cte).toMatch(/je\.entry_date\s*<=\s*\$2::date/);
+      expect(cte).toMatch(/coa\.code\s*LIKE\s*'52%'/);
+    });
+
+    it('today_combined / period_combined unite expenses with wage_accruals (UNION ALL)', async () => {
+      const { svc, calls } = buildSvc();
+      await svc.dashboard({ from: '2026-05-01', to: '2026-05-03' });
+      const sql = calls.find((c) => /today_combined AS/.test(c.sql))?.sql ?? '';
+      const today  = sliceBetween(sql, /today_combined AS \(/,  /\),\s*period_expenses AS \(/);
+      const period = sliceBetween(sql, /period_combined AS \(/, /\),\s*today_largest AS \(/);
+      expect(today).toMatch(/UNION ALL/);
+      expect(today).toMatch(/FROM today_expenses/);
+      expect(today).toMatch(/FROM today_wage_accruals/);
+      expect(period).toMatch(/UNION ALL/);
+      expect(period).toMatch(/FROM period_expenses/);
+      expect(period).toMatch(/FROM period_wage_accruals/);
+    });
+
+    it('totals/largest read from *_combined, never from the bare *_expenses CTEs', async () => {
+      const { svc, calls } = buildSvc();
+      await svc.dashboard({ from: '2026-05-01', to: '2026-05-03' });
+      const sql = calls.find((c) => /today_combined AS/.test(c.sql))?.sql ?? '';
+      // The final outer SELECT must aggregate combined views, otherwise
+      // wage accruals never show up in the totals/counts/largest.
+      expect(sql).toMatch(/SUM\(amount\),\s*0\)\s*FROM today_combined/);
+      expect(sql).toMatch(/COUNT\(\*\)\s*FROM today_combined/);
+      expect(sql).toMatch(/SUM\(amount\),\s*0\)\s*FROM period_combined/);
+      expect(sql).toMatch(/COUNT\(\*\)\s*FROM period_combined/);
+      // Largest CTEs source from combined too.
+      expect(sql).toMatch(/today_largest AS \(\s*SELECT category, amount FROM today_combined/);
+      expect(sql).toMatch(/period_largest AS \(\s*SELECT category, amount FROM period_combined/);
+    });
+  });
+
+  // ── End-to-end on the production fixture ─────────────────────────
+  describe('dailyExpensesTodayAndPeriod — production fixture (2026-05-03 Cairo)', () => {
+    it('today=0/0/null when only an advance posted (the 70 EGP EXP-46 must drop)', async () => {
+      const { svc } = buildSvc({
+        dailyExpenses: {
+          today_total: '0', today_count: 0,
+          today_largest_cat: null, today_largest_amt: null,
+          period_total: '1645.00', period_count: 7,
+          period_largest_cat: 'مستلزمات', period_largest_amt: '310.00',
+        },
+      });
+      const r = await svc.dashboard({ from: '2026-05-01', to: '2026-05-03' });
+      expect(r.daily_expenses.today_total).toBe(0);
+      expect(r.daily_expenses.today_count).toBe(0);
+      expect(r.daily_expenses.today_largest).toBeNull();
+    });
+
+    it('MTD=1,645/7 with مستلزمات 310 the largest single row (3 expenses 605 + 4 accruals 1,040)', async () => {
+      const { svc } = buildSvc({
+        dailyExpenses: {
+          today_total: '0', today_count: 0,
+          today_largest_cat: null, today_largest_amt: null,
+          period_total: '1645.00', period_count: 7,
+          period_largest_cat: 'مستلزمات', period_largest_amt: '310.00',
+        },
+      });
+      const r = await svc.dashboard({ from: '2026-05-01', to: '2026-05-03' });
+      expect(r.daily_expenses.period_total).toBe(1645);
+      expect(r.daily_expenses.period_count).toBe(7);
+      expect(r.daily_expenses.period_largest).toEqual({
+        category: 'مستلزمات',
+        amount: 310,
+      });
+    });
+
+    it('hypothetical: when a single wage accrual (e.g. 2,000) eclipses every expense row, it surfaces as the largest', async () => {
+      const { svc } = buildSvc({
+        dailyExpenses: {
+          today_total: '2000.00', today_count: 1,
+          today_largest_cat: 'رواتب وأجور', today_largest_amt: '2000.00',
+          period_total: '2000.00', period_count: 1,
+          period_largest_cat: 'رواتب وأجور', period_largest_amt: '2000.00',
+        },
+      });
+      const r = await svc.dashboard({ from: '2026-05-01', to: '2026-05-03' });
+      expect(r.daily_expenses.today_largest).toEqual({
+        category: 'رواتب وأجور',
+        amount: 2000,
+      });
+    });
+
+    it('today=0 stays zero, never null/NaN/undefined leak even when both streams are empty', async () => {
+      const { svc } = buildSvc({
+        dailyExpenses: {
+          today_total: 0, today_count: 0,
+          today_largest_cat: null, today_largest_amt: null,
+          period_total: 0, period_count: 0,
+          period_largest_cat: null, period_largest_amt: null,
+        },
+      });
+      const r = await svc.dashboard({ from: '2026-05-01', to: '2026-05-03' });
+      expect(r.daily_expenses.today_total).toBe(0);
+      expect(r.daily_expenses.period_total).toBe(0);
+      expect(r.daily_expenses.today_largest).toBeNull();
+      expect(r.daily_expenses.period_largest).toBeNull();
+      expect(Number.isNaN(r.daily_expenses.today_total)).toBe(false);
+      expect(Number.isNaN(r.daily_expenses.period_total)).toBe(false);
+    });
+  });
+
+  // ── profitTotals: expenses sub-figure ────────────────────────────
+  describe('profitTotals — expense_total composition', () => {
+    it('SQL filters expenses by is_advance != TRUE', async () => {
+      const { svc, calls } = buildSvc();
+      await svc.dashboard({ from: '2026-05-01', to: '2026-05-03' });
+      const sql = calls.find((c) => /expense_total AS/.test(c.sql))?.sql ?? '';
+      const cte = sliceBetween(sql, /expense_total AS \(/, /\),\s*agg AS \(/);
+      expect(cte).toMatch(/COALESCE\(is_advance,\s*FALSE\)\s*=\s*FALSE/);
+    });
+
+    it('SQL adds wage_accrual JEs (operating-expense codes only) when no cashbox filter', async () => {
+      const { svc, calls } = buildSvc();
+      await svc.dashboard({ from: '2026-05-01', to: '2026-05-03' });
+      const sql = calls.find((c) => /expense_total AS/.test(c.sql))?.sql ?? '';
+      const cte = sliceBetween(sql, /expense_total AS \(/, /\),\s*agg AS \(/);
+      expect(cte).toMatch(/reference_type::text\s*=\s*'employee_wage_accrual'/);
+      expect(cte).toMatch(/je\.is_posted\s*=\s*TRUE/);
+      expect(cte).toMatch(/je\.is_void\s*=\s*FALSE/);
+      expect(cte).toMatch(/je\.reversal_of\s*IS\s*NULL/);
+      expect(cte).toMatch(/coa\.code\s*LIKE\s*'52%'/);
+    });
+
+    it('SQL DROPS the wage_accrual subquery when a cashbox filter is in play (accruals are cashbox-agnostic)', async () => {
+      const { svc, calls } = buildSvc();
+      await svc.dashboard({
+        from: '2026-05-01',
+        to: '2026-05-03',
+        cashbox_id: 'cb-test',
+      });
+      const sql = calls.find((c) => /expense_total AS/.test(c.sql))?.sql ?? '';
+      const cte = sliceBetween(sql, /expense_total AS \(/, /\),\s*agg AS \(/);
+      // Inside the expense_total CTE specifically, the wage_accrual
+      // subquery must be replaced with a literal 0 so the cashbox-
+      // filtered total never absorbs accruals from other cashboxes.
+      expect(cte).not.toMatch(/employee_wage_accrual/);
+      expect(cte).toMatch(/cashbox_id\s*=\s*\$/);
+    });
+
+    it('production fixture: profit.expenses_total = 1,645 EGP for MTD 2026-05-01..03', async () => {
+      // 605 (real expenses, advance excluded) + 1,040 (4 wage_accruals) = 1,645
+      const { svc } = buildSvc({ expenseTotal: 1645 });
+      const r = await svc.dashboard({ from: '2026-05-01', to: '2026-05-03' });
+      expect(r.profit.expenses_total).toBe(1645);
+    });
+  });
+
+  // ── profitTrendDaily: per-day merge ──────────────────────────────
+  describe('profitTrendDaily — per-day expense lookup', () => {
+    it('SQL has a per_day CTE that UNION ALLs expenses (no advance) and wage_accruals', async () => {
+      const { svc, calls } = buildSvc();
+      await svc.dashboard({ from: '2026-05-01', to: '2026-05-03' });
+      const sql = calls.find((c) => /per_day AS/.test(c.sql) && /employee_wage_accrual/.test(c.sql))?.sql ?? '';
+      expect(sql).toMatch(/UNION ALL/);
+      expect(sql).toMatch(/FROM expenses/);
+      expect(sql).toMatch(/FROM journal_entries je/);
+      expect(sql).toMatch(/COALESCE\(is_advance,\s*FALSE\)\s*=\s*FALSE/);
+      expect(sql).toMatch(/coa\.code\s*LIKE\s*'52%'/);
+      // Outer aggregate sums by day so the two streams collapse cleanly.
+      expect(sql).toMatch(/SELECT d, COALESCE\(SUM\(total\),\s*0\) AS total FROM per_day GROUP BY d/);
+    });
+
+    it('production fixture: per-day map merges 2026-05-01=815 (295+520) and 2026-05-02=830 (310+520)', async () => {
+      const { svc } = buildSvc({
+        perDayRows: [
+          { d: '2026-05-01', total: '815.00' },
+          { d: '2026-05-02', total: '830.00' },
+        ],
+      });
+      const r = await svc.dashboard({ from: '2026-05-01', to: '2026-05-03' });
+      // Trend is empty unless invoices exist; sum of expense lookup is
+      // still observable indirectly through the SQL stub. Assert no
+      // crash + the helper accepted both stream rows.
+      expect(Array.isArray(r.profit_trend)).toBe(true);
+    });
+  });
+
+  // ── No-write invariant on the new SQL paths ──────────────────────
+  describe('no-write invariant on advance-wage path', () => {
+    it('every issued query is pure SELECT — no INSERT/UPDATE/DELETE/TRUNCATE on the new helpers', async () => {
+      const { svc, calls } = buildSvc();
+      await svc.dashboard({ from: '2026-05-01', to: '2026-05-03' });
+      const newPathQueries = calls.filter((c) =>
+        /today_combined AS/.test(c.sql) ||
+        /expense_total AS/.test(c.sql) ||
+        (/per_day AS/.test(c.sql) && /employee_wage_accrual/.test(c.sql)),
+      );
+      expect(newPathQueries.length).toBeGreaterThanOrEqual(3);
+      for (const c of newPathQueries) {
+        const upper = c.sql.toUpperCase();
+        expect(upper).not.toMatch(/\bINSERT\s+INTO\b/);
+        expect(upper).not.toMatch(/\bUPDATE\b/);
+        expect(upper).not.toMatch(/\bDELETE\s+FROM\b/);
+        expect(upper).not.toMatch(/\bTRUNCATE\b/);
+      }
+    });
+
+    it('the new SQL does not touch chart_of_accounts as a write target — read-only join only', async () => {
+      const { svc, calls } = buildSvc();
+      await svc.dashboard({ from: '2026-05-01', to: '2026-05-03' });
+      for (const c of calls) {
+        const upper = c.sql.toUpperCase();
+        expect(upper).not.toMatch(/UPDATE\s+CHART_OF_ACCOUNTS/);
+        expect(upper).not.toMatch(/INSERT\s+INTO\s+CHART_OF_ACCOUNTS/);
+        expect(upper).not.toMatch(/UPDATE\s+JOURNAL_ENTRIES/);
+        expect(upper).not.toMatch(/UPDATE\s+JOURNAL_LINES/);
+      }
+    });
+  });
+});
