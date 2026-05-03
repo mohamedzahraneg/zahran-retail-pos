@@ -182,6 +182,26 @@ export interface RecordTransactionSpec {
    * column. Ignored when reversal_of is not supplied.
    */
   reversal_reason?: string;
+
+  /**
+   * PR-FIN-CASHBOX-GL-PREVENTION-GUARDS — opt-in escape hatch for
+   * legitimate accounting-only postings that touch a GL liquid-asset
+   * account (1111/1113/1114/1115) WITHOUT a paired cashbox movement.
+   *
+   * Default `false`. When `false` (the safe default), the engine
+   * enforces three invariants on cash-impacting postings:
+   *   A. Every GL line on a liquid account has `cashbox_id`.
+   *   B. Every such line has a paired `cash_movement` on the same
+   *      cashbox with the matching signed amount.
+   *   C. Every `cash_movement` has a paired GL line on a liquid
+   *      account with the matching cashbox_id and signed amount.
+   *
+   * Set this to `true` ONLY for genuinely accounting-only
+   * corrections (e.g. a directional re-class that doesn't move
+   * physical cash). The engine will record an `engine_bypass_alerts`
+   * row classifying the entry so the dashboard surfaces it.
+   */
+  accounting_only?: boolean;
 }
 
 export type RecordTransactionResult =
@@ -201,6 +221,138 @@ export type RecordTransactionResult =
       ok: false;
       error: string;
     };
+
+/**
+ * PR-FIN-CASHBOX-GL-PREVENTION-GUARDS — pure validator for the
+ * cashbox/GL alignment invariant. Exported for direct unit-testing
+ * without booting the full engine + DataSource.
+ *
+ * Returns:
+ *   · `null` — invariant satisfied; engine should proceed normally.
+ *   · `'accounting_only_bypass_logged'` — `accounting_only=true` was
+ *      set; engine should record an `engine_bypass_alerts` row and
+ *      proceed.
+ *   · `string` — invariant violated; engine should throw with this
+ *      message as the BadRequestException reason.
+ *
+ * Pure function — no I/O, no time, fully deterministic.
+ */
+export type CashGlAlignmentResult = null | 'accounting_only_bypass_logged' | string;
+
+export function checkCashGlAlignment(input: {
+  reference_type: string;
+  reference_id: string;
+  accounting_only: boolean;
+  resolved_lines: Array<{
+    account_id: string;
+    debit: number;
+    credit: number;
+    cashbox_id: string | null;
+  }>;
+  cash_movements: Array<{
+    cashbox_id: string;
+    direction: 'in' | 'out';
+    amount: number;
+  }>;
+  code_by_account_id: Map<string, string> | Record<string, string>;
+}): CashGlAlignmentResult {
+  const LIQUID_CODES = new Set(['1111', '1113', '1114', '1115']);
+  const codeOf = (id: string): string => {
+    if (input.code_by_account_id instanceof Map) {
+      return input.code_by_account_id.get(id) ?? '';
+    }
+    return input.code_by_account_id[id] ?? '';
+  };
+
+  const cashLines = input.resolved_lines
+    .map((l) => ({ ...l, code: codeOf(l.account_id) }))
+    .filter((l) => LIQUID_CODES.has(l.code));
+
+  const movements = input.cash_movements ?? [];
+
+  // Fast-path: no cash-impacting lines AND no movements → nothing to
+  // assert. Pure non-cash JEs (e.g. wage accrual DR 521 / CR 213)
+  // pass straight through.
+  if (cashLines.length === 0 && movements.length === 0) return null;
+
+  if (input.accounting_only) {
+    return 'accounting_only_bypass_logged';
+  }
+
+  // ── Guard A — every cash GL line MUST have cashbox_id ────────────
+  for (const cl of cashLines) {
+    if (!cl.cashbox_id) {
+      return (
+        `cash GL line on ${cl.code} requires cashbox_id ` +
+        `(${input.reference_type}/${input.reference_id}). ` +
+        `Use resolve_from_cashbox_id or set cashbox_id explicitly. ` +
+        `If this is a pure accounting correction with no cash movement, ` +
+        `set accounting_only=true on the spec.`
+      );
+    }
+  }
+
+  // ── Guard B — every cash GL line MUST be paired with a CT ────────
+  // Match key: (cashbox_id, signedAmount). DR → +amount (cash IN),
+  // CR → -amount (cash OUT). cash_movements use direction='in'/'out'
+  // with positive amount → reduce to the same signed convention.
+  type Pair = { cashbox_id: string; signed: number };
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  const lineKey = (l: {
+    cashbox_id: string;
+    debit: number;
+    credit: number;
+  }): Pair => ({
+    cashbox_id: l.cashbox_id,
+    signed: r2(l.debit) - r2(l.credit),
+  });
+  const mvKey = (m: {
+    cashbox_id: string;
+    direction: 'in' | 'out';
+    amount: number;
+  }): Pair => ({
+    cashbox_id: m.cashbox_id,
+    signed: m.direction === 'in' ? r2(m.amount) : -r2(m.amount),
+  });
+
+  const mvBag: Pair[] = movements.map(mvKey);
+  const consume = (need: Pair): boolean => {
+    const i = mvBag.findIndex(
+      (p) =>
+        p.cashbox_id === need.cashbox_id &&
+        Math.abs(p.signed - need.signed) < 0.01,
+    );
+    if (i === -1) return false;
+    mvBag.splice(i, 1);
+    return true;
+  };
+
+  for (const cl of cashLines) {
+    const need = lineKey(cl as any);
+    if (!consume(need)) {
+      return (
+        `cash GL line on ${cl.code} (${input.reference_type}/${input.reference_id}) ` +
+        `has no paired cashbox_transactions movement ` +
+        `(cashbox_id=${cl.cashbox_id}, signed=${need.signed.toFixed(2)}). ` +
+        `Add cash_movements: { cashbox_id, direction:'${need.signed > 0 ? 'in' : 'out'}', amount:${Math.abs(need.signed).toFixed(2)}, ... } ` +
+        `or set accounting_only=true if no physical cash moved.`
+      );
+    }
+  }
+
+  // ── Guard C — leftover movements with no GL line counterpart ─────
+  if (mvBag.length > 0) {
+    const leftover = mvBag[0];
+    return (
+      `cashbox_transactions movement (cashbox_id=${leftover.cashbox_id}, ` +
+      `signed=${leftover.signed.toFixed(2)}) on ${input.reference_type}/${input.reference_id} ` +
+      `has no paired cash GL line on a liquid-asset account ` +
+      `(1111/1113/1114/1115) with the same cashbox tag and signed amount.`
+    );
+  }
+
+  return null;
+}
 
 @Injectable()
 export class FinancialEngineService {
@@ -324,12 +476,20 @@ export class FinancialEngineService {
             `could not resolve GL account for line (code=${line.account_code}, cashbox=${line.resolve_from_cashbox_id})`,
           );
         }
+        // PR-FIN-CASHBOX-GL-PREVENTION-GUARDS — auto-tag cashbox_id when
+        // the line was resolved via `resolve_from_cashbox_id` but the
+        // caller didn't redundantly set `cashbox_id`. This eliminates
+        // the historical bug class (e.g. JE-2026-000123 / EXP-000003)
+        // where a cash account got posted with no cashbox tag because
+        // the caller used resolve_from_cashbox_id alone.
+        const autoCashboxId =
+          line.cashbox_id ?? line.resolve_from_cashbox_id ?? null;
         resolvedLines.push({
           account_id: accountId,
           debit: Number(line.debit || 0),
           credit: Number(line.credit || 0),
           description: line.description ?? spec.description,
-          cashbox_id: line.cashbox_id ?? null,
+          cashbox_id: autoCashboxId,
           warehouse_id: line.warehouse_id ?? null,
           customer_id: line.customer_id ?? null,
           supplier_id: line.supplier_id ?? null,
@@ -357,6 +517,16 @@ export class FinancialEngineService {
           cash_txn_ids: cashTxnIds,
         };
       }
+
+      // ── Phase 3.5 — PR-FIN-CASHBOX-GL-PREVENTION-GUARDS — assert
+      //    cashbox/GL alignment on every cash-impacting posting. Skipped
+      //    when `accounting_only=true` (with an engine_bypass_alerts row
+      //    classifying the bypass so the dashboard surfaces it).
+      await this.assertCashGlAlignment(
+        q,
+        spec,
+        resolvedLines,
+      );
 
       // ── Phase 4 — insert header + lines, then flip is_posted. Split
       //    so the balance trigger validates against the real lines.
@@ -569,6 +739,91 @@ export class FinancialEngineService {
   // ══════════════════════════════════════════════════════════════════
   //   INTERNALS — not exported; every caller uses recordTransaction()
   // ══════════════════════════════════════════════════════════════════
+
+  /**
+   * PR-FIN-CASHBOX-GL-PREVENTION-GUARDS — invariant enforcement on
+   * every cash-impacting posting that flows through the engine.
+   *
+   * For each resolved GL line whose account is a liquid-asset code
+   * (1111 / 1113 / 1114 / 1115):
+   *   A. line.cashbox_id MUST be non-null (auto-tag in Phase 2 already
+   *      covers callers who used `resolve_from_cashbox_id` alone).
+   *   B. There MUST be a paired `cash_movement` on the same cashbox
+   *      with the matching signed amount (DR → 'in', CR → 'out').
+   * For each `cash_movement`:
+   *   C. There MUST be at least one resolved liquid-asset GL line on
+   *      the same cashbox with the matching signed amount.
+   *
+   * When `spec.accounting_only=true`, the three guards are skipped
+   * AND an `engine_bypass_alerts` row is recorded so the dashboard
+   * surfaces the intentional bypass. This is the right path for
+   * legitimate accounting-only corrections (e.g. a directional
+   * re-class JE that doesn't move physical cash).
+   *
+   * Pure SELECT for the COA lookup; no writes here other than the
+   * optional engine_bypass_alerts row inside the same transaction.
+   */
+  private async assertCashGlAlignment(
+    q: QueryFn,
+    spec: RecordTransactionSpec,
+    resolvedLines: Array<{
+      account_id: string;
+      debit: number;
+      credit: number;
+      cashbox_id: string | null;
+    }>,
+  ): Promise<void> {
+    // Batch-fetch the COA codes for every distinct account_id in the
+    // resolved lines so the pure validator knows which lines are
+    // liquid-asset.
+    const distinctIds = Array.from(
+      new Set(resolvedLines.map((l) => l.account_id)),
+    );
+    if (distinctIds.length === 0) return;
+    const codeRows: Array<{ id: string; code: string }> = await q(
+      `SELECT id::text AS id, code
+         FROM chart_of_accounts
+        WHERE id = ANY($1::uuid[])`,
+      [distinctIds],
+    );
+    const codeById = new Map<string, string>(
+      codeRows.map((r) => [r.id, r.code]),
+    );
+
+    const violation = checkCashGlAlignment({
+      reference_type: spec.reference_type,
+      reference_id: spec.reference_id,
+      accounting_only: spec.accounting_only ?? false,
+      resolved_lines: resolvedLines,
+      cash_movements: spec.cash_movements ?? [],
+      code_by_account_id: codeById,
+    });
+
+    if (violation === 'accounting_only_bypass_logged') {
+      // Opt-in escape hatch. Record an engine_bypass_alerts row so the
+      // dashboard's health card surfaces the intentional bypass; the
+      // table may not exist on pre-057 installs (best-effort).
+      try {
+        await q(
+          `INSERT INTO engine_bypass_alerts
+             (reference_type, reference_id, reason, created_at)
+           VALUES ($1, $2, $3, NOW())`,
+          [
+            spec.reference_type,
+            spec.reference_id,
+            `accounting_only=true: cash-impacting JE without paired CT`,
+          ],
+        );
+      } catch {
+        /* table missing on pre-057 — skip silently */
+      }
+      return;
+    }
+
+    if (violation) {
+      throw new BadRequestException(violation);
+    }
+  }
 
   private validateSpec(spec: RecordTransactionSpec) {
     if (!spec.reference_type || !spec.reference_id) {
