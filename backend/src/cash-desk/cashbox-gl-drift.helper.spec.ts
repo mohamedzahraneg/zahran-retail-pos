@@ -137,6 +137,72 @@ describe('CashboxGlDriftHelper.clusterDriftOffsetByCashbox — SQL shape', () =>
   });
 });
 
+// ─── PR-FIN-DASHBOARD-DRIFT-CANCEL-AWARE ──────────────────────────
+// New `clusterPhantomGlobalStats()` helper used by
+// `FinanceDashboardService.health()` to subtract phantom drift rows
+// from the operator-facing "فروق تصنيف مراجع" KPI on the financial
+// dashboard. Same cancelled-return cluster definition the existing
+// `clusterDriftOffsetByCashbox` uses; this method aggregates the
+// COUNT and the Σ |drift_amount| of those rows globally (across
+// every cashbox).
+describe('CashboxGlDriftHelper.clusterPhantomGlobalStats — SQL shape', () => {
+  it('joins per-ref view to cluster keys + aggregates count + Σ ABS(drift_amount) globally', async () => {
+    const { ds, calls } = makeFakeDs([[]]);
+    const helper = await buildHelper(ds);
+    await helper.clusterPhantomGlobalStats();
+
+    expect(calls).toHaveLength(1);
+    const sql = calls[0].sql;
+    // Cancellation cluster definition matches the sibling helper
+    // method — same CTE shape so the two methods always agree on
+    // which rows are "phantoms".
+    expect(sql).toMatch(/cancelled_returns AS[\s\S]+cashbox_id IS NOT NULL/);
+    expect(sql).toMatch(/cluster_refs AS/);
+    // Global aggregation, not per-cashbox.
+    expect(sql).toMatch(/COUNT\(\*\)/);
+    expect(sql).toMatch(/SUM\(ABS\(pr\.drift_amount\)\)/);
+    // Filters out zero-drift rows (the cluster nets to zero in
+    // signed terms but each row still has a non-zero |drift|).
+    expect(sql).toMatch(/pr\.drift_amount\s*<>\s*0/);
+    // No GROUP BY — single global row.
+    expect(sql).not.toMatch(/GROUP BY/i);
+  });
+
+  it('returns {rows, absTotal} from the production-shaped fixture', async () => {
+    // Production snapshot: 3 phantom rows, |Σ| = 1,050 EGP.
+    const { ds } = makeFakeDs([
+      [{ rows: 3, abs_total: '1050.00' }],
+    ]);
+    const helper = await buildHelper(ds);
+    const stats = await helper.clusterPhantomGlobalStats();
+    expect(stats.rows).toBe(3);
+    expect(stats.absTotal).toBe(1050);
+  });
+
+  it('returns {rows: 0, absTotal: 0} when no cancelled-return clusters exist', async () => {
+    const { ds } = makeFakeDs([
+      [{ rows: 0, abs_total: '0' }],
+    ]);
+    const helper = await buildHelper(ds);
+    const stats = await helper.clusterPhantomGlobalStats();
+    expect(stats.rows).toBe(0);
+    expect(stats.absTotal).toBe(0);
+  });
+
+  it('SQL is pure SELECT — no INSERT/UPDATE/DELETE', async () => {
+    const { ds, calls } = makeFakeDs([[]]);
+    const helper = await buildHelper(ds);
+    await helper.clusterPhantomGlobalStats();
+    const sql = calls[0].sql;
+    expect(sql).toMatch(/^\s*WITH/i);
+    expect(sql).not.toMatch(/\bINSERT\b/i);
+    expect(sql).not.toMatch(/\bUPDATE\s+\w/i);
+    expect(sql).not.toMatch(/\bDELETE\s+FROM\b/i);
+    expect(sql).not.toMatch(/\bMERGE\b/i);
+    expect(sql).not.toMatch(/\bTRUNCATE\b/i);
+  });
+});
+
 // ─────────────────────────────────────────────────────────────────────
 //  Source-grep on cash-desk.service.ts to pin the consumer behavior.
 //  These are defense-in-depth assertions that the EMAXCONNSESSION

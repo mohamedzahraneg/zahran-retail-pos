@@ -140,4 +140,70 @@ export class CashboxGlDriftHelper {
     );
     return new Map(rows.map((r: any) => [r.cashbox_id, Number(r.offset)]));
   }
+
+  /**
+   * PR-FIN-DASHBOARD-DRIFT-CANCEL-AWARE — global aggregate of
+   * phantom drift rows from cancelled-return clusters across ALL
+   * cashboxes. Used by `FinanceDashboardService.health()` to
+   * subtract these from the raw `cashbox_drift_count` and
+   * `cashbox_drift_total` so the financial-health card doesn't
+   * surface phantom drift the operational treasury page already
+   * normalises away.
+   *
+   * Returns:
+   *   • `rows`     — total count of v_cashbox_drift_per_ref rows
+   *                  that fall inside a cancelled-return cluster.
+   *                  This is what the dashboard subtracts from the
+   *                  raw `drift_count`.
+   *   • `absTotal` — Σ |drift_amount| of those phantom rows. This
+   *                  is what the dashboard subtracts from the raw
+   *                  `cashbox_drift_total` (the operator-facing
+   *                  card's "إجمالي الفروق" figure).
+   *
+   * Important: we sum |drift_amount|, not signed drift_amount.
+   * The cluster nets to zero in signed terms (that's why the
+   * existing `clusterDriftOffsetByCashbox()` returns 0 per
+   * cluster), but each individual row contributes a non-zero
+   * absolute amount to the dashboard's "total" KPI.
+   *
+   * One round trip; pure SELECT — no DML.
+   */
+  async clusterPhantomGlobalStats(): Promise<{ rows: number; absTotal: number }> {
+    const result = await this.ds.query(
+      `
+      WITH cancelled_returns AS (
+        SELECT id::text AS return_id, cashbox_id::text AS cashbox_id
+          FROM returns
+         WHERE status = 'cancelled'
+           AND cashbox_id IS NOT NULL
+      ),
+      cancelled_jes AS (
+        SELECT je.id::text AS je_id, cr.return_id, cr.cashbox_id
+          FROM cancelled_returns cr
+          JOIN journal_entries je
+            ON je.reference_type = 'return'
+           AND je.reference_id   = cr.return_id::uuid
+      ),
+      cluster_refs AS (
+        SELECT cashbox_id, 'return'::text   AS reference_type, return_id::uuid AS reference_id
+          FROM cancelled_returns
+        UNION ALL
+        SELECT cashbox_id, 'other'::text,    je_id::uuid FROM cancelled_jes
+        UNION ALL
+        SELECT cashbox_id, 'reversal'::text, je_id::uuid FROM cancelled_jes
+      )
+      SELECT
+        COUNT(*)::int                                       AS rows,
+        COALESCE(SUM(ABS(pr.drift_amount)), 0)::numeric(14,2) AS abs_total
+        FROM v_cashbox_drift_per_ref pr
+        JOIN cluster_refs cr
+          ON cr.cashbox_id    = pr.cashbox_id::text
+         AND cr.reference_type::text = pr.reference_type::text
+         AND cr.reference_id  = pr.reference_id
+       WHERE pr.drift_amount <> 0
+      `,
+    );
+    const r = result[0] ?? { rows: 0, abs_total: '0' };
+    return { rows: Number(r.rows ?? 0), absTotal: Number(r.abs_total ?? 0) };
+  }
 }

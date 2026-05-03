@@ -848,3 +848,186 @@ describe('FinanceDashboardService — PR-FIN-2', () => {
     });
   });
 });
+
+// ─── PR-FIN-DASHBOARD-DRIFT-CANCEL-AWARE ──────────────────────────
+// Pins the cancel-aware normalization on the financial-health card.
+// The dashboard's `health()` reads `v_cashbox_drift_per_ref` for
+// the operator-facing "فروق تصنيف مراجع" KPI. That view splits
+// each cancelled return into 3 phantom rows that the legacy
+// per-ref grouping can't merge. Operationally the cluster nets to
+// zero, so we subtract:
+//   • count of phantom rows from cashbox_drift_count
+//   • Σ |drift_amount| of phantom rows from cashbox_drift_total
+// Same fix the cash-desk gl-drift endpoint applies (PR #246).
+describe('FinanceDashboardService.health — cancel-aware drift normalization', () => {
+  // The default `buildSvc()` constructs the service WITHOUT the
+  // helper to mirror the pre-PR safety contract. We need a variant
+  // that injects a fake helper to assert the new subtraction logic.
+  function buildSvcWithDriftHelper(
+    helperReturns: { rows: number; absTotal: number },
+    healthFixture: {
+      total_debit?: string;
+      total_credit?: string;
+      cashbox_balance_drift_count?: number;
+      drift_count?: number;
+      drift_abs?: number;
+      bypass_7d?: number;
+      bypass_last_seen?: any;
+      unbalanced_count?: number;
+    } = {},
+  ) {
+    const calls: { sql: string; params: any[] }[] = [];
+    const ds = {
+      query: jest.fn(async (sql: string, params: any[] = []) => {
+        calls.push({ sql, params });
+        if (/tb AS/.test(sql)) {
+          return [
+            {
+              total_debit:                 healthFixture.total_debit ?? '100.00',
+              total_credit:                healthFixture.total_credit ?? '100.00',
+              cashbox_balance_drift_count: healthFixture.cashbox_balance_drift_count ?? 0,
+              drift_count:                 healthFixture.drift_count ?? 0,
+              drift_abs:                   healthFixture.drift_abs ?? 0,
+              bypass_7d:                   healthFixture.bypass_7d ?? 0,
+              bypass_last_seen:            healthFixture.bypass_last_seen ?? null,
+              unbalanced_count:            healthFixture.unbalanced_count ?? 0,
+            },
+          ];
+        }
+        return [];
+      }),
+    };
+    const helper = {
+      clusterPhantomGlobalStats: jest.fn(async () => helperReturns),
+    };
+    const svc = new FinanceDashboardService(ds as any, helper as any);
+    return { svc, ds, helper, calls };
+  }
+
+  it('subtracts phantom rows from cashbox_drift_count', async () => {
+    // Production snapshot: raw view shows 25 drift rows; 3 are
+    // phantoms from cancelled-return clusters → adjusted count = 22.
+    const { svc, helper } = buildSvcWithDriftHelper(
+      { rows: 3, absTotal: 1050 },
+      { drift_count: 25, drift_abs: 4137.98 },
+    );
+    const r = await svc.dashboard({ from: '2026-04-01', to: '2026-04-30' });
+    expect(helper.clusterPhantomGlobalStats).toHaveBeenCalledTimes(1);
+    expect(r.health.cashbox_drift_count).toBe(22);
+  });
+
+  it('subtracts |drift_amount| of phantom rows from cashbox_drift_total', async () => {
+    // Same snapshot: |drift_abs| 4,137.98 minus phantom 1,050.00 = 3,087.98.
+    const { svc } = buildSvcWithDriftHelper(
+      { rows: 3, absTotal: 1050 },
+      { drift_count: 25, drift_abs: 4137.98 },
+    );
+    const r = await svc.dashboard({ from: '2026-04-01', to: '2026-04-30' });
+    expect(r.health.cashbox_drift_total).toBe(3087.98);
+  });
+
+  it('with no phantoms, returns the raw view numbers verbatim', async () => {
+    const { svc } = buildSvcWithDriftHelper(
+      { rows: 0, absTotal: 0 },
+      { drift_count: 25, drift_abs: 4137.98 },
+    );
+    const r = await svc.dashboard({ from: '2026-04-01', to: '2026-04-30' });
+    expect(r.health.cashbox_drift_count).toBe(25);
+    expect(r.health.cashbox_drift_total).toBe(4137.98);
+  });
+
+  it('clamps to 0 if phantom count would push the result negative (defensive)', async () => {
+    // If the helper somehow returns more phantoms than the raw view
+    // shows (impossible in practice but cheap to guard), we MUST NOT
+    // surface a negative count to the FE.
+    const { svc } = buildSvcWithDriftHelper(
+      { rows: 100, absTotal: 9999 },
+      { drift_count: 5, drift_abs: 200 },
+    );
+    const r = await svc.dashboard({ from: '2026-04-01', to: '2026-04-30' });
+    expect(r.health.cashbox_drift_count).toBe(0);
+    expect(r.health.cashbox_drift_total).toBe(0);
+  });
+
+  it('falls back to raw numbers when the helper is NOT injected (defensive @Optional path)', async () => {
+    // The pre-PR construction path (default `buildSvc`) constructs
+    // the service WITHOUT the helper. The service must still return
+    // a valid health card — just with the raw view numbers.
+    const { svc } = buildSvc({
+      matchers: [
+        {
+          test: (s: string) => /tb AS/.test(s),
+          rows: [
+            {
+              total_debit:  '100.00',
+              total_credit: '100.00',
+              cashbox_balance_drift_count: 0,
+              drift_count:  25,
+              drift_abs:    4137.98,
+              bypass_7d:    0,
+              bypass_last_seen: null,
+              unbalanced_count: 0,
+            },
+          ],
+        },
+      ],
+    });
+    const r = await svc.dashboard({ from: '2026-04-01', to: '2026-04-30' });
+    expect(r.health.cashbox_drift_count).toBe(25);
+    expect(r.health.cashbox_drift_total).toBe(4137.98);
+  });
+
+  it('helper SQL is pure SELECT — no INSERT/UPDATE/DELETE on the cancel-aware path', async () => {
+    // Spec-level guard: the helper's internal `clusterPhantomGlobalStats`
+    // SQL is exercised by its own helper.spec.ts file, but assert here
+    // that calling `health()` with the helper present never causes the
+    // service to emit any non-SELECT statement either.
+    const { svc, calls } = buildSvcWithDriftHelper(
+      { rows: 3, absTotal: 1050 },
+      { drift_count: 25, drift_abs: 4137.98 },
+    );
+    await svc.dashboard({ from: '2026-04-01', to: '2026-04-30' });
+    for (const c of calls) {
+      const sql = c.sql.trim();
+      // Allow `WITH` CTEs (every cash query in this file uses them);
+      // the actual leaf must still be SELECT.
+      expect(sql).not.toMatch(/\bINSERT\b/i);
+      expect(sql).not.toMatch(/\bUPDATE\s+\w/i);
+      expect(sql).not.toMatch(/\bDELETE\s+FROM\b/i);
+      expect(sql).not.toMatch(/\bMERGE\s+INTO\b/i);
+      expect(sql).not.toMatch(/\bTRUNCATE\b/i);
+    }
+  });
+
+  it('overall=warning when adjusted drift_abs > 0 (not raw)', async () => {
+    // Adjusted = 200 (raw 1200 − phantom 1000 = 200) → still warning.
+    const { svc } = buildSvcWithDriftHelper(
+      { rows: 3, absTotal: 1000 },
+      { drift_count: 5, drift_abs: 1200, bypass_7d: 0 },
+    );
+    const r = await svc.dashboard({ from: '2026-04-01', to: '2026-04-30' });
+    expect(r.health.cashbox_drift_total).toBe(200);
+    expect(r.health.overall).toBe('warning');
+  });
+
+  it('overall=healthy when phantoms eat ALL the raw drift', async () => {
+    // Adjusted = 0 (raw 1000 − phantom 1000 = 0) → healthy.
+    const { svc } = buildSvcWithDriftHelper(
+      { rows: 3, absTotal: 1000 },
+      { drift_count: 3, drift_abs: 1000, bypass_7d: 0 },
+    );
+    const r = await svc.dashboard({ from: '2026-04-01', to: '2026-04-30' });
+    expect(r.health.cashbox_drift_total).toBe(0);
+    expect(r.health.cashbox_drift_count).toBe(0);
+    expect(r.health.overall).toBe('healthy');
+  });
+
+  it('helper is invoked exactly once per dashboard request (no fan-out)', async () => {
+    const { svc, helper } = buildSvcWithDriftHelper(
+      { rows: 3, absTotal: 1050 },
+      { drift_count: 25, drift_abs: 4137.98 },
+    );
+    await svc.dashboard({ from: '2026-04-01', to: '2026-04-30' });
+    expect(helper.clusterPhantomGlobalStats).toHaveBeenCalledTimes(1);
+  });
+});
