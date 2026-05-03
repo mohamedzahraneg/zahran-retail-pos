@@ -283,13 +283,25 @@ export class FinanceDashboardService {
     const bypass7d = Number(r.bypass_7d ?? 0);
     const unbalanced = Number(r.unbalanced_count ?? 0);
 
-    // PR-FIN-DASHBOARD-DRIFT-CANCEL-AWARE — subtract phantom drift
-    // rows from cancelled-return clusters before reporting the
-    // operator-facing KPI. `v_cashbox_drift_per_ref` splits each
-    // cancelled return into 3 rows that the view alone can't merge;
-    // operationally the cluster nets to zero, so we exclude its
-    // count + |amount| contribution. Same normalization the
-    // cash-desk gl-drift endpoint already applies (PR #246).
+    // PR-FIN-DASHBOARD-DRIFT-CANCEL-AWARE (PR #254) +
+    // PR-FIN-DASHBOARD-DRIFT-TAXONOMY-PAIRING — subtract TWO classes
+    // of phantom drift before reporting the operator-facing KPI:
+    //
+    //   1. Cancelled-return clusters (3 rows per cancelled return,
+    //      each tagged with a different reference_type, all with
+    //      drift summing to zero across the cluster).
+    //   2. Taxonomy mismatches (CT side and JE side use different
+    //      `reference_type` for the same business event but the
+    //      same `reference_id` — e.g. CT='other', JE='employee_settlement'
+    //      — so the per-ref view emits two one-sided rows that pair
+    //      to zero by reference_id).
+    //
+    // Both classes are pure view artifacts — operationally each
+    // group nets to zero. The two phantom sets do not overlap by
+    // construction (the taxonomy helper EXCLUDES cluster_refs from
+    // its query). Rows that survive both adjustments represent
+    // genuine one-sided cashbox-vs-GL drift that an operator should
+    // investigate.
     //
     // If the helper isn't injected (only happens in defensive unit
     // tests that construct the service without it), we degrade
@@ -298,9 +310,12 @@ export class FinanceDashboardService {
     let phantomCount = 0;
     let phantomAbs = 0;
     if (this.driftHelper) {
-      const stats = await this.driftHelper.clusterPhantomGlobalStats();
-      phantomCount = stats.rows;
-      phantomAbs = stats.absTotal;
+      const [clusterStats, taxonomyStats] = await Promise.all([
+        this.driftHelper.clusterPhantomGlobalStats(),
+        this.driftHelper.taxonomyMismatchGlobalStats(),
+      ]);
+      phantomCount = clusterStats.rows + taxonomyStats.rows;
+      phantomAbs   = clusterStats.absTotal + taxonomyStats.absTotal;
     }
     const adjustedDriftCount = Math.max(0, rawDriftCount - phantomCount);
     const adjustedDriftAbs   = Math.max(0, rawDriftAbs - phantomAbs);
