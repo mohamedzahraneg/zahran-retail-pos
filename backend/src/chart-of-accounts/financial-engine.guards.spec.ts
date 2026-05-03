@@ -411,3 +411,140 @@ describe('checkCashGlAlignment — PR-FIN-CASHBOX-GL-PREVENTION-GUARDS', () => {
     });
   });
 });
+
+/**
+ * PR-FIN-CASHBOX-GL-PREVENTION-GUARDS — engine-level observability
+ * contract for `accounting_only=true` bypass.
+ *
+ * The pure validator (`checkCashGlAlignment`) only signals the
+ * sentinel; the engine method (`FinancialEngineService.assertCashGlAlignment`)
+ * is responsible for the side effect. The user explicitly asked us
+ * NOT to add a new INSERT into `engine_bypass_alerts` (that table is
+ * owned by the migration-063 trigger). This block pins:
+ *
+ *   1. `accounting_only=true` bypass → logger.warn IS called with
+ *      a structured message tagged with the reference.
+ *   2. The engine's queryFn receives ONLY the COA SELECT during
+ *      assertion — never an `INSERT INTO engine_bypass_alerts`.
+ *   3. Healthy non-cash JEs do NOT emit a spurious bypass log.
+ */
+import { FinancialEngineService } from './financial-engine.service';
+
+describe('FinancialEngineService.assertCashGlAlignment — bypass observability (logger-only)', () => {
+  function build() {
+    // Constructor only stores the DataSource; we never call
+    // recordTransaction here, so a stub is enough.
+    const ds = { query: jest.fn() } as any;
+    const svc = new FinancialEngineService(ds);
+    const warnSpy = jest.spyOn((svc as any).logger, 'warn').mockImplementation(() => {});
+    const queries: Array<{ sql: string; params: any[] }> = [];
+    const q = jest.fn(async (sql: string, params: any[] = []) => {
+      queries.push({ sql, params });
+      // Stub the COA lookup: return code rows for any account_id.
+      if (/SELECT id::text AS id, code\s+FROM chart_of_accounts/.test(sql)) {
+        const ids: string[] = (params[0] as string[]) ?? [];
+        return ids.map((id) => ({
+          id,
+          code: id === 'a-1111' ? '1111' : id === 'a-213' ? '213' : 'unknown',
+        }));
+      }
+      return [];
+    });
+    return { svc, warnSpy, queries, q };
+  }
+
+  it('logs a warn line when accounting_only=true triggers the bypass', async () => {
+    const { svc, warnSpy, q } = build();
+    await (svc as any).assertCashGlAlignment(
+      q,
+      {
+        reference_type: 'employee_settlement',
+        reference_id: 'settlement-7',
+        description: 'تصحيح اتجاه التسوية',
+        gl_lines: [],
+        user_id: null,
+        accounting_only: true,
+      },
+      [
+        { account_id: 'a-213',  debit: 100, credit: 0,   cashbox_id: null },
+        { account_id: 'a-1111', debit: 0,   credit: 100, cashbox_id: null },
+      ],
+    );
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    const msg = warnSpy.mock.calls[0][0] as string;
+    expect(msg).toMatch(/accounting_only=true bypass/);
+    expect(msg).toMatch(/employee_settlement\/settlement-7/);
+    expect(msg).toMatch(/cash-impacting JE recorded without paired CT/);
+  });
+
+  it('queryFn never receives an INSERT INTO engine_bypass_alerts during the bypass', async () => {
+    const { svc, queries, q } = build();
+    await (svc as any).assertCashGlAlignment(
+      q,
+      {
+        reference_type: 'employee_settlement',
+        reference_id: 'settlement-7',
+        description: 'تصحيح',
+        gl_lines: [],
+        user_id: null,
+        accounting_only: true,
+      },
+      [
+        { account_id: 'a-213',  debit: 100, credit: 0,   cashbox_id: null },
+        { account_id: 'a-1111', debit: 0,   credit: 100, cashbox_id: null },
+      ],
+    );
+    // Only the COA SELECT should have hit q. No INSERT/UPDATE/DELETE.
+    expect(queries).toHaveLength(1);
+    expect(queries[0].sql).toMatch(/SELECT id::text AS id, code\s+FROM chart_of_accounts/);
+    for (const c of queries) {
+      expect(c.sql).not.toMatch(/INSERT\s+INTO\s+engine_bypass_alerts/i);
+      expect(c.sql).not.toMatch(/\bINSERT\s+INTO\b/i);
+      expect(c.sql).not.toMatch(/\bUPDATE\b/i);
+      expect(c.sql).not.toMatch(/\bDELETE\s+FROM\b/i);
+    }
+  });
+
+  it('does NOT emit a bypass warn line for healthy non-cash JEs (no false positives)', async () => {
+    const { svc, warnSpy, q } = build();
+    await (svc as any).assertCashGlAlignment(
+      q,
+      {
+        reference_type: 'employee_wage_accrual',
+        reference_id: 'wage-1',
+        description: 'استحقاق',
+        gl_lines: [],
+        user_id: null,
+        accounting_only: false,
+      },
+      [
+        // Pure 521/213 JE — non-cash. No bypass needed, no warn expected.
+        { account_id: 'a-521', debit: 250, credit: 0,   cashbox_id: null },
+        { account_id: 'a-213', debit: 0,   credit: 250, cashbox_id: null },
+      ],
+    );
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('does NOT emit a bypass warn line when accounting_only=true is set on a non-cash spec', async () => {
+    // The pure validator returns null (not the bypass sentinel) for
+    // non-cash specs even when accounting_only=true — so no warn either.
+    const { svc, warnSpy, q } = build();
+    await (svc as any).assertCashGlAlignment(
+      q,
+      {
+        reference_type: 'employee_wage_accrual',
+        reference_id: 'wage-2',
+        description: 'استحقاق',
+        gl_lines: [],
+        user_id: null,
+        accounting_only: true,
+      },
+      [
+        { account_id: 'a-521', debit: 250, credit: 0,   cashbox_id: null },
+        { account_id: 'a-213', debit: 0,   credit: 250, cashbox_id: null },
+      ],
+    );
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+});

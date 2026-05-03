@@ -198,8 +198,12 @@ export interface RecordTransactionSpec {
    *
    * Set this to `true` ONLY for genuinely accounting-only
    * corrections (e.g. a directional re-class that doesn't move
-   * physical cash). The engine will record an `engine_bypass_alerts`
-   * row classifying the entry so the dashboard surfaces it.
+   * physical cash). The engine will emit a structured warn-level
+   * log line tagged with the reference so on-call can audit
+   * intentional bypasses. (No direct INSERT into
+   * `engine_bypass_alerts` — that table is owned by the
+   * migration-063 trigger; a follow-up PR will centralize
+   * application-layer alert recording.)
    */
   accounting_only?: boolean;
 }
@@ -230,8 +234,9 @@ export type RecordTransactionResult =
  * Returns:
  *   · `null` — invariant satisfied; engine should proceed normally.
  *   · `'accounting_only_bypass_logged'` — `accounting_only=true` was
- *      set; engine should record an `engine_bypass_alerts` row and
- *      proceed.
+ *      set on a cash-impacting spec; engine should emit a warn-level
+ *      log line (no DB write — see the `assertCashGlAlignment` body)
+ *      and proceed.
  *   · `string` — invariant violated; engine should throw with this
  *      message as the BadRequestException reason.
  *
@@ -755,13 +760,12 @@ export class FinancialEngineService {
    *      the same cashbox with the matching signed amount.
    *
    * When `spec.accounting_only=true`, the three guards are skipped
-   * AND an `engine_bypass_alerts` row is recorded so the dashboard
-   * surfaces the intentional bypass. This is the right path for
-   * legitimate accounting-only corrections (e.g. a directional
-   * re-class JE that doesn't move physical cash).
+   * AND a warn-level log line is emitted (logger-only — no DB write).
+   * Centralizing bypass-alert recording into a dedicated service is
+   * deferred to a follow-up PR so we don't double-write into the
+   * `engine_bypass_alerts` table that the migration-063 trigger owns.
    *
-   * Pure SELECT for the COA lookup; no writes here other than the
-   * optional engine_bypass_alerts row inside the same transaction.
+   * Pure SELECT for the COA lookup; no DML at all from this method.
    */
   private async assertCashGlAlignment(
     q: QueryFn,
@@ -800,23 +804,20 @@ export class FinancialEngineService {
     });
 
     if (violation === 'accounting_only_bypass_logged') {
-      // Opt-in escape hatch. Record an engine_bypass_alerts row so the
-      // dashboard's health card surfaces the intentional bypass; the
-      // table may not exist on pre-057 installs (best-effort).
-      try {
-        await q(
-          `INSERT INTO engine_bypass_alerts
-             (reference_type, reference_id, reason, created_at)
-           VALUES ($1, $2, $3, NOW())`,
-          [
-            spec.reference_type,
-            spec.reference_id,
-            `accounting_only=true: cash-impacting JE without paired CT`,
-          ],
-        );
-      } catch {
-        /* table missing on pre-057 — skip silently */
-      }
+      // Opt-in escape hatch. There is currently NO application-layer
+      // service/helper that owns inserts into `engine_bypass_alerts`
+      // (the table is populated exclusively by the Postgres trigger
+      // `fn_engine_write_allowed` from migration 063 when a write
+      // bypasses the canonical engine context). Adding a second
+      // insertion path from inside the engine would create a duplicate
+      // recording surface — so this path is logger-only for now. A
+      // follow-up PR can introduce a small `BypassAlertsService` (or
+      // extend the migration-063 trigger with a typed reason column)
+      // and route this call through it.
+      this.logger.warn(
+        `accounting_only=true bypass on ${spec.reference_type}/${spec.reference_id}: ` +
+          `cash-impacting JE recorded without paired CT (intentional)`,
+      );
       return;
     }
 
