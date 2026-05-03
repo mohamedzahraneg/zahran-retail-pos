@@ -169,6 +169,29 @@ export class SettingsService {
   }
 
   // ─── Cashboxes ──────────────────────────────────────────────────────
+  // PR-FIN-PAYMENTS-WALLET-DISPLAY-BALANCE — adds an `accounting_balance`
+  // column on the response so non-cash cashboxes (kind ∈ ewallet|bank|
+  // check) can show their GL-derived net instead of the misleading
+  // stored `current_balance` (which only changes via cashbox_transactions
+  // — and non-cash payments deliberately don't write CTs).
+  //
+  // Derivation: cashbox.kind → GL account_code via the canonical map
+  //   ewallet → 1114
+  //   bank    → 1113
+  //   check   → 1115
+  // and `Σ(jl.debit − jl.credit)` over active journal_lines on that
+  // account_code.
+  //
+  // IMPORTANT — aggregation note: GL account 1114 is shared by every
+  // ewallet cashbox AND every wallet/instapay payment_account. If two
+  // ewallet cashboxes existed (production currently has one), they
+  // would both show the same aggregate number. The FE labels this
+  // explicitly as "محاسبي / GL" so the operator never confuses it
+  // with a per-cashbox cash-drawer figure.
+  //
+  // For kind='cash' this returns NULL (the FE keeps showing the
+  // stored `current_balance`, which is the canonical drawer figure).
+  // Pure SELECT — no DML.
   listCashboxes(warehouseId?: string) {
     const params: any[] = [];
     let cond = 'WHERE cb.is_active = TRUE';
@@ -177,7 +200,29 @@ export class SettingsService {
       cond += ` AND cb.warehouse_id = $1`;
     }
     return this.ds.query(
-      `SELECT cb.*, w.name_ar AS warehouse_name
+      `SELECT cb.*, w.name_ar AS warehouse_name,
+              CASE
+                WHEN cb.kind::text = 'ewallet' THEN '1114'
+                WHEN cb.kind::text = 'bank'    THEN '1113'
+                WHEN cb.kind::text = 'check'   THEN '1115'
+                ELSE NULL
+              END                                 AS accounting_gl_code,
+              CASE
+                WHEN cb.kind::text IN ('ewallet','bank','check') THEN (
+                  SELECT COALESCE(SUM(jl.debit - jl.credit), 0)::text
+                    FROM journal_lines jl
+                    JOIN journal_entries je ON je.id = jl.entry_id
+                    JOIN chart_of_accounts coa ON coa.id = jl.account_id
+                   WHERE coa.code = CASE cb.kind::text
+                                      WHEN 'ewallet' THEN '1114'
+                                      WHEN 'bank'    THEN '1113'
+                                      WHEN 'check'   THEN '1115'
+                                    END
+                     AND je.is_posted = TRUE
+                     AND je.is_void   = FALSE
+                )
+                ELSE NULL
+              END                                 AS accounting_balance
        FROM cashboxes cb
        LEFT JOIN warehouses w ON w.id = cb.warehouse_id
        ${cond}

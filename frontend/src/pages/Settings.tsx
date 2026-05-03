@@ -28,6 +28,7 @@ import {
 import { useAuthStore } from '@/stores/auth.store';
 import { ReceiptTemplatesTab } from './ReceiptTemplatesTab';
 import { PaymentAccountLogoManager } from '@/components/payment-accounts/PaymentAccountLogoManager';
+import { displayCashboxBalance } from '@/lib/cashboxBalanceDisplay';
 
 type TabKey =
   | 'company'
@@ -359,7 +360,7 @@ function WarehouseModal({
 }
 
 // ────────────────────────────────────────────────────────────────────
-function CashboxesTab() {
+export function CashboxesTab() {
   const qc = useQueryClient();
   const list = useQuery({
     queryKey: ['cashboxes-admin'],
@@ -398,10 +399,56 @@ function CashboxesTab() {
                 <td className="p-3 font-medium">{cb.name_ar}</td>
                 <td className="p-3 text-slate-600">{cb.warehouse_name}</td>
                 <td className="p-3 text-end tabular-nums font-semibold">
-                  {Number(cb.current_balance).toLocaleString('en-US', {
-                    minimumFractionDigits: 2,
-                  })}{' '}
-                  ج.م
+                  {/* PR-FIN-PAYMENTS-WALLET-DISPLAY-BALANCE (label
+                      polish): show the figure with an EXPLICIT visible
+                      label above it — "رصيد الخزنة" for cash
+                      drawers, "الرصيد المحاسبي" for GL-derived
+                      ewallet/bank/check kinds. The "محاسبي" pill
+                      stays as a compact secondary indicator. */}
+                  {(() => {
+                    const d = displayCashboxBalance(cb);
+                    const label =
+                      d.kind === 'cash'
+                        ? 'رصيد الخزنة'
+                        : d.kind === 'accounting'
+                          ? 'الرصيد المحاسبي'
+                          : 'الرصيد المحاسبي';
+                    return (
+                      <div className="flex flex-col items-end leading-tight">
+                        <span
+                          className="text-[10px] font-medium text-slate-500"
+                          data-testid={`cashbox-balance-label-${cb.id}`}
+                        >
+                          {label}
+                        </span>
+                        <span className="flex items-center gap-1">
+                          <span>
+                            {d.amount.toLocaleString('en-US', {
+                              minimumFractionDigits: 2,
+                            })}{' '}
+                            ج.م
+                          </span>
+                          {d.kind === 'accounting' && (
+                            <span
+                              className="text-[10px] font-bold bg-sky-50 text-sky-700 border border-sky-200 rounded px-1.5 py-0.5 align-middle"
+                              title={`الرصيد المحاسبي من حساب GL ${d.glCode} — مجموع لكل خزائن نفس النوع`}
+                              data-testid={`cashbox-accounting-badge-${cb.id}`}
+                            >
+                              محاسبي
+                            </span>
+                          )}
+                          {d.kind === 'unlinked' && (
+                            <span
+                              className="text-[10px] font-bold bg-amber-50 text-amber-700 border border-amber-200 rounded px-1.5 py-0.5 align-middle"
+                              title="لا يوجد حساب محاسبي مرتبط — العرض ٠"
+                            >
+                              غير مربوط
+                            </span>
+                          )}
+                        </span>
+                      </div>
+                    );
+                  })()}
                 </td>
                 <td className="p-3 text-center">
                   {cb.is_active ? '✓' : '—'}

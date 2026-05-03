@@ -272,3 +272,156 @@ describe('UpsertCashboxDto — PR-FIN-PAYACCT-4D-UX-FIX-6 validator tightening',
     expect(errors.find((e: any) => e.property === 'warehouse_id')).toBeUndefined();
   });
 });
+
+// ─── PR-FIN-PAYMENTS-WALLET-DISPLAY-BALANCE ──────────────────────────
+// Pins the listCashboxes() shape that surfaces a GL-derived
+// `accounting_balance` for non-cash kinds (ewallet/bank/check) so the
+// FE can stop showing the misleading stored `current_balance` (which
+// stays at 0 forever on those kinds because non-cash payments don't
+// write CTs — see posting.service.ts for the rule).
+//
+// We assert SQL structure + parameters, not Postgres semantics —
+// behaviour over GL data is verified live in production via
+// supabase.execute_sql before merge.
+describe('SettingsService.listCashboxes — accounting_balance derivation', () => {
+  it('SQL shape: pure SELECT — no INSERT/UPDATE/DELETE on the cashboxes path', async () => {
+    const { service, dsCalls } = await makeService(async () => []);
+    await service.listCashboxes();
+    expect(dsCalls).toHaveLength(1);
+    const sql = dsCalls[0].sql;
+    expect(sql).toMatch(/^\s*SELECT/i);
+    expect(sql).not.toMatch(/\bINSERT\b/i);
+    expect(sql).not.toMatch(/\bUPDATE\b/i);
+    expect(sql).not.toMatch(/\bDELETE\b/i);
+  });
+
+  it('SQL shape: derives accounting_gl_code via the canonical kind→code map', async () => {
+    const { service, dsCalls } = await makeService(async () => []);
+    await service.listCashboxes();
+    const sql = dsCalls[0].sql;
+    expect(sql).toMatch(/accounting_gl_code/);
+    // ewallet → 1114, bank → 1113, check → 1115. cash maps to NULL
+    // (the FE keeps showing the stored current_balance for cash).
+    expect(sql).toMatch(/'ewallet'[\s\S]*?'1114'/);
+    expect(sql).toMatch(/'bank'[\s\S]*?'1113'/);
+    expect(sql).toMatch(/'check'[\s\S]*?'1115'/);
+  });
+
+  it('SQL shape: derives accounting_balance via Σ(jl.debit − jl.credit) on the matching account_code', async () => {
+    const { service, dsCalls } = await makeService(async () => []);
+    await service.listCashboxes();
+    const sql = dsCalls[0].sql;
+    expect(sql).toMatch(/accounting_balance/);
+    expect(sql).toMatch(/journal_lines/);
+    expect(sql).toMatch(/SUM\(jl\.debit\s*-\s*jl\.credit\)/);
+    expect(sql).toMatch(/chart_of_accounts/);
+  });
+
+  it('SQL shape: only counts posted, non-void journal entries (matches GL net rules)', async () => {
+    const { service, dsCalls } = await makeService(async () => []);
+    await service.listCashboxes();
+    const sql = dsCalls[0].sql;
+    expect(sql).toMatch(/je\.is_posted\s*=\s*TRUE/);
+    expect(sql).toMatch(/je\.is_void\s*=\s*FALSE/);
+  });
+
+  it('SQL shape: cash kind is excluded from the GL aggregation (stays NULL → FE keeps current_balance)', async () => {
+    const { service, dsCalls } = await makeService(async () => []);
+    await service.listCashboxes();
+    const sql = dsCalls[0].sql;
+    // The IN-list inside the accounting_balance CASE must not name 'cash'.
+    expect(sql).toMatch(/IN\s*\(\s*'ewallet'\s*,\s*'bank'\s*,\s*'check'\s*\)/);
+    expect(sql).not.toMatch(/IN\s*\(\s*'cash'\s*,/);
+  });
+
+  it('SQL shape: filters to active cashboxes by default', async () => {
+    const { service, dsCalls } = await makeService(async () => []);
+    await service.listCashboxes();
+    expect(dsCalls[0].sql).toMatch(/cb\.is_active\s*=\s*TRUE/);
+  });
+
+  it('warehouse_id filter: propagates to params and adds the warehouse_id condition', async () => {
+    const WAREHOUSE = '00000000-aaaa-bbbb-cccc-111111111111';
+    const { service, dsCalls } = await makeService(async () => []);
+    await service.listCashboxes(WAREHOUSE);
+    expect(dsCalls[0].params).toContain(WAREHOUSE);
+    expect(dsCalls[0].sql).toMatch(/cb\.warehouse_id\s*=\s*\$1/);
+  });
+
+  it('no warehouse_id: empty params and no warehouse_id predicate', async () => {
+    const { service, dsCalls } = await makeService(async () => []);
+    await service.listCashboxes();
+    expect(dsCalls[0].params).toEqual([]);
+    expect(dsCalls[0].sql).not.toMatch(/cb\.warehouse_id\s*=/);
+  });
+
+  it('passes returned rows through verbatim (cash row: accounting_balance = NULL)', async () => {
+    const cashRow = {
+      id: 'cb-cash',
+      kind: 'cash',
+      name_ar: 'الخزينة الرئيسية',
+      current_balance: '1500.00',
+      accounting_gl_code: null,
+      accounting_balance: null,
+      is_active: true,
+    };
+    const { service } = await makeService(async () => [cashRow]);
+    const out = await service.listCashboxes();
+    expect(out).toEqual([cashRow]);
+    expect(out[0].accounting_balance).toBeNull();
+    expect(out[0].accounting_gl_code).toBeNull();
+  });
+
+  it('passes returned rows through verbatim (ewallet row: accounting_balance = derived GL net)', async () => {
+    // Production fixture-shape: GL 1114 net = +2,190.00 EGP from
+    // wallet/instapay invoice payments, while the stored
+    // current_balance on خزنة التحويلات is still 0 (non-cash payments
+    // never write CTs).
+    const ewalletRow = {
+      id: 'cb-ewallet',
+      kind: 'ewallet',
+      name_ar: 'خزنة التحويلات',
+      current_balance: '0',
+      accounting_gl_code: '1114',
+      accounting_balance: '2190.00',
+      is_active: true,
+    };
+    const { service } = await makeService(async () => [ewalletRow]);
+    const out = await service.listCashboxes();
+    expect(out[0].accounting_gl_code).toBe('1114');
+    expect(out[0].accounting_balance).toBe('2190.00');
+    // The stored current_balance is still 0 — the FE picks the right
+    // figure via displayCashboxBalance based on kind.
+    expect(out[0].current_balance).toBe('0');
+  });
+
+  it('bank kind row: accounting_gl_code = 1113 (canonical map)', async () => {
+    const bankRow = {
+      id: 'cb-bank',
+      kind: 'bank',
+      name_ar: 'حساب POS Visa',
+      current_balance: '0',
+      accounting_gl_code: '1113',
+      accounting_balance: '0.00',
+      is_active: true,
+    };
+    const { service } = await makeService(async () => [bankRow]);
+    const out = await service.listCashboxes();
+    expect(out[0].accounting_gl_code).toBe('1113');
+  });
+
+  it('check kind row: accounting_gl_code = 1115 (canonical map)', async () => {
+    const checkRow = {
+      id: 'cb-check',
+      kind: 'check',
+      name_ar: 'الشيكات الواردة',
+      current_balance: '0',
+      accounting_gl_code: '1115',
+      accounting_balance: '0.00',
+      is_active: true,
+    };
+    const { service } = await makeService(async () => [checkRow]);
+    const out = await service.listCashboxes();
+    expect(out[0].accounting_gl_code).toBe('1115');
+  });
+});

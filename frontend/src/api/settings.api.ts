@@ -48,6 +48,12 @@ export interface Cashbox {
   warehouse_name?: string;
   current_balance: number;
   is_active: boolean;
+  // PR-FIN-PAYMENTS-WALLET-DISPLAY-BALANCE — see cash-desk.api.ts
+  // Cashbox interface for the full doc on aggregation semantics.
+  // Optional here so existing consumers compile unchanged.
+  kind?: 'cash' | 'bank' | 'ewallet' | 'check';
+  accounting_gl_code?: '1113' | '1114' | '1115' | null;
+  accounting_balance?: string | null;
 }
 
 export interface Role {

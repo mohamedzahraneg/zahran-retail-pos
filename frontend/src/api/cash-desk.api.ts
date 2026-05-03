@@ -26,6 +26,20 @@ export interface Cashbox {
   opening_balance?: string;
   is_active: boolean;
 
+  // PR-FIN-PAYMENTS-WALLET-DISPLAY-BALANCE — derived GL net for
+  // non-cash cashboxes (kind ∈ ewallet|bank|check). NULL for cash
+  // cashboxes (use `current_balance` for those — that's the
+  // canonical drawer figure).
+  //
+  // Aggregation: GL accounts 1113/1114/1115 are shared across all
+  // cashboxes of the same `kind`. If two ewallet cashboxes existed,
+  // both would carry the same `accounting_balance` (the GL 1114
+  // total). The FE surfaces this with an explicit "محاسبي / GL"
+  // badge so the operator never confuses it with a per-cashbox
+  // cash-drawer figure.
+  accounting_gl_code?: '1113' | '1114' | '1115' | null;
+  accounting_balance?: string | null;
+
   // Type + linked institution (null for plain cash)
   kind: CashboxKind;
   institution_code: string | null;

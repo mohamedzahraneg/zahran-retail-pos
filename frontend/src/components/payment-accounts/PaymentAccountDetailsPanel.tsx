@@ -194,7 +194,22 @@ export function PaymentAccountDetailsPanel({
             <dl className="grid grid-cols-2 gap-x-3 gap-y-2 text-sm">
               <DetailRow label="المعرف" value={account.identifier ?? '—'} mono />
               <DetailRow label="حساب الأستاذ" value={`${account.gl_account_code} — ${account.gl_name_ar ?? ''}`} mono />
-              <DetailRow label="الخزنة المرتبطة" value={cashbox ? cashbox.name_ar : '— غير مربوط —'} />
+              {/* PR-FIN-PAYMENTS-WALLET-DISPLAY-BALANCE (label
+                  polish): spell out which balance kind backs the
+                  linked cashbox so the operator never confuses a
+                  per-drawer cash figure with a GL aggregate.
+                    cash    → "<name> — رصيد الخزنة"
+                    non-cash → "<name> — الرصيد المحاسبي / GL" */}
+              <DetailRow
+                label="الخزنة المرتبطة"
+                value={
+                  cashbox
+                    ? cashbox.kind === 'cash'
+                      ? `${cashbox.name_ar} — رصيد الخزنة`
+                      : `${cashbox.name_ar} — الرصيد المحاسبي / GL`
+                    : '— غير مربوط —'
+                }
+              />
               <DetailRow label="الحالة" value={account.active ? 'نشط' : 'غير نشط'} tone={account.active ? 'emerald' : 'rose'} />
               <DetailRow label="الافتراضي" value={account.is_default ? 'نعم' : 'لا'} />
               <DetailRow
@@ -211,6 +226,11 @@ export function PaymentAccountDetailsPanel({
             <ul className="space-y-1.5 text-sm">
               <SummaryRow label="إجمالي الداخل" value={EGP(account.total_in)} tone="emerald" testId="totals-in" />
               <SummaryRow label="إجمالي الخارج" value={EGP(account.total_out)} tone="rose"   testId="totals-out" />
+              {/* PR-FIN-PAYMENTS-WALLET-DISPLAY-BALANCE — explicit
+                  "رصيد حساب الدفع" alongside the existing
+                  "صافي الحركة" so the operator sees the per-payment-
+                  account balance as a balance, not just a flow delta. */}
+              <SummaryRow label="رصيد حساب الدفع" value={EGP(account.net_debit)} tone="emerald" testId="totals-payment-account-balance" />
               <SummaryRow label="صافي الحركة"  value={EGP(account.net_debit)}            testId="totals-net" />
               <SummaryRow label="عدد الحركات"  value={String(account.je_count)}          testId="totals-count" />
             </ul>
