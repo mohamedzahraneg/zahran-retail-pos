@@ -34,6 +34,7 @@ import { type Cashbox } from '@/api/cash-desk.api';
 import { Modal, Field } from '@/components/cash-desk/Modal';
 import { PaymentProviderLogo } from '@/components/payments/PaymentProviderLogo';
 import { uuidOrNull } from '@/lib/uuid-or-null';
+import { displayCashboxBalance } from '@/lib/cashboxBalanceDisplay';
 
 /**
  * Methods the admin can create accounts for. Cash + non-cash (incl.
@@ -432,7 +433,20 @@ export function PaymentAccountModal({
             >
               <option value="">— بدون ربط —</option>
               {cashboxesForMethod.map((cb) => {
-                const balanceLabel = `${Number(cb.current_balance || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ج.م`;
+                // PR-FIN-PAYMENTS-WALLET-DISPLAY-BALANCE — for non-cash
+                // kinds the per-cashbox `current_balance` stays at 0
+                // by design (only cash payments write CTs). Show the
+                // GL-derived figure with a "محاسبي" prefix so the
+                // operator never reads the dropdown as "this drawer
+                // has 0 ج.م".
+                const display = displayCashboxBalance(cb);
+                const balanceLabel =
+                  `${display.amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ج.م` +
+                  (display.kind === 'accounting'
+                    ? ' (محاسبي)'
+                    : display.kind === 'unlinked'
+                      ? ' — غير مربوط بحساب محاسبي'
+                      : '');
                 const inactiveBadge = cb.is_active ? '' : ' — غير نشطة';
                 return (
                   <option key={cb.id} value={cb.id}>

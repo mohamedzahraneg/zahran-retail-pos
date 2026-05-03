@@ -28,6 +28,7 @@ import {
 import { useAuthStore } from '@/stores/auth.store';
 import { ReceiptTemplatesTab } from './ReceiptTemplatesTab';
 import { PaymentAccountLogoManager } from '@/components/payment-accounts/PaymentAccountLogoManager';
+import { displayCashboxBalance } from '@/lib/cashboxBalanceDisplay';
 
 type TabKey =
   | 'company'
@@ -359,7 +360,7 @@ function WarehouseModal({
 }
 
 // ────────────────────────────────────────────────────────────────────
-function CashboxesTab() {
+export function CashboxesTab() {
   const qc = useQueryClient();
   const list = useQuery({
     queryKey: ['cashboxes-admin'],
@@ -398,10 +399,38 @@ function CashboxesTab() {
                 <td className="p-3 font-medium">{cb.name_ar}</td>
                 <td className="p-3 text-slate-600">{cb.warehouse_name}</td>
                 <td className="p-3 text-end tabular-nums font-semibold">
-                  {Number(cb.current_balance).toLocaleString('en-US', {
-                    minimumFractionDigits: 2,
-                  })}{' '}
-                  ج.م
+                  {/* PR-FIN-PAYMENTS-WALLET-DISPLAY-BALANCE — show
+                      GL-derived figure for non-cash kinds, with a
+                      small "محاسبي" pill so the operator never
+                      mis-reads the dropdown. Cash unchanged. */}
+                  {(() => {
+                    const d = displayCashboxBalance(cb);
+                    return (
+                      <>
+                        {d.amount.toLocaleString('en-US', {
+                          minimumFractionDigits: 2,
+                        })}{' '}
+                        ج.م
+                        {d.kind === 'accounting' && (
+                          <span
+                            className="ms-2 text-[10px] font-bold bg-sky-50 text-sky-700 border border-sky-200 rounded px-1.5 py-0.5 align-middle"
+                            title={`الرصيد المحاسبي من حساب GL ${d.glCode} — مجموع لكل خزائن نفس النوع`}
+                            data-testid={`cashbox-accounting-badge-${cb.id}`}
+                          >
+                            محاسبي
+                          </span>
+                        )}
+                        {d.kind === 'unlinked' && (
+                          <span
+                            className="ms-2 text-[10px] font-bold bg-amber-50 text-amber-700 border border-amber-200 rounded px-1.5 py-0.5 align-middle"
+                            title="لا يوجد حساب محاسبي مرتبط — العرض ٠"
+                          >
+                            غير مربوط
+                          </span>
+                        )}
+                      </>
+                    );
+                  })()}
                 </td>
                 <td className="p-3 text-center">
                   {cb.is_active ? '✓' : '—'}
