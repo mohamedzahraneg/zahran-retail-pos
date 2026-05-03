@@ -274,13 +274,45 @@ export class AccountingAnalyticsService {
         WHERE COALESCE(status::text, '') NOT IN ('cancelled', 'draft', 'void')
           AND grand_total > COALESCE(paid_amount, 0)`,
     );
-    // Authoritative cash balance = sum of all cashbox_transactions.
-    // Avoids stale current_balance that drifts over time.
+    // PR-FIN-ANALYTICS-LIQUIDITY-GL — accounting-truth liquidity.
+    //
+    // The previous formula `Σ(direction=in ? amount : -amount)` over
+    // raw `cashbox_transactions` had three independent bugs that all
+    // surfaced together on the production "السيولة" tile:
+    //
+    //   1. NO `is_void` filter on CTs → voided cancellation/reversal
+    //      rows inflated the total. On the production snapshot this
+    //      added +2,839.98 EGP of phantom cash.
+    //   2. NO non-cash kinds → wallet/bank/check liquidity was
+    //      invisible. خزنة التحويلات holds GL 1114 = 2,190 EGP that
+    //      this formula completely missed (non-cash payments don't
+    //      write CTs by design — see posting.service.ts).
+    //   3. The CT system can drift from the GL; reporting any of
+    //      "current_balance / CT-sum / GL net" as "the cash balance"
+    //      contradicts the other two answers.
+    //
+    // Replace with the canonical GL liquid-assets sum — the same
+    // source of truth the Income Statement, Trial Balance and the
+    // treasury cards (post PR #247/#248/#249) all use:
+    //
+    //   1111 الخزينة الرئيسية  (cash drawer)
+    //   1113 البنوك            (bank accounts)
+    //   1114 المحافظ الإلكترونية (wallets / InstaPay)
+    //   1115 الشيكات            (checks)
+    //
+    // Filters mirror every other GL-derived KPI in this file:
+    //   • je.is_posted = TRUE  → only finalised entries
+    //   • je.is_void   = FALSE → exclude voids
+    //
+    // Pure SELECT — no DML, no engine touch.
     const [cash] = await this.ds.query(
-      `SELECT COALESCE(SUM(
-         CASE WHEN direction = 'in' THEN amount ELSE -amount END
-       ), 0)::numeric(14,2) AS cash_on_hand
-         FROM cashbox_transactions`,
+      `SELECT COALESCE(SUM(jl.debit - jl.credit), 0)::numeric(14,2) AS cash_on_hand
+         FROM journal_lines jl
+         JOIN journal_entries je ON je.id = jl.entry_id
+         JOIN chart_of_accounts coa ON coa.id = jl.account_id
+        WHERE coa.code IN ('1111','1113','1114','1115')
+          AND je.is_posted = TRUE
+          AND je.is_void   = FALSE`,
     );
 
     const revenue = Number(rev?.revenue || 0);
