@@ -418,19 +418,24 @@ export class FinanceDashboardService {
   // ─── Expenses (المصروفات — اليوم / الفترة) ───────────────────────
   /**
    * PR-FIN-2-HOTFIX-4 — split `dailyExpensesToday()` into a combined
-   * today + period helper. The card title was "المصروفات اليوم" in
-   * PR-FIN-2 but rendered zero whenever today had no expenses, which
-   * looked broken even though the user had real expense activity in
-   * the selected period. We now return BOTH:
+   * today + period helper.
    *
-   *   · `today_*` — Cairo today's date only (hard-bound, ignores the
-   *     dashboard's range filter so "اليوم" always means today).
-   *   · `period_*` — uses the dashboard's `range` filter so the
-   *     period total respects whatever the user picked in the
-   *     filter bar.
+   * PR-FIN-DASHBOARD-EXPENSES-ADVANCE-WAGE — two read-only adjustments
+   * to make the card mirror the operating-expense reality:
    *
-   * Both slices read-only from `expenses`; the DailyExpenses page
-   * and `POST /accounting/expenses/daily` are NOT touched.
+   *   1. EXCLUDE advances (`expenses.is_advance = TRUE`). An advance
+   *      debits an employee receivable (1123), not an expense
+   *      account, so it should not appear under "المصروفات".
+   *   2. INCLUDE `employee_wage_accrual` JEs (posted, non-void, not
+   *      themselves reversals). A wage accrual debits 521 (رواتب
+   *      وأجور) and credits 213 (مستحقات الموظفين); it is a real
+   *      operating expense even though no row is written to the
+   *      `expenses` table. Filter to operating-expense codes (52%),
+   *      so accidental postings outside the operating-expense tree
+   *      are ignored.
+   *
+   * Composition is safe — wage_accrual JEs do NOT have a matching
+   * `expenses` row, so unioning the two streams cannot double-count.
    */
   private async dailyExpensesTodayAndPeriod(
     range: { from: string; to: string },
@@ -441,6 +446,25 @@ export class FinanceDashboardService {
          FROM expenses e
          LEFT JOIN expense_categories c ON c.id = e.category_id
          WHERE e.expense_date = (now() AT TIME ZONE 'Africa/Cairo')::date
+           AND COALESCE(e.is_advance, FALSE) = FALSE
+       ),
+       today_wage_accruals AS (
+         SELECT jl.debit AS amount, coa.name_ar AS category
+         FROM journal_entries je
+         JOIN journal_lines jl ON jl.entry_id = je.id
+         JOIN chart_of_accounts coa ON coa.id = jl.account_id
+         WHERE je.reference_type::text = 'employee_wage_accrual'
+           AND je.is_posted = TRUE
+           AND je.is_void = FALSE
+           AND je.reversal_of IS NULL
+           AND je.entry_date = (now() AT TIME ZONE 'Africa/Cairo')::date
+           AND jl.debit > 0
+           AND coa.code LIKE '52%'
+       ),
+       today_combined AS (
+         SELECT amount, category FROM today_expenses
+         UNION ALL
+         SELECT amount, category FROM today_wage_accruals
        ),
        period_expenses AS (
          SELECT e.amount, c.name_ar AS category
@@ -448,22 +472,42 @@ export class FinanceDashboardService {
          LEFT JOIN expense_categories c ON c.id = e.category_id
          WHERE e.expense_date >= $1::date
            AND e.expense_date <= $2::date
+           AND COALESCE(e.is_advance, FALSE) = FALSE
+       ),
+       period_wage_accruals AS (
+         SELECT jl.debit AS amount, coa.name_ar AS category
+         FROM journal_entries je
+         JOIN journal_lines jl ON jl.entry_id = je.id
+         JOIN chart_of_accounts coa ON coa.id = jl.account_id
+         WHERE je.reference_type::text = 'employee_wage_accrual'
+           AND je.is_posted = TRUE
+           AND je.is_void = FALSE
+           AND je.reversal_of IS NULL
+           AND je.entry_date >= $1::date
+           AND je.entry_date <= $2::date
+           AND jl.debit > 0
+           AND coa.code LIKE '52%'
+       ),
+       period_combined AS (
+         SELECT amount, category FROM period_expenses
+         UNION ALL
+         SELECT amount, category FROM period_wage_accruals
        ),
        today_largest AS (
-         SELECT category, amount FROM today_expenses
+         SELECT category, amount FROM today_combined
          ORDER BY amount DESC LIMIT 1
        ),
        period_largest AS (
-         SELECT category, amount FROM period_expenses
+         SELECT category, amount FROM period_combined
          ORDER BY amount DESC LIMIT 1
        )
        SELECT
-         (SELECT COALESCE(SUM(amount), 0) FROM today_expenses)  AS today_total,
-         (SELECT COUNT(*)                  FROM today_expenses)  AS today_count,
+         (SELECT COALESCE(SUM(amount), 0) FROM today_combined)  AS today_total,
+         (SELECT COUNT(*)                  FROM today_combined)  AS today_count,
          (SELECT category FROM today_largest)                    AS today_largest_cat,
          (SELECT amount   FROM today_largest)                    AS today_largest_amt,
-         (SELECT COALESCE(SUM(amount), 0) FROM period_expenses) AS period_total,
-         (SELECT COUNT(*)                  FROM period_expenses) AS period_count,
+         (SELECT COALESCE(SUM(amount), 0) FROM period_combined) AS period_total,
+         (SELECT COUNT(*)                  FROM period_combined) AS period_count,
          (SELECT category FROM period_largest)                   AS period_largest_cat,
          (SELECT amount   FROM period_largest)                   AS period_largest_amt`,
       [range.from, range.to],
@@ -673,11 +717,36 @@ export class FinanceDashboardService {
          WHERE il.invoice_id IN (SELECT id FROM inv)
        ),
        expense_total AS (
-         SELECT COALESCE(SUM(amount), 0) AS total
-         FROM expenses
-         WHERE expense_date >= $1::date
-           AND expense_date <= $2::date
-           ${f.cashbox_id ? `AND cashbox_id = ${this.expensesParamIdx(f)}` : ''}
+         -- PR-FIN-DASHBOARD-EXPENSES-ADVANCE-WAGE
+         --   - exclude advances (debit a receivable, not an expense)
+         --   - add posted, non-void wage_accrual JEs (debit 521;
+         --     no expenses-table row, so no double counting)
+         --   - cashbox filter applies only to the expenses table:
+         --     wage accruals are cashbox-agnostic obligations, so
+         --     suppress them when a single-cashbox view is requested.
+         SELECT (
+           (SELECT COALESCE(SUM(amount), 0)
+              FROM expenses
+             WHERE expense_date >= $1::date
+               AND expense_date <= $2::date
+               AND COALESCE(is_advance, FALSE) = FALSE
+               ${f.cashbox_id ? `AND cashbox_id = ${this.expensesParamIdx(f)}` : ''})
+           +
+           ${f.cashbox_id ? '0' : `(
+             SELECT COALESCE(SUM(jl.debit), 0)
+               FROM journal_entries je
+               JOIN journal_lines jl ON jl.entry_id = je.id
+               JOIN chart_of_accounts coa ON coa.id = jl.account_id
+              WHERE je.reference_type::text = 'employee_wage_accrual'
+                AND je.is_posted = TRUE
+                AND je.is_void = FALSE
+                AND je.reversal_of IS NULL
+                AND je.entry_date >= $1::date
+                AND je.entry_date <= $2::date
+                AND jl.debit > 0
+                AND coa.code LIKE '52%'
+           )`}
+         ) AS total
        ),
        agg AS (
          SELECT
@@ -828,11 +897,35 @@ export class FinanceDashboardService {
       ],
     );
     // Daily expenses lookup, mapped by date for net-profit subtraction.
+    //
+    // PR-FIN-DASHBOARD-EXPENSES-ADVANCE-WAGE — same composition as
+    // `expense_total` in `profitTotals`: skip advances, add wage
+    // accrual JEs (by JE entry_date). UNION ALL allows the per-day
+    // SUM to combine both streams without double counting (a wage
+    // accrual has no `expenses` row).
     const expenseRows = await this.ds.query(
-      `SELECT expense_date AS d, COALESCE(SUM(amount), 0) AS total
-       FROM expenses
-       WHERE expense_date >= $1::date AND expense_date <= $2::date
-       GROUP BY 1`,
+      `WITH per_day AS (
+         SELECT expense_date AS d, COALESCE(SUM(amount), 0) AS total
+           FROM expenses
+          WHERE expense_date >= $1::date AND expense_date <= $2::date
+            AND COALESCE(is_advance, FALSE) = FALSE
+          GROUP BY 1
+         UNION ALL
+         SELECT je.entry_date AS d, COALESCE(SUM(jl.debit), 0) AS total
+           FROM journal_entries je
+           JOIN journal_lines jl ON jl.entry_id = je.id
+           JOIN chart_of_accounts coa ON coa.id = jl.account_id
+          WHERE je.reference_type::text = 'employee_wage_accrual'
+            AND je.is_posted = TRUE
+            AND je.is_void = FALSE
+            AND je.reversal_of IS NULL
+            AND je.entry_date >= $1::date
+            AND je.entry_date <= $2::date
+            AND jl.debit > 0
+            AND coa.code LIKE '52%'
+          GROUP BY 1
+       )
+       SELECT d, COALESCE(SUM(total), 0) AS total FROM per_day GROUP BY d`,
       [range.from, range.to],
     );
     const expByDate: Record<string, number> = {};
