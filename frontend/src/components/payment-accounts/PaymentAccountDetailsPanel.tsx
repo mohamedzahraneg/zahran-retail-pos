@@ -194,13 +194,19 @@ export function PaymentAccountDetailsPanel({
             <dl className="grid grid-cols-2 gap-x-3 gap-y-2 text-sm">
               <DetailRow label="المعرف" value={account.identifier ?? '—'} mono />
               <DetailRow label="حساب الأستاذ" value={`${account.gl_account_code} — ${account.gl_name_ar ?? ''}`} mono />
+              {/* PR-FIN-PAYMENTS-WALLET-DISPLAY-BALANCE (label
+                  polish): spell out which balance kind backs the
+                  linked cashbox so the operator never confuses a
+                  per-drawer cash figure with a GL aggregate.
+                    cash    → "<name> — رصيد الخزنة"
+                    non-cash → "<name> — الرصيد المحاسبي / GL" */}
               <DetailRow
                 label="الخزنة المرتبطة"
                 value={
                   cashbox
                     ? cashbox.kind === 'cash'
-                      ? cashbox.name_ar
-                      : `${cashbox.name_ar} (محاسبي/GL)`
+                      ? `${cashbox.name_ar} — رصيد الخزنة`
+                      : `${cashbox.name_ar} — الرصيد المحاسبي / GL`
                     : '— غير مربوط —'
                 }
               />

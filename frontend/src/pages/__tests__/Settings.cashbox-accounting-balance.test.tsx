@@ -59,7 +59,7 @@ beforeEach(() => {
 });
 
 describe('Settings → CashboxesTab balance cell — PR-FIN-PAYMENTS-WALLET-DISPLAY-BALANCE', () => {
-  it('ewallet row shows the GL-derived accounting_balance + "محاسبي" pill (NOT stored 0)', async () => {
+  it('ewallet row shows the GL-derived accounting_balance + explicit "الرصيد المحاسبي" label + "محاسبي" pill', async () => {
     // Production fixture-shape: خزنة التحويلات stores 0 (non-cash
     // payments don't write CTs) but GL 1114 has +2,190 EGP.
     listCashboxesMock.mockResolvedValue([
@@ -74,12 +74,15 @@ describe('Settings → CashboxesTab balance cell — PR-FIN-PAYMENTS-WALLET-DISP
     const tr = row.closest('tr')!;
     // Real derived figure visible.
     expect(within(tr).getByText(/2,190\.00/)).toBeInTheDocument();
-    // The pill exists for ewallet rows.
+    // EXPLICIT visible label — not just a tooltip.
+    const labelEl = within(tr).getByTestId('cashbox-balance-label-cb-ewallet');
+    expect(labelEl.textContent).toBe('الرصيد المحاسبي');
+    // The pill stays as a compact secondary indicator.
     expect(within(tr).getByTestId('cashbox-accounting-badge-cb-ewallet')).toBeInTheDocument();
     expect(within(tr).getByTestId('cashbox-accounting-badge-cb-ewallet').textContent).toMatch(/محاسبي/);
   });
 
-  it('cash row shows current_balance and NO "محاسبي" pill (drawer figure is canonical)', async () => {
+  it('cash row shows current_balance with explicit "رصيد الخزنة" label and NO "محاسبي" pill', async () => {
     listCashboxesMock.mockResolvedValue([
       {
         id: 'cb-cash', name_ar: 'الخزينة الرئيسية', warehouse_name: 'الفرع الرئيسي',
@@ -91,11 +94,16 @@ describe('Settings → CashboxesTab balance cell — PR-FIN-PAYMENTS-WALLET-DISP
     const row = await screen.findByText('الخزينة الرئيسية');
     const tr = row.closest('tr')!;
     expect(within(tr).getByText(/5,000\.00/)).toBeInTheDocument();
+    // EXPLICIT cash label.
+    const labelEl = within(tr).getByTestId('cashbox-balance-label-cb-cash');
+    expect(labelEl.textContent).toBe('رصيد الخزنة');
+    // No accounting pill on cash rows.
     expect(within(tr).queryByTestId('cashbox-accounting-badge-cb-cash')).toBeNull();
+    // No "محاسبي" string anywhere on the cash row.
     expect(within(tr).queryByText('محاسبي')).toBeNull();
   });
 
-  it('bank row shows the derived figure with "محاسبي" pill', async () => {
+  it('bank row shows the derived figure with explicit "الرصيد المحاسبي" label + "محاسبي" pill', async () => {
     listCashboxesMock.mockResolvedValue([
       {
         id: 'cb-bank', name_ar: 'حساب POS Visa', warehouse_name: 'الفرع الرئيسي',
@@ -107,10 +115,11 @@ describe('Settings → CashboxesTab balance cell — PR-FIN-PAYMENTS-WALLET-DISP
     const row = await screen.findByText('حساب POS Visa');
     const tr = row.closest('tr')!;
     expect(within(tr).getByText(/4,500\.00/)).toBeInTheDocument();
+    expect(within(tr).getByTestId('cashbox-balance-label-cb-bank').textContent).toBe('الرصيد المحاسبي');
     expect(within(tr).getByTestId('cashbox-accounting-badge-cb-bank')).toBeInTheDocument();
   });
 
-  it('non-cash row missing a GL link renders the "غير مربوط" amber warning pill', async () => {
+  it('non-cash row missing a GL link renders the "غير مربوط" amber warning pill (label still "الرصيد المحاسبي")', async () => {
     // Defensive: settings.service.ts shouldn't produce this in production
     // (the CASE expression always supplies a GL code for ewallet/bank/check),
     // but if it ever does, the FE warns instead of pretending.
@@ -127,9 +136,12 @@ describe('Settings → CashboxesTab balance cell — PR-FIN-PAYMENTS-WALLET-DISP
     await waitFor(() => {
       expect(within(tr).getByText('غير مربوط')).toBeInTheDocument();
     });
+    // Even unlinked rows make their *intended* balance kind explicit so
+    // the operator can act on the warning ("oh, this should be GL").
+    expect(within(tr).getByTestId('cashbox-balance-label-cb-orphan').textContent).toBe('الرصيد المحاسبي');
   });
 
-  it('mixed cash + ewallet table renders BOTH cells with the right semantics in one pass', async () => {
+  it('mixed cash + ewallet table renders BOTH explicit labels in one pass', async () => {
     listCashboxesMock.mockResolvedValue([
       {
         id: 'cb-cash', name_ar: 'الخزينة الرئيسية', warehouse_name: 'A',
@@ -147,8 +159,10 @@ describe('Settings → CashboxesTab balance cell — PR-FIN-PAYMENTS-WALLET-DISP
     const cashRow = screen.getByText('الخزينة الرئيسية').closest('tr')!;
     const ewalletRow = screen.getByText('خزنة التحويلات').closest('tr')!;
     expect(within(cashRow).getByText(/1,500\.00/)).toBeInTheDocument();
+    expect(within(cashRow).getByTestId('cashbox-balance-label-cb-cash').textContent).toBe('رصيد الخزنة');
     expect(within(cashRow).queryByText('محاسبي')).toBeNull();
     expect(within(ewalletRow).getByText(/2,190\.00/)).toBeInTheDocument();
+    expect(within(ewalletRow).getByTestId('cashbox-balance-label-cb-ewallet').textContent).toBe('الرصيد المحاسبي');
     expect(within(ewalletRow).getByText('محاسبي')).toBeInTheDocument();
   });
 });

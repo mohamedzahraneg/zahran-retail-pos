@@ -129,14 +129,17 @@ describe('<PaymentAccountDetailsPanel /> — PR-FIN-PAYMENTS-WALLET-DISPLAY-BALA
     expect(within(totals).getByTestId('totals-count')).toBeInTheDocument();
   });
 
-  it('linked ewallet cashbox is labeled "(محاسبي/GL)" — never as a per-drawer cash figure', () => {
+  it('linked ewallet cashbox spells out "— الرصيد المحاسبي / GL" (full sentence, not bare "(محاسبي/GL)")', () => {
     renderPanel({ cashbox: makeCashbox({ kind: 'ewallet', name_ar: 'خزنة التحويلات' }) });
     const identity = screen.getByTestId('details-identity');
     expect(identity.textContent).toMatch(/خزنة التحويلات/);
-    expect(identity.textContent).toMatch(/\(محاسبي\/GL\)/);
+    // EXPLICIT label.
+    expect(identity.textContent).toMatch(/—\s*الرصيد المحاسبي\s*\/\s*GL/);
+    // Never the bare-suffix shorthand.
+    expect(identity.textContent).not.toMatch(/\(محاسبي\/GL\)/);
   });
 
-  it('linked CASH cashbox is NOT labeled "(محاسبي/GL)" — current_balance IS canonical', () => {
+  it('linked CASH cashbox spells out "— رصيد الخزنة" — never the accounting label', () => {
     renderPanel({
       cashbox: makeCashbox({
         id: 'cb-cash', kind: 'cash', name_ar: 'الخزينة الرئيسية',
@@ -145,10 +148,12 @@ describe('<PaymentAccountDetailsPanel /> — PR-FIN-PAYMENTS-WALLET-DISPLAY-BALA
     });
     const identity = screen.getByTestId('details-identity');
     expect(identity.textContent).toMatch(/الخزينة الرئيسية/);
+    expect(identity.textContent).toMatch(/—\s*رصيد الخزنة/);
+    expect(identity.textContent).not.toMatch(/الرصيد المحاسبي/);
     expect(identity.textContent).not.toMatch(/محاسبي\/GL/);
   });
 
-  it('bank cashbox is labeled "(محاسبي/GL)" (kind=bank → GL 1113)', () => {
+  it('bank cashbox spells out "— الرصيد المحاسبي / GL" (kind=bank → GL 1113)', () => {
     renderPanel({
       cashbox: makeCashbox({
         id: 'cb-bank', kind: 'bank', name_ar: 'حساب POS Visa',
@@ -157,14 +162,16 @@ describe('<PaymentAccountDetailsPanel /> — PR-FIN-PAYMENTS-WALLET-DISPLAY-BALA
     });
     const identity = screen.getByTestId('details-identity');
     expect(identity.textContent).toMatch(/حساب POS Visa/);
-    expect(identity.textContent).toMatch(/\(محاسبي\/GL\)/);
+    expect(identity.textContent).toMatch(/—\s*الرصيد المحاسبي\s*\/\s*GL/);
   });
 
   it('renders correctly when no cashbox is linked (— غير مربوط —)', async () => {
     renderPanel({ cashbox: null });
     const identity = screen.getByTestId('details-identity');
     expect(identity.textContent).toMatch(/غير مربوط/);
-    expect(identity.textContent).not.toMatch(/محاسبي\/GL/);
+    // No balance-kind label when there's no linked cashbox.
+    expect(identity.textContent).not.toMatch(/رصيد الخزنة/);
+    expect(identity.textContent).not.toMatch(/الرصيد المحاسبي/);
     // The new SummaryRow is account-level — it must still render.
     await waitFor(() =>
       expect(screen.getByTestId('totals-payment-account-balance')).toBeInTheDocument(),

@@ -107,29 +107,32 @@ beforeEach(() => {
 });
 
 describe('<PaymentAccountModal /> cashbox dropdown — PR-FIN-PAYMENTS-WALLET-DISPLAY-BALANCE', () => {
-  it('ewallet option shows the GL-derived balance with "(محاسبي)" suffix, NOT the stored 0.00', () => {
+  it('ewallet option spells out "الرصيد المحاسبي: <amount>" (full sentence, not bare "(محاسبي)")', () => {
     // The instapay method maps to ewallet kind, so the dropdown is
     // populated with ewallet cashboxes only.
     renderModal();
     const select = screen.getByTestId('payment-account-modal-cashbox') as HTMLSelectElement;
     const ewalletOption = Array.from(select.options).find((o) => o.value === 'cb-ewallet');
     expect(ewalletOption).toBeDefined();
-    // Must contain the derived amount (2,190) AND the "محاسبي" badge.
-    expect(ewalletOption!.textContent).toMatch(/2,190\.00/);
-    expect(ewalletOption!.textContent).toMatch(/محاسبي/);
-    // Must NOT show the misleading stored 0 as the headline figure.
-    expect(ewalletOption!.textContent).not.toMatch(/·\s*0\.00\s*ج\.م\s*\)/);
+    // EXPLICIT label sentence, not just a "(محاسبي)" suffix.
+    expect(ewalletOption!.textContent).toMatch(/الرصيد المحاسبي:\s*2,190\.00\s*ج\.م/);
+    // Must NOT regress to bare "(محاسبي)" suffix or to "0.00 ج.م" headline.
+    expect(ewalletOption!.textContent).not.toMatch(/\(محاسبي\)/);
+    expect(ewalletOption!.textContent).not.toMatch(/·\s*0\.00\s*ج\.م/);
   });
 
-  it('ewallet option without a GL link shows "غير مربوط بحساب محاسبي" warning', () => {
+  it('ewallet option without a GL link spells out "الرصيد المحاسبي" + "غير مربوط بحساب محاسبي"', () => {
     renderModal();
     const select = screen.getByTestId('payment-account-modal-cashbox') as HTMLSelectElement;
     const opt = Array.from(select.options).find((o) => o.value === 'cb-ewallet-unlinked');
     expect(opt).toBeDefined();
+    // The label still names the *intended* balance kind (operator can
+    // act on the warning) and the warning is appended.
+    expect(opt!.textContent).toMatch(/الرصيد المحاسبي:/);
     expect(opt!.textContent).toMatch(/غير مربوط بحساب محاسبي/);
   });
 
-  it('cash dropdown still shows the canonical drawer figure (no "محاسبي" suffix)', async () => {
+  it('cash option spells out "رصيد الخزنة: <amount>" — never the accounting label', async () => {
     // Switching to method=cash filters the dropdown to cash kind only.
     renderModal({ prefilledMethod: undefined });
     fireEvent.change(screen.getByTestId('payment-account-modal-method'), {
@@ -138,9 +141,10 @@ describe('<PaymentAccountModal /> cashbox dropdown — PR-FIN-PAYMENTS-WALLET-DI
     const select = screen.getByTestId('payment-account-modal-cashbox') as HTMLSelectElement;
     const cashOption = Array.from(select.options).find((o) => o.value === 'cb-cash');
     expect(cashOption).toBeDefined();
-    expect(cashOption!.textContent).toMatch(/5,000\.00/);
-    // Cash drawers MUST NOT carry the "(محاسبي)" suffix — the
-    // current_balance IS the canonical figure for cash.
+    expect(cashOption!.textContent).toMatch(/رصيد الخزنة:\s*5,000\.00\s*ج\.م/);
+    // Cash MUST NOT carry the accounting label (would imply GL
+    // semantics on a drawer figure that's already canonical).
+    expect(cashOption!.textContent).not.toMatch(/الرصيد المحاسبي/);
     expect(cashOption!.textContent).not.toMatch(/\(محاسبي\)/);
     expect(cashOption!.textContent).not.toMatch(/غير مربوط بحساب محاسبي/);
   });

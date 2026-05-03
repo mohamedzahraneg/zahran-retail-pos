@@ -433,20 +433,28 @@ export function PaymentAccountModal({
             >
               <option value="">— بدون ربط —</option>
               {cashboxesForMethod.map((cb) => {
-                // PR-FIN-PAYMENTS-WALLET-DISPLAY-BALANCE — for non-cash
-                // kinds the per-cashbox `current_balance` stays at 0
-                // by design (only cash payments write CTs). Show the
-                // GL-derived figure with a "محاسبي" prefix so the
-                // operator never reads the dropdown as "this drawer
-                // has 0 ج.م".
+                // PR-FIN-PAYMENTS-WALLET-DISPLAY-BALANCE (label
+                // polish): for non-cash kinds the per-cashbox
+                // `current_balance` stays at 0 by design (only cash
+                // payments write CTs). The dropdown option must spell
+                // out *which* balance kind the operator is looking at:
+                //   cash       → "رصيد الخزنة: <amount>"
+                //   ewallet/   → "الرصيد المحاسبي: <amount>"
+                //   bank/check
+                //   unlinked   → "الرصيد المحاسبي: <amount> — غير مربوط"
+                // No more bare "(محاسبي)" suffix — that was easy to
+                // miss. The operator now reads a full sentence.
                 const display = displayCashboxBalance(cb);
+                const amountText = `${display.amount.toLocaleString('en-US', {
+                  minimumFractionDigits: 2,
+                  maximumFractionDigits: 2,
+                })} ج.م`;
                 const balanceLabel =
-                  `${display.amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ج.م` +
-                  (display.kind === 'accounting'
-                    ? ' (محاسبي)'
-                    : display.kind === 'unlinked'
-                      ? ' — غير مربوط بحساب محاسبي'
-                      : '');
+                  display.kind === 'cash'
+                    ? `رصيد الخزنة: ${amountText}`
+                    : display.kind === 'accounting'
+                      ? `الرصيد المحاسبي: ${amountText}`
+                      : `الرصيد المحاسبي: ${amountText} — غير مربوط بحساب محاسبي`;
                 const inactiveBadge = cb.is_active ? '' : ' — غير نشطة';
                 return (
                   <option key={cb.id} value={cb.id}>
