@@ -38,10 +38,15 @@ export interface FinanceDashboard {
   };
 
   liquidity: {
+    /** GL 1111 الخزينة الرئيسية */
     cashboxes_total: number;
+    /** GL 1113 البنوك */
     banks_total: number;
+    /** GL 1114 المحافظ الإلكترونية */
     wallets_total: number;
-    cards_total: number;
+    /** GL 1115 الشيكات (renamed from `cards_total` in
+        PR-FIN-DASHBOARD-LIQUIDITY-GL). */
+    checks_total: number;
     total_cash_equivalents: number;
   };
 

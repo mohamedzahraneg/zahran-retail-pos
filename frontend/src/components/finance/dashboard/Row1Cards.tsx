@@ -52,12 +52,15 @@ function CashEquivalentsCard({ data }: { data: FinanceDashboard['liquidity'] }) 
       tone="emerald"
       testId="card-cash-equivalents"
     >
+      {/* PR-FIN-DASHBOARD-LIQUIDITY-GL — buckets now sum from
+          GL liquid-asset codes (1111/1113/1114/1115). The 4th
+          bucket was relabeled "البطاقات" → "الشيكات" because
+          GL 1115 = "الشيكات". No `card` GL code exists today; if
+          one is introduced later it would land in a 5th bucket. */}
       <KpiRow label="إجمالي الخزائن" value={fmtEGP(data.cashboxes_total)} />
       <KpiRow label="إجمالي البنوك" value={fmtEGP(data.banks_total)} />
       <KpiRow label="إجمالي المحافظ" value={fmtEGP(data.wallets_total)} />
-      <span title="لا توجد حسابات بطاقات مفعلة بعد">
-        <KpiRow label="إجمالي البطاقات" value={fmtEGP(data.cards_total)} />
-      </span>
+      <KpiRow label="إجمالي الشيكات" value={fmtEGP(data.checks_total)} />
       <div className="border-t border-slate-200 dark:border-slate-700 pt-2 mt-1">
         <KpiRow
           label="الإجمالي"

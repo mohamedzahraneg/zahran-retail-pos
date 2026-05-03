@@ -51,10 +51,16 @@ export interface FinanceDashboardResponse {
   };
 
   liquidity: {
+    /** GL 1111 الخزينة الرئيسية — cash drawer net */
     cashboxes_total: number;
+    /** GL 1113 البنوك — bank accounts net */
     banks_total: number;
+    /** GL 1114 المحافظ الإلكترونية — wallets / InstaPay net */
     wallets_total: number;
-    cards_total: number;
+    /** GL 1115 الشيكات — checks net (renamed from `cards_total`
+        in PR-FIN-DASHBOARD-LIQUIDITY-GL; no `card` GL code exists). */
+    checks_total: number;
+    /** Σ of the four buckets above. */
     total_cash_equivalents: number;
   };
 

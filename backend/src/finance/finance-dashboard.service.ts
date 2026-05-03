@@ -298,36 +298,71 @@ export class FinanceDashboardService {
   }
 
   // ─── Liquidity (النقدية وما في حكمها) ─────────────────────────────
+  // PR-FIN-DASHBOARD-LIQUIDITY-GL — accounting-truth liquidity.
+  //
+  // The previous formula summed `cashboxes.current_balance` grouped by
+  // `kind`. That had two production-visible bugs that surfaced
+  // together on the "النقدية وما في حكمها" card:
+  //
+  //   1. Non-cash kinds (ewallet/bank/check) never write CTs — see
+  //      posting.service.ts — so their stored `current_balance` stays
+  //      at 0 forever. The wallets bucket showed 0 even though
+  //      خزنة التحويلات holds GL 1114 = 2,190 EGP.
+  //   2. Even the cash bucket can drift from GL because the CT system
+  //      and `current_balance` may be out of sync (the same drift the
+  //      health card surfaces).
+  //
+  // Replace with the canonical GL liquid-assets sum — the same source
+  // of truth the Income Statement, Trial Balance, treasury cards
+  // (post PR #247/#248/#249) and the Smart Analytics liquidity
+  // (post PR #251) all use:
+  //
+  //   1111 الخزينة الرئيسية  → cashboxes_total bucket
+  //   1113 البنوك            → banks_total      bucket
+  //   1114 المحافظ الإلكترونية → wallets_total    bucket
+  //   1115 الشيكات            → checks_total     bucket
+  //
+  // The 4th bucket is renamed `cards_total` → `checks_total` because
+  // GL 1115 is "الشيكات" (the FE label flips from "البطاقات" to
+  // "الشيكات" alongside this PR). No `card` GL code exists today.
+  //
+  // Pure SELECT — no DML, no engine touch.
+  // The `cashbox_id` filter is intentionally NOT applied here: the
+  // dashboard's optional cashbox filter scopes operational lists
+  // (recent movements, drift detail) but liquidity is inherently a
+  // global accounting figure — restricting it to one cashbox would
+  // mean "this cashbox's cash drawer in the GL" and ignore wallets/
+  // banks/checks, defeating the whole point of the new formula. If
+  // an operator wants per-cashbox cash, they look at the treasury
+  // card on /cashboxes (which already routes through
+  // `displayCashboxBalance`).
   private async liquidity(
-    f: DashboardFilters,
+    _f: DashboardFilters,
   ): Promise<FinanceDashboardResponse['liquidity']> {
     const rows = await this.ds.query(
-      `SELECT
-         kind,
-         COALESCE(SUM(current_balance), 0) AS total
-       FROM cashboxes
-       WHERE is_active = TRUE
-         ${f.cashbox_id ? 'AND id = $1' : ''}
-       GROUP BY kind`,
-      f.cashbox_id ? [f.cashbox_id] : [],
+      `SELECT coa.code,
+              COALESCE(SUM(jl.debit - jl.credit), 0) AS total
+         FROM journal_lines jl
+         JOIN journal_entries je ON je.id = jl.entry_id
+         JOIN chart_of_accounts coa ON coa.id = jl.account_id
+        WHERE coa.code IN ('1111','1113','1114','1115')
+          AND je.is_posted = TRUE
+          AND je.is_void   = FALSE
+        GROUP BY coa.code`,
     );
-    const sumByKind = (kind: string) =>
-      Number(
-        (rows.find((r: any) => r.kind === kind) ?? { total: 0 }).total ?? 0,
-      );
+    const sumByCode = (code: string): number =>
+      Number((rows.find((r: any) => r.code === code) ?? { total: 0 }).total ?? 0);
 
-    const cashboxes = sumByKind('cash');
-    const banks = sumByKind('bank');
-    const wallets = sumByKind('ewallet');
-    // Cards total is intentionally 0.00 — see Q4 of the plan.
-    // We do NOT fabricate; cashboxes.kind has no 'card' value yet.
-    const cards = 0;
-    const total = round2(cashboxes + banks + wallets + cards);
+    const cashboxes = sumByCode('1111');
+    const banks     = sumByCode('1113');
+    const wallets   = sumByCode('1114');
+    const checks    = sumByCode('1115');
+    const total = round2(cashboxes + banks + wallets + checks);
     return {
       cashboxes_total: round2(cashboxes),
       banks_total: round2(banks),
       wallets_total: round2(wallets),
-      cards_total: 0,
+      checks_total: round2(checks),
       total_cash_equivalents: total,
     };
   }

@@ -138,26 +138,136 @@ describe('FinanceDashboardService — PR-FIN-2', () => {
     });
   });
 
-  describe('liquidity', () => {
-    it('aggregates by cashbox kind; cards forced to 0', async () => {
+  describe('liquidity — PR-FIN-DASHBOARD-LIQUIDITY-GL', () => {
+    // The previous formula summed `cashboxes.current_balance` grouped
+    // by `kind` and hardcoded `cards_total = 0`. That had two bugs:
+    // (1) non-cash kinds never write CTs so wallets/banks/checks
+    // stored 0 forever, (2) even the cash bucket can drift from GL.
+    // The new formula sums GL liquid-asset codes (1111/1113/1114/1115)
+    // over posted-non-void journal entries — matching the Income
+    // Statement and the analytics liquidity tile shipped in PR #251.
+    it('aggregates by GL liquid-asset codes (1111/1113/1114/1115)', async () => {
       const { svc } = buildSvc({
         matchers: [
           {
-            test: (s) => /FROM cashboxes/.test(s) && /GROUP BY kind/.test(s),
+            test: (s) =>
+              /FROM journal_lines/.test(s) &&
+              /coa\.code IN\s*\(\s*'1111'\s*,\s*'1113'\s*,\s*'1114'\s*,\s*'1115'\s*\)/.test(s),
             rows: [
-              { kind: 'cash',    total: '100.00' },
-              { kind: 'bank',    total: '500.00' },
-              { kind: 'ewallet', total: '50.00' },
+              { code: '1111', total: '29660.00' }, // cashboxes
+              { code: '1113', total: '0.00' },     // banks
+              { code: '1114', total: '2190.00' },  // wallets
+              { code: '1115', total: '0.00' },     // checks
             ],
           },
         ],
       });
       const r = await svc.dashboard({ from: '2026-04-01', to: '2026-04-30' });
-      expect(r.liquidity.cashboxes_total).toBe(100);
-      expect(r.liquidity.banks_total).toBe(500);
-      expect(r.liquidity.wallets_total).toBe(50);
-      expect(r.liquidity.cards_total).toBe(0);
-      expect(r.liquidity.total_cash_equivalents).toBe(650);
+      expect(r.liquidity.cashboxes_total).toBe(29660);
+      expect(r.liquidity.banks_total).toBe(0);
+      expect(r.liquidity.wallets_total).toBe(2190);
+      expect(r.liquidity.checks_total).toBe(0);
+      expect(r.liquidity.total_cash_equivalents).toBe(31850);
+      // The retired field name must be gone from the response shape.
+      expect((r.liquidity as any).cards_total).toBeUndefined();
+    });
+
+    it('SQL filters posted, non-void journal entries (excludes voids)', async () => {
+      const { svc, calls } = buildSvc({
+        matchers: [
+          {
+            test: (s) => /FROM journal_lines/.test(s) && /coa\.code IN/.test(s),
+            rows: [],
+          },
+        ],
+      });
+      await svc.dashboard({ from: '2026-04-01', to: '2026-04-30' });
+      const liquiditySql = calls.find(
+        (c) => /FROM journal_lines/.test(c.sql) && /coa\.code IN/.test(c.sql),
+      )!;
+      expect(liquiditySql).toBeDefined();
+      expect(liquiditySql.sql).toMatch(/je\.is_posted\s*=\s*TRUE/);
+      expect(liquiditySql.sql).toMatch(/je\.is_void\s*=\s*FALSE/);
+    });
+
+    it('SQL: pure SELECT — no INSERT/UPDATE/DELETE on the liquidity path', async () => {
+      const { svc, calls } = buildSvc({
+        matchers: [{ test: () => true, rows: [] }],
+      });
+      await svc.dashboard({ from: '2026-04-01', to: '2026-04-30' });
+      const liquiditySql = calls.find(
+        (c) => /FROM journal_lines/.test(c.sql) && /coa\.code IN/.test(c.sql),
+      )!;
+      expect(liquiditySql).toBeDefined();
+      expect(liquiditySql.sql).toMatch(/^\s*SELECT/i);
+      expect(liquiditySql.sql).not.toMatch(/\bINSERT\b/i);
+      expect(liquiditySql.sql).not.toMatch(/\bUPDATE\b/i);
+      expect(liquiditySql.sql).not.toMatch(/\bDELETE\b/i);
+      expect(liquiditySql.sql).not.toMatch(/\bMERGE\b/i);
+    });
+
+    it('SQL never SUMs raw cashbox_transactions for liquidity', async () => {
+      const { svc, calls } = buildSvc({
+        matchers: [{ test: () => true, rows: [] }],
+      });
+      await svc.dashboard({ from: '2026-04-01', to: '2026-04-30' });
+      const liquiditySql = calls.find(
+        (c) => /coa\.code IN\s*\(\s*'1111'/.test(c.sql),
+      )!;
+      expect(liquiditySql).toBeDefined();
+      expect(liquiditySql.sql).not.toMatch(/cashbox_transactions/);
+      expect(liquiditySql.sql).not.toMatch(/direction\s*=\s*'in'/);
+    });
+
+    it('SQL never groups by cashboxes.kind anymore (legacy formula gone)', async () => {
+      const { svc, calls } = buildSvc({
+        matchers: [{ test: () => true, rows: [] }],
+      });
+      await svc.dashboard({ from: '2026-04-01', to: '2026-04-30' });
+      // None of the emitted SQL on the liquidity path should aggregate
+      // `cashboxes` by `kind` — that's the retired pattern.
+      const guilty = calls.find(
+        (c) => /FROM cashboxes/.test(c.sql) && /GROUP BY\s+kind/i.test(c.sql),
+      );
+      expect(guilty).toBeUndefined();
+    });
+
+    it('production fixture: cash 29,660 + wallet 2,190 = total 31,850 (matches live)', async () => {
+      const { svc } = buildSvc({
+        matchers: [
+          {
+            test: (s) => /FROM journal_lines/.test(s) && /coa\.code IN/.test(s),
+            rows: [
+              { code: '1111', total: '29660.00' },
+              { code: '1114', total: '2190.00' },
+              // 1113/1115 absent → resolve to 0 via the COALESCE/sumByCode helper
+            ],
+          },
+        ],
+      });
+      const r = await svc.dashboard({ from: '2026-04-01', to: '2026-04-30' });
+      expect(r.liquidity.cashboxes_total).toBe(29660);
+      expect(r.liquidity.banks_total).toBe(0);
+      expect(r.liquidity.wallets_total).toBe(2190);
+      expect(r.liquidity.checks_total).toBe(0);
+      expect(r.liquidity.total_cash_equivalents).toBe(31850);
+    });
+
+    it('all-empty fixture: every bucket falls back to 0 cleanly (no NaN leak)', async () => {
+      const { svc } = buildSvc({
+        matchers: [
+          {
+            test: (s) => /FROM journal_lines/.test(s) && /coa\.code IN/.test(s),
+            rows: [],
+          },
+        ],
+      });
+      const r = await svc.dashboard({ from: '2026-04-01', to: '2026-04-30' });
+      expect(r.liquidity.cashboxes_total).toBe(0);
+      expect(r.liquidity.banks_total).toBe(0);
+      expect(r.liquidity.wallets_total).toBe(0);
+      expect(r.liquidity.checks_total).toBe(0);
+      expect(r.liquidity.total_cash_equivalents).toBe(0);
     });
   });
 
