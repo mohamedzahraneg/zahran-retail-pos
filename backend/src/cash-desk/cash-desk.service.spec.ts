@@ -2781,3 +2781,156 @@ describe('CashDeskService.updateCashbox — PR-FIN-PAYACCT-4D-UX-FIX-6 uuid sani
   });
 });
 
+// ─── PR-FIN-CASHBOXES-TREASURY-GRID-FIXES (Fix 1) ─────────────────
+// Pins the SELECT shape on `listCashboxes` after extending it with
+// the GL-derived `accounting_balance` column (mirrors PR #247
+// settings.service.ts shape). The /cashboxes treasury page consumes
+// THIS endpoint — without these fields the new card would still
+// show 0.00 for ewallet/bank/check.
+describe('CashDeskService.listCashboxes — accounting_balance derivation', () => {
+  // Responder-driven fake DataSource so tests can answer the
+  // migration-049-feature-detection probe AND inspect the main SELECT.
+  function makeResponderDS(
+    responder: (sql: string, params: any[]) => any[] | Promise<any[]>,
+  ) {
+    const dsCalls: QueryCall[] = [];
+    const ds: any = {
+      query: async (sql: string, params: any[] = []) => {
+        dsCalls.push({ sql, params });
+        return responder(sql, params);
+      },
+      transaction: async (cb: (em: any) => Promise<any>) => cb(ds),
+    };
+    return { ds, dsCalls };
+  }
+
+  async function makeServiceFor(
+    responder: (sql: string, params: any[]) => any[] | Promise<any[]>,
+  ) {
+    const { ds, dsCalls } = makeResponderDS(responder);
+    const moduleRef = await Test.createTestingModule({
+      providers: [
+        CashDeskService,
+        { provide: DataSource, useValue: ds },
+        { provide: AccountingPostingService, useValue: {} },
+        { provide: FinancialEngineService, useValue: {} },
+      ],
+    }).compile();
+    const service = moduleRef.get(CashDeskService);
+    return { service, dsCalls };
+  }
+
+  // The migration-049 probe must answer "yes" so the modern SELECT
+  // (the one we're testing) is the path that runs.
+  function modernResponder(rows: any[] = []) {
+    return (sql: string) => {
+      if (/information_schema\.columns/.test(sql)) return [{ has_kind: true, has_fi: true }];
+      return rows;
+    };
+  }
+
+  it('SQL shape: pure SELECT — no INSERT/UPDATE/DELETE on the cashboxes path', async () => {
+    const { service, dsCalls } = await makeServiceFor(modernResponder());
+    await service.listCashboxes(true);
+    // Strip the migration-probe call; assert only the main SELECT.
+    const main = dsCalls.find((c) => /FROM cashboxes cb/.test(c.sql))!;
+    expect(main).toBeDefined();
+    expect(main.sql).toMatch(/^\s*SELECT/i);
+    expect(main.sql).not.toMatch(/\bINSERT\b/i);
+    expect(main.sql).not.toMatch(/\bUPDATE\b/i);
+    expect(main.sql).not.toMatch(/\bDELETE\b/i);
+    expect(main.sql).not.toMatch(/\bMERGE\b/i);
+  });
+
+  it('SQL shape: derives accounting_gl_code via the canonical kind→code map', async () => {
+    const { service, dsCalls } = await makeServiceFor(modernResponder());
+    await service.listCashboxes(true);
+    const main = dsCalls.find((c) => /FROM cashboxes cb/.test(c.sql))!;
+    expect(main.sql).toMatch(/accounting_gl_code/);
+    // ewallet → 1114, bank → 1113, check → 1115. cash maps to NULL.
+    expect(main.sql).toMatch(/'ewallet'[\s\S]*?'1114'/);
+    expect(main.sql).toMatch(/'bank'[\s\S]*?'1113'/);
+    expect(main.sql).toMatch(/'check'[\s\S]*?'1115'/);
+  });
+
+  it('SQL shape: derives accounting_balance via Σ(jl.debit − jl.credit) on the matching account_code', async () => {
+    const { service, dsCalls } = await makeServiceFor(modernResponder());
+    await service.listCashboxes(true);
+    const main = dsCalls.find((c) => /FROM cashboxes cb/.test(c.sql))!;
+    expect(main.sql).toMatch(/accounting_balance/);
+    expect(main.sql).toMatch(/journal_lines/);
+    expect(main.sql).toMatch(/SUM\(jl\.debit\s*-\s*jl\.credit\)/);
+    expect(main.sql).toMatch(/chart_of_accounts/);
+  });
+
+  it('SQL shape: only counts posted, non-void journal entries (matches GL net rules)', async () => {
+    const { service, dsCalls } = await makeServiceFor(modernResponder());
+    await service.listCashboxes(true);
+    const main = dsCalls.find((c) => /FROM cashboxes cb/.test(c.sql))!;
+    expect(main.sql).toMatch(/je\.is_posted\s*=\s*TRUE/);
+    expect(main.sql).toMatch(/je\.is_void\s*=\s*FALSE/);
+  });
+
+  it('SQL shape: cash kind is excluded from the GL aggregation (stays NULL → FE keeps current_balance)', async () => {
+    const { service, dsCalls } = await makeServiceFor(modernResponder());
+    await service.listCashboxes(true);
+    const main = dsCalls.find((c) => /FROM cashboxes cb/.test(c.sql))!;
+    expect(main.sql).toMatch(/IN\s*\(\s*'ewallet'\s*,\s*'bank'\s*,\s*'check'\s*\)/);
+    expect(main.sql).not.toMatch(/IN\s*\(\s*'cash'\s*,/);
+  });
+
+  it('cash row passes through with accounting_balance = NULL (FE helper falls back to current_balance)', async () => {
+    const cashRow = {
+      id: 'cb-cash', kind: 'cash', name_ar: 'الخزينة الرئيسية',
+      current_balance: '31650.00', is_active: true,
+      accounting_gl_code: null, accounting_balance: null,
+    };
+    const { service } = await makeServiceFor(modernResponder([cashRow]));
+    const out = await service.listCashboxes(true);
+    expect(out).toEqual([cashRow]);
+    expect(out[0].accounting_balance).toBeNull();
+    expect(out[0].accounting_gl_code).toBeNull();
+  });
+
+  it('ewallet row carries accounting_gl_code=1114 + GL-derived accounting_balance', async () => {
+    // Production fixture: GL 1114 net = +2,190.00 EGP from
+    // wallet/instapay invoice payments; stored current_balance = 0
+    // because non-cash payments don't write CTs.
+    const ewalletRow = {
+      id: 'cb-ewallet', kind: 'ewallet', name_ar: 'خزنة التحويلات',
+      current_balance: '0', is_active: true,
+      accounting_gl_code: '1114', accounting_balance: '2190.00',
+    };
+    const { service } = await makeServiceFor(modernResponder([ewalletRow]));
+    const out = await service.listCashboxes(true);
+    expect(out[0].accounting_gl_code).toBe('1114');
+    expect(out[0].accounting_balance).toBe('2190.00');
+    expect(out[0].current_balance).toBe('0');
+  });
+
+  it('includeInactive=false adds the cb.is_active filter; true omits it', async () => {
+    const { service, dsCalls: c1 } = await makeServiceFor(modernResponder());
+    await service.listCashboxes(false);
+    const main1 = c1.find((c) => /FROM cashboxes cb/.test(c.sql))!;
+    expect(main1.sql).toMatch(/cb\.is_active\s*=\s*true/i);
+
+    const { service: s2, dsCalls: c2 } = await makeServiceFor(modernResponder());
+    await s2.listCashboxes(true);
+    const main2 = c2.find((c) => /FROM cashboxes cb/.test(c.sql))!;
+    expect(main2.sql).not.toMatch(/cb\.is_active\s*=/i);
+  });
+
+  it('pre-migration fallback (kind/fi columns missing): accounting columns return NULL', async () => {
+    // Older DB without migration 049 — the BE returns synthetic NULLs
+    // so the FE's displayCashboxBalance helper degrades gracefully.
+    const { service, dsCalls } = await makeServiceFor((sql) => {
+      if (/information_schema\.columns/.test(sql)) return [{ has_kind: false, has_fi: false }];
+      return [];
+    });
+    await service.listCashboxes(true);
+    const main = dsCalls.find((c) => /FROM cashboxes cb/.test(c.sql))!;
+    expect(main.sql).toMatch(/NULL\s+AS\s+accounting_gl_code/);
+    expect(main.sql).toMatch(/NULL\s+AS\s+accounting_balance/);
+  });
+});
+

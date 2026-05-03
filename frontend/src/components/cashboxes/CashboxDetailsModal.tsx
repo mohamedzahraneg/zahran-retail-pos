@@ -68,6 +68,7 @@ import {
   buildPrintHtml,
   buildReportTitle,
 } from './cashboxReportBuilder';
+import { displayCashboxBalance } from '@/lib/cashboxBalanceDisplay';
 
 /**
  * PR-FIN-PAYACCT-4D-REPORTS-1B — sortable columns for the operations
@@ -133,7 +134,16 @@ export function CashboxDetailsModal({
   onOpenLinkedAccount,
 }: CashboxDetailsModalProps) {
   // ── Filters ────────────────────────────────────────────────────────
-  const [rangeKey, setRangeKey] = useState<SmartRangeKey>('month');
+  // PR-FIN-CASHBOXES-TREASURY-GRID-FIXES (Fix 4): cash drawers see
+  // mostly current-month activity (POS receipts, settle-invoice cash),
+  // so the default 'month' range is sensible. Non-cash cashboxes
+  // (ewallet/bank/check) accumulate movements over much longer
+  // horizons via linked payment accounts — defaulting to 'month' hid
+  // ~9 of 10 wallet movements for خزنة التحويلات. Default to 'all'
+  // for those so the operator sees the full history immediately.
+  const [rangeKey, setRangeKey] = useState<SmartRangeKey>(
+    cashbox.kind === 'cash' ? 'month' : 'all',
+  );
   const [customFrom, setCustomFrom] = useState<string>('');
   const [customTo, setCustomTo] = useState<string>('');
   const [type, setType] = useState<CashboxMovementSource | ''>('');
@@ -323,41 +333,86 @@ export function CashboxDetailsModal({
 
         {/* Header summary */}
         <div className="p-5 grid grid-cols-1 md:grid-cols-3 gap-5 border-b border-slate-100">
-          {/* Identity */}
-          <div data-testid="cashbox-details-identity">
-            <h3 className="font-bold text-sm text-slate-700 mb-2">بيانات الخزنة</h3>
-            <dl className="grid grid-cols-2 gap-x-3 gap-y-2 text-sm">
-              <DetailRow label="العملة" value={cashbox.currency || '—'} />
-              <DetailRow
-                label="الرصيد الحالي"
-                value={EGP(cashbox.current_balance)}
-                tone="emerald"
-                mono
-              />
-              {cashbox.account_number && (
-                <DetailRow label="رقم الحساب" value={cashbox.account_number} mono />
-              )}
-              {cashbox.iban && (
-                <DetailRow label="IBAN" value={cashbox.iban} mono />
-              )}
-              {cashbox.wallet_phone && (
-                <DetailRow label="رقم المحفظة" value={cashbox.wallet_phone} mono />
-              )}
-              {cashbox.check_issuer_name && (
-                <DetailRow label="جهة الإصدار" value={cashbox.check_issuer_name} />
-              )}
-            </dl>
-          </div>
+          {/* Identity. PR-FIN-CASHBOXES-TREASURY-GRID-FIXES (Fix 2):
+              the headline figure now routes through `displayCashboxBalance`
+              so non-cash cashboxes (ewallet/bank/check) show the
+              GL-derived `accounting_balance` labeled "الرصيد المحاسبي"
+              instead of the misleading stored `current_balance` (which
+              stays at 0 because non-cash payments don't write CTs).
+              Cash cashboxes are unchanged: stored figure under
+              "رصيد الخزنة". The stored value for non-cash is preserved
+              as a secondary "الرصيد التشغيلي المخزن" row so the
+              technical figure stays auditable without misleading the
+              operator about the wallet's real balance. */}
+          {(() => {
+            const display = displayCashboxBalance(cashbox);
+            const isCash = cashbox.kind === 'cash';
+            const headerLabel = isCash ? 'رصيد الخزنة' : 'الرصيد المحاسبي';
+            return (
+              <div data-testid="cashbox-details-identity">
+                <h3 className="font-bold text-sm text-slate-700 mb-2">بيانات الخزنة</h3>
+                <dl className="grid grid-cols-2 gap-x-3 gap-y-2 text-sm">
+                  <DetailRow label="العملة" value={cashbox.currency || '—'} />
+                  <DetailRow
+                    label={headerLabel}
+                    value={EGP(display.amount)}
+                    tone="emerald"
+                    mono
+                    testId="cashbox-details-main-balance"
+                  />
+                  {/* Stored value preserved as a clearly-labeled
+                      technical row when it differs from the headline
+                      (i.e. only for non-cash kinds, where the stored
+                      figure is operational/transfer-eligible cash that
+                      lives in a separate semantics from GL net). */}
+                  {!isCash && (
+                    <DetailRow
+                      label="الرصيد التشغيلي المخزن"
+                      value={EGP(cashbox.current_balance)}
+                      mono
+                      testId="cashbox-details-stored-balance"
+                    />
+                  )}
+                  {cashbox.account_number && (
+                    <DetailRow label="رقم الحساب" value={cashbox.account_number} mono />
+                  )}
+                  {cashbox.iban && (
+                    <DetailRow label="IBAN" value={cashbox.iban} mono />
+                  )}
+                  {cashbox.wallet_phone && (
+                    <DetailRow label="رقم المحفظة" value={cashbox.wallet_phone} mono />
+                  )}
+                  {cashbox.check_issuer_name && (
+                    <DetailRow label="جهة الإصدار" value={cashbox.check_issuer_name} />
+                  )}
+                </dl>
+              </div>
+            );
+          })()}
 
-          {/* Period totals (from current filter) */}
+          {/* Period totals (from current filter).
+              PR-FIN-CASHBOXES-TREASURY-GRID-FIXES (Fix 4): label is
+              now explicit that this is scoped to the active date
+              filter — the operator was confusing this with all-time
+              wallet activity when the default range hid older rows. */}
           <div data-testid="cashbox-details-totals">
-            <h3 className="font-bold text-sm text-slate-700 mb-2">إجماليات الفترة</h3>
+            <h3 className="font-bold text-sm text-slate-700 mb-2">إجماليات الفترة المختارة</h3>
             <ul className="space-y-1.5 text-sm">
               <SummaryRow label="إجمالي الداخل" value={EGP(totals.in)}  tone="emerald" testId="cashbox-totals-in" />
               <SummaryRow label="إجمالي الخارج" value={EGP(totals.out)} tone="rose"    testId="cashbox-totals-out" />
               <SummaryRow label="صافي الحركة"   value={EGP(totals.net)}                  testId="cashbox-totals-net" />
               <SummaryRow label="عدد الحركات"   value={String(totals.count)}             testId="cashbox-totals-count" />
             </ul>
+            {/* PR-FIN-CASHBOXES-TREASURY-GRID-FIXES (Fix 4): clarifying
+                hint so the operator understands this depends on the
+                active date filter — pair with "إجماليات الحسابات
+                المرتبطة" (linked-account totals are date-independent). */}
+            <div
+              className="text-[10px] text-slate-500 mt-1.5"
+              data-testid="cashbox-totals-period-hint"
+            >
+              تعتمد هذه الإجماليات على الفترة الزمنية المختارة من المرشّح
+            </div>
           </div>
 
           {/* PR-FIN-PAYACCT-4D-UX-FIX-15 — accounting reconciliation card.
@@ -397,7 +452,12 @@ export function CashboxDetailsModal({
                   </div>
                   <dl className="text-[12px] text-slate-700 space-y-1">
                     <div className="flex items-center justify-between gap-2">
-                      <dt>رصيد الخزنة</dt>
+                      {/* PR-FIN-CASHBOXES-TREASURY-GRID-FIXES (Fix 2):
+                          for non-cash cashboxes the stored value is
+                          NOT the wallet balance — relabel so the
+                          operator never confuses 0 here for "the
+                          wallet is empty". */}
+                      <dt>{cashbox.kind === 'cash' ? 'رصيد الخزنة' : 'الرصيد التشغيلي المخزن'}</dt>
                       <dd
                         className="font-mono"
                         data-testid="cashbox-details-drift-stored"
@@ -460,12 +520,49 @@ export function CashboxDetailsModal({
           </div>
         </div>
 
-        {/* Linked payment accounts */}
+        {/* Linked payment accounts.
+            PR-FIN-CASHBOXES-TREASURY-GRID-FIXES (Fix 4): the operator
+            was confused that the period-scoped "إجماليات الفترة"
+            looked empty for the wallet (1 movement / 500) when the
+            cashbox actually carries ~2,190 EGP in linked-PA balance.
+            We now print the date-independent linked-account total
+            (sum of `net_debit` across linked PAs) BEFORE the per-row
+            list so the operator sees the wallet's true position
+            immediately. This number matches the GL net (and the
+            treasury card's "الرصيد المحاسبي") whenever every
+            relevant PA is linked. */}
         <div className="p-5 border-b border-slate-100">
           <div className="flex items-center justify-between mb-3">
             <h3 className="font-bold text-sm text-slate-700">حسابات الدفع المرتبطة</h3>
             <span className="text-xs text-slate-500">{linkedAccounts.length} حساب</span>
           </div>
+          {linkedAccounts.length > 0 && (() => {
+            const linkedNetTotal = linkedAccounts.reduce(
+              (s, b) => s + Number(b.net_debit || 0),
+              0,
+            );
+            return (
+              <div
+                className="rounded-lg border border-emerald-200 bg-emerald-50/40 p-3 mb-3 flex items-center justify-between"
+                data-testid="cashbox-details-linked-totals"
+              >
+                <div>
+                  <div className="text-[12px] font-bold text-emerald-800">
+                    إجماليات الحسابات المرتبطة
+                  </div>
+                  <div className="text-[10px] text-emerald-700/80 mt-0.5">
+                    مجموع رصيد كل الحسابات المرتبطة — مستقل عن الفترة الزمنية
+                  </div>
+                </div>
+                <div
+                  className="font-mono text-lg font-black text-emerald-800"
+                  data-testid="cashbox-details-linked-totals-amount"
+                >
+                  {EGP(linkedNetTotal)}
+                </div>
+              </div>
+            );
+          })()}
           {linkedAccounts.length === 0 ? (
             <div
               className="text-center text-slate-500 text-sm py-6 rounded-lg border border-dashed border-slate-200 bg-slate-50"
@@ -542,7 +639,11 @@ export function CashboxDetailsModal({
           </div>
 
           <div className="flex flex-wrap gap-2 mb-3" data-testid="cashbox-details-range-chips">
-            {(['today', 'week', 'month', 'custom'] as SmartRangeKey[]).map((k) => {
+            {/* PR-FIN-CASHBOXES-TREASURY-GRID-FIXES (Fix 4): added
+                "الكل" chip so non-cash cashboxes can default to no-
+                filter and the operator can flip back to historical
+                view from any other range with one click. */}
+            {(['today', 'week', 'month', 'all', 'custom'] as SmartRangeKey[]).map((k) => {
               const active = rangeKey === k;
               return (
                 <button
@@ -692,12 +793,13 @@ export function CashboxDetailsModal({
  * ──────────────────────────────────────────────────────────────────── */
 
 function DetailRow({
-  label, value, tone, mono,
+  label, value, tone, mono, testId,
 }: {
   label: string;
   value: string;
   tone?: 'emerald' | 'rose' | 'slate';
   mono?: boolean;
+  testId?: string;
 }) {
   const cls =
     tone === 'emerald' ? 'text-emerald-700' :
@@ -706,7 +808,9 @@ function DetailRow({
   return (
     <>
       <dt className="text-[11px] text-slate-500">{label}</dt>
-      <dd className={`text-sm font-bold ${cls} ${mono ? 'font-mono' : ''}`}>{value}</dd>
+      <dd className={`text-sm font-bold ${cls} ${mono ? 'font-mono' : ''}`} data-testid={testId}>
+        {value}
+      </dd>
     </>
   );
 }

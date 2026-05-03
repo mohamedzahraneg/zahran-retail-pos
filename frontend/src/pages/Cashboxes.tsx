@@ -1148,10 +1148,19 @@ export default function Cashboxes() {
             providers={providers}
             onClose={() => setCashboxDetailsId(null)}
             onOpenLinkedAccount={(account) => {
-              // Drill into the linked account's per-account details panel.
-              // Both modals can be open simultaneously — the inner one is
-              // higher z-index so the operator returns to the cashbox view
-              // when they close it.
+              // PR-FIN-CASHBOXES-TREASURY-GRID-FIXES (Fix 3): the
+              // earlier behaviour kept BOTH modals open and trusted
+              // z-index to layer the account modal on top — but both
+              // <PaymentAccountDetailsPanel> and <CashboxDetailsModal>
+              // ship with `z-50`, so DOM order decides stacking. The
+              // CashboxDetailsModal is rendered AFTER the account
+              // modal in this file → it covers the account modal,
+              // exactly the bug the user reported. Close the cashbox
+              // modal before opening the account modal so the
+              // operator sees the drilldown immediately and the
+              // browser focus moves with it. They can re-open the
+              // cashbox modal from the treasury card if needed.
+              setCashboxDetailsId(null);
               setSelectedId(account.payment_account_id);
               setDetailsId(account.payment_account_id);
             }}

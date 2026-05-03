@@ -564,6 +564,18 @@ export class CashDeskService {
                   WHERE table_name='financial_institutions') AS has_fi`,
     );
     if (m049?.has_kind && m049?.has_fi) {
+      // PR-FIN-CASHBOXES-TREASURY-GRID-FIXES — extend the SELECT with
+      // GL-derived `accounting_balance` for non-cash kinds. Mirrors the
+      // already-shipped `settings.service.ts.listCashboxes()` shape
+      // (PR-FIN-PAYMENTS-WALLET-DISPLAY-BALANCE) so the /cashboxes
+      // treasury page (which consumes THIS endpoint, not the settings
+      // one) finally surfaces the wallet/bank/check GL net instead of
+      // the misleading stored `current_balance` (which stays at 0
+      // because non-cash payments don't write CTs).
+      //
+      // Mapping: cashbox.kind → GL account_code
+      //   ewallet → 1114, bank → 1113, check → 1115, cash → NULL
+      // Pure SELECT — no DML, no engine touch.
       return this.ds.query(
         `
         SELECT cb.*, cb.name_ar AS name,
@@ -571,7 +583,29 @@ export class CashDeskService {
                fi.name_en        AS institution_name_en,
                fi.website_domain AS institution_domain,
                fi.color_hex      AS institution_color,
-               fi.kind           AS institution_kind
+               fi.kind           AS institution_kind,
+               CASE
+                 WHEN cb.kind::text = 'ewallet' THEN '1114'
+                 WHEN cb.kind::text = 'bank'    THEN '1113'
+                 WHEN cb.kind::text = 'check'   THEN '1115'
+                 ELSE NULL
+               END               AS accounting_gl_code,
+               CASE
+                 WHEN cb.kind::text IN ('ewallet','bank','check') THEN (
+                   SELECT COALESCE(SUM(jl.debit - jl.credit), 0)::text
+                     FROM journal_lines jl
+                     JOIN journal_entries je ON je.id = jl.entry_id
+                     JOIN chart_of_accounts coa ON coa.id = jl.account_id
+                    WHERE coa.code = CASE cb.kind::text
+                                       WHEN 'ewallet' THEN '1114'
+                                       WHEN 'bank'    THEN '1113'
+                                       WHEN 'check'   THEN '1115'
+                                     END
+                      AND je.is_posted = TRUE
+                      AND je.is_void   = FALSE
+                 )
+                 ELSE NULL
+               END               AS accounting_balance
           FROM cashboxes cb
           LEFT JOIN financial_institutions fi ON fi.code = cb.institution_code
          ${includeInactive ? '' : 'WHERE cb.is_active = true'}
@@ -579,7 +613,9 @@ export class CashDeskService {
         `,
       );
     }
-    // Fallback — pre-migration schema.
+    // Fallback — pre-migration schema. Cash-only world; accounting
+    // columns return NULL so the FE helper degrades to current_balance
+    // exactly as before this PR.
     return this.ds.query(
       `SELECT cb.*, cb.name_ar AS name,
               'cash' AS kind,
@@ -587,7 +623,9 @@ export class CashDeskService {
               NULL AS institution_name_en,
               NULL AS institution_domain,
               NULL AS institution_color,
-              NULL AS institution_kind
+              NULL AS institution_kind,
+              NULL AS accounting_gl_code,
+              NULL AS accounting_balance
          FROM cashboxes cb
         ${includeInactive ? '' : 'WHERE cb.is_active = true'}
         ORDER BY cb.name_ar`,
