@@ -13,6 +13,7 @@ import { AccountingPostingService } from '../chart-of-accounts/posting.service';
 import { FinancialEngineService } from '../chart-of-accounts/financial-engine.service';
 import { PaymentsService } from '../payments/payments.service';
 import { sanitizeUuidInput } from '../common/uuid-or-null';
+import { CashboxGlDriftHelper } from './cashbox-gl-drift.helper';
 
 /**
  * PR-FIN-PAYACCT-4C — central rule used by both `receiveFromCustomer`
@@ -101,6 +102,10 @@ export class CashDeskService {
     @Optional() private readonly posting?: AccountingPostingService,
     @Optional() private readonly engine?: FinancialEngineService,
     @Optional() private readonly payments?: PaymentsService,
+    // PR-FIN-CASHBOX-DRIFT-CANCEL-AWARE-FIX — single source of truth
+    // for the cancellation-cluster phantom-drift normalization that
+    // both `getGlDrift` and `getDriftDetail` now apply.
+    @Optional() private readonly driftHelper?: CashboxGlDriftHelper,
   ) {}
 
   /**
@@ -1278,7 +1283,7 @@ export class CashDeskService {
    * stays open to authenticated users like the rest of cash-desk.
    */
   async getGlDrift() {
-    return this.ds.query(`
+    const rows = await this.ds.query(`
       SELECT cashbox_id::text   AS cashbox_id,
              cashbox_name,
              kind::text          AS kind,
@@ -1291,6 +1296,31 @@ export class CashDeskService {
         FROM v_cashbox_gl_drift
        ORDER BY cashbox_name
     `);
+
+    // PR-FIN-CASHBOX-DRIFT-CANCEL-AWARE-FIX — subtract the
+    // cancellation-cluster phantom drift before returning. Each
+    // cancelled return contributes exactly its refund amount as a
+    // raw view-side drift (the per-ref grouping splits the
+    // cancellation into 3 rows the view can't merge); operationally
+    // the cluster nets to zero, so we subtract the offset here so
+    // the FE alerts panel doesn't flag a fake drift.
+    if (!this.driftHelper) return rows;
+    const offsetByCashbox =
+      await this.driftHelper.clusterDriftOffsetByCashbox();
+    return rows.map((r: any) => {
+      const offset = offsetByCashbox.get(r.cashbox_id) ?? 0;
+      if (offset === 0) return r;
+      const adjusted = Number(r.drift_amount) - offset;
+      return {
+        ...r,
+        drift_amount: adjusted.toFixed(2),
+        // Raw drift retained as `_drift_raw` so an admin diagnostic
+        // page can still inspect the un-normalized view value if
+        // needed (no FE consumer reads this today).
+        _drift_raw: r.drift_amount,
+        _cancelled_cluster_offset: offset.toFixed(2),
+      };
+    });
   }
 
   /**
@@ -1400,37 +1430,77 @@ export class CashDeskService {
       [cashboxId],
     );
 
-    // 4. PR-FIN-PAYACCT-4D-REPORTS-1A-UX-FIX-2 — per-row explanation
-    //    enrichment. For each contributing row we add:
-    //      • invoice_grand_total / invoice_paid_amount (when applicable)
-    //      • invoice_cash_paid / invoice_non_cash_paid
-    //      • invoice_payment_breakdown (per-method roll-up)
-    //      • return_total_refund / return_method (when applicable)
-    //      • je_exists                — does ANY non-void JE exist for
-    //                                   this reference_id?
-    //      • je_has_cashbox_link      — does any JE line for this ref
-    //                                   carry the cashbox's id either
-    //                                   directly (`journal_lines.cashbox_id`)
-    //                                   OR via the GL account
-    //                                   (`chart_of_accounts.cashbox_id`)?
-    //      • expected_cashbox_amount  — the operator-facing "what the
-    //                                   cashbox SHOULD show for this ref"
-    //                                   (cash-paid for invoices,
-    //                                   -refund for returns)
-    //      • explanation_code         — enum from EXPLANATION_CODES
-    //      • explanation_ar           — short Arabic phrase for the UI
-    //      • recommended_review_action_ar — what the operator should do
-    //
-    //    All queries are pure SELECT — no INSERT/UPDATE/DELETE anywhere
-    //    in the enrichment path.
-    const enrichedRows = await Promise.all(
-      rows.map((r: any) => this.enrichDriftRow(cashboxId, r)),
+    // PR-FIN-CASHBOX-DRIFT-CANCEL-AWARE-FIX — drop rows that belong
+    // to a cancelled-return cluster BEFORE the per-row enrichment
+    // fan-out. The 3 cluster rows
+    //   (return,<return_id>) + (other,<orig JE id>) + (reversal,<orig JE id>)
+    // sum to the cluster's refund amount in the legacy per-ref view,
+    // but operationally net to zero (each cancellation has paired
+    // refund-out + reversal-in cashbox transactions). The helper
+    // returns the exact key set so we filter in O(1) per row.
+    const clusterKeys = this.driftHelper
+      ? await this.driftHelper.clusterRefSet(cashboxId)
+      : new Set<string>();
+    const filteredRows = rows.filter(
+      (r: any) =>
+        !clusterKeys.has(`${r.reference_type}:${r.reference_id}`),
     );
 
+    // PR-FIN-CASHBOX-DRIFT-CANCEL-AWARE-FIX — sequential enrichment.
+    // The original implementation fanned out one DB round-trip per
+    // row concurrently via the unbounded fan-out pattern, which
+    // exhausts the pg pool (EMAXCONNSESSION) the moment a cashbox
+    // accumulates a hundred drift rows AND the FE re-fetches under
+    // transient load. A sequential for-of keeps the pool footprint
+    // at one connection for the duration of the report.
+    const enrichedRows: any[] = [];
+    for (const r of filteredRows) {
+      // eslint-disable-next-line no-await-in-loop
+      enrichedRows.push(await this.enrichDriftRow(cashboxId, r));
+    }
+
+    // Recompute totals from the SAME filtered set so the FE sanity
+    // check (Σ row.drift = totals.total_drift) still holds. The view
+    // also exposes per-cashbox totals; subtract the cluster offset
+    // there too.
+    const clusterOffset = clusterKeys.size > 0 && this.driftHelper
+      ? Number(
+          (await this.driftHelper.clusterDriftOffsetByCashbox()).get(
+            cashboxId,
+          ) ?? 0,
+        )
+      : 0;
+    const adjustedTotals = totals
+      ? {
+          count: filteredRows.length,
+          total_ct: totals.total_ct,
+          total_je: totals.total_je,
+          total_drift: (
+            Number(totals.total_drift) - clusterOffset
+          ).toFixed(2),
+        }
+      : { count: 0, total_ct: '0', total_je: '0', total_drift: '0' };
+
+    // Cashbox-level header gets the same offset treatment as
+    // `getGlDrift()` so the modal header value matches the totals
+    // row at the bottom of the table.
+    const adjustedCashbox = cashboxRow
+      ? clusterOffset !== 0
+        ? {
+            ...cashboxRow,
+            gl_drift: (
+              Number(cashboxRow.gl_drift) - clusterOffset
+            ).toFixed(2),
+            _gl_drift_raw: cashboxRow.gl_drift,
+            _cancelled_cluster_offset: clusterOffset.toFixed(2),
+          }
+        : cashboxRow
+      : null;
+
     return {
-      cashbox: cashboxRow ?? null,
+      cashbox: adjustedCashbox,
       rows: enrichedRows,
-      totals: totals ?? { count: 0, total_ct: '0', total_je: '0', total_drift: '0' },
+      totals: adjustedTotals,
     };
   }
 
