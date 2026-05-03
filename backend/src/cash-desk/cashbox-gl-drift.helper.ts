@@ -206,4 +206,92 @@ export class CashboxGlDriftHelper {
     const r = result[0] ?? { rows: 0, abs_total: '0' };
     return { rows: Number(r.rows ?? 0), absTotal: Number(r.abs_total ?? 0) };
   }
+
+  /**
+   * PR-FIN-DASHBOARD-DRIFT-TAXONOMY-PAIRING — global aggregate of
+   * "taxonomy mismatch" phantom drift rows. These are rows in
+   * `v_cashbox_drift_per_ref` that look like drift only because the
+   * CT side and JE side use DIFFERENT `reference_type` for the SAME
+   * business event:
+   *
+   *   • CT writes  reference_type='other'                with reference_id=X
+   *   • JE posts   reference_type='employee_settlement'  with reference_id=X
+   *
+   * The view groups by `(cashbox_id, reference_type, reference_id)`,
+   * so it can't merge the two halves. Each half appears as a
+   * one-sided drift row that pairs to ZERO with its sibling when
+   * grouped by `(cashbox_id, reference_id)` alone.
+   *
+   * This method:
+   *   1. Excludes rows already in cancelled-return clusters (those
+   *      are handled by `clusterPhantomGlobalStats()` — PR #254).
+   *   2. Among the rest, groups by `(cashbox_id, reference_id)` and
+   *      finds groups where Σ drift_amount = 0 AND COUNT(*) > 1
+   *      (single rows are real one-sided drift, not phantoms).
+   *   3. Returns COUNT(*) and Σ |drift_amount| of those rows so the
+   *      dashboard can subtract them from the operator-facing
+   *      "فروق تصنيف مراجع" KPI.
+   *
+   * Composes cleanly with `clusterPhantomGlobalStats()`: that method
+   * subtracts cancelled-return clusters (3 rows per cancelled
+   * return, different reference_id), this method subtracts
+   * taxonomy mismatches (multiple rows per business event, same
+   * reference_id). The two phantom sets do not overlap by
+   * construction (cluster_refs filter at the start of this query).
+   *
+   * One round trip; pure SELECT — no DML.
+   */
+  async taxonomyMismatchGlobalStats(): Promise<{ rows: number; absTotal: number }> {
+    const result = await this.ds.query(
+      `
+      WITH cancelled_returns AS (
+        SELECT id::text AS return_id, cashbox_id::text AS cashbox_id
+          FROM returns
+         WHERE status = 'cancelled'
+           AND cashbox_id IS NOT NULL
+      ),
+      cancelled_jes AS (
+        SELECT je.id::text AS je_id, cr.return_id, cr.cashbox_id
+          FROM cancelled_returns cr
+          JOIN journal_entries je
+            ON je.reference_type = 'return'
+           AND je.reference_id   = cr.return_id::uuid
+      ),
+      cluster_refs AS (
+        SELECT cashbox_id, 'return'::text   AS reference_type, return_id::uuid AS reference_id
+          FROM cancelled_returns
+        UNION ALL
+        SELECT cashbox_id, 'other'::text,    je_id::uuid FROM cancelled_jes
+        UNION ALL
+        SELECT cashbox_id, 'reversal'::text, je_id::uuid FROM cancelled_jes
+      ),
+      non_cluster_drift AS (
+        SELECT pr.cashbox_id::text AS cashbox_id,
+               pr.reference_id,
+               pr.drift_amount
+          FROM v_cashbox_drift_per_ref pr
+          LEFT JOIN cluster_refs cr
+            ON cr.cashbox_id    = pr.cashbox_id::text
+           AND cr.reference_type::text = pr.reference_type::text
+           AND cr.reference_id  = pr.reference_id
+         WHERE pr.drift_amount <> 0
+           AND cr.cashbox_id IS NULL
+      ),
+      zero_net_pairs AS (
+        SELECT cashbox_id, reference_id
+          FROM non_cluster_drift
+         GROUP BY cashbox_id, reference_id
+        HAVING ROUND(SUM(drift_amount), 2) = 0
+           AND COUNT(*) > 1
+      )
+      SELECT
+        COUNT(*)::int                                       AS rows,
+        COALESCE(SUM(ABS(d.drift_amount)), 0)::numeric(14,2) AS abs_total
+        FROM non_cluster_drift d
+        JOIN zero_net_pairs z USING (cashbox_id, reference_id)
+      `,
+    );
+    const r = result[0] ?? { rows: 0, abs_total: '0' };
+    return { rows: Number(r.rows ?? 0), absTotal: Number(r.abs_total ?? 0) };
+  }
 }

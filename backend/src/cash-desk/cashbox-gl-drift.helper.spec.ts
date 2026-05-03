@@ -203,6 +203,87 @@ describe('CashboxGlDriftHelper.clusterPhantomGlobalStats — SQL shape', () => {
   });
 });
 
+// ─── PR-FIN-DASHBOARD-DRIFT-TAXONOMY-PAIRING ──────────────────────
+// Pins the new `taxonomyMismatchGlobalStats()` helper used by
+// `FinanceDashboardService.health()` to subtract phantom drift rows
+// where the CT side and JE side use different `reference_type`
+// for the SAME `reference_id`. Each pair nets to zero
+// operationally — the per-ref view alone can't merge them.
+describe('CashboxGlDriftHelper.taxonomyMismatchGlobalStats — SQL shape', () => {
+  it('builds the cancellation-cluster CTE first to EXCLUDE its rows (no overlap with clusterPhantomGlobalStats)', async () => {
+    const { ds, calls } = makeFakeDs([[]]);
+    const helper = await buildHelper(ds);
+    await helper.taxonomyMismatchGlobalStats();
+    expect(calls).toHaveLength(1);
+    const sql = calls[0].sql;
+    // The cancellation cluster CTE pattern must be present + the
+    // LEFT JOIN with `cr.cashbox_id IS NULL` filter that excludes
+    // those rows from the taxonomy candidate set.
+    expect(sql).toMatch(/cancelled_returns AS/);
+    expect(sql).toMatch(/cancelled_jes AS/);
+    expect(sql).toMatch(/cluster_refs AS/);
+    expect(sql).toMatch(/non_cluster_drift AS[\s\S]+LEFT JOIN cluster_refs/);
+    expect(sql).toMatch(/cr\.cashbox_id IS NULL/);
+  });
+
+  it('groups the candidate rows by (cashbox_id, reference_id) and keeps zero-net pairs (size > 1)', async () => {
+    const { ds, calls } = makeFakeDs([[]]);
+    const helper = await buildHelper(ds);
+    await helper.taxonomyMismatchGlobalStats();
+    const sql = calls[0].sql;
+    expect(sql).toMatch(/zero_net_pairs AS/);
+    expect(sql).toMatch(/GROUP BY cashbox_id, reference_id/);
+    // Must filter to groups whose drift sums to zero AND have at
+    // least 2 rows (single rows are real one-sided drift, not phantoms).
+    expect(sql).toMatch(/HAVING ROUND\(SUM\(drift_amount\),\s*2\)\s*=\s*0/);
+    expect(sql).toMatch(/AND COUNT\(\*\)\s*>\s*1/);
+  });
+
+  it('returns COUNT(*) + Σ |drift_amount| of rows belonging to zero-net pairs', async () => {
+    const { ds, calls } = makeFakeDs([[]]);
+    const helper = await buildHelper(ds);
+    await helper.taxonomyMismatchGlobalStats();
+    const sql = calls[0].sql;
+    expect(sql).toMatch(/COUNT\(\*\)/);
+    expect(sql).toMatch(/SUM\(ABS\(d\.drift_amount\)\)/);
+    expect(sql).toMatch(/JOIN zero_net_pairs/);
+  });
+
+  it('returns the production-shaped fixture: 22 rows / 3,087.98 abs', async () => {
+    // Production snapshot: 11 pairs × 2 rows each = 22; |drift| total = 3,087.98.
+    const { ds } = makeFakeDs([
+      [{ rows: 22, abs_total: '3087.98' }],
+    ]);
+    const helper = await buildHelper(ds);
+    const stats = await helper.taxonomyMismatchGlobalStats();
+    expect(stats.rows).toBe(22);
+    expect(stats.absTotal).toBe(3087.98);
+  });
+
+  it('returns {rows: 0, absTotal: 0} when there are no taxonomy mismatches', async () => {
+    const { ds } = makeFakeDs([
+      [{ rows: 0, abs_total: '0' }],
+    ]);
+    const helper = await buildHelper(ds);
+    const stats = await helper.taxonomyMismatchGlobalStats();
+    expect(stats.rows).toBe(0);
+    expect(stats.absTotal).toBe(0);
+  });
+
+  it('SQL is pure SELECT — no INSERT/UPDATE/DELETE', async () => {
+    const { ds, calls } = makeFakeDs([[]]);
+    const helper = await buildHelper(ds);
+    await helper.taxonomyMismatchGlobalStats();
+    const sql = calls[0].sql;
+    expect(sql).toMatch(/^\s*WITH/i);
+    expect(sql).not.toMatch(/\bINSERT\b/i);
+    expect(sql).not.toMatch(/\bUPDATE\s+\w/i);
+    expect(sql).not.toMatch(/\bDELETE\s+FROM\b/i);
+    expect(sql).not.toMatch(/\bMERGE\b/i);
+    expect(sql).not.toMatch(/\bTRUNCATE\b/i);
+  });
+});
+
 // ─────────────────────────────────────────────────────────────────────
 //  Source-grep on cash-desk.service.ts to pin the consumer behavior.
 //  These are defense-in-depth assertions that the EMAXCONNSESSION

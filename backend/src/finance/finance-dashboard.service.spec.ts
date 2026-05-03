@@ -875,6 +875,11 @@ describe('FinanceDashboardService.health — cancel-aware drift normalization', 
       bypass_last_seen?: any;
       unbalanced_count?: number;
     } = {},
+    // PR-FIN-DASHBOARD-DRIFT-TAXONOMY-PAIRING — second helper return
+    // for the new `taxonomyMismatchGlobalStats()` method. Defaults to
+    // {0, 0} so existing specs that only pin cluster-phantom behavior
+    // see no taxonomy contribution.
+    taxonomyReturns: { rows: number; absTotal: number } = { rows: 0, absTotal: 0 },
   ) {
     const calls: { sql: string; params: any[] }[] = [];
     const ds = {
@@ -898,7 +903,8 @@ describe('FinanceDashboardService.health — cancel-aware drift normalization', 
       }),
     };
     const helper = {
-      clusterPhantomGlobalStats: jest.fn(async () => helperReturns),
+      clusterPhantomGlobalStats:    jest.fn(async () => helperReturns),
+      taxonomyMismatchGlobalStats:  jest.fn(async () => taxonomyReturns),
     };
     const svc = new FinanceDashboardService(ds as any, helper as any);
     return { svc, ds, helper, calls };
@@ -1029,5 +1035,180 @@ describe('FinanceDashboardService.health — cancel-aware drift normalization', 
     );
     await svc.dashboard({ from: '2026-04-01', to: '2026-04-30' });
     expect(helper.clusterPhantomGlobalStats).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ─── PR-FIN-DASHBOARD-DRIFT-TAXONOMY-PAIRING ──────────────────────
+// Pins the second normalization on the financial-health card.
+// Composes with PR #254's cluster-phantom adjustment: BOTH phantom
+// classes are subtracted on every dashboard request.
+//
+// Phantom class 1 (PR #254): cancelled-return clusters — 3 rows per
+// cancelled return tagged with different reference_type, all with
+// the cluster summing to zero.
+//
+// Phantom class 2 (THIS PR): taxonomy mismatches — CT side and JE
+// side use DIFFERENT reference_type for the SAME reference_id (e.g.
+// CT='other', JE='employee_settlement'). The per-ref view emits two
+// one-sided rows that pair to zero by reference_id alone. Each pair
+// contributes COUNT*1 + Σ |drift| to the false-positive KPI.
+//
+// The two phantom sets do not overlap by construction (the taxonomy
+// helper EXCLUDES cluster_refs from its query). Rows that survive
+// BOTH adjustments are genuine one-sided cashbox-vs-GL drift that
+// an operator should investigate.
+describe('FinanceDashboardService.health — taxonomy-pairing normalization', () => {
+  // Reuse the buildSvcWithDriftHelper from the cancel-aware describe
+  // block by re-defining a thin local copy that omits the cluster-
+  // phantom default (so each spec's intent is explicit).
+  function buildSvcBoth(
+    cluster: { rows: number; absTotal: number },
+    taxonomy: { rows: number; absTotal: number },
+    healthFixture: {
+      total_debit?: string;
+      total_credit?: string;
+      drift_count?: number;
+      drift_abs?: number;
+      bypass_7d?: number;
+      unbalanced_count?: number;
+      cashbox_balance_drift_count?: number;
+    } = {},
+  ) {
+    const calls: { sql: string; params: any[] }[] = [];
+    const ds = {
+      query: jest.fn(async (sql: string, params: any[] = []) => {
+        calls.push({ sql, params });
+        if (/tb AS/.test(sql)) {
+          return [
+            {
+              total_debit:                 healthFixture.total_debit ?? '100.00',
+              total_credit:                healthFixture.total_credit ?? '100.00',
+              cashbox_balance_drift_count: healthFixture.cashbox_balance_drift_count ?? 0,
+              drift_count:                 healthFixture.drift_count ?? 0,
+              drift_abs:                   healthFixture.drift_abs ?? 0,
+              bypass_7d:                   healthFixture.bypass_7d ?? 0,
+              bypass_last_seen:            null,
+              unbalanced_count:            healthFixture.unbalanced_count ?? 0,
+            },
+          ];
+        }
+        return [];
+      }),
+    };
+    const helper = {
+      clusterPhantomGlobalStats:   jest.fn(async () => cluster),
+      taxonomyMismatchGlobalStats: jest.fn(async () => taxonomy),
+    };
+    const svc = new FinanceDashboardService(ds as any, helper as any);
+    return { svc, helper, calls };
+  }
+
+  it('subtracts BOTH cluster phantoms AND taxonomy mismatches from cashbox_drift_count', async () => {
+    // Production snapshot: raw 25, cluster 3, taxonomy 22 → adjusted 0.
+    const { svc, helper } = buildSvcBoth(
+      { rows: 3, absTotal: 1050 },         // PR #254 cluster phantoms
+      { rows: 22, absTotal: 3087.98 },     // THIS PR taxonomy phantoms
+      { drift_count: 25, drift_abs: 4137.98 },
+    );
+    const r = await svc.dashboard({ from: '2026-04-01', to: '2026-04-30' });
+    expect(helper.clusterPhantomGlobalStats).toHaveBeenCalledTimes(1);
+    expect(helper.taxonomyMismatchGlobalStats).toHaveBeenCalledTimes(1);
+    expect(r.health.cashbox_drift_count).toBe(0);
+    expect(r.health.cashbox_drift_total).toBe(0);
+  });
+
+  it('production snapshot end-to-end: 25/4,137.98 → 0/0.00', async () => {
+    const { svc } = buildSvcBoth(
+      { rows: 3,  absTotal: 1050 },
+      { rows: 22, absTotal: 3087.98 },
+      { drift_count: 25, drift_abs: 4137.98 },
+    );
+    const r = await svc.dashboard({ from: '2026-04-01', to: '2026-04-30' });
+    expect(r.health.cashbox_drift_count).toBe(0);
+    expect(r.health.cashbox_drift_total).toBe(0);
+    expect(r.health.overall).toBe('healthy');
+  });
+
+  it('legitimate unpaired drift survives both adjustments', async () => {
+    // Suppose 30 raw rows: 3 cluster phantoms + 22 taxonomy + 5 real
+    // one-sided drifts (e.g. raw 30, raw_abs 5,000 incl. 1,050+3,088+862).
+    const { svc } = buildSvcBoth(
+      { rows: 3,  absTotal: 1050 },
+      { rows: 22, absTotal: 3087.98 },
+      { drift_count: 30, drift_abs: 5000 },
+    );
+    const r = await svc.dashboard({ from: '2026-04-01', to: '2026-04-30' });
+    expect(r.health.cashbox_drift_count).toBe(5);            // 30 - 3 - 22
+    expect(r.health.cashbox_drift_total).toBe(862.02);       // 5000 - 1050 - 3087.98
+    expect(r.health.overall).toBe('warning');
+  });
+
+  it('cancelled-return phantom adjustment alone (no taxonomy phantoms) — preserves PR #254 behaviour', async () => {
+    const { svc } = buildSvcBoth(
+      { rows: 3, absTotal: 1050 },
+      { rows: 0, absTotal: 0 },          // no taxonomy phantoms
+      { drift_count: 25, drift_abs: 4137.98 },
+    );
+    const r = await svc.dashboard({ from: '2026-04-01', to: '2026-04-30' });
+    expect(r.health.cashbox_drift_count).toBe(22);           // 25 - 3 - 0
+    expect(r.health.cashbox_drift_total).toBe(3087.98);      // 4137.98 - 1050 - 0
+  });
+
+  it('taxonomy phantom adjustment alone (no cluster phantoms) — symmetric behaviour', async () => {
+    const { svc } = buildSvcBoth(
+      { rows: 0, absTotal: 0 },          // no cluster phantoms
+      { rows: 22, absTotal: 3087.98 },
+      { drift_count: 22, drift_abs: 3087.98 },
+    );
+    const r = await svc.dashboard({ from: '2026-04-01', to: '2026-04-30' });
+    expect(r.health.cashbox_drift_count).toBe(0);            // 22 - 0 - 22
+    expect(r.health.cashbox_drift_total).toBe(0);            // 3087.98 - 0 - 3087.98
+  });
+
+  it('clamps to 0 if BOTH phantom classes overshoot the raw view (defensive)', async () => {
+    // Impossible in practice (phantoms are subset of raw rows), but
+    // the dashboard MUST NOT surface a negative count to the FE.
+    const { svc } = buildSvcBoth(
+      { rows: 100, absTotal: 9999 },
+      { rows: 100, absTotal: 9999 },
+      { drift_count: 5, drift_abs: 200 },
+    );
+    const r = await svc.dashboard({ from: '2026-04-01', to: '2026-04-30' });
+    expect(r.health.cashbox_drift_count).toBe(0);
+    expect(r.health.cashbox_drift_total).toBe(0);
+  });
+
+  it('both helper methods invoked exactly once per dashboard request (no fan-out)', async () => {
+    const { svc, helper } = buildSvcBoth(
+      { rows: 3, absTotal: 1050 },
+      { rows: 22, absTotal: 3087.98 },
+      { drift_count: 25, drift_abs: 4137.98 },
+    );
+    await svc.dashboard({ from: '2026-04-01', to: '2026-04-30' });
+    expect(helper.clusterPhantomGlobalStats).toHaveBeenCalledTimes(1);
+    expect(helper.taxonomyMismatchGlobalStats).toHaveBeenCalledTimes(1);
+  });
+
+  it('overall=healthy when phantoms (both classes combined) eat ALL the raw drift', async () => {
+    const { svc } = buildSvcBoth(
+      { rows: 3,  absTotal: 1050 },
+      { rows: 22, absTotal: 3087.98 },
+      { drift_count: 25, drift_abs: 4137.98, bypass_7d: 0 },
+    );
+    const r = await svc.dashboard({ from: '2026-04-01', to: '2026-04-30' });
+    expect(r.health.cashbox_drift_total).toBe(0);
+    expect(r.health.overall).toBe('healthy');
+  });
+
+  it('overall=warning when adjusted drift > 0 after BOTH subtractions', async () => {
+    // Adjusted = 200 (raw 1,200 − cluster 500 − taxonomy 500 = 200).
+    const { svc } = buildSvcBoth(
+      { rows: 1, absTotal: 500 },
+      { rows: 2, absTotal: 500 },
+      { drift_count: 5, drift_abs: 1200, bypass_7d: 0 },
+    );
+    const r = await svc.dashboard({ from: '2026-04-01', to: '2026-04-30' });
+    expect(r.health.cashbox_drift_total).toBe(200);
+    expect(r.health.overall).toBe('warning');
   });
 });
