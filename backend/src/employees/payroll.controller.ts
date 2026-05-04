@@ -425,7 +425,7 @@ export class PayrollController {
       },
       transactions,
       coa: {
-        account_code: '1123',
+        account_code: GL_EMPLOYEE_RECEIVABLE,
         account_name_ar: 'ذمم الموظفين',
       },
     };

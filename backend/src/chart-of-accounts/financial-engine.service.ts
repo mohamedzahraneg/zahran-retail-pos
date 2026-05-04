@@ -4,6 +4,7 @@ import {
   CASHBOX_KIND_TO_GL_CODE,
   CashboxKindForGl,
   GL_CASH,
+  GL_EMPLOYEE_RECEIVABLE,
   LIQUID_GL_CODES,
 } from './gl-codes.constants';
 
@@ -1112,7 +1113,7 @@ export class FinancialEngineService {
     // Regular expense → DR category account (or 529 fallback).
     const dr: EngineGlLine = args.is_advance && args.employee_user_id
       ? {
-          account_code: '1123',
+          account_code: GL_EMPLOYEE_RECEIVABLE,
           debit: args.amount,
           employee_user_id: args.employee_user_id,
         }
@@ -1264,7 +1265,12 @@ export class FinancialEngineService {
         error: 'employee_id required for charge_employee treatment',
       };
     }
-    const debitCode = treatment === 'charge_employee' ? '1123' : '531';
+    // PR-AUDIT-POSTING-GL-CONSTANTS-B1-EMPLOYEE — only the 'charge_employee'
+    // branch (which routes to the employee-receivable account) is centralized.
+    // The 'company_loss' branch keeps the '531' literal because that code is
+    // a COGS/shortage-loss code, not an employee code; it's deferred to a
+    // future B2 phase with a proper GL_SHORTAGE_LOSS / GL_COGS naming.
+    const debitCode = treatment === 'charge_employee' ? GL_EMPLOYEE_RECEIVABLE : '531';
     return this.recordTransaction({
       kind: 'shift_variance',
       reference_type: 'shift_variance',

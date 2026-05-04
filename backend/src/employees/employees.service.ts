@@ -1662,7 +1662,7 @@ export class EmployeesService {
           "تسوية بطريقة 'أخرى' تتطلب تحديد الحساب المقابل",
         );
       }
-      if (dto.offset_account_code === '1123') {
+      if (dto.offset_account_code === GL_EMPLOYEE_RECEIVABLE) {
         throw new BadRequestException(
           'لا يمكن استخدام 1123 كحساب مقابل — هو طرف التسوية نفسه',
         );
@@ -1709,13 +1709,13 @@ export class EmployeesService {
       const isCashOrBank = method === 'cash' || method === 'bank';
       const dr = isCashOrBank
         ? {
-            account_code: '213',
+            account_code: GL_EMPLOYEE_PAYABLE,
             debit: dto.amount,
             employee_user_id: userId,
           }
         : method === 'payroll_deduction'
           ? {
-              account_code: '213',
+              account_code: GL_EMPLOYEE_PAYABLE,
               debit: dto.amount,
               employee_user_id: userId,
             }
@@ -1730,7 +1730,7 @@ export class EmployeesService {
             cashbox_id: resolvedCashboxId!,
           }
         : {
-            account_code: '1123',
+            account_code: GL_EMPLOYEE_RECEIVABLE,
             credit: dto.amount,
             employee_user_id: userId,
           };
