@@ -11,6 +11,11 @@ import {
   UpsertWarehouseDto,
 } from './dto/settings.dto';
 import { sanitizeUuidInput } from '../common/uuid-or-null';
+import {
+  GL_BANK,
+  GL_CHECKS,
+  GL_WALLET,
+} from '../chart-of-accounts/gl-codes.constants';
 
 @Injectable()
 export class SettingsService {
@@ -199,12 +204,17 @@ export class SettingsService {
       params.push(warehouseId);
       cond += ` AND cb.warehouse_id = $1`;
     }
+    // PR-AUDIT-CASHBOX-KIND-MAP-CENTRALIZE — the 6 GL-code literals
+    // in this CASE expression now interpolate from gl-codes.constants
+    // (GL_BANK / GL_WALLET / GL_CHECKS). Output SQL is byte-identical;
+    // the spec at settings.service.spec.ts:305-307 still passes
+    // because its regex matches the post-interpolation string.
     return this.ds.query(
       `SELECT cb.*, w.name_ar AS warehouse_name,
               CASE
-                WHEN cb.kind::text = 'ewallet' THEN '1114'
-                WHEN cb.kind::text = 'bank'    THEN '1113'
-                WHEN cb.kind::text = 'check'   THEN '1115'
+                WHEN cb.kind::text = 'ewallet' THEN '${GL_WALLET}'
+                WHEN cb.kind::text = 'bank'    THEN '${GL_BANK}'
+                WHEN cb.kind::text = 'check'   THEN '${GL_CHECKS}'
                 ELSE NULL
               END                                 AS accounting_gl_code,
               CASE
@@ -214,9 +224,9 @@ export class SettingsService {
                     JOIN journal_entries je ON je.id = jl.entry_id
                     JOIN chart_of_accounts coa ON coa.id = jl.account_id
                    WHERE coa.code = CASE cb.kind::text
-                                      WHEN 'ewallet' THEN '1114'
-                                      WHEN 'bank'    THEN '1113'
-                                      WHEN 'check'   THEN '1115'
+                                      WHEN 'ewallet' THEN '${GL_WALLET}'
+                                      WHEN 'bank'    THEN '${GL_BANK}'
+                                      WHEN 'check'   THEN '${GL_CHECKS}'
                                     END
                      AND je.is_posted = TRUE
                      AND je.is_void   = FALSE
