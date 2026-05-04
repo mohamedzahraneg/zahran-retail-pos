@@ -1,14 +1,20 @@
 /**
  * Cashboxes.fix-8-balances.test.tsx — PR-FIN-PAYACCT-4D-UX-FIX-8
+ *                                   + PR-AUDIT-EWALLET-PAGE-KPI-FIX (source migration)
  *
  * Pins two production-grade behaviors on /cashboxes:
  *
- *   1. Wallet KPI tile MUST sum every wallet/instapay PA, even when
- *      multiple PAs share the same `(gl_account_code, cashbox_id)`
- *      bucket. The legacy dedup-by-(gl|cashbox) silently dropped the
- *      second PA in the production case where InstaPay (gl=1114,
- *      cashbox=null) and WE Pay (gl=1114, cashbox=null) shared the
- *      key `"1114|null"`.
+ *   1. Wallet KPI tile MUST show the correct total for the wallet bucket.
+ *      ─ ORIGINAL PR-FIX-8 source: sum of per-payment-account `net_debit`
+ *        (caught a dedup bug that dropped a PA sharing the same
+ *        `(gl_account_code, cashbox_id)` bucket as another).
+ *      ─ NEW source as of PR-AUDIT-EWALLET-PAGE-KPI-FIX: sum of
+ *        `cashboxes.accounting_balance` where `kind='ewallet'`. The per-
+ *        account view's `net_debit` collapses to 0 in production because
+ *        wallet GL 1114 lines are untagged (`jl.cashbox_id IS NULL`); the
+ *        cashbox API exposes the GL roll-up directly. The KPI assertions
+ *        below are preserved by mocking the ewallet cashbox with the
+ *        expected `accounting_balance`.
  *
  *   2. Synthetic "unattached" rows (sentinel id `unattached:<method>`)
  *      from the FIX-8 backend listBalances UNION render with the
@@ -140,29 +146,39 @@ beforeEach(() => {
   methodMixMock.mockResolvedValue(METHOD_MIX);
 });
 
-describe('/cashboxes wallet KPI — PR-FIN-PAYACCT-4D-UX-FIX-8', () => {
-  it('sums InstaPay + WE Pay even when both share the same (gl=1114, cashbox=null) bucket', async () => {
-    // Production repro: two wallet/instapay accounts on the same GL
-    // bucket with no cashbox link. The legacy dedup-by-(gl|cashbox)
-    // collapsed them and only one was counted; the wallet KPI was
-    // short by ~295 EGP. After FIX-8 the per-account sum runs straight.
+describe('/cashboxes wallet KPI — PR-FIN-PAYACCT-4D-UX-FIX-8 (now sourced from cashbox accounting_balance per PR-AUDIT-EWALLET-PAGE-KPI-FIX)', () => {
+  it('shows the wallet bucket total (640) — sourced from ewallet cashbox accounting_balance', async () => {
+    // PR-AUDIT-EWALLET-PAGE-KPI-FIX — the KPI source is now the
+    // ewallet cashbox's `accounting_balance` (the GL 1114 roll-up).
+    // This mock provides both layers: the per-account balances (used
+    // by the table rows + the bottom GL bucket sub-total contract)
+    // AND the ewallet cashbox carrying the same total via
+    // accounting_balance, so the KPI asserts the same 640 EGP it did
+    // pre-source-migration.
     balancesMock.mockResolvedValue([
       makeBalance({
         payment_account_id: 'pa-instapay', method: 'instapay', provider_key: 'instapay',
         display_name: 'InstaPay', identifier: '01004888879',
-        gl_account_code: '1114', cashbox_id: null, net_debit: '345',
+        gl_account_code: '1114', cashbox_id: 'cb-ewallet', net_debit: '345',
       }),
       makeBalance({
         payment_account_id: 'pa-wepay', method: 'wallet', provider_key: 'we_pay',
         display_name: 'WE Pay', identifier: '01004888879',
-        gl_account_code: '1114', cashbox_id: null, net_debit: '295',
+        gl_account_code: '1114', cashbox_id: 'cb-ewallet', net_debit: '295',
       }),
+    ]);
+    cashboxesMock.mockResolvedValue([
+      CASH_BOX,
+      {
+        ...CASH_BOX,
+        id: 'cb-ewallet', name: 'خزنة التحويلات', name_ar: 'خزنة التحويلات',
+        kind: 'ewallet',
+        accounting_gl_code: '1114',
+        accounting_balance: '640.00',
+      } as any,
     ]);
     renderPage();
     const tile = await screen.findByTestId('kpi-wallet-balance');
-    // 345 + 295 = 640. The legacy bug would have shown 345 (or 295,
-    // whichever PA Map iteration hit first). Either single-PA value
-    // failing the assertion is the regression.
     await waitFor(() => {
       expect(within(tile).getByText(/640/)).toBeInTheDocument();
     });
@@ -211,7 +227,14 @@ describe('/cashboxes synthetic unattached rows — PR-FIN-PAYACCT-4D-UX-FIX-8', 
     expect(within(realRow).getByTestId('row-action-edit')).toBeInTheDocument();
   });
 
-  it('wallet KPI INCLUDES the unattached synthetic total (operator sees the full bucket)', async () => {
+  it('wallet KPI INCLUDES untagged GL 1114 activity (operator sees the full bucket via cashbox accounting_balance)', async () => {
+    // PR-AUDIT-EWALLET-PAGE-KPI-FIX — the bucket total is now sourced
+    // from the ewallet cashbox's `accounting_balance` (which equals
+    // the full GL 1114 net, INCLUDING the rows the per-account view
+    // can't attribute to a specific payment account because their
+    // jl.cashbox_id IS NULL). The "unattached" payment-account row
+    // still renders with its synthetic-row badge below; the KPI shows
+    // the full bucket regardless.
     balancesMock.mockResolvedValue([
       makeBalance({
         payment_account_id: 'pa-instapay', method: 'instapay', net_debit: '345',
@@ -225,10 +248,18 @@ describe('/cashboxes synthetic unattached rows — PR-FIN-PAYACCT-4D-UX-FIX-8', 
         is_unattached: true, sort_order: -1, net_debit: '1050',
       }),
     ]);
+    cashboxesMock.mockResolvedValue([
+      CASH_BOX,
+      {
+        ...CASH_BOX,
+        id: 'cb-ewallet', name: 'خزنة التحويلات', name_ar: 'خزنة التحويلات',
+        kind: 'ewallet',
+        accounting_gl_code: '1114',
+        accounting_balance: '1690.00',
+      } as any,
+    ]);
     renderPage();
     const tile = await screen.findByTestId('kpi-wallet-balance');
-    // 345 + 295 + 1050 = 1690 — the operator sees the full wallet
-    // bucket including unattached money so they know to act on it.
     await waitFor(() => {
       expect(within(tile).getByText(/1,690/)).toBeInTheDocument();
     });

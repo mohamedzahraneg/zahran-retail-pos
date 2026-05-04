@@ -469,22 +469,28 @@ export default function Cashboxes() {
     }
     const noDefault = activeMethods.size - defaultedMethods.size;
 
-    // PR-FIN-PAYACCT-4D-UX-FIX-8 — wallet / bank totals are now a
-    // straight per-account sum. The legacy dedup-by-(gl_account_code,
-    // cashbox_id) was a workaround for the pre-FIX-2 backend that
-    // returned shared GL-bucket totals on every account row; FIX-2
-    // made listBalances strictly per-payment_account_id, so the
-    // dedup is now actively WRONG — InstaPay (gl=1114, cashbox=null)
-    // and WE Pay (gl=1114, cashbox=null) share the same dedup key
-    // and only one of them gets counted. Each row already has a
-    // unique payment_account_id; sum them straight.
-    const sumByMethod = (filter: (b: PaymentAccountBalance) => boolean) =>
-      balances.reduce((s, b) => (filter(b) ? s + Number(b.net_debit || 0) : s), 0);
-    const walletTotal = sumByMethod((b) => {
-      const k = paymentAccountKind(b.method as PaymentMethodCode);
-      return k === 'wallet' || k === 'instapay';
-    });
-    const bankTotal = sumByMethod((b) => paymentAccountKind(b.method as PaymentMethodCode) === 'bank');
+    // PR-AUDIT-EWALLET-PAGE-KPI-FIX — wallet / bank KPI totals are now
+    // sourced from the cashbox API's `accounting_balance` (the GL roll-up
+    // already on screen in the treasury cards), NOT from the per-payment-
+    // account `v_payment_account_balance.net_debit`.
+    //
+    // Why: the view's filter requires `jl.cashbox_id = pa.cashbox_id`,
+    // but every wallet GL 1114 line in production is untagged
+    // (`jl.cashbox_id IS NULL`) because non-cash payments don't go
+    // through the engine's CT path. As a result the per-account net_debit
+    // is 0 for both InstaPay and WE Pay, even though GL 1114 = 2,340.
+    // The treasury card already shows 2,340 (from `accounting_balance`),
+    // and this PR makes the KPI tile + GL bucket sub-total agree.
+    //
+    // Per-account ROW balances on the table are intentionally kept at
+    // the per-account net_debit (i.e. genuine 0) plus an attribution
+    // caption so the operator never sees a row claiming amounts that
+    // aren't actually attributed to that specific payment account. See
+    // the row rendering below for the caption logic.
+    const sumCashboxAccountingBy = (predicate: (cb: Cashbox) => boolean) =>
+      boxes.reduce((s, cb) => (predicate(cb) ? s + Number(cb.accounting_balance ?? 0) : s), 0);
+    const walletTotal = sumCashboxAccountingBy((cb) => cb.kind === 'ewallet');
+    const bankTotal   = sumCashboxAccountingBy((cb) => cb.kind === 'bank');
 
     // "آخر حركة" = max(last_movement across balances, latest cashbox movement)
     const balanceLast = balances
@@ -504,7 +510,7 @@ export default function Cashboxes() {
       walletTotal, bankTotal,
       latestMovement,
     };
-  }, [balances, recentMovements]);
+  }, [balances, recentMovements, boxes]);
 
   // ── Warning-strip data (computed from the same balances; no extra fetch) ──
   // PR-FIN-PAYACCT-4D-UX-FIX-13 — exempt cash (cashbox-driven by design).
@@ -943,7 +949,7 @@ export default function Cashboxes() {
           {/* Bottom 3 dashboard cards */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-3" data-testid="treasury-summary">
             <SummaryCard title="ملخص أرصدة حسابات الدفع" testId="summary-balance" icon={<ListChecks size={14} className="text-slate-600" />}>
-              <BalanceSummary balances={balances} />
+              <BalanceSummary balances={balances} cashboxes={boxes} />
             </SummaryCard>
             <SummaryCard title="توزيع الحسابات حسب النوع" testId="summary-distribution" icon={<PieChart size={14} className="text-slate-600" />}>
               <DistributionCard balances={balances} />
@@ -1520,7 +1526,32 @@ function PaymentAccountsTable({
                       <span className="text-[11px] text-amber-700 bg-amber-50 px-2 py-0.5 rounded">غير مربوط</span>
                     )}
                   </Td>
-                  <Td className="font-mono text-xs">{EGP(b.net_debit)}</Td>
+                  <Td className="font-mono text-xs">
+                    <div data-testid={`payment-account-row-net-debit-${b.payment_account_id}`}>
+                      {EGP(b.net_debit)}
+                    </div>
+                    {/* PR-AUDIT-EWALLET-PAGE-KPI-FIX — attribution caption.
+                        When a wallet/instapay row reads 0 because no JL has
+                        been tagged with this payment_account_id (every
+                        wallet GL 1114 line is currently untagged), AND the
+                        linked structural cashbox does carry an accounting
+                        balance, point the operator to the source of truth
+                        instead of leaving "0 EGP" hanging. The per-row
+                        figure stays at 0 — we don't fake per-account
+                        attribution we don't have. */}
+                    {(kind === 'wallet' || kind === 'instapay')
+                      && Number(b.net_debit || 0) === 0
+                      && linkedCb
+                      && Number((linkedCb as any).accounting_balance ?? 0) > 0 && (
+                      <div
+                        className="text-[10px] text-slate-500 mt-0.5 leading-snug"
+                        data-testid={`payment-account-row-attribution-${b.payment_account_id}`}
+                      >
+                        حركات GL {b.gl_account_code} غير منسوبة لحساب محدد —
+                        راجع {linkedCb.name_ar}
+                      </div>
+                    )}
+                  </Td>
                   <Td className="text-[11px] text-slate-600">
                     {b.last_movement
                       ? <span title={b.last_movement}>{relativeArabic(b.last_movement)}</span>
@@ -1673,20 +1704,39 @@ function SummaryCard({
   );
 }
 
-function BalanceSummary({ balances }: { balances: PaymentAccountBalance[] }) {
+function BalanceSummary({
+  balances,
+  cashboxes,
+}: {
+  balances: PaymentAccountBalance[];
+  cashboxes: Cashbox[];
+}) {
   const totalIn  = balances.reduce((s, b) => s + Number(b.total_in  || 0), 0);
   const totalOut = balances.reduce((s, b) => s + Number(b.total_out || 0), 0);
   const total    = balances.reduce((s, b) => s + Number(b.net_debit || 0), 0);
   const jeCount  = balances.reduce((s, b) => s + Number(b.je_count  || 0), 0);
-  // PR-FIN-PAYACCT-4D-UX-FIX-2 — per-GL roll-up of the per-account
-  // balances. Explicit labels make it clear these aggregate per-account
-  // values grouped by GL (NOT the true ledger bucket totals — the
-  // legacy untagged journal lines are not included).
-  const byGl = balances.reduce<Record<string, number>>((acc, b) => {
-    if (!b.gl_account_code) return acc;
-    acc[b.gl_account_code] = (acc[b.gl_account_code] ?? 0) + Number(b.net_debit || 0);
-    return acc;
-  }, {});
+  // PR-AUDIT-EWALLET-PAGE-KPI-FIX — GL bucket sub-totals are now
+  // sourced from `cashboxes.accounting_balance` (already on screen in
+  // the treasury cards) instead of the per-account `net_debit` sum.
+  //
+  // Why: every wallet GL 1114 line in production is untagged
+  // (`jl.cashbox_id IS NULL`) so the per-account view returns 0 for
+  // both InstaPay and WE Pay. Summing those would show 0 even though
+  // GL 1114 = 2,340. The cashbox API already exposes the correct GL
+  // roll-up via `accounting_balance` keyed by `accounting_gl_code`,
+  // so we simply sum that here. Same code applied to GL 1113/1115
+  // for symmetry and to prevent the same drift if banks/checks ever
+  // accumulate untagged lines.
+  const sumCashboxAccountingByGl = (code: string) =>
+    cashboxes.reduce(
+      (s, cb) => (cb.accounting_gl_code === code ? s + Number(cb.accounting_balance ?? 0) : s),
+      0,
+    );
+  const hasGlBucket = (code: string) =>
+    cashboxes.some((cb) => cb.accounting_gl_code === code);
+  const gl1114 = sumCashboxAccountingByGl('1114');
+  const gl1113 = sumCashboxAccountingByGl('1113');
+  const gl1115 = sumCashboxAccountingByGl('1115');
   return (
     <div className="space-y-2 text-sm">
       <ul className="space-y-1.5">
@@ -1696,21 +1746,21 @@ function BalanceSummary({ balances }: { balances: PaymentAccountBalance[] }) {
         <Row label="إجمالي الرصيد"  value={EGP(total)} />
         <Row label="عدد القيود"     value={String(jeCount)} />
       </ul>
-      {(byGl['1114'] !== undefined || byGl['1113'] !== undefined || byGl['1115'] !== undefined) && (
+      {(hasGlBucket('1114') || hasGlBucket('1113') || hasGlBucket('1115')) && (
         <>
           <div className="border-t border-slate-100 my-2" />
           <div className="text-[11px] text-slate-500 mb-1">
             إجمالي مجمع لكل حساب أستاذ
           </div>
           <ul className="space-y-1.5" data-testid="summary-gl-buckets">
-            {byGl['1114'] !== undefined && (
-              <Row label="إجمالي المحافظ الإلكترونية 1114" value={EGP(byGl['1114'])} />
+            {hasGlBucket('1114') && (
+              <Row label="إجمالي المحافظ الإلكترونية 1114" value={EGP(gl1114)} />
             )}
-            {byGl['1113'] !== undefined && (
-              <Row label="إجمالي البنوك 1113" value={EGP(byGl['1113'])} />
+            {hasGlBucket('1113') && (
+              <Row label="إجمالي البنوك 1113" value={EGP(gl1113)} />
             )}
-            {byGl['1115'] !== undefined && (
-              <Row label="إجمالي الشيكات 1115" value={EGP(byGl['1115'])} />
+            {hasGlBucket('1115') && (
+              <Row label="إجمالي الشيكات 1115" value={EGP(gl1115)} />
             )}
           </ul>
         </>
