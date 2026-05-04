@@ -6,6 +6,7 @@ import {
   ParseUUIDPipe,
   Post,
   Query,
+  UseInterceptors,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { IsOptional, IsString, MinLength } from 'class-validator';
@@ -16,6 +17,10 @@ import {
   CurrentUser,
   JwtUser,
 } from '../common/decorators/current-user.decorator';
+// PR-AUDIT-IDEMPOTENCY-INTERCEPTOR-POS-INVOICE — opt-in idempotency
+// support on POST /pos/invoices. Without an Idempotency-Key header,
+// behavior is exactly unchanged.
+import { IdempotencyInterceptor } from '../common/interceptors/idempotency.interceptor';
 
 class VoidInvoiceDto {
   @IsString() @MinLength(3) reason: string;
@@ -34,6 +39,11 @@ export class PosController {
   @Post('invoices')
   @Roles('admin', 'manager', 'cashier')
   @Permissions('pos.sell')
+  // PR-AUDIT-IDEMPOTENCY-INTERCEPTOR-POS-INVOICE — pilot endpoint.
+  // Optional Idempotency-Key header. Without it, today's behavior
+  // (cashier double-click → 2 invoices). With it, replays the cached
+  // 2xx response for 24h or 425/409 for concurrent / payload-mismatch.
+  @UseInterceptors(IdempotencyInterceptor)
   create(@Body() dto: CreateInvoiceDto, @CurrentUser() user: JwtUser) {
     return this.pos.createInvoice(dto, user.userId);
   }
