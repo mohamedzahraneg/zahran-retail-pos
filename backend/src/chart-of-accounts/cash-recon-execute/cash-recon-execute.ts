@@ -10,7 +10,7 @@
  *   Row 1 (EXP-2026-000003 / 2,000 EGP)  → option (a)
  *     · Tag expense to SHF-2026-00002 / الخزينة الرئيسية
  *     · Tag the GL 1111 line to الخزينة الرئيسية
- *     · Write missing CT cash OUT 2,000
+ *     · Write missing CT cash OUT 2,000 via fn_record_cashbox_txn
  *
  *   Row 2 (SHF-2026-00002 / +5 EGP)      → option (single)
  *     · Tag the GL 1111 line to الخزينة الرئيسية
@@ -23,6 +23,23 @@
  *   Row 4 (RET-2026-000003 / -350 EGP)   → option (a)
  *     · Void CT-245 (mirrors the JE-358 void)
  *     · Recompute current_balance from active CT sum
+ *
+ *   Row 5 (SHF-2026-00002 surplus +5 EGP) → option (5)
+ *     · Write missing CT cash IN +5 via fn_record_cashbox_txn
+ *       (mirrors JE-126's standalone shift-surplus GL credit)
+ *
+ * Canonical cashbox helper:
+ *   Row 1 and Row 5 use the existing Postgres helper
+ *   `fn_record_cashbox_txn` rather than raw INSERTs. The function:
+ *     · Holds the cashbox row FOR UPDATE
+ *     · Computes balance_after from the signed delta
+ *     · INSERTs the CT row (with balance_after correctly populated)
+ *     · UPDATEs cashboxes.current_balance
+ *   atomically. It honors `app.engine_context` so the migration-068
+ *   guard set by main() still applies. Switched in PR-265 after the
+ *   PR-264 dry-run revealed that raw `INSERT INTO cashbox_transactions`
+ *   fails on `balance_after NOT NULL` even under the `service:*`
+ *   engine-context bypass.
  *
  * Strict execution contract:
  *   · ALL 4 rows in a single transaction. Partial failure → ROLLBACK.
@@ -228,7 +245,9 @@ export async function runRow1a(q: QueryFn): Promise<RowResult> {
     actions.push({ step: 'UPDATE journal_lines (cashbox_id on JE-123 line)', status: 'executed' });
   }
 
-  // Step 3 — INSERT cashbox_transactions (idempotent: notes prefix probe)
+  // Step 3 — write cashbox_transactions via canonical helper.
+  // Idempotency: probe for an existing CT carrying the EXEC#1a notes
+  // prefix on the same expense reference. If found, skip.
   const [ctExisting] = await q(
     `SELECT id FROM cashbox_transactions
        WHERE reference_type='expense'
@@ -239,22 +258,36 @@ export async function runRow1a(q: QueryFn): Promise<RowResult> {
   );
   if (ctExisting?.id) {
     actions.push({
-      step: 'INSERT cashbox_transactions (cleanup CT)',
+      step: 'fn_record_cashbox_txn (cleanup CT for Row 1)',
       status: 'skipped_idempotent',
       detail: `cleanup CT already present (id=${ctExisting.id})`,
     });
   } else {
+    // fn_record_cashbox_txn signature:
+    //   (p_cashbox_id uuid, p_direction text, p_amount numeric,
+    //    p_category text, p_reference_type text DEFAULT NULL,
+    //    p_reference_id uuid DEFAULT NULL, p_user_id uuid DEFAULT NULL,
+    //    p_notes text DEFAULT NULL) RETURNS bigint
+    // The function locks the cashbox row, computes balance_after from the
+    // signed delta, INSERTs the CT, and UPDATEs cashboxes.current_balance —
+    // all inside our outer transaction and under the same
+    // `app.engine_context` GUC set by main().
     await q(
-      `INSERT INTO cashbox_transactions
-         (cashbox_id, direction, amount, category, reference_type, reference_id, notes)
-       VALUES ($1::uuid, 'out', 2000, 'expense', 'expense', $2::uuid, $3)`,
+      `SELECT fn_record_cashbox_txn(
+         $1::uuid, $2::text, $3::numeric, $4::text,
+         $5::text, $6::uuid, $7::uuid, $8::text)`,
       [
         AL_RAISIA_CASHBOX_ID,
+        'out',
+        2000,
+        'expense',
+        'expense',
         EXP003_ID,
+        null,
         `${NOTE_PREFIX_1A}: missing CT for EXP-2026-000003 (created 2026-04-21 inside SHF-2026-00002)`,
       ],
     );
-    actions.push({ step: 'INSERT cashbox_transactions (cleanup CT)', status: 'executed' });
+    actions.push({ step: 'fn_record_cashbox_txn (cleanup CT for Row 1)', status: 'executed' });
   }
 
   return { row_id: 'row-1', option: '1a', actions };
@@ -439,18 +472,29 @@ export async function runRow5(q: QueryFn): Promise<RowResult> {
   );
   if (existing?.id) {
     actions.push({
-      step: 'INSERT cashbox_transactions (Row 5 counter-CT in +5)',
+      step: 'fn_record_cashbox_txn (Row 5 counter-CT in +5)',
       status: 'skipped_idempotent',
       detail: `cleanup CT marker already present (id=${existing.id}) — re-run no-op`,
     });
   } else {
+    // fn_record_cashbox_txn signature: see runRow1a's comment block.
+    // Same canonical helper — the function correctly handles balance_after
+    // (raw INSERT fails on the NOT NULL constraint) and updates
+    // cashboxes.current_balance atomically. Row 4's recompute remains as
+    // a belt-and-braces step because Row 4's CT-245 void uses a raw
+    // UPDATE (not the helper) and current_balance must still resync after.
     await q(
-      `INSERT INTO cashbox_transactions
-         (cashbox_id, direction, amount, category, reference_type, reference_id, notes)
-       VALUES ($1::uuid, 'in', 5, 'shift_variance', 'shift', $2::uuid, $3)`,
+      `SELECT fn_record_cashbox_txn(
+         $1::uuid, $2::text, $3::numeric, $4::text,
+         $5::text, $6::uuid, $7::uuid, $8::text)`,
       [
         AL_RAISIA_CASHBOX_ID,
+        'in',
+        5,
+        'shift_variance',
+        'shift',
         SHF002_REF_ID,
+        null,
         `${NOTE_PREFIX_5}: missing cash-side mirror for JE-2026-000126 ` +
           `(shift surplus +5 on SHF-2026-00002 / الخزينة الرئيسية). ` +
           `category=shift_variance, reference_type=shift to match existing ` +
@@ -461,7 +505,7 @@ export async function runRow5(q: QueryFn): Promise<RowResult> {
       ],
     );
     actions.push({
-      step: 'INSERT cashbox_transactions (Row 5 counter-CT in +5)',
+      step: 'fn_record_cashbox_txn (Row 5 counter-CT in +5)',
       status: 'executed',
       detail:
         'Counter-CT IN +5 written for SHF-2026-00002 (category=shift_variance, ' +
