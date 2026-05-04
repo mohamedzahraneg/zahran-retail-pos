@@ -79,11 +79,17 @@ export const JE196_ENTRY_NO = 'JE-2026-000196';
 // Row 4
 export const RET003_CT_ID = 245;
 
+// Row 5 — write the missing CT IN +5 to mirror JE-126's standalone
+// shift-surplus credit on الخزينة الرئيسية. SHF002_REF_ID (declared
+// for Row 1 above) is reused here because shift_variance JEs and
+// shift CTs share the same reference (the shift's UUID).
+
 // Audit prefixes (exported for tests)
 export const NOTE_PREFIX_1A = 'cleanup: PR-CASH-RECON-EXEC#1a';
 export const NOTE_PREFIX_2  = 'cleanup: PR-CASH-RECON-EXEC#2';
 export const NOTE_PREFIX_3A = 'cleanup: PR-CASH-RECON-EXEC#3a';
 export const NOTE_PREFIX_4A = 'cleanup: PR-CASH-RECON-EXEC#4a';
+export const NOTE_PREFIX_5  = 'cleanup: PR-CASH-RECON-EXEC#5';
 
 // ─── Types ────────────────────────────────────────────────────────
 export type QueryFn = (sql: string, params?: unknown[]) => Promise<any[]>;
@@ -95,8 +101,8 @@ export interface RowAction {
 }
 
 export interface RowResult {
-  row_id: 'row-1' | 'row-2' | 'row-3' | 'row-4';
-  option: '1a' | '2' | '3a' | '4a';
+  row_id: 'row-1' | 'row-2' | 'row-3' | 'row-4' | 'row-5';
+  option: '1a' | '2' | '3a' | '4a' | '5';
   actions: RowAction[];
 }
 
@@ -399,6 +405,60 @@ export async function runRow4a(q: QueryFn): Promise<RowResult> {
   return { row_id: 'row-4', option: '4a', actions };
 }
 
+export async function runRow5(q: QueryFn): Promise<RowResult> {
+  const actions: RowAction[] = [];
+
+  // Row 5 = write the missing CT IN +5 EGP for SHF-2026-00002
+  // (الخزينة الرئيسية) to mirror JE-126's standalone shift-surplus
+  // GL credit. Business meaning: shift surplus means cash physically
+  // entered the drawer; the GL recorded the +5 (DR 1111 / CR 421
+  // shift surplus income) but no CT was ever written. Row 2 already
+  // tags the JE-126 1111 line to الرئيسية; Row 5 adds the missing
+  // cash-side mirror so per-cashbox-drift fully closes to 0.
+  //
+  // Idempotency: probe for an existing CT carrying the EXEC#5 notes
+  // prefix on the same shift reference. If found, skip the INSERT.
+  const [existing] = await q(
+    `SELECT id FROM cashbox_transactions
+       WHERE reference_type='shift_variance'
+         AND reference_id=$1::uuid
+         AND notes LIKE $2 || '%'
+       LIMIT 1`,
+    [SHF002_REF_ID, NOTE_PREFIX_5],
+  );
+  if (existing?.id) {
+    actions.push({
+      step: 'INSERT cashbox_transactions (Row 5 counter-CT in +5)',
+      status: 'skipped_idempotent',
+      detail: `cleanup CT marker already present (id=${existing.id}) — re-run no-op`,
+    });
+  } else {
+    await q(
+      `INSERT INTO cashbox_transactions
+         (cashbox_id, direction, amount, category, reference_type, reference_id, notes)
+       VALUES ($1::uuid, 'in', 5, 'shift_variance', 'shift_variance', $2::uuid, $3)`,
+      [
+        AL_RAISIA_CASHBOX_ID,
+        SHF002_REF_ID,
+        `${NOTE_PREFIX_5}: missing cash-side mirror for JE-2026-000126 ` +
+          `(shift surplus +5 on SHF-2026-00002 / الخزينة الرئيسية). ` +
+          `JE-126 stays active (the +5 GL credit represents real cash that ` +
+          `entered the drawer at shift close). This CT closes the ` +
+          `per-cashbox-drift contribution from this shift to 0.`,
+      ],
+    );
+    actions.push({
+      step: 'INSERT cashbox_transactions (Row 5 counter-CT in +5)',
+      status: 'executed',
+      detail:
+        'Counter-CT IN +5 written for SHF-2026-00002; JE-126 untouched (kept active). ' +
+        'Row 4 will recompute current_balance after this row to capture the new CT.',
+    });
+  }
+
+  return { row_id: 'row-5', option: '5', actions };
+}
+
 // ─── Orchestrator (single transaction, all-or-nothing) ─────────────
 export async function executeCleanup(
   q: QueryFn,
@@ -412,6 +472,10 @@ export async function executeCleanup(
     rows.push(await runRow1a(q));
     rows.push(await runRow2(q));
     rows.push(await runRow3a(q));
+    // Row 5 must run BEFORE Row 4 so Row 4's recompute on
+    // cashboxes.current_balance captures the new CT IN +5 (no
+    // INSERT trigger updates current_balance automatically).
+    rows.push(await runRow5(q));
     rows.push(await runRow4a(q));
     after = await readSnapshot(q);
     if (!options.dryRun) {
@@ -469,7 +533,7 @@ export function renderResult(result: ExecuteResult): string {
   lines.push('## Safety footprint');
   lines.push(`- Mode: **${result.mode}**`);
   lines.push(`- Committed: ${result.committed ? 'yes' : 'no — ROLLBACK'}`);
-  lines.push(`- Audit prefixes: ${NOTE_PREFIX_1A} / ${NOTE_PREFIX_2} / ${NOTE_PREFIX_3A} / ${NOTE_PREFIX_4A}`);
+  lines.push(`- Audit prefixes: ${NOTE_PREFIX_1A} / ${NOTE_PREFIX_2} / ${NOTE_PREFIX_3A} / ${NOTE_PREFIX_4A} / ${NOTE_PREFIX_5}`);
   lines.push('- 0 DELETEs.');
   lines.push('- All UPDATEs/INSERTs run inside a single transaction.');
   return lines.join('\n');

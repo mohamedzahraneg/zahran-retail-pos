@@ -34,6 +34,7 @@ import {
   runRow2,
   runRow3a,
   runRow4a,
+  runRow5,
   AL_RAISIA_CASHBOX_ID,
   EXP003_ID,
   EXP003_JL_ID,
@@ -46,6 +47,7 @@ import {
   NOTE_PREFIX_2,
   NOTE_PREFIX_3A,
   NOTE_PREFIX_4A,
+  NOTE_PREFIX_5,
 } from './cash-recon-execute';
 
 const SCRIPT_PATH = resolve(__dirname, 'cash-recon-execute.ts');
@@ -281,6 +283,79 @@ describe('runRow4a — void + recompute', () => {
   });
 });
 
+// ─── 3.5. Row 5: counter-CT IN +5 for SHF-2026-00002 ──────────────
+describe('runRow5 — counter-CT IN +5 (closes the Row 2 residual)', () => {
+  it('inserts EXACTLY ONE CT IN +5 tied to SHF002_REF_ID + EXEC#5 prefix', async () => {
+    const { q, calls } = makeQ({
+      responses: [
+        // No prior cleanup CT exists yet
+        { pattern: /SELECT id FROM cashbox_transactions[\s\S]*notes LIKE/, rows: [] },
+      ],
+    });
+    const result = await runRow5(q);
+    expect(result.row_id).toBe('row-5');
+    expect(result.option).toBe('5');
+    const dml = calls.filter((c) => /^\s*(UPDATE|INSERT|DELETE)/i.test(c.sql));
+    // Exactly one INSERT, zero UPDATE/DELETE.
+    expect(dml.filter((c) => /^\s*INSERT/i.test(c.sql))).toHaveLength(1);
+    expect(dml.filter((c) => /^\s*UPDATE/i.test(c.sql))).toHaveLength(0);
+    expect(dml.filter((c) => /^\s*DELETE/i.test(c.sql))).toHaveLength(0);
+    // The INSERT targets cashbox_transactions, direction='in', amount=5.
+    const insertCall = dml.find((c) => /INSERT INTO cashbox_transactions/i.test(c.sql))!;
+    expect(insertCall.sql).toMatch(/'in',\s*5/);
+    expect(insertCall.sql).toMatch(/'shift_variance'/);
+    // SHF002_REF_ID in params + AL_RAISIA_CASHBOX_ID in params + EXEC#5 prefix in notes.
+    expect(insertCall.params).toContain(SHF002_REF_ID);
+    expect(insertCall.params).toContain(AL_RAISIA_CASHBOX_ID);
+    const notesParam = insertCall.params.find(
+      (p: any) => typeof p === 'string' && p.startsWith(NOTE_PREFIX_5),
+    );
+    expect(notesParam).toBeTruthy();
+    expect(notesParam).toMatch(/JE-2026-000126/);
+    expect(notesParam).toMatch(/SHF-2026-00002/);
+  });
+
+  it('is idempotent — re-run after a previous insert is a no-op', async () => {
+    const { q, calls } = makeQ({
+      responses: [
+        // Prior cleanup CT already exists (row id 999)
+        { pattern: /SELECT id FROM cashbox_transactions[\s\S]*notes LIKE/, rows: [{ id: 999 }] },
+      ],
+    });
+    const result = await runRow5(q);
+    expect(result.actions[0].status).toBe('skipped_idempotent');
+    expect(calls.filter((c) => /^\s*INSERT/i.test(c.sql))).toHaveLength(0);
+  });
+
+  it('does NOT touch JE-126 — Row 5 only adds a CT, the JE stays active', async () => {
+    const { q, calls } = makeQ({
+      responses: [
+        { pattern: /SELECT id FROM cashbox_transactions[\s\S]*notes LIKE/, rows: [] },
+      ],
+    });
+    await runRow5(q);
+    for (const c of calls) {
+      // No UPDATE journal_entries (no void of JE-126), no UPDATE journal_lines either.
+      expect(c.sql).not.toMatch(/UPDATE\s+journal_entries/i);
+      expect(c.sql).not.toMatch(/UPDATE\s+journal_lines/i);
+      // No params reference JE-126 entry_no — the CT is tied to the SHIFT reference, not the JE.
+      expect(c.params.includes('JE-2026-000126')).toBe(false);
+    }
+  });
+
+  it('uses reference_type=shift_variance + reference_id=SHF002_REF_ID (matches JE-126\'s reference)', async () => {
+    const { q, calls } = makeQ({
+      responses: [
+        { pattern: /SELECT id FROM cashbox_transactions[\s\S]*notes LIKE/, rows: [] },
+      ],
+    });
+    await runRow5(q);
+    const insertCall = calls.find((c) => /INSERT INTO cashbox_transactions/i.test(c.sql))!;
+    expect(insertCall.sql).toMatch(/'shift_variance'/);
+    expect(insertCall.params).toContain(SHF002_REF_ID);
+  });
+});
+
 // ─── 4. Idempotent rerun is no-op ─────────────────────────────────
 describe('idempotent rerun — second pass does nothing', () => {
   it('runRow1a skips all 3 actions when state matches target', async () => {
@@ -431,11 +506,12 @@ describe('script source — global invariants', () => {
     expect(code).not.toMatch(/\bALTER\s+TABLE\b/i);
   });
 
-  it('exports the four audit-trail prefixes verbatim', () => {
+  it('exports the five audit-trail prefixes verbatim', () => {
     expect(NOTE_PREFIX_1A).toBe('cleanup: PR-CASH-RECON-EXEC#1a');
     expect(NOTE_PREFIX_2).toBe('cleanup: PR-CASH-RECON-EXEC#2');
     expect(NOTE_PREFIX_3A).toBe('cleanup: PR-CASH-RECON-EXEC#3a');
     expect(NOTE_PREFIX_4A).toBe('cleanup: PR-CASH-RECON-EXEC#4a');
+    expect(NOTE_PREFIX_5).toBe('cleanup: PR-CASH-RECON-EXEC#5');
   });
 
   it('default mode is dry-run; only --execute commits', () => {
@@ -447,41 +523,44 @@ describe('script source — global invariants', () => {
 // ─── Renderer ─────────────────────────────────────────────────────
 describe('renderResult — formatted Markdown report', () => {
   it('renders the snapshot Δ table + per-row actions + safety footer', () => {
-    // Authoritative after-state (computed via SQL simulation against
-    // the live snapshot). The +95 residual represents the unchanged
-    // pieces the user's chosen options don't fully balance:
-    //   · Row 2 tag-only leaves the GL +5 unmatched on the cash side
-    //     (the user previously accepted this 5 EGP residual as historical
-    //     noise).
-    //   · Row 3 (R3-B) voids JE-196 the stale duplicate; this fully closes
-    //     settlement-7's GL-side over-count (no more +100 phantom credit).
-    //   · Row 4 voids CT-245 (mirrors the JE-358 void) and recomputes
-    //     current_balance; this closes the cancelled-return chain.
+    // Authoritative after-state with all 5 rows (computed via SQL
+    // simulation against the live snapshot):
+    //   · Row 1: tag EXP-000003 + write CT out 2,000
+    //   · Row 2: tag JE-126 1111 line to الرئيسية
+    //   · Row 3 (R3-B): void JE-196 (stale duplicate of JE-248)
+    //   · Row 5: write counter-CT IN +5 to mirror JE-126's shift surplus
+    //     (matches the business meaning: shift surplus = cash entered)
+    //   · Row 4: void CT-245 + recompute current_balance (runs LAST so
+    //     recompute captures Row 5's new CT)
     //
-    // Final residual: −5 EGP (entirely from Row 2's accepted noise).
-    // ABU YUSUF's balance corrects from +70 (inflated by JE-196 duplicate)
-    // to −30 (business owes him 30). TB stays at 0.
+    // Final state: gap = 0, drift = 0 ✓
+    // ABU YUSUF balance corrects from +70 → −30 (duplicate JE-196 removed).
+    // TB stays at 0.
     const md = renderResult({
       mode: 'dry-run',
       committed: false,
       before: { current_balance: 33885, active_ct_sum: 33885, tagged_gl_1111: 34235, untagged_gl_1111: -2095, global_gl_1111: 32140, per_cashbox_drift: -350, global_gap: 1745 },
-      after:  { current_balance: 32235, active_ct_sum: 32235, tagged_gl_1111: 32240, untagged_gl_1111: 0, global_gl_1111: 32240, per_cashbox_drift: -5, global_gap: -5 },
+      after:  { current_balance: 32240, active_ct_sum: 32240, tagged_gl_1111: 32240, untagged_gl_1111: 0, global_gl_1111: 32240, per_cashbox_drift: 0, global_gap: 0 },
       rows: [
         { row_id: 'row-1', option: '1a', actions: [{ step: 'UPDATE expenses', status: 'executed' }] },
         { row_id: 'row-2', option: '2',  actions: [{ step: 'UPDATE journal_lines', status: 'executed' }] },
         { row_id: 'row-3', option: '3a', actions: [{ step: 'UPDATE journal_entries SET is_void=TRUE on JE-2026-000196', status: 'executed' }] },
+        { row_id: 'row-5', option: '5',  actions: [{ step: 'INSERT cashbox_transactions (Row 5 counter-CT in +5)', status: 'executed' }] },
         { row_id: 'row-4', option: '4a', actions: [{ step: 'UPDATE cashbox_transactions (void CT-245)', status: 'executed' }] },
       ],
     });
     expect(md).toMatch(/# Cash\/GL cleanup — DRY-RUN/);
     expect(md).toMatch(/Committed: \*\*NO\*\*/);
-    expect(md).toMatch(/\| current_balance \| 33885\.00 \| 32235\.00 \| -1650\.00 \|/);
-    // global_gap moves from +1,745 → −5 (Row 2 accepted residual).
-    expect(md).toMatch(/\| global_gap \| 1745\.00 \| -5\.00 \| -1750\.00 \|/);
+    expect(md).toMatch(/\| current_balance \| 33885\.00 \| 32240\.00 \| -1645\.00 \|/);
+    // global_gap closes to exactly 0 ✓
+    expect(md).toMatch(/\| global_gap \| 1745\.00 \| 0\.00 \| -1745\.00 \|/);
+    expect(md).toMatch(/\| per_cashbox_drift \| -350\.00 \| 0\.00 \| \+350\.00 \|/);
     expect(md).toMatch(/### row-1 \(option 1a\)/);
     expect(md).toMatch(/### row-3 \(option 3a\)/);
+    expect(md).toMatch(/### row-5 \(option 5\)/);
     expect(md).toMatch(/### row-4 \(option 4a\)/);
     expect(md).toMatch(/JE-2026-000196/);
+    expect(md).toMatch(/Row 5 counter-CT in \+5/);
     expect(md).toMatch(/cleanup: PR-CASH-RECON-EXEC#1a/);
     expect(md).toMatch(/0 DELETEs/);
   });
