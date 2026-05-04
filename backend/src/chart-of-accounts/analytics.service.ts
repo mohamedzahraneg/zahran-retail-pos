@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { DataSource } from 'typeorm';
+import { LIQUID_CODES_SQL_LIST } from './gl-codes.constants';
 
 /**
  * Rich analytics for the new Analytics page.
@@ -315,7 +316,7 @@ export class AccountingAnalyticsService {
          FROM journal_lines jl
          JOIN journal_entries je ON je.id = jl.entry_id
          JOIN chart_of_accounts coa ON coa.id = jl.account_id
-        WHERE coa.code IN ('1111','1113','1114','1115')
+        WHERE coa.code IN (${LIQUID_CODES_SQL_LIST})
           AND je.is_posted = TRUE
           AND je.is_void   = FALSE`,
     );

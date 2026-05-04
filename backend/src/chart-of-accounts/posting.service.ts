@@ -9,6 +9,11 @@ import {
   METHOD_DEFAULT_GL_CODE,
   isCashMethod,
 } from '../payments/providers.catalog';
+import {
+  CASHBOX_KIND_TO_GL_CODE,
+  CashboxKindForGl,
+  GL_CASH,
+} from './gl-codes.constants';
 
 // PR-PAY-1 — Method → default GL account. The map is exhaustive over
 // the existing `payment_method_code` enum (cash, card_visa,
@@ -166,7 +171,7 @@ export class AccountingPostingService {
                 description: `كاش - فاتورة ${inv.invoice_no}`,
               }
             : {
-                account_code: '1111',
+                account_code: GL_CASH,
                 debit: amt,
                 cashbox_id: undefined,
                 description: `كاش - فاتورة ${inv.invoice_no}`,
@@ -1586,7 +1591,7 @@ export class AccountingPostingService {
     q: QueryFn,
     cashboxId: string | null,
   ): Promise<string | null> {
-    if (!cashboxId) return this.accountIdByCode(q, '1111');
+    if (!cashboxId) return this.accountIdByCode(q, GL_CASH);
     const [explicit] = await q(
       `SELECT id FROM chart_of_accounts
         WHERE cashbox_id = $1 AND is_active = TRUE LIMIT 1`,
@@ -1597,13 +1602,8 @@ export class AccountingPostingService {
       `SELECT kind FROM cashboxes WHERE id = $1`,
       [cashboxId],
     );
-    const fallback: Record<string, string> = {
-      cash: '1111',
-      bank: '1113',
-      ewallet: '1114',
-      check: '1115',
-    };
-    const code = fallback[cb?.kind ?? 'cash'] || '1111';
+    const code =
+      CASHBOX_KIND_TO_GL_CODE[(cb?.kind ?? 'cash') as CashboxKindForGl] || GL_CASH;
     return this.accountIdByCode(q, code);
   }
 

@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, Logger, Optional } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { FinancialEngineService } from './financial-engine.service';
+import { GL_CASH } from './gl-codes.constants';
 
 /**
  * System-wide audit + repair for the accounting layer.
@@ -1146,7 +1147,7 @@ export class ReconciliationService {
       // Point the GL link to the main cashbox so postings resolve
       // correctly after backfill. Clears any old links first.
       const [coaMain] = await this.ds.query(
-        `SELECT id FROM chart_of_accounts WHERE code = '1111' LIMIT 1`,
+        `SELECT id FROM chart_of_accounts WHERE code = '${GL_CASH}' LIMIT 1`,
       );
       if (coaMain) {
         await this.ds.query(
