@@ -1,6 +1,10 @@
 import axios, { AxiosError, AxiosInstance, AxiosResponse } from 'axios';
 import toast from 'react-hot-toast';
 import { useAuthStore } from '@/stores/auth.store';
+// PR-AUDIT-IDEMPOTENCY-POS-INVOICE-FE — opt-in Idempotency-Key on
+// the single online POST /pos/invoices route. See lib module for the
+// gating rules; this interceptor delegates entirely to it.
+import { attachCheckoutIdempotencyKeyIfApplicable } from '@/lib/checkout-idempotency';
 
 const envApiUrl = import.meta.env.VITE_API_URL as string | undefined;
 const baseURL = envApiUrl ?? 'http://localhost:3000';
@@ -17,6 +21,9 @@ api.interceptors.request.use((config) => {
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
   }
+  // PR-AUDIT-IDEMPOTENCY-POS-INVOICE-FE — no-op on every route except
+  // POST /pos/invoices, where it adds the per-checkout key.
+  attachCheckoutIdempotencyKeyIfApplicable(config);
   return config;
 });
 
