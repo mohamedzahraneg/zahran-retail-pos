@@ -36,7 +36,7 @@
  *   · Backend changes — none needed
  */
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import {
@@ -63,6 +63,11 @@ import {
 import { accountingApi } from '@/api/accounting.api';
 import { useAuthStore } from '@/stores/auth.store';
 import { TeamRow } from '@/api/employees.api';
+// PR-AUDIT-IDEMPOTENCY-ACCOUNTING-EXPENSES-FE — reset the per-modal
+// Idempotency-Key on AdvanceModal mount/unmount. AdvanceModal is the
+// second caller of POST /accounting/expenses/daily (with is_advance=true);
+// shares the same key module as AddExpenseModal in DailyExpenses.tsx.
+import { resetExpenseIdempotencyKey } from '@/lib/expense-idempotency';
 import { EmployeeCashClassifierGuard } from './EmployeeCashClassifierGuard';
 import {
   CashSourceSelector,
@@ -621,6 +626,16 @@ export function AdvanceModal({
   onClose: () => void;
 }) {
   const qc = useQueryClient();
+
+  // PR-AUDIT-IDEMPOTENCY-ACCOUNTING-EXPENSES-FE — clean slate on
+  // mount, defensive reset on unmount. Field changes within the
+  // open modal do NOT reset the key — body-tamper safety is BE-side
+  // via 409 IDEMPOTENCY_KEY_PAYLOAD_MISMATCH.
+  useEffect(() => {
+    resetExpenseIdempotencyKey();
+    return () => resetExpenseIdempotencyKey();
+  }, []);
+
   const [amount, setAmount] = useState('');
   const [reason, setReason] = useState('');
   const [source, setSource] = useState<CashSource>({
