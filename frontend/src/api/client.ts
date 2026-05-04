@@ -9,6 +9,11 @@ import { attachCheckoutIdempotencyKeyIfApplicable } from '@/lib/checkout-idempot
 // on POST /cash-desk/transfer. Same shape, sibling helper. The two
 // helpers gate on disjoint URLs so they cannot cross-fire.
 import { attachTransferIdempotencyKeyIfApplicable } from '@/lib/transfer-idempotency';
+// PR-AUDIT-IDEMPOTENCY-ACCOUNTING-EXPENSES-FE — opt-in Idempotency-Key
+// on the two expense-create routes. Same shape, third sibling helper.
+// Strict equality on the URL gate so suffix routes (e.g.
+// /accounting/expenses/:id/approve) can't accidentally receive the header.
+import { attachExpenseIdempotencyKeyIfApplicable } from '@/lib/expense-idempotency';
 
 const envApiUrl = import.meta.env.VITE_API_URL as string | undefined;
 const baseURL = envApiUrl ?? 'http://localhost:3000';
@@ -31,6 +36,10 @@ api.interceptors.request.use((config) => {
   // PR-AUDIT-IDEMPOTENCY-CASH-DESK-TRANSFER-FE — no-op on every route
   // except POST /cash-desk/transfer, where it adds the per-modal key.
   attachTransferIdempotencyKeyIfApplicable(config);
+  // PR-AUDIT-IDEMPOTENCY-ACCOUNTING-EXPENSES-FE — no-op on every
+  // route except POST /accounting/expenses and POST
+  // /accounting/expenses/daily, where it adds the per-modal key.
+  attachExpenseIdempotencyKeyIfApplicable(config);
   return config;
 });
 

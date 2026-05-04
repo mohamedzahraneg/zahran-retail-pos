@@ -55,6 +55,11 @@ import { cashDeskApi } from '@/api/cash-desk.api';
 import { shiftsApi } from '@/api/shifts.api';
 import { useAuthStore } from '@/stores/auth.store';
 import { exportToExcel, printReport } from '@/lib/exportExcel';
+// PR-AUDIT-IDEMPOTENCY-ACCOUNTING-EXPENSES-FE — reset the per-modal
+// Idempotency-Key on AddExpenseModal mount/unmount so each open
+// modal session is one expense intent. Within an open session every
+// retry of the same submit reuses the same key.
+import { resetExpenseIdempotencyKey } from '@/lib/expense-idempotency';
 import ExpensesAnalyticsPremiumTab from './ExpensesAnalyticsPremiumTab';
 import {
   EditExpenseModal,
@@ -1055,6 +1060,15 @@ function AddExpenseModal({
     hasPermission('employee.team.view') ||
     hasPermission('accounts.journal.post') ||
     hasPermission('*');
+
+  // PR-AUDIT-IDEMPOTENCY-ACCOUNTING-EXPENSES-FE — clean slate on
+  // mount, defensive reset on unmount. Field changes within the
+  // open modal do NOT reset the key — body-tamper safety is BE-side
+  // via 409 IDEMPOTENCY_KEY_PAYLOAD_MISMATCH.
+  useEffect(() => {
+    resetExpenseIdempotencyKey();
+    return () => resetExpenseIdempotencyKey();
+  }, []);
 
   const today = new Date().toISOString().slice(0, 10);
   const [amount, setAmount] = useState('');
