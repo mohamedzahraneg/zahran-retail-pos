@@ -75,6 +75,7 @@ import {
   GL_BANK,
   GL_CASH,
   GL_CHECKS,
+  GL_SUPPLIER_PAYABLE,
   GL_WALLET,
   LIQUID_CODES_SQL_LIST,
 } from '../chart-of-accounts/gl-codes.constants';
@@ -546,7 +547,7 @@ export class FinanceDashboardService {
     // Nothing is fabricated; nothing is written.
     const suppliers = await this.ds.query(`
       WITH coa_211 AS (
-        SELECT id FROM chart_of_accounts WHERE code = '211' LIMIT 1
+        SELECT id FROM chart_of_accounts WHERE code = '${GL_SUPPLIER_PAYABLE}' LIMIT 1
       ),
       sources AS (
         SELECT

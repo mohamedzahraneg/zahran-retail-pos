@@ -32,6 +32,24 @@ export const GL_WALLET = '1114';
 /** Checks under collection / الشيكات تحت التحصيل. */
 export const GL_CHECKS = '1115';
 
+/* ──────────────────────────────────────────────────────────────────
+ * Non-liquid GL codes — PR-AUDIT-NON-LIQUID-GL-PHASE-A
+ *
+ * Read-only SELECT/reporting sites only. Posting/engine/line-creation
+ * paths still use literals deliberately (Phase B work — out of scope
+ * here). The forward-prevention spec is NOT extended in this phase;
+ * adding broad non-liquid scanning is a separate follow-up.
+ * ──────────────────────────────────────────────────────────────────*/
+
+/** Employee receivables / advances — ذمم الموظفين. */
+export const GL_EMPLOYEE_RECEIVABLE = '1123';
+
+/** Employee payables / accruals — مستحقات الموظفين. */
+export const GL_EMPLOYEE_PAYABLE = '213';
+
+/** Supplier payable — الموردون والدائنون. */
+export const GL_SUPPLIER_PAYABLE = '211';
+
 /**
  * The four liquid-asset GL codes in canonical sort order. Used by
  * Finance Dashboard, Analytics, and the FinancialEngine guard to

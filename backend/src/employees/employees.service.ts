@@ -7,6 +7,10 @@ import {
 } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { FinancialEngineService } from '../chart-of-accounts/financial-engine.service';
+import {
+  GL_EMPLOYEE_PAYABLE,
+  GL_EMPLOYEE_RECEIVABLE,
+} from '../chart-of-accounts/gl-codes.constants';
 
 /**
  * Employee / HR module.
@@ -1458,7 +1462,7 @@ export class EmployeesService {
          JOIN journal_entries je ON je.id = jl.entry_id
          JOIN chart_of_accounts coa ON coa.id = jl.account_id
         WHERE COALESCE(jl.employee_id, jl.employee_user_id) = $1
-          AND coa.code IN ('1123', '213')
+          AND coa.code IN ('${GL_EMPLOYEE_RECEIVABLE}', '${GL_EMPLOYEE_PAYABLE}')
           AND je.is_posted = TRUE
         ORDER BY je.entry_date ASC, je.entry_no ASC, jl.line_no ASC`,
       [userId],

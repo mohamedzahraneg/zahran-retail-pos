@@ -14,6 +14,7 @@ import {
 } from './dto/shift.dto';
 import { AccountingPostingService } from '../chart-of-accounts/posting.service';
 import { FinancialEngineService } from '../chart-of-accounts/financial-engine.service';
+import { GL_EMPLOYEE_RECEIVABLE } from '../chart-of-accounts/gl-codes.constants';
 
 /**
  * Cashier shift (وردية) service.
@@ -352,7 +353,7 @@ export class ShiftsService {
              e.shift_id,
              coa.code AS account_code,
              COALESCE(e.is_advance, FALSE)
-               OR coa.code = '1123' AS is_employee_advance,
+               OR coa.code = '${GL_EMPLOYEE_RECEIVABLE}' AS is_employee_advance,
              je.entry_no AS je_entry_no,
              CASE WHEN e.is_approved THEN 'approved' ELSE 'pending' END AS status
         FROM expenses e
