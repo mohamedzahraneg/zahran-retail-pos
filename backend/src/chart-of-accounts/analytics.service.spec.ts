@@ -182,3 +182,95 @@ describe('AccountingAnalyticsService.smartIndicators — cash_on_hand (PR-FIN-AN
     expect(cashSql.sql).not.toMatch(/FROM\s+cashboxes\b/);
   });
 });
+
+/* ──────────────────────────────────────────────────────────────────
+ * PR-AUDIT-VOID-LEAK — cashFlowWaterfall + dailyTrend cash_moves CTE
+ * must filter `is_void = FALSE` on every cashbox_transactions read so
+ * voided cancellation/reversal CTs don't inflate the opening balance,
+ * the per-category buckets, or the daily cash low/high markers.
+ * ──────────────────────────────────────────────────────────────────*/
+describe('AccountingAnalyticsService.cashFlowWaterfall — PR-AUDIT-VOID-LEAK', () => {
+  it('opening-balance SQL filters voided CTs (is_void = FALSE)', async () => {
+    const { service, dsCalls } = await makeService(() => []);
+    await service.cashFlowWaterfall({ from: '2026-04-01', to: '2026-05-03' });
+    const openingSql = dsCalls.find((c) => /AS opening/.test(c.sql))!;
+    expect(openingSql).toBeDefined();
+    expect(openingSql.sql).toMatch(/FROM\s+cashbox_transactions/);
+    expect(openingSql.sql).toMatch(/is_void\s*=\s*FALSE/);
+    // Defensive: refuse the unfiltered shape.
+    expect(openingSql.sql).not.toMatch(/FROM\s+cashbox_transactions\s+WHERE\s+\(created_at/);
+  });
+
+  it('per-category bucket SQL filters voided CTs (is_void = FALSE)', async () => {
+    const { service, dsCalls } = await makeService(() => []);
+    await service.cashFlowWaterfall({ from: '2026-04-01', to: '2026-05-03' });
+    const bucketSql = dsCalls.find((c) => /GROUP BY direction, category/.test(c.sql))!;
+    expect(bucketSql).toBeDefined();
+    expect(bucketSql.sql).toMatch(/FROM\s+cashbox_transactions/);
+    expect(bucketSql.sql).toMatch(/is_void\s*=\s*FALSE/);
+  });
+
+  it('end-to-end: voided CT inside the date range is EXCLUDED — opening + buckets reflect active CTs only', async () => {
+    // Fixture: opening = 1,000 EGP from active CTs only (the SQL did
+    // its job — what comes back from the stub is the answer the SQL
+    // produced after the void filter applied).
+    const { service } = await makeService((sql) => {
+      if (/AS opening/.test(sql)) return [{ opening: '1000.00' }];
+      if (/GROUP BY direction, category/.test(sql))
+        return [
+          { direction: 'in',  category: 'sale',     amount: '500.00' },
+          { direction: 'out', category: 'expense',  amount: '200.00' },
+        ];
+      return [];
+    });
+    const out = await service.cashFlowWaterfall({ from: '2026-04-01', to: '2026-05-03' });
+    expect(out.opening).toBe(1000);
+    expect(out.buckets).toEqual([
+      { direction: 'in',  category: 'sale',    amount: '500.00' },
+      { direction: 'out', category: 'expense', amount: '200.00' },
+    ]);
+  });
+
+  it('SQL is read-only: pure SELECT, no INSERT/UPDATE/DELETE/MERGE', async () => {
+    const { service, dsCalls } = await makeService(() => []);
+    await service.cashFlowWaterfall({ from: '2026-04-01', to: '2026-05-03' });
+    const ctSqls = dsCalls.filter((c) => /FROM\s+cashbox_transactions/.test(c.sql));
+    expect(ctSqls.length).toBeGreaterThanOrEqual(2);
+    for (const c of ctSqls) {
+      expect(c.sql).toMatch(/^\s*\n?\s*SELECT/i);
+      expect(c.sql).not.toMatch(/\bINSERT\b/i);
+      expect(c.sql).not.toMatch(/\bUPDATE\b/i);
+      expect(c.sql).not.toMatch(/\bDELETE\b/i);
+      expect(c.sql).not.toMatch(/\bMERGE\b/i);
+    }
+  });
+});
+
+describe('AccountingAnalyticsService.dailyPerformance — cash_moves filters voided CTs (PR-AUDIT-VOID-LEAK)', () => {
+  it('cash_moves CTE includes is_void = FALSE so voided CTs do NOT contribute balance_after to cash_low/cash_high', async () => {
+    const { service, dsCalls } = await makeService(() => []);
+    await service.dailyPerformance({ from: '2026-04-01', to: '2026-05-03' });
+    // dailyTrend issues ONE composite query; find the call that contains the cash_moves CTE.
+    const trendSql = dsCalls.find((c) => /cash_moves AS \(/.test(c.sql))!;
+    expect(trendSql).toBeDefined();
+    // Pin the cash_moves CTE shape: must reference cashbox_transactions
+    // AND have an is_void = FALSE filter inside that CTE specifically.
+    expect(trendSql.sql).toMatch(/cash_moves AS \(\s*[\s\S]*?FROM\s+cashbox_transactions\s+[\s\S]*?is_void\s*=\s*FALSE/);
+    // The cash_day CTE consumes cash_moves and emits cash_low / cash_high
+    // (the user-visible chart fields that this fix protects).
+    expect(trendSql.sql).toMatch(/cash_day AS \(/);
+    expect(trendSql.sql).toMatch(/cash_low/);
+    expect(trendSql.sql).toMatch(/cash_high/);
+  });
+
+  it('dailyPerformance SQL is read-only', async () => {
+    const { service, dsCalls } = await makeService(() => []);
+    await service.dailyPerformance({ from: '2026-04-01', to: '2026-05-03' });
+    const trendSql = dsCalls.find((c) => /cash_moves AS \(/.test(c.sql))!;
+    expect(trendSql.sql).toMatch(/^\s*\n?\s*WITH/i);
+    expect(trendSql.sql).not.toMatch(/\bINSERT\b/i);
+    expect(trendSql.sql).not.toMatch(/\bUPDATE\b/i);
+    expect(trendSql.sql).not.toMatch(/\bDELETE\b/i);
+    expect(trendSql.sql).not.toMatch(/\bMERGE\b/i);
+  });
+});

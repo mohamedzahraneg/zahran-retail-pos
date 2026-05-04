@@ -1067,13 +1067,19 @@ export class AccountingService {
       : '';
     if (dto.warehouse_id) params.push(dto.warehouse_id);
 
+    // PR-AUDIT-VOID-LEAK: filter out voided CTs so cashflow buckets
+    // don't double-count cancellations / reversals. Same bug class as
+    // analytics.cashFlowWaterfall — both report cash activity from raw
+    // CTs and must exclude voided rows to match the active CT sum the
+    // dashboard reconciliation helpers and the engine treat as truth.
     const byCat = await this.ds.query(
       `SELECT t.category, t.direction,
               COALESCE(SUM(t.amount),0)::numeric AS total,
               COUNT(*)::int                     AS count
        FROM cashbox_transactions t
        JOIN cashboxes cb ON cb.id = t.cashbox_id
-       WHERE t.created_at::date BETWEEN $1 AND $2
+       WHERE t.is_void = FALSE
+         AND t.created_at::date BETWEEN $1 AND $2
          ${wCond}
        GROUP BY t.category, t.direction
        ORDER BY total DESC`,
@@ -1102,6 +1108,12 @@ export class AccountingService {
     const wCond = dto.warehouse_id ? `AND cb.warehouse_id = $3` : '';
     if (dto.warehouse_id) params.push(dto.warehouse_id);
 
+    // PR-AUDIT-VOID-LEAK: per-cashbox CT aggregates exclude voided CTs.
+    // The void filter goes on the LEFT JOIN's ON clause (NOT the WHERE)
+    // so cashboxes with zero active CTs still appear in the result with
+    // 0/0/0/0 — putting it in WHERE would silently drop them. The
+    // cb.current_balance value is unaffected (it's the stored balance,
+    // already void-aware via the engine's recompute path).
     return this.ds.query(
       `SELECT
          cb.id                                   AS cashbox_id,
@@ -1119,7 +1131,8 @@ export class AccountingService {
                           THEN t.amount END),0)::numeric AS opening_out
        FROM cashboxes cb
        LEFT JOIN warehouses w ON w.id = cb.warehouse_id
-       LEFT JOIN cashbox_transactions t ON t.cashbox_id = cb.id
+       LEFT JOIN cashbox_transactions t
+         ON t.cashbox_id = cb.id AND t.is_void = FALSE
        WHERE cb.is_active = TRUE
          ${wCond}
        GROUP BY cb.id, w.name_ar
