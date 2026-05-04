@@ -149,6 +149,11 @@ describe('attachTransferIdempotencyKeyIfApplicable — request shape gate', () =
       '/cash-desk/reconciliation/mark',
       '/cash-desk/reconciliation/unmark',
       '/cash-desk/reconciliation/auto-match',
+      // Pin exact-match (not prefix-match) on the URL gate. A future
+      // refactor to startsWith() would silently widen scope and let
+      // the header leak onto sibling endpoints under the same prefix.
+      '/cash-desk/transfer/anything-else',
+      '/cash-desk/transfer/abc-id/void',
       '/sync/push', // explicit: offline sync is out of scope
     ]) {
       const cfg: any = { method: 'post', url, headers: {} };
