@@ -91,4 +91,40 @@ describe('<BalanceCard /> — sign convention', () => {
     render(<BalanceCard glLiveSnapshot={-100} />);
     expect(screen.getByText('الرصيد الحالي')).toBeInTheDocument();
   });
+
+  // ─── PR-AUDIT-EMPLOYEE-VIEW-UNIFY — named-employee fixtures ──────
+  // Pin the canonical sign convention against the actual production
+  // employees from the audit baseline (captured 2026-05-04). If a
+  // future refactor flips the sign or revives the inverted
+  // `v_employee_balances_gl.net_balance`, these tests fail by name —
+  // making the regression obvious in CI.
+  describe('PR-AUDIT-EMPLOYEE-VIEW-UNIFY — named-employee fixtures', () => {
+    it('Abu Yousef (balance = -30) renders "له 30" green', () => {
+      render(<BalanceCard glLiveSnapshot={-30} />);
+      expect(screen.getByTestId('balance-card-label')).toHaveTextContent('له');
+      expect(screen.getByTestId('balance-card-label').className).toMatch(/emerald/);
+      expect(screen.getByTestId('balance-card-value')).toHaveTextContent('30.00');
+    });
+
+    it('Mohamed El-Zobaty (balance = +2080) renders "عليه 2080" red', () => {
+      render(<BalanceCard glLiveSnapshot={2080} />);
+      expect(screen.getByTestId('balance-card-label')).toHaveTextContent('عليه');
+      expect(screen.getByTestId('balance-card-label').className).toMatch(/rose/);
+      expect(screen.getByTestId('balance-card-value')).toHaveTextContent('2,080.00');
+    });
+
+    it('Mahmoud Zahran (balance = -250) renders "له 250" green', () => {
+      render(<BalanceCard glLiveSnapshot={-250} />);
+      expect(screen.getByTestId('balance-card-label')).toHaveTextContent('له');
+      expect(screen.getByTestId('balance-card-label').className).toMatch(/emerald/);
+      expect(screen.getByTestId('balance-card-value')).toHaveTextContent('250.00');
+    });
+
+    it('Admin (balance = +10) renders "عليه 10" red', () => {
+      render(<BalanceCard glLiveSnapshot={10} />);
+      expect(screen.getByTestId('balance-card-label')).toHaveTextContent('عليه');
+      expect(screen.getByTestId('balance-card-label').className).toMatch(/rose/);
+      expect(screen.getByTestId('balance-card-value')).toHaveTextContent('10.00');
+    });
+  });
 });

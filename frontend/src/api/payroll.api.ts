@@ -71,25 +71,48 @@ export interface EmployeeTxn {
 }
 
 /**
- * Shape returned by `GET /payroll/balances`. Sourced from the authoritative
- * GL view `v_employee_balances_gl` (migration 039) — NOT from raw
- * employee_transactions sums. Positive `net_balance` = company owes the
- * employee; negative = employee owes the company.
+ * Shape returned by `GET /payroll/balances`.
+ *
+ * PR-AUDIT-EMPLOYEE-VIEW-UNIFY — sign convention contract:
+ *
+ *   ✅ USE `gl_balance` for ALL user-facing display.
+ *      Sourced from `v_employee_gl_balance.balance` (migration 075,
+ *      COA 1123 + 213). Convention:
+ *        positive ⇒ EMPLOYEE OWES the company  (عليه)
+ *        negative ⇒ COMPANY OWES the employee  (له)
+ *
+ *   ⚠ DO NOT consume `liabilities` / `receivables` / `net_balance`
+ *      for display. These are SOURCE-derived aggregates from
+ *      employee_transactions + employee_deductions etc. — they exist
+ *      only so the BE can compute `gl_vs_source_diff` for drift
+ *      detection, and they carry the OPPOSITE sign convention from
+ *      `gl_balance`:
+ *        positive net_balance ⇒ company owes employee
+ *        negative net_balance ⇒ employee owes company
+ *      Mixing them with `gl_balance` will silently invert labels.
  */
 export interface EmployeeBalance {
   employee_id: string;
   /**
    * Canonical GL balance from v_employee_gl_balance (COA 1123 + 213,
-   * migration 075). This is the headline. Positive = employee owes
-   * company; negative = company owes employee. Prefer this over
-   * `net_balance` (source-derived) for all user-facing display.
+   * migration 075). **THE headline field for any UI display.**
+   * Positive = employee owes company (عليه); negative = company owes
+   * employee (له). All Finance Dashboard / Team / EmployeeProfile / /me
+   * pages already consume this field exclusively (see audit
+   * PR-AUDIT-EMPLOYEE-VIEW-UNIFY).
    */
   gl_balance: number | string;
   full_name: string;
   username: string;
-  liabilities: number | string; // account 213 (credit − debit)
-  receivables: number | string; // account 1123 (debit − credit)
-  net_balance: number | string; // liabilities − receivables
+  /**
+   * @deprecated Source-derived; INVERTED sign vs `gl_balance`. Used by
+   * BE drift detection (`gl_vs_source_diff`). Do not display.
+   */
+  liabilities: number | string;
+  /** @deprecated See `liabilities` — same warning. */
+  receivables: number | string;
+  /** @deprecated See `liabilities` — same warning. */
+  net_balance: number | string;
   txn_count: number;
   last_txn_date: string | null;
 }
