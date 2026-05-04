@@ -14,6 +14,11 @@ import { FinancialEngineService } from '../chart-of-accounts/financial-engine.se
 import { PaymentsService } from '../payments/payments.service';
 import { sanitizeUuidInput } from '../common/uuid-or-null';
 import { CashboxGlDriftHelper } from './cashbox-gl-drift.helper';
+import {
+  GL_BANK,
+  GL_CHECKS,
+  GL_WALLET,
+} from '../chart-of-accounts/gl-codes.constants';
 
 /**
  * PR-FIN-PAYACCT-4C — central rule used by both `receiveFromCustomer`
@@ -576,6 +581,11 @@ export class CashDeskService {
       // Mapping: cashbox.kind → GL account_code
       //   ewallet → 1114, bank → 1113, check → 1115, cash → NULL
       // Pure SELECT — no DML, no engine touch.
+      // PR-AUDIT-CASHBOX-KIND-MAP-CENTRALIZE — the 6 GL-code literals
+      // in this CASE expression now interpolate from gl-codes.constants
+      // (GL_BANK / GL_WALLET / GL_CHECKS). Output SQL is byte-identical;
+      // the cash-desk.service.spec.ts assertions on returned row shape
+      // (accounting_gl_code value, etc.) continue to pass.
       return this.ds.query(
         `
         SELECT cb.*, cb.name_ar AS name,
@@ -585,9 +595,9 @@ export class CashDeskService {
                fi.color_hex      AS institution_color,
                fi.kind           AS institution_kind,
                CASE
-                 WHEN cb.kind::text = 'ewallet' THEN '1114'
-                 WHEN cb.kind::text = 'bank'    THEN '1113'
-                 WHEN cb.kind::text = 'check'   THEN '1115'
+                 WHEN cb.kind::text = 'ewallet' THEN '${GL_WALLET}'
+                 WHEN cb.kind::text = 'bank'    THEN '${GL_BANK}'
+                 WHEN cb.kind::text = 'check'   THEN '${GL_CHECKS}'
                  ELSE NULL
                END               AS accounting_gl_code,
                CASE
@@ -597,9 +607,9 @@ export class CashDeskService {
                      JOIN journal_entries je ON je.id = jl.entry_id
                      JOIN chart_of_accounts coa ON coa.id = jl.account_id
                     WHERE coa.code = CASE cb.kind::text
-                                       WHEN 'ewallet' THEN '1114'
-                                       WHEN 'bank'    THEN '1113'
-                                       WHEN 'check'   THEN '1115'
+                                       WHEN 'ewallet' THEN '${GL_WALLET}'
+                                       WHEN 'bank'    THEN '${GL_BANK}'
+                                       WHEN 'check'   THEN '${GL_CHECKS}'
                                      END
                       AND je.is_posted = TRUE
                       AND je.is_void   = FALSE

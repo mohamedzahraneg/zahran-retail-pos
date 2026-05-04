@@ -12,9 +12,10 @@
  * sprinkling a new literal.
  *
  * Allowlist (sites the audit deliberately deferred):
- *   · cash-desk.service.ts          — SQL CASE on cb.kind, deferred
- *   · settings/settings.service.ts  — SQL CASE on cb.kind, deferred
  *   · payments/payments.service.ts  — SQL CASE in unattached_balances CTE
+ *                                    (payment_method→GL, not cb.kind→GL;
+ *                                     PR-271 audit deferred this as a
+ *                                     larger refactor)
  *   · chart-of-accounts/cash-recon-execute/cash-recon-execute.ts
  *                                  — one-off historical maintenance
  *   · chart-of-accounts/gl-codes.constants.ts
@@ -30,6 +31,12 @@
  *   · chart-of-accounts/posting.service.ts
  *                                  — '1114' in inline comment about
  *                                    historic behavior
+ *
+ * Removed from allowlist by PR-AUDIT-CASHBOX-KIND-MAP-CENTRALIZE
+ * (these now interpolate from gl-codes.constants and are actively
+ * guarded by this spec):
+ *   · cash-desk/cash-desk.service.ts
+ *   · settings/settings.service.ts
  */
 
 import { readdirSync, readFileSync, statSync } from 'fs';
@@ -39,8 +46,6 @@ const REPO_BACKEND_SRC = resolve(__dirname, '..');
 
 const ALLOWED_FILES: ReadonlySet<string> = new Set([
   'chart-of-accounts/gl-codes.constants.ts',
-  'cash-desk/cash-desk.service.ts',
-  'settings/settings.service.ts',
   'payments/payments.service.ts',
   'payments/dto/payment-account.dto.ts',
   'employees/employees.controller.ts',
