@@ -10,7 +10,9 @@
  * One helper per source produces a `StatementResponse`:
  *   · glAccountStatement      — chart_of_accounts × journal_lines
  *   · cashboxStatement        — v_cashbox_movements (covers cash/bank/wallet)
- *   · employeeStatement       — v_employee_ledger + v_employee_balances_gl
+ *   · employeeStatement       — v_employee_ledger (canonical balance:
+ *                                v_employee_gl_balance per
+ *                                PR-AUDIT-EMPLOYEE-VIEW-UNIFY)
  *   · customerStatement       — customer_ledger + invoice context
  *   · supplierStatement       — supplier_ledger + purchases context
  *
@@ -305,10 +307,20 @@ export class StatementsService {
       [userId, range.from, range.to],
     );
 
-    // amount_owed_delta is signed: positive = company owes employee
-    // (debit side of the employee receivable account 1123); negative
-    // = employee owes company (credit side / 213). Map the sign into
-    // debit/credit columns so the table reads naturally.
+    // PR-AUDIT-EMPLOYEE-VIEW-UNIFY — sign convention pinned.
+    //
+    // `amount_owed_delta` follows the SAME canonical convention as
+    // `v_employee_gl_balance.balance`:
+    //   · positive → EMPLOYEE owes the company (advance/shortage/deduction)
+    //                → DR 1123 (asset increases) → debit column
+    //   · negative → COMPANY owes the employee (settlement/refund)
+    //                → CR 1123 / DR 213 (asset decreases) → credit column
+    // Defined at `database/migrations/060_shift_variance_treatment.sql:235-237`
+    // ("Signed amount convention (what the employee OWES the company):
+    //   positive → increases liability …").
+    //
+    // Map the signed delta into debit/credit columns so the statement
+    // table reads as a standard accounting ledger view.
     let running = opening;
     let totDebit = 0;
     let totCredit = 0;

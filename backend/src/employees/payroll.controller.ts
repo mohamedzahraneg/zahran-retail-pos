@@ -213,14 +213,27 @@ export class PayrollController {
         r.expenses,
         r.advances,
         r.payouts,
-        -- Company's obligation side (what we owe the employee)
+        -- ─── Source-table aggregates (DEPRECATED for display) ────────
+        -- PR-AUDIT-EMPLOYEE-VIEW-UNIFY — DO NOT use these for user-
+        -- facing balances. They aggregate the source tables directly
+        -- (employee_transactions, deductions, etc.) and keep an INVERTED
+        -- sign convention vs the canonical gl_balance (which is the
+        -- only field a UI surface should consume).
+        --
+        -- Why kept: gl_vs_source_diff below subtracts these to spot
+        -- drift between the engine-posted GL view and the raw source
+        -- tables. Reconcile jobs read gl_vs_source_diff and chase
+        -- the gap. Removing the aliases would break that drift signal.
+        --
+        -- Sign convention HERE (legacy / source-derived):
+        --   positive net_balance/balance = company owes employee
+        --   negative net_balance/balance = employee owes company
+        -- (OPPOSITE of gl_balance below — see Why kept.)
         (r.wages + r.bonuses + r.expenses)::numeric(14,2)          AS liabilities,
-        -- Employee's obligation side (what they owe us)
         (r.deductions + r.advances + r.payouts)::numeric(14,2)     AS receivables,
-        -- Signed net balance (positive = company owes; negative = employee owes)
         ((r.wages + r.bonuses + r.expenses)
          - (r.deductions + r.advances + r.payouts))::numeric(14,2) AS net_balance,
-        -- Back-compat alias used elsewhere
+        -- Back-compat alias (same value as net_balance). Same warning applies.
         ((r.wages + r.bonuses + r.expenses)
          - (r.deductions + r.advances + r.payouts))::numeric(14,2) AS balance,
         GREATEST(0, ((r.deductions + r.advances + r.payouts)
