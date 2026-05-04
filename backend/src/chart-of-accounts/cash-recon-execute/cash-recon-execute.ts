@@ -566,6 +566,27 @@ async function main(): Promise<void> {
   await client.connect();
   try {
     await client.query('BEGIN');
+    // PR-FIN-CASH-RECON-EXECUTE-ENGINE-CONTEXT — migration-068's strict
+    // guard `fn_guard_journal_lines` rejects every UPDATE/INSERT on
+    // `journal_lines` (and similarly-guarded tables) unless the session
+    // has set `app.engine_context` to one of:
+    //   · `engine:<token>`      — the canonical FinancialEngine path
+    //   · `service:<token>`     — grandfathered legacy/maintenance writes
+    //                             (audited via engine_bypass_alerts row per write)
+    //   · `migration:<...>`     — schema-migration DDL
+    //
+    // This script is a one-off historical maintenance cleanup that runs
+    // raw SQL outside the engine, so the correct context is `service:`.
+    // SET LOCAL keeps the GUC scoped to THIS transaction only — it
+    // reverts on COMMIT or ROLLBACK, so no leakage into the next
+    // connection checked out from the pool.
+    //
+    // Each guarded write inside the transaction will additionally emit
+    // an `engine_bypass_alerts` row (logged by fn_engine_write_allowed
+    // for the `service:*` tier) so every cleanup mutation is auditable.
+    await client.query(
+      `SET LOCAL app.engine_context = 'service:cash-recon-cleanup'`,
+    );
     const q: QueryFn = async (sql, params = []) => {
       const r = await client.query(sql, params as any[]);
       return r.rows;

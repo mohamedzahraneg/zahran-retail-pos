@@ -385,6 +385,76 @@ describe('runRow5 — counter-CT IN +5 (closes the Row 2 residual)', () => {
   });
 });
 
+// ─── 3.6. CLI bootstrap engine_context contract ───────────────────
+//
+// PR-FIN-CASH-RECON-EXECUTE-ENGINE-CONTEXT — the migration-068
+// `fn_guard_journal_lines` trigger BLOCKS every UPDATE/INSERT on
+// guarded tables unless the session has set `app.engine_context`
+// to a recognised tier. The CLI bootstrap must SET LOCAL the
+// 'service:cash-recon-cleanup' context immediately after BEGIN
+// and before any DML so the orchestrator's row writes are allowed.
+//
+// These specs are source-shape assertions because the actual CLI
+// can't be exercised without a real DB. They pin the exact contract
+// the user approved in PR-264:
+//   1. SET LOCAL is present in main()
+//   2. SET LOCAL appears AFTER `await client.query('BEGIN')`
+//   3. SET LOCAL appears BEFORE any other client.query() call
+//      (and BEFORE the executeCleanup invocation that issues DML)
+//   4. The exact context string is 'service:cash-recon-cleanup'
+//      (NOT engine:*, which is reserved for the FinancialEngine path)
+//   5. Uses SET LOCAL (not SET) so the GUC is scoped to the
+//      transaction and reverts at COMMIT/ROLLBACK
+describe('CLI bootstrap — app.engine_context (migration-068 guard bypass)', () => {
+  const src = readFileSync(SCRIPT_PATH, 'utf8');
+
+  // Extract main() body so we can assert ordering without false-positives
+  // from comments above main().
+  const mainBodyStart = src.indexOf('async function main()');
+  const mainBodyEnd = src.indexOf('if (require.main === module)');
+  const mainBody = src.slice(mainBodyStart, mainBodyEnd);
+
+  it('uses SET LOCAL (not bare SET) so the GUC is transaction-scoped', () => {
+    expect(mainBody).toMatch(/SET LOCAL app\.engine_context/);
+    // Defensive: refuse a bare `SET app.engine_context = ...` (session-scoped,
+    // would leak into other connections via the pg pool — though we use a
+    // dedicated Client here, the LOCAL discipline is the right contract).
+    expect(mainBody).not.toMatch(/SET\s+app\.engine_context\s*=/);
+  });
+
+  it('uses exactly the service:cash-recon-cleanup context (NOT engine:*)', () => {
+    expect(mainBody).toMatch(/SET LOCAL app\.engine_context\s*=\s*'service:cash-recon-cleanup'/);
+    // Refuse engine:* — that's the FinancialEngine's silent canonical
+    // tier; using it here would suppress the engine_bypass_alerts audit
+    // row that the service:* tier creates.
+    expect(mainBody).not.toMatch(/engine:[a-z-]/);
+  });
+
+  it('SET LOCAL appears AFTER BEGIN (so it is scoped to the cleanup transaction)', () => {
+    const beginIdx = mainBody.indexOf("client.query('BEGIN')");
+    const setLocalIdx = mainBody.indexOf('SET LOCAL app.engine_context');
+    expect(beginIdx).toBeGreaterThan(-1);
+    expect(setLocalIdx).toBeGreaterThan(-1);
+    expect(setLocalIdx).toBeGreaterThan(beginIdx);
+  });
+
+  it('SET LOCAL appears BEFORE the executeCleanup invocation (so DML is allowed)', () => {
+    const setLocalIdx = mainBody.indexOf('SET LOCAL app.engine_context');
+    const orchestratorIdx = mainBody.indexOf('executeCleanup(q,');
+    expect(setLocalIdx).toBeGreaterThan(-1);
+    expect(orchestratorIdx).toBeGreaterThan(-1);
+    expect(setLocalIdx).toBeLessThan(orchestratorIdx);
+  });
+
+  it('explains the audit trail (service:* tier emits engine_bypass_alerts per write)', () => {
+    // Doc comment must mention that each guarded write logs an
+    // engine_bypass_alerts row so future readers know to expect the
+    // counter to grow on --execute.
+    expect(mainBody).toMatch(/engine_bypass_alerts/);
+    expect(mainBody).toMatch(/auditable/);
+  });
+});
+
 // ─── 4. Idempotent rerun is no-op ─────────────────────────────────
 describe('idempotent rerun — second pass does nothing', () => {
   it('runRow1a skips all 3 actions when state matches target', async () => {
