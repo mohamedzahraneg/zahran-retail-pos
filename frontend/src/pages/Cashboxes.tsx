@@ -111,6 +111,11 @@ import { InstitutionLogo } from '@/components/InstitutionLogo';
 import { useAuthStore } from '@/stores/auth.store';
 import { uuidOrNull, isMissingUuid } from '@/lib/uuid-or-null';
 import { displayCashboxBalance } from '@/lib/cashboxBalanceDisplay';
+// PR-AUDIT-IDEMPOTENCY-CASH-DESK-TRANSFER-FE — reset the per-modal
+// Idempotency-Key on TransferModal mount/unmount so each open modal
+// session is one transfer intent. Within an open session every
+// retry of the same submit reuses the same key.
+import { resetTransferIdempotencyKey } from '@/lib/transfer-idempotency';
 
 /**
  * Icon used by `CashboxFormModal` (kept verbatim from earlier PRs) to
@@ -1874,6 +1879,17 @@ function TransferModal({
   const [toId, setToId] = useState('');
   const [amount, setAmount] = useState('');
   const [notes, setNotes] = useState('');
+
+  // PR-AUDIT-IDEMPOTENCY-CASH-DESK-TRANSFER-FE — clean slate on
+  // mount, defensive reset on unmount. Source/dest/amount/notes
+  // changes within the open modal do NOT reset the key — that's
+  // intentional, so a retry of the same submit reuses the key
+  // even after the cashier tweaks a field. Body-tamper safety
+  // is handled BE-side via 409 IDEMPOTENCY_KEY_PAYLOAD_MISMATCH.
+  useEffect(() => {
+    resetTransferIdempotencyKey();
+    return () => resetTransferIdempotencyKey();
+  }, []);
 
   const from = boxes.find((b) => b.id === fromId);
   const to = boxes.find((b) => b.id === toId);

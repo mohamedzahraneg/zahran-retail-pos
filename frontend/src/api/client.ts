@@ -5,6 +5,10 @@ import { useAuthStore } from '@/stores/auth.store';
 // the single online POST /pos/invoices route. See lib module for the
 // gating rules; this interceptor delegates entirely to it.
 import { attachCheckoutIdempotencyKeyIfApplicable } from '@/lib/checkout-idempotency';
+// PR-AUDIT-IDEMPOTENCY-CASH-DESK-TRANSFER-FE — opt-in Idempotency-Key
+// on POST /cash-desk/transfer. Same shape, sibling helper. The two
+// helpers gate on disjoint URLs so they cannot cross-fire.
+import { attachTransferIdempotencyKeyIfApplicable } from '@/lib/transfer-idempotency';
 
 const envApiUrl = import.meta.env.VITE_API_URL as string | undefined;
 const baseURL = envApiUrl ?? 'http://localhost:3000';
@@ -24,6 +28,9 @@ api.interceptors.request.use((config) => {
   // PR-AUDIT-IDEMPOTENCY-POS-INVOICE-FE — no-op on every route except
   // POST /pos/invoices, where it adds the per-checkout key.
   attachCheckoutIdempotencyKeyIfApplicable(config);
+  // PR-AUDIT-IDEMPOTENCY-CASH-DESK-TRANSFER-FE — no-op on every route
+  // except POST /cash-desk/transfer, where it adds the per-modal key.
+  attachTransferIdempotencyKeyIfApplicable(config);
   return config;
 });
 
