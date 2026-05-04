@@ -26,6 +26,13 @@ export type KpiTone =
 
 export interface KpiCardProps {
   title: string;
+  /**
+   * PR-AUDIT-LABELS-CASH-VS-GL — optional formula tooltip surfaced on
+   * the card title via the native `title` attribute. Used by the
+   * `السيولة المحاسبية` card on the Finance Dashboard to spell out the
+   * GL accounts that roll up into the headline figure.
+   */
+  titleTooltip?: string;
   icon?: ReactNode;
   tone?: KpiTone;
   children: ReactNode;
@@ -46,6 +53,7 @@ const TONE_STYLES: Record<KpiTone, { tile: string; border: string }> = {
 
 export function KpiCard({
   title,
+  titleTooltip,
   icon,
   tone = 'slate',
   children,
@@ -58,7 +66,11 @@ export function KpiCard({
       className={`rounded-2xl border bg-white dark:bg-slate-900 ${t.border} shadow-sm p-4 flex flex-col gap-3`}
     >
       <div className="flex items-start justify-between gap-2">
-        <h4 className="text-sm font-bold text-slate-700 dark:text-slate-200">
+        <h4
+          className="text-sm font-bold text-slate-700 dark:text-slate-200"
+          title={titleTooltip}
+          data-testid={testId ? `${testId}-title` : undefined}
+        >
           {title}
         </h4>
         {icon && (

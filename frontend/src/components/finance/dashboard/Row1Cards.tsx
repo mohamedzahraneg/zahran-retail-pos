@@ -47,7 +47,15 @@ export function Row1Cards({ data }: { data: FinanceDashboard }) {
 function CashEquivalentsCard({ data }: { data: FinanceDashboard['liquidity'] }) {
   return (
     <KpiCard
-      title="النقدية وما في حكمها"
+      // PR-AUDIT-LABELS-CASH-VS-GL — title renamed from the ambiguous
+      // "النقدية وما في حكمها" to "السيولة المحاسبية" so the operator
+      // knows this is the GL roll-up (not the operational cash-drawer
+      // sum). The tooltip names the exact GL accounts so anyone hovering
+      // sees the formula: GL 1111 + GL 1113 + GL 1114 + GL 1115. The
+      // sub-row labels are likewise suffixed with their GL code so the
+      // breakdown stays unambiguous even without the tooltip.
+      title="السيولة المحاسبية"
+      titleTooltip="السيولة المحاسبية = الخزائن GL 1111 + البنوك GL 1113 + المحافظ GL 1114 + الشيكات GL 1115"
       icon={<Wallet size={18} />}
       tone="emerald"
       testId="card-cash-equivalents"
@@ -56,11 +64,14 @@ function CashEquivalentsCard({ data }: { data: FinanceDashboard['liquidity'] }) 
           GL liquid-asset codes (1111/1113/1114/1115). The 4th
           bucket was relabeled "البطاقات" → "الشيكات" because
           GL 1115 = "الشيكات". No `card` GL code exists today; if
-          one is introduced later it would land in a 5th bucket. */}
-      <KpiRow label="إجمالي الخزائن" value={fmtEGP(data.cashboxes_total)} />
-      <KpiRow label="إجمالي البنوك" value={fmtEGP(data.banks_total)} />
-      <KpiRow label="إجمالي المحافظ" value={fmtEGP(data.wallets_total)} />
-      <KpiRow label="إجمالي الشيكات" value={fmtEGP(data.checks_total)} />
+          one is introduced later it would land in a 5th bucket.
+          PR-AUDIT-LABELS-CASH-VS-GL — sub-row labels now carry the
+          explicit "(GL XXXX)" suffix so the operator can never confuse
+          these accounting roll-ups with the operational cashbox sum. */}
+      <KpiRow label="الخزائن المحاسبية (GL 1111)"  value={fmtEGP(data.cashboxes_total)} />
+      <KpiRow label="البنوك المحاسبية (GL 1113)"   value={fmtEGP(data.banks_total)} />
+      <KpiRow label="المحافظ المحاسبية (GL 1114)"  value={fmtEGP(data.wallets_total)} />
+      <KpiRow label="الشيكات المحاسبية (GL 1115)"  value={fmtEGP(data.checks_total)} />
       <div className="border-t border-slate-200 dark:border-slate-700 pt-2 mt-1">
         <KpiRow
           label="الإجمالي"
