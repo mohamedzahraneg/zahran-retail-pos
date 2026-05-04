@@ -18,6 +18,9 @@ import {
   GL_BANK,
   GL_WALLET,
   GL_CHECKS,
+  GL_EMPLOYEE_RECEIVABLE,
+  GL_EMPLOYEE_PAYABLE,
+  GL_SUPPLIER_PAYABLE,
   LIQUID_GL_CODES,
   LIQUID_CODES_SQL_LIST,
   CASHBOX_KIND_TO_GL_CODE,
@@ -71,6 +74,25 @@ describe('gl-codes.constants — PR-AUDIT-LIQUID-CODES-CONST', () => {
       // and commas. Any other char would mean a code with non-digit
       // contents leaked in (rejection check).
       expect(LIQUID_CODES_SQL_LIST).toMatch(/^[\d',]+$/);
+    });
+  });
+
+  /* ────────────────────────────────────────────────────────────────
+   * PR-AUDIT-NON-LIQUID-GL-PHASE-A — pin the 3 new non-liquid GL
+   * code constants used by read-only SELECT/reporting sites
+   * (employees.service, payroll.controller, shifts.service,
+   * finance-dashboard.service). Posting/engine line-creation paths
+   * still use literals — Phase B is a separate PR.
+   * ────────────────────────────────────────────────────────────────*/
+  describe('non-liquid GL code constants — PR-AUDIT-NON-LIQUID-GL-PHASE-A', () => {
+    it('GL_EMPLOYEE_RECEIVABLE is "1123" (ذمم الموظفين / advances)', () => {
+      expect(GL_EMPLOYEE_RECEIVABLE).toBe('1123');
+    });
+    it('GL_EMPLOYEE_PAYABLE is "213" (مستحقات الموظفين / accruals)', () => {
+      expect(GL_EMPLOYEE_PAYABLE).toBe('213');
+    });
+    it('GL_SUPPLIER_PAYABLE is "211" (الموردون والدائنون)', () => {
+      expect(GL_SUPPLIER_PAYABLE).toBe('211');
     });
   });
 

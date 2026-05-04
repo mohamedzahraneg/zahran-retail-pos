@@ -29,6 +29,7 @@ import {
   JwtUser,
 } from '../common/decorators/current-user.decorator';
 import { EmployeesService } from './employees.service';
+import { GL_EMPLOYEE_RECEIVABLE } from '../chart-of-accounts/gl-codes.constants';
 
 /**
  * Payroll / Employee Accounts surface.
@@ -186,7 +187,7 @@ export class PayrollController {
       coa AS (
         SELECT id AS account_id, code, name_ar, name_en
           FROM chart_of_accounts
-         WHERE code = '1123'   -- ذمم الموظفين — the canonical GL home
+         WHERE code = '${GL_EMPLOYEE_RECEIVABLE}'   -- ذمم الموظفين — the canonical GL home
          LIMIT 1
       ),
       -- GL-based balance: post-migration-071 rows are tagged with
