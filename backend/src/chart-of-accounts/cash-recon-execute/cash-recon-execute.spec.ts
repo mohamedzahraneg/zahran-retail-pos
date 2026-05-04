@@ -87,7 +87,7 @@ const PERMITTED_TABLES = [
 
 // ─── 1. Selected decisions applied ────────────────────────────────
 describe('executeCleanup — selected decisions applied per row', () => {
-  it('runRow1a issues exactly the option-(a) DML: tag expense + tag JL + INSERT CT', async () => {
+  it('runRow1a issues exactly the option-(a) DML: tag expense + tag JL + fn_record_cashbox_txn', async () => {
     const { q, calls } = makeQ({
       responses: [
         { pattern: /SELECT cashbox_id::text AS cashbox_id, shift_id::text AS shift_id\s+FROM expenses/, rows: [{ cashbox_id: null, shift_id: null }] },
@@ -100,21 +100,27 @@ describe('executeCleanup — selected decisions applied per row', () => {
     expect(result.option).toBe('1a');
     expect(result.actions.map((a) => a.status)).toEqual(['executed', 'executed', 'executed']);
 
-    const dml = calls
-      .map((c) => c.sql.trim().toUpperCase())
-      .filter((s) => s.startsWith('UPDATE') || s.startsWith('INSERT'));
-    // Exactly 3 DML statements: 2 UPDATEs + 1 INSERT.
-    expect(dml.filter((s) => s.startsWith('UPDATE EXPENSES'))).toHaveLength(1);
-    expect(dml.filter((s) => s.startsWith('UPDATE JOURNAL_LINES'))).toHaveLength(1);
-    expect(dml.filter((s) => s.startsWith('INSERT INTO CASHBOX_TRANSACTIONS'))).toHaveLength(1);
-    expect(dml).toHaveLength(3);
-
-    // Notes prefix on the INSERT.
-    const insertCall = calls.find((c) => /INSERT INTO cashbox_transactions/.test(c.sql))!;
-    const notesParam = insertCall.params.find(
-      (p: any) => typeof p === 'string' && p.startsWith(NOTE_PREFIX_1A),
-    );
-    expect(notesParam).toBeTruthy();
+    const upper = calls.map((c) => c.sql.trim().toUpperCase());
+    // 2 raw UPDATEs (expenses, journal_lines) + 1 SELECT fn_record_cashbox_txn.
+    expect(upper.filter((s) => s.startsWith('UPDATE EXPENSES'))).toHaveLength(1);
+    expect(upper.filter((s) => s.startsWith('UPDATE JOURNAL_LINES'))).toHaveLength(1);
+    // PR-265: cashbox_transactions write goes through the canonical helper —
+    // no raw INSERT INTO cashbox_transactions on this code path.
+    expect(upper.filter((s) => s.startsWith('INSERT INTO CASHBOX_TRANSACTIONS'))).toHaveLength(0);
+    const fnCalls = calls.filter((c) => /SELECT\s+fn_record_cashbox_txn/i.test(c.sql));
+    expect(fnCalls).toHaveLength(1);
+    // Param contract pinned to the function signature
+    // (cashbox_id, direction, amount, category, reference_type, reference_id, user_id, notes).
+    const fn = fnCalls[0]!;
+    expect(fn.params[0]).toBe(AL_RAISIA_CASHBOX_ID);
+    expect(fn.params[1]).toBe('out');
+    expect(fn.params[2]).toBe(2000);
+    expect(fn.params[3]).toBe('expense');
+    expect(fn.params[4]).toBe('expense');
+    expect(fn.params[5]).toBe(EXP003_ID);
+    expect(fn.params[6]).toBeNull();
+    expect(typeof fn.params[7]).toBe('string');
+    expect((fn.params[7] as string).startsWith(NOTE_PREFIX_1A)).toBe(true);
   });
 
   it('runRow2 issues ONE UPDATE on journal_lines (tag-only) and NO INSERT', async () => {
@@ -285,7 +291,7 @@ describe('runRow4a — void + recompute', () => {
 
 // ─── 3.5. Row 5: counter-CT IN +5 for SHF-2026-00002 ──────────────
 describe('runRow5 — counter-CT IN +5 (closes the Row 2 residual)', () => {
-  it('inserts EXACTLY ONE CT IN +5 tied to SHF002_REF_ID + EXEC#5 prefix', async () => {
+  it('issues EXACTLY ONE fn_record_cashbox_txn call IN +5 tied to SHF002_REF_ID + EXEC#5 prefix', async () => {
     const { q, calls } = makeQ({
       responses: [
         // No prior cleanup CT exists yet
@@ -295,26 +301,30 @@ describe('runRow5 — counter-CT IN +5 (closes the Row 2 residual)', () => {
     const result = await runRow5(q);
     expect(result.row_id).toBe('row-5');
     expect(result.option).toBe('5');
-    const dml = calls.filter((c) => /^\s*(UPDATE|INSERT|DELETE)/i.test(c.sql));
-    // Exactly one INSERT, zero UPDATE/DELETE.
-    expect(dml.filter((c) => /^\s*INSERT/i.test(c.sql))).toHaveLength(1);
-    expect(dml.filter((c) => /^\s*UPDATE/i.test(c.sql))).toHaveLength(0);
-    expect(dml.filter((c) => /^\s*DELETE/i.test(c.sql))).toHaveLength(0);
-    // The INSERT targets cashbox_transactions, direction='in', amount=5.
-    const insertCall = dml.find((c) => /INSERT INTO cashbox_transactions/i.test(c.sql))!;
-    expect(insertCall.sql).toMatch(/'in',\s*5/);
+    // PR-265: cashbox_transactions write goes through the canonical helper —
+    // no raw INSERT INTO cashbox_transactions on this code path.
+    expect(calls.filter((c) => /^\s*INSERT/i.test(c.sql))).toHaveLength(0);
+    expect(calls.filter((c) => /^\s*UPDATE/i.test(c.sql))).toHaveLength(0);
+    expect(calls.filter((c) => /^\s*DELETE/i.test(c.sql))).toHaveLength(0);
+    const fnCalls = calls.filter((c) => /SELECT\s+fn_record_cashbox_txn/i.test(c.sql));
+    expect(fnCalls).toHaveLength(1);
+    // Param contract pinned to the function signature
+    // (cashbox_id, direction, amount, category, reference_type, reference_id, user_id, notes).
+    const fn = fnCalls[0]!;
+    expect(fn.params[0]).toBe(AL_RAISIA_CASHBOX_ID);
+    expect(fn.params[1]).toBe('in');
+    expect(fn.params[2]).toBe(5);
     // Enum convention: category='shift_variance' (varchar — descriptive)
     // + reference_type='shift' (entity_type enum — must be valid enum
     // value; 'shift_variance' is NOT in entity_type, only in
     // journal_entries.reference_type).
-    expect(insertCall.sql).toMatch(/'shift_variance',\s*'shift'/);
-    // SHF002_REF_ID in params + AL_RAISIA_CASHBOX_ID in params + EXEC#5 prefix in notes.
-    expect(insertCall.params).toContain(SHF002_REF_ID);
-    expect(insertCall.params).toContain(AL_RAISIA_CASHBOX_ID);
-    const notesParam = insertCall.params.find(
-      (p: any) => typeof p === 'string' && p.startsWith(NOTE_PREFIX_5),
-    );
-    expect(notesParam).toBeTruthy();
+    expect(fn.params[3]).toBe('shift_variance');
+    expect(fn.params[4]).toBe('shift');
+    expect(fn.params[5]).toBe(SHF002_REF_ID);
+    expect(fn.params[6]).toBeNull();
+    expect(typeof fn.params[7]).toBe('string');
+    const notesParam = fn.params[7] as string;
+    expect(notesParam.startsWith(NOTE_PREFIX_5)).toBe(true);
     expect(notesParam).toMatch(/JE-2026-000126/);
     expect(notesParam).toMatch(/SHF-2026-00002/);
     expect(notesParam).toMatch(/category=shift_variance, reference_type=shift/);
@@ -329,7 +339,9 @@ describe('runRow5 — counter-CT IN +5 (closes the Row 2 residual)', () => {
     });
     const result = await runRow5(q);
     expect(result.actions[0].status).toBe('skipped_idempotent');
+    // No raw INSERT and no helper call when idempotent.
     expect(calls.filter((c) => /^\s*INSERT/i.test(c.sql))).toHaveLength(0);
+    expect(calls.filter((c) => /SELECT\s+fn_record_cashbox_txn/i.test(c.sql))).toHaveLength(0);
   });
 
   it('does NOT touch JE-126 — Row 5 only adds a CT, the JE stays active', async () => {
@@ -348,26 +360,28 @@ describe('runRow5 — counter-CT IN +5 (closes the Row 2 residual)', () => {
     }
   });
 
-  it('uses category=shift_variance + reference_type=shift (entity_type enum is missing shift_variance)', async () => {
+  it('helper call uses category=shift_variance + reference_type=shift (entity_type enum is missing shift_variance)', async () => {
     const { q, calls } = makeQ({
       responses: [
         { pattern: /SELECT id FROM cashbox_transactions[\s\S]*notes LIKE/, rows: [] },
       ],
     });
     await runRow5(q);
-    const insertCall = calls.find((c) => /INSERT INTO cashbox_transactions/i.test(c.sql))!;
+    const fnCall = calls.find((c) => /SELECT\s+fn_record_cashbox_txn/i.test(c.sql))!;
+    expect(fnCall).toBeDefined();
     // Category column is varchar — keeps the descriptive 'shift_variance' label
     // (matches existing prod CTs CT-92 / CT-159 / CT-273).
-    expect(insertCall.sql).toMatch(/'shift_variance'/);
+    expect(fnCall.params[3]).toBe('shift_variance');
     // reference_type column is the entity_type enum which does NOT include
     // 'shift_variance' — only 'shift'. Production-pattern compatible.
-    expect(insertCall.sql).toMatch(/'shift_variance',\s*'shift'/);
-    // Defensive: refuse the broken pattern that would throw on enum validation.
-    expect(insertCall.sql).not.toMatch(/'shift_variance',\s*'shift_variance'/);
-    expect(insertCall.params).toContain(SHF002_REF_ID);
+    expect(fnCall.params[4]).toBe('shift');
+    // Defensive: refuse the broken pattern that would throw on enum validation
+    // (reference_type must NEVER be 'shift_variance').
+    expect(fnCall.params[4]).not.toBe('shift_variance');
+    expect(fnCall.params).toContain(SHF002_REF_ID);
   });
 
-  it('idempotency probe queries reference_type=shift (matches the INSERT side)', async () => {
+  it('idempotency probe queries reference_type=shift (matches the helper-call side)', async () => {
     const { q, calls } = makeQ({
       responses: [
         { pattern: /SELECT id FROM cashbox_transactions[\s\S]*notes LIKE/, rows: [] },
@@ -375,8 +389,8 @@ describe('runRow5 — counter-CT IN +5 (closes the Row 2 residual)', () => {
     });
     await runRow5(q);
     // The idempotency SELECT must also use reference_type='shift', else a
-    // subsequent re-run wouldn't find the CT it just inserted (and would
-    // double-insert).
+    // subsequent re-run wouldn't find the CT the helper just wrote (and would
+    // double-write).
     const idempotencyProbe = calls.find((c) =>
       /SELECT id FROM cashbox_transactions[\s\S]*notes LIKE/.test(c.sql),
     )!;
@@ -561,7 +575,13 @@ describe('no unrelated rows touched — every DML targets only the sanctioned ID
     });
     await executeCleanup(q, { dryRun: true });
 
-    const dmlCalls = calls.filter((c) => /^\s*(UPDATE|INSERT)/i.test(c.sql));
+    // Treat the canonical helper invocations the same as raw DML for the
+    // sanctioned-IDs / permitted-tables checks: every SELECT fn_record_cashbox_txn
+    // mutates `cashbox_transactions` (and `cashboxes`) under the same
+    // engine-context guard that protects raw INSERTs.
+    const dmlCalls = calls.filter((c) =>
+      /^\s*(UPDATE|INSERT)/i.test(c.sql) || /SELECT\s+fn_record_cashbox_txn/i.test(c.sql),
+    );
     const sanctioned = new Set<unknown>([
       AL_RAISIA_CASHBOX_ID,
       EXP003_ID,
@@ -576,10 +596,14 @@ describe('no unrelated rows touched — every DML targets only the sanctioned ID
       const sanctionedHits = call.params.filter((p: any) => sanctioned.has(p));
       expect(sanctionedHits.length).toBeGreaterThanOrEqual(1);
     }
-    // Tables touched are only the 4 permitted ones.
+    // Tables touched are only the permitted ones — fn_record_cashbox_txn
+    // resolves to `cashbox_transactions` (which is in PERMITTED_TABLES).
     for (const call of dmlCalls) {
       const upper = call.sql.toUpperCase();
-      const target = /UPDATE\s+(\w+)/.exec(upper)?.[1] ?? /INSERT\s+INTO\s+(\w+)/.exec(upper)?.[1] ?? '';
+      const target =
+        /UPDATE\s+(\w+)/.exec(upper)?.[1] ??
+        /INSERT\s+INTO\s+(\w+)/.exec(upper)?.[1] ??
+        (/SELECT\s+FN_RECORD_CASHBOX_TXN/.test(upper) ? 'CASHBOX_TRANSACTIONS' : '');
       expect(PERMITTED_TABLES.map((t) => t.toUpperCase())).toContain(target);
     }
     // Zero DELETEs.
@@ -603,6 +627,27 @@ describe('script source — global invariants', () => {
     expect(code).not.toMatch(/\bTRUNCATE\b/i);
     expect(code).not.toMatch(/\bDROP\s+(TABLE|SCHEMA)\b/i);
     expect(code).not.toMatch(/\bALTER\s+TABLE\b/i);
+  });
+
+  it('PR-265: contains zero raw `INSERT INTO cashbox_transactions` (cashbox writes use fn_record_cashbox_txn)', () => {
+    // Source-shape defense: the executor must NEVER emit a raw INSERT into
+    // cashbox_transactions. The canonical helper fn_record_cashbox_txn is
+    // the only sanctioned write path because it populates balance_after
+    // (a NOT NULL column that raw INSERTs cannot satisfy without an
+    // explicit lock+compute) and updates cashboxes.current_balance
+    // atomically. Discovered when the PR-264 dry-run failed on
+    // `null value in column "balance_after" of relation "cashbox_transactions"
+    //  violates not-null constraint`.
+    //
+    // We strip block comments so the doc-comment header (which legitimately
+    // names the forbidden pattern in prose explaining why we replaced it)
+    // doesn't trip the check.
+    const code = src
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/(^|[^:])\/\/.*$/gm, '$1');
+    expect(code).not.toMatch(/INSERT\s+INTO\s+cashbox_transactions/i);
+    // And conversely, the helper IS used.
+    expect(code).toMatch(/SELECT\s+fn_record_cashbox_txn\s*\(/i);
   });
 
   it('exports the five audit-trail prefixes verbatim', () => {
