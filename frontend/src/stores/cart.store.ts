@@ -2,6 +2,10 @@ import { create } from 'zustand';
 import { Product, Variant } from '@/api/products.api';
 import { Customer } from '@/api/customers.api';
 import type { PaymentMethodCode } from '@/api/payments.api';
+// PR-AUDIT-IDEMPOTENCY-POS-INVOICE-FE — `cart.clear()` is the single
+// "new checkout intent" boundary; reset here so the next online
+// POST /pos/invoices mints a fresh Idempotency-Key.
+import { resetCheckoutIdempotencyKey } from '@/lib/checkout-idempotency';
 
 export interface CartItem {
   variantId: string;
@@ -241,7 +245,11 @@ export const useCartStore = create<CartState>((set, get) => ({
       ),
     })),
 
-  clear: () =>
+  clear: () => {
+    // PR-AUDIT-IDEMPOTENCY-POS-INVOICE-FE — reset BEFORE the state
+    // mutation so a subscriber that fires synchronously off `items`
+    // (e.g. a logger) sees the new intent boundary consistently.
+    resetCheckoutIdempotencyKey();
     set((state) => ({
       items: [],
       customer: null,
@@ -254,7 +262,8 @@ export const useCartStore = create<CartState>((set, get) => ({
       notes: '',
       coupon: null,
       loyalty: null,
-    })),
+    }));
+  },
 
   subtotal: () =>
     get().items.reduce(
