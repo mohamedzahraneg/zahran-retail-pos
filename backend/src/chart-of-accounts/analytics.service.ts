@@ -56,10 +56,15 @@ export class AccountingAnalyticsService {
          GROUP BY 1
       ),
       cash_moves AS (
+        -- PR-AUDIT-VOID-LEAK: exclude voided CTs so the daily cash
+        -- low/high markers reflect only active cash activity. Without
+        -- this filter, a voided cancellation/reversal CT contributes
+        -- its balance_after snapshot to the chart max/min.
         SELECT (created_at AT TIME ZONE 'Africa/Cairo')::date AS d,
                direction, amount, balance_after
           FROM cashbox_transactions
-         WHERE (created_at AT TIME ZONE 'Africa/Cairo')::date
+         WHERE is_void = FALSE
+           AND (created_at AT TIME ZONE 'Africa/Cairo')::date
                BETWEEN $1::date AND $2::date
       ),
       cash_day AS (
@@ -655,13 +660,19 @@ export class AccountingAnalyticsService {
    * outflows → closing.
    */
   async cashFlowWaterfall(params: { from: string; to: string }) {
+    // PR-AUDIT-VOID-LEAK: both queries below now filter out voided CTs.
+    // Without `is_void = FALSE` the opening sum and per-category buckets
+    // both inflate by every cancellation / reversal CT in the range —
+    // the same bug class that put +2,839 EGP of phantom liquidity on
+    // the production "السيولة" tile before PR-FIN-ANALYTICS-LIQUIDITY-GL.
     const [opening] = await this.ds.query(
       `
       SELECT COALESCE(SUM(
         CASE WHEN direction = 'in' THEN amount ELSE -amount END
       ), 0)::numeric(14,2) AS opening
         FROM cashbox_transactions
-       WHERE (created_at AT TIME ZONE 'Africa/Cairo')::date < $1::date
+       WHERE is_void = FALSE
+         AND (created_at AT TIME ZONE 'Africa/Cairo')::date < $1::date
       `,
       [params.from],
     );
@@ -670,7 +681,8 @@ export class AccountingAnalyticsService {
       SELECT direction, category,
              COALESCE(SUM(amount), 0)::numeric(14,2) AS amount
         FROM cashbox_transactions
-       WHERE (created_at AT TIME ZONE 'Africa/Cairo')::date
+       WHERE is_void = FALSE
+         AND (created_at AT TIME ZONE 'Africa/Cairo')::date
              BETWEEN $1::date AND $2::date
        GROUP BY direction, category
        ORDER BY direction, amount DESC
