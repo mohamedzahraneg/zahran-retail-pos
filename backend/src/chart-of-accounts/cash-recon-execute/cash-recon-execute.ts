@@ -418,9 +418,20 @@ export async function runRow5(q: QueryFn): Promise<RowResult> {
   //
   // Idempotency: probe for an existing CT carrying the EXEC#5 notes
   // prefix on the same shift reference. If found, skip the INSERT.
+  //
+  // Enum convention (verified against the 3 production shift-variance
+  // CTs CT-92 / CT-159 / CT-273): the `cashbox_transactions.reference_type`
+  // column uses the `entity_type` Postgres enum which does NOT include
+  // `'shift_variance'` — only `'shift'`. So the existing pattern is:
+  //   · category = 'shift_variance' (varchar — descriptive label)
+  //   · reference_type = 'shift'    (entity_type enum — points to the shift)
+  //   · reference_id = the shift's UUID
+  // The JE side uses reference_type='shift_variance' (a journal_entries
+  // enum that DOES include that value); CT and JE form a taxonomy-mismatch
+  // pair on the same reference_id that nets to 0 in v_cashbox_drift_per_ref.
   const [existing] = await q(
     `SELECT id FROM cashbox_transactions
-       WHERE reference_type='shift_variance'
+       WHERE reference_type='shift'
          AND reference_id=$1::uuid
          AND notes LIKE $2 || '%'
        LIMIT 1`,
@@ -436,22 +447,25 @@ export async function runRow5(q: QueryFn): Promise<RowResult> {
     await q(
       `INSERT INTO cashbox_transactions
          (cashbox_id, direction, amount, category, reference_type, reference_id, notes)
-       VALUES ($1::uuid, 'in', 5, 'shift_variance', 'shift_variance', $2::uuid, $3)`,
+       VALUES ($1::uuid, 'in', 5, 'shift_variance', 'shift', $2::uuid, $3)`,
       [
         AL_RAISIA_CASHBOX_ID,
         SHF002_REF_ID,
         `${NOTE_PREFIX_5}: missing cash-side mirror for JE-2026-000126 ` +
           `(shift surplus +5 on SHF-2026-00002 / الخزينة الرئيسية). ` +
-          `JE-126 stays active (the +5 GL credit represents real cash that ` +
-          `entered the drawer at shift close). This CT closes the ` +
-          `per-cashbox-drift contribution from this shift to 0.`,
+          `category=shift_variance, reference_type=shift to match existing ` +
+          `cashbox_transactions enum convention (entity_type enum does not ` +
+          `include 'shift_variance'). JE-126 stays active (the +5 GL credit ` +
+          `represents real cash that entered the drawer at shift close). ` +
+          `This CT closes the per-cashbox-drift contribution from this shift to 0.`,
       ],
     );
     actions.push({
       step: 'INSERT cashbox_transactions (Row 5 counter-CT in +5)',
       status: 'executed',
       detail:
-        'Counter-CT IN +5 written for SHF-2026-00002; JE-126 untouched (kept active). ' +
+        'Counter-CT IN +5 written for SHF-2026-00002 (category=shift_variance, ' +
+        'reference_type=shift); JE-126 untouched (kept active). ' +
         'Row 4 will recompute current_balance after this row to capture the new CT.',
     });
   }

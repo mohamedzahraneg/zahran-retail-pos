@@ -303,7 +303,11 @@ describe('runRow5 — counter-CT IN +5 (closes the Row 2 residual)', () => {
     // The INSERT targets cashbox_transactions, direction='in', amount=5.
     const insertCall = dml.find((c) => /INSERT INTO cashbox_transactions/i.test(c.sql))!;
     expect(insertCall.sql).toMatch(/'in',\s*5/);
-    expect(insertCall.sql).toMatch(/'shift_variance'/);
+    // Enum convention: category='shift_variance' (varchar — descriptive)
+    // + reference_type='shift' (entity_type enum — must be valid enum
+    // value; 'shift_variance' is NOT in entity_type, only in
+    // journal_entries.reference_type).
+    expect(insertCall.sql).toMatch(/'shift_variance',\s*'shift'/);
     // SHF002_REF_ID in params + AL_RAISIA_CASHBOX_ID in params + EXEC#5 prefix in notes.
     expect(insertCall.params).toContain(SHF002_REF_ID);
     expect(insertCall.params).toContain(AL_RAISIA_CASHBOX_ID);
@@ -313,6 +317,7 @@ describe('runRow5 — counter-CT IN +5 (closes the Row 2 residual)', () => {
     expect(notesParam).toBeTruthy();
     expect(notesParam).toMatch(/JE-2026-000126/);
     expect(notesParam).toMatch(/SHF-2026-00002/);
+    expect(notesParam).toMatch(/category=shift_variance, reference_type=shift/);
   });
 
   it('is idempotent — re-run after a previous insert is a no-op', async () => {
@@ -343,7 +348,7 @@ describe('runRow5 — counter-CT IN +5 (closes the Row 2 residual)', () => {
     }
   });
 
-  it('uses reference_type=shift_variance + reference_id=SHF002_REF_ID (matches JE-126\'s reference)', async () => {
+  it('uses category=shift_variance + reference_type=shift (entity_type enum is missing shift_variance)', async () => {
     const { q, calls } = makeQ({
       responses: [
         { pattern: /SELECT id FROM cashbox_transactions[\s\S]*notes LIKE/, rows: [] },
@@ -351,8 +356,32 @@ describe('runRow5 — counter-CT IN +5 (closes the Row 2 residual)', () => {
     });
     await runRow5(q);
     const insertCall = calls.find((c) => /INSERT INTO cashbox_transactions/i.test(c.sql))!;
+    // Category column is varchar — keeps the descriptive 'shift_variance' label
+    // (matches existing prod CTs CT-92 / CT-159 / CT-273).
     expect(insertCall.sql).toMatch(/'shift_variance'/);
+    // reference_type column is the entity_type enum which does NOT include
+    // 'shift_variance' — only 'shift'. Production-pattern compatible.
+    expect(insertCall.sql).toMatch(/'shift_variance',\s*'shift'/);
+    // Defensive: refuse the broken pattern that would throw on enum validation.
+    expect(insertCall.sql).not.toMatch(/'shift_variance',\s*'shift_variance'/);
     expect(insertCall.params).toContain(SHF002_REF_ID);
+  });
+
+  it('idempotency probe queries reference_type=shift (matches the INSERT side)', async () => {
+    const { q, calls } = makeQ({
+      responses: [
+        { pattern: /SELECT id FROM cashbox_transactions[\s\S]*notes LIKE/, rows: [] },
+      ],
+    });
+    await runRow5(q);
+    // The idempotency SELECT must also use reference_type='shift', else a
+    // subsequent re-run wouldn't find the CT it just inserted (and would
+    // double-insert).
+    const idempotencyProbe = calls.find((c) =>
+      /SELECT id FROM cashbox_transactions[\s\S]*notes LIKE/.test(c.sql),
+    )!;
+    expect(idempotencyProbe.sql).toMatch(/reference_type='shift'/);
+    expect(idempotencyProbe.sql).not.toMatch(/reference_type='shift_variance'/);
   });
 });
 
