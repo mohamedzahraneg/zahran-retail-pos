@@ -335,6 +335,13 @@ export class CashDeskController {
   // ── Customer receipts ────────────────────────────────────────────────
   @Post('customer-payments')
   @Roles('admin', 'manager', 'cashier', 'accountant')
+  // PR-AUDIT-IDEMPOTENCY-CASH-DESK-CUSTOMER-PAYMENTS — fifth protected
+  // endpoint after /pos/invoices (#275), /cash-desk/transfer (#277),
+  // /accounting/expenses + /accounting/expenses/daily (#279). Optional
+  // Idempotency-Key header. Without it, today's behavior. With it,
+  // replays the cached 2xx for 24h or 425/409 for concurrent /
+  // payload-mismatch. Supplier-payments is deferred to a phased PR.
+  @UseInterceptors(IdempotencyInterceptor)
   receive(
     @Body() dto: CreateCustomerPaymentDto,
     @CurrentUser() user: JwtUser,
