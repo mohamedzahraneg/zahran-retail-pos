@@ -168,9 +168,19 @@ const PROVIDERS: PaymentProvider[] = [
 ];
 
 const CASH_BOX = makeCashbox({ id: 'cb-cash', kind: 'cash' });
+// PR-AUDIT-EWALLET-PAGE-KPI-FIX — wallet/bank KPI tiles + GL bucket
+// sub-totals are now sourced from `cashboxes.accounting_balance`
+// (the GL roll-up the treasury cards already use). Mock shapes
+// updated so the existing GL-bucket-label test continues to pass and
+// the per-cashbox accounting fields are visible to the new source.
 const BANK_BOX = makeCashbox({
   id: 'cb-bank', kind: 'bank', name_ar: 'بنك مصر الرئيسي', current_balance: '0',
-});
+  accounting_gl_code: '1113', accounting_balance: '0',
+} as any);
+const EWALLET_BOX = makeCashbox({
+  id: 'cb-ewallet', kind: 'ewallet', name_ar: 'خزنة التحويلات', current_balance: '0',
+  accounting_gl_code: '1114', accounting_balance: '0',
+} as any);
 
 // 6 payment_accounts — covers wallet/instapay/POS/bank/cheque rows so the
 // 7-tile KPI math + warning strips + per-row warnings + distribution
@@ -328,6 +338,16 @@ describe('<Cashboxes /> — PR-FIN-PAYACCT-4D-UX-FIX table-first layout', () => 
 
   // ─── 5. KPI row — 7 tiles, including new "آخر حركة" ────────────
   it('renders all 7 KPI tiles, including آخر حركة', async () => {
+    // PR-AUDIT-EWALLET-PAGE-KPI-FIX — KPI wallet bucket is now sourced
+    // from `cashboxes.accounting_balance` (the GL roll-up) instead of
+    // `sum(balances.net_debit)` for wallet/instapay rows. Add an
+    // EWALLET_BOX with the same 1,700 EGP total that the legacy
+    // assertion expected so the test keeps the same surface contract.
+    cashboxesMock.mockResolvedValue([
+      CASH_BOX,
+      BANK_BOX,
+      { ...EWALLET_BOX, accounting_balance: '1700.00' } as any,
+    ]);
     renderPage();
     for (const id of [
       'kpi-total',
@@ -340,8 +360,8 @@ describe('<Cashboxes /> — PR-FIN-PAYACCT-4D-UX-FIX table-first layout', () => 
     ]) {
       expect(screen.getByTestId(id)).toBeInTheDocument();
     }
-    // KPI math from the fixture: 6 accounts, 6 active, 0 inactive,
-    // wallet bucket = instapay 1400 + wallet 300 = 1700.
+    // KPI math: 6 accounts, 6 active, 0 inactive,
+    // wallet bucket = ewallet cashbox accounting_balance = 1,700.
     await waitFor(() =>
       expect(screen.getByTestId('kpi-total')).toHaveTextContent('6'),
     );
@@ -579,13 +599,20 @@ describe('<Cashboxes /> — PR-FIN-PAYACCT-4D-UX-FIX table-first layout', () => 
 
   // ─── Bottom card relabel ───────────────────────────────────────
   it('PR-4D-UX-FIX-2: bottom balance card includes explicit GL-bucket labels', async () => {
+    // PR-AUDIT-EWALLET-PAGE-KPI-FIX — the GL bucket section's
+    // visibility predicate is now `cashboxes.some(cb => cb.accounting_gl_code === code)`
+    // (sourced from the cashbox API), not `balances.some(b => b.gl_account_code === code)`.
+    // The default mock includes BANK_BOX (GL 1113); add the EWALLET_BOX
+    // here so the GL 1114 bucket also renders as the original test
+    // expected.
+    cashboxesMock.mockResolvedValue([CASH_BOX, BANK_BOX, EWALLET_BOX]);
     renderPage();
     // Wait for the balances query to resolve so the GL-bucket section renders.
     await waitFor(() =>
       expect(screen.getByTestId('summary-gl-buckets')).toBeInTheDocument(),
     );
     const buckets = screen.getByTestId('summary-gl-buckets');
-    // The fixture has rows on GL 1114 (instapay+wallet) and 1113 (POS+bank).
+    // The fixture has cashboxes on GL 1114 (EWALLET_BOX) and 1113 (BANK_BOX).
     expect(within(buckets).getByText(/إجمالي المحافظ الإلكترونية 1114/)).toBeInTheDocument();
     expect(within(buckets).getByText(/إجمالي البنوك 1113/)).toBeInTheDocument();
   });
