@@ -66,7 +66,15 @@ export const EXP003_JL_ID = 'ab8c215c-7900-4819-bc13-79312004c136';
 export const SHF002_JL_ID = 'b0dd332b-4ca1-4cd1-ae54-30494f2b3895';
 
 // Row 3
+// SETTLEMENT7_JL_ID is the JE-196 1111 line UUID — preserved as an
+// exported constant for the spec's "no unrelated rows touched" check
+// even though Row 3's chosen path (R3-B = void JE-196) no longer
+// touches the JL directly.
 export const SETTLEMENT7_JL_ID = '7ff6d8f4-f526-4525-a2c5-e747c719d94b';
+// JE-196 entry_no — passed as a parameter to the void UPDATE so the
+// "no unrelated rows touched" spec sees a sanctioned identifier on
+// the params bag.
+export const JE196_ENTRY_NO = 'JE-2026-000196';
 
 // Row 4
 export const RET003_CT_ID = 245;
@@ -273,46 +281,60 @@ export async function runRow2(q: QueryFn): Promise<RowResult> {
 export async function runRow3a(q: QueryFn): Promise<RowResult> {
   const actions: RowAction[] = [];
 
-  // Defensive duplicate-CT guard — even though CT-108 should already
-  // exist, refuse to proceed if anything has injected a cleanup CT for
-  // the SAME settlement reference (would double-count).
-  const [stalePrefixCt] = await q(
-    `SELECT id FROM cashbox_transactions
-       WHERE notes LIKE $1 || '%'
-       LIMIT 1`,
-    [NOTE_PREFIX_3A],
+  // Row 3 = void JE-196 (the stale duplicate that PR-DRIFT-3G missed).
+  //
+  // Background re-confirmed during the audit:
+  //   · PR-DRIFT-3G previously voided CT-105/107 + JE-193 (the
+  //     wrong-direction noise) and inserted JE-248 + kept CT-108 as
+  //     the canonical settlement-7 pair.
+  //   · JE-196 was the user's own manual "تصحيح اتجاه" attempt that
+  //     the same PR-DRIFT-3G migration failed to retire. It records
+  //     the SAME settlement event as JE-248 (DR 213 / CR 1111 100
+  //     EGP for ابو يوسف), and is therefore a stale duplicate.
+  //   · Voiding JE-196 reaches PR-DRIFT-3G's documented intent:
+  //     leave only CT-108 + JE-248 active for settlement #7.
+  //
+  // Side effects of this void:
+  //   · ABU YUSUF's per-employee balance drops from +70 → −30 (the
+  //     +70 was inflated by the duplicate JE-196's +100 contribution
+  //     to 213 DR; the true balance is the business owing him 30).
+  //   · TB stays at 0 because JE-196 is a balanced 2-line entry; both
+  //     DR 213 +100 and CR 1111 −100 are removed atomically.
+  //   · No CT is created (CT-108 IS the canonical cash event).
+  //   · No JE/JL is tagged (JE-196 line stays untagged because the
+  //     entire JE is now voided).
+  const [jeBefore] = await q(
+    `SELECT id::text AS id, is_void
+       FROM journal_entries WHERE entry_no=$1`,
+    [JE196_ENTRY_NO],
   );
-  if (stalePrefixCt?.id) {
-    // Idempotent re-run: prior run already tagged. Skip the UPDATE.
+  if (jeBefore?.is_void === true) {
     actions.push({
-      step: 'guard: no duplicate CT for settlement #7',
+      step: `UPDATE journal_entries SET is_void=TRUE on ${JE196_ENTRY_NO}`,
       status: 'skipped_idempotent',
-      detail: `cleanup CT marker already present (id=${stalePrefixCt.id}) — re-run no-op`,
-    });
-  }
-
-  const [jlBefore] = await q(
-    `SELECT cashbox_id::text AS cashbox_id FROM journal_lines WHERE id=$1::uuid`,
-    [SETTLEMENT7_JL_ID],
-  );
-  if (jlBefore?.cashbox_id === AL_RAISIA_CASHBOX_ID) {
-    actions.push({
-      step: 'UPDATE journal_lines (cashbox_id on JE-196 line)',
-      status: 'skipped_idempotent',
-      detail: 'JL already tagged',
+      detail: 'JE-196 already voided — re-run no-op',
     });
   } else {
     await q(
-      `UPDATE journal_lines
-          SET cashbox_id=$1::uuid
-        WHERE id=$2::uuid`,
-      [AL_RAISIA_CASHBOX_ID, SETTLEMENT7_JL_ID],
+      `UPDATE journal_entries
+          SET is_void=TRUE,
+              void_reason=$2,
+              voided_at=NOW()
+        WHERE entry_no=$1 AND is_void=FALSE`,
+      [
+        JE196_ENTRY_NO,
+        `${NOTE_PREFIX_3A}: stale duplicate of JE-2026-000248 (settlement-7) ` +
+          `missed by PR-DRIFT-3G. CT-108 + JE-248 remain the canonical ` +
+          `cash/GL pair. Voiding JE-196 corrects ابو يوسف's balance ` +
+          `(+70 → −30) and closes the GL contribution to per-cashbox drift.`,
+      ],
     );
     actions.push({
-      step: 'UPDATE journal_lines (cashbox_id on JE-196 line)',
+      step: `UPDATE journal_entries SET is_void=TRUE on ${JE196_ENTRY_NO}`,
       status: 'executed',
       detail:
-        'CT-108 already exists with the cash event — Row 3 is tag-only by design (no new CT).',
+        'JE-196 voided as stale duplicate. CT-108 + JE-248 remain the canonical pair. ' +
+        'No CT created, no JL tagged, no other JE touched.',
     });
   }
 

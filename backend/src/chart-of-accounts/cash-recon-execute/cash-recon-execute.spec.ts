@@ -40,6 +40,7 @@ import {
   SHF002_REF_ID,
   SHF002_JL_ID,
   SETTLEMENT7_JL_ID,
+  JE196_ENTRY_NO,
   RET003_CT_ID,
   NOTE_PREFIX_1A,
   NOTE_PREFIX_2,
@@ -73,7 +74,14 @@ function makeQ(state: RecorderQueryFnState = {}) {
 }
 
 // Whitelist of permitted DML targets (table_name + WHERE clause IDs).
-const PERMITTED_TABLES = ['expenses', 'journal_lines', 'cashbox_transactions', 'cashboxes'];
+const PERMITTED_TABLES = [
+  'expenses',
+  'journal_lines',
+  'cashbox_transactions',
+  'cashboxes',
+  // R3-B targets journal_entries to void JE-196 (the stale duplicate).
+  'journal_entries',
+];
 
 // ─── 1. Selected decisions applied ────────────────────────────────
 describe('executeCleanup — selected decisions applied per row', () => {
@@ -142,22 +150,95 @@ describe('executeCleanup — selected decisions applied per row', () => {
   });
 });
 
-// ─── 2. Row 3 does not create duplicate CT ────────────────────────
-describe('runRow3a — never creates a duplicate CT', () => {
-  it('issues ONE UPDATE on journal_lines and ZERO INSERTs into cashbox_transactions', async () => {
+// ─── 2. Row 3 voids JE-196 (does not create CT, does not tag JL) ──
+describe('runRow3a — voids JE-196 (the stale duplicate)', () => {
+  it('issues ONE UPDATE on journal_entries (void) — ZERO INSERTs into cashbox_transactions, ZERO UPDATEs on journal_lines', async () => {
     const { q, calls } = makeQ({
       responses: [
-        { pattern: /SELECT id FROM cashbox_transactions[\s\S]*notes LIKE/, rows: [] },
-        { pattern: /SELECT cashbox_id::text AS cashbox_id FROM journal_lines/, rows: [{ cashbox_id: null }] },
+        // JE-196 currently active — first call returns is_void=false
+        { pattern: /SELECT id::text AS id, is_void\s+FROM journal_entries/, rows: [{ id: 'je196-uuid', is_void: false }] },
       ],
     });
     const result = await runRow3a(q);
     const dml = calls
       .map((c) => c.sql.trim().toUpperCase())
-      .filter((s) => s.startsWith('UPDATE') || s.startsWith('INSERT'));
-    expect(dml.filter((s) => s.startsWith('UPDATE JOURNAL_LINES'))).toHaveLength(1);
+      .filter((s) => s.startsWith('UPDATE') || s.startsWith('INSERT') || s.startsWith('DELETE'));
+    // Exactly one void UPDATE on journal_entries.
+    expect(dml.filter((s) => s.startsWith('UPDATE JOURNAL_ENTRIES'))).toHaveLength(1);
+    // No CT create, no JL tag, no DELETE.
     expect(dml.filter((s) => s.startsWith('INSERT INTO CASHBOX_TRANSACTIONS'))).toHaveLength(0);
-    expect(result.actions.some((a) => /CT-108 already exists/.test(a.detail ?? ''))).toBe(true);
+    expect(dml.filter((s) => s.startsWith('UPDATE JOURNAL_LINES'))).toHaveLength(0);
+    expect(dml.filter((s) => s.startsWith('UPDATE CASHBOXES'))).toHaveLength(0);
+    expect(dml.filter((s) => s.startsWith('UPDATE CASHBOX_TRANSACTIONS'))).toHaveLength(0);
+    expect(dml.filter((s) => s.startsWith('DELETE'))).toHaveLength(0);
+    // Action detail surfaces the canonical-pair fact.
+    expect(
+      result.actions.some((a) =>
+        /CT-108 \+ JE-248 remain the canonical/.test(a.detail ?? '') ||
+        /CT-108 \+ JE-248 remain the canonical/.test(a.step ?? ''),
+      ),
+    ).toBe(true);
+  });
+
+  it('void UPDATE targets entry_no=JE-2026-000196 with NOTE_PREFIX_3A void_reason', async () => {
+    const { q, calls } = makeQ({
+      responses: [
+        { pattern: /SELECT id::text AS id, is_void\s+FROM journal_entries/, rows: [{ id: 'je196-uuid', is_void: false }] },
+      ],
+    });
+    await runRow3a(q);
+    const voidUpdate = calls.find((c) => /UPDATE journal_entries[\s\S]*is_void=TRUE/.test(c.sql))!;
+    expect(voidUpdate).toBeDefined();
+    expect(voidUpdate.params).toContain(JE196_ENTRY_NO);
+    const reason = voidUpdate.params.find(
+      (p: any) => typeof p === 'string' && p.startsWith(NOTE_PREFIX_3A),
+    );
+    expect(reason).toBeTruthy();
+    expect(reason).toMatch(/stale duplicate of JE-2026-000248/);
+    expect(reason).toMatch(/PR-DRIFT-3G/);
+  });
+
+  it('CT-108 + JE-248 are NEVER targeted by any DML (audit-text mentions are OK)', async () => {
+    const { q, calls } = makeQ({
+      responses: [
+        { pattern: /SELECT id::text AS id, is_void\s+FROM journal_entries/, rows: [{ id: 'je196-uuid', is_void: false }] },
+      ],
+    });
+    await runRow3a(q);
+    // SQL strings (the actual target of each statement) must not reference
+    // CT-108 / JE-248 / their UUIDs. The `void_reason` text legitimately
+    // explains the canonical pair for the audit trail — that's a documented
+    // string parameter, not a targeting parameter.
+    for (const c of calls) {
+      // No DML param equals the CT-108 numeric id.
+      expect(c.params.includes(108)).toBe(false);
+      // No DML param equals JE-248's entry_no exactly.
+      expect(c.params.includes('JE-2026-000248')).toBe(false);
+      // The SQL itself doesn't target JE-248's entry_no / id literal.
+      expect(c.sql).not.toMatch(/WHERE\s+entry_no\s*=\s*'JE-2026-000248'/);
+      expect(c.sql).not.toMatch(/WHERE\s+id\s*=\s*'887ea7c4-baf9-4e1b-9376-88cfbb46cb33'/);
+      // No params reference CT-108's ref_id UUID as a TARGET.
+      // (The string '887ea7c4' is allowed in the void_reason but never as a sole-param.)
+      const refParams = c.params.filter(
+        (p: any) => typeof p === 'string' && p === '887ea7c4-baf9-4e1b-9376-88cfbb46cb33',
+      );
+      expect(refParams).toHaveLength(0);
+    }
+  });
+
+  it('does NOT touch SETTLEMENT7_JL_ID (the JE-196 1111 line) — entire entry voided instead', async () => {
+    const { q, calls } = makeQ({
+      responses: [
+        { pattern: /SELECT id::text AS id, is_void\s+FROM journal_entries/, rows: [{ id: 'je196-uuid', is_void: false }] },
+      ],
+    });
+    await runRow3a(q);
+    for (const c of calls) {
+      const stringParams = c.params.filter((p: any) => typeof p === 'string');
+      for (const sp of stringParams) {
+        expect(sp).not.toBe(SETTLEMENT7_JL_ID);
+      }
+    }
   });
 });
 
@@ -229,16 +310,15 @@ describe('idempotent rerun — second pass does nothing', () => {
     expect(calls.filter((c) => /UPDATE/.test(c.sql))).toHaveLength(0);
   });
 
-  it('runRow3a skips when JL is already tagged', async () => {
+  it('runRow3a skips when JE-196 is already voided', async () => {
     const { q, calls } = makeQ({
       responses: [
-        { pattern: /SELECT id FROM cashbox_transactions[\s\S]*notes LIKE/, rows: [] },
-        { pattern: /SELECT cashbox_id::text AS cashbox_id FROM journal_lines/, rows: [{ cashbox_id: AL_RAISIA_CASHBOX_ID }] },
+        { pattern: /SELECT id::text AS id, is_void\s+FROM journal_entries/, rows: [{ id: 'je196-uuid', is_void: true }] },
       ],
     });
     const result = await runRow3a(q);
-    expect(result.actions.find((a) => /UPDATE journal_lines/.test(a.step))?.status).toBe('skipped_idempotent');
-    expect(calls.filter((c) => /UPDATE/.test(c.sql))).toHaveLength(0);
+    expect(result.actions[0].status).toBe('skipped_idempotent');
+    expect(calls.filter((c) => /UPDATE/i.test(c.sql))).toHaveLength(0);
   });
 
   it('runRow4a skips the void when CT-245 already voided', async () => {
@@ -262,6 +342,8 @@ describe('rollback on partial failure', () => {
         { pattern: /SELECT cashbox_id::text AS cashbox_id, shift_id::text AS shift_id\s+FROM expenses/, rows: [{ cashbox_id: null, shift_id: null }] },
         { pattern: /SELECT cashbox_id::text AS cashbox_id FROM journal_lines/, rows: [{ cashbox_id: null }] },
         { pattern: /SELECT id FROM cashbox_transactions[\s\S]*notes LIKE/, rows: [] },
+        // R3-B: JE-196 active in this scenario
+        { pattern: /SELECT id::text AS id, is_void\s+FROM journal_entries/, rows: [{ id: 'je196-uuid', is_void: false }] },
         { pattern: /SELECT is_void FROM cashbox_transactions/, rows: [{ is_void: false }] },
         { pattern: /WITH ct_per_cashbox AS/, rows: [{
           current_balance: 34155, active_ct_sum: 34155,
@@ -294,6 +376,8 @@ describe('no unrelated rows touched — every DML targets only the sanctioned ID
         { pattern: /SELECT cashbox_id::text AS cashbox_id, shift_id::text AS shift_id\s+FROM expenses/, rows: [{ cashbox_id: null, shift_id: null }] },
         { pattern: /SELECT cashbox_id::text AS cashbox_id FROM journal_lines/, rows: [{ cashbox_id: null }] },
         { pattern: /SELECT id FROM cashbox_transactions[\s\S]*notes LIKE/, rows: [] },
+        // R3-B: JE-196 active → not yet voided
+        { pattern: /SELECT id::text AS id, is_void\s+FROM journal_entries/, rows: [{ id: 'je196-uuid', is_void: false }] },
         { pattern: /SELECT is_void FROM cashbox_transactions/, rows: [{ is_void: false }] },
         { pattern: /WITH ct_per_cashbox AS/, rows: [{
           current_balance: 34155, active_ct_sum: 34155,
@@ -310,7 +394,8 @@ describe('no unrelated rows touched — every DML targets only the sanctioned ID
       EXP003_JL_ID,
       SHF002_REF_ID,
       SHF002_JL_ID,
-      SETTLEMENT7_JL_ID,
+      // R3-B sanctioned identifier: target JE-196 by entry_no
+      JE196_ENTRY_NO,
       RET003_CT_ID,
     ]);
     for (const call of dmlCalls) {
@@ -366,30 +451,37 @@ describe('renderResult — formatted Markdown report', () => {
     // the live snapshot). The +95 residual represents the unchanged
     // pieces the user's chosen options don't fully balance:
     //   · Row 2 tag-only leaves the GL +5 unmatched on the cash side
-    //   · Row 4 voids CT-245 but the JE-378 reversal's +350 stays on
-    //     tagged_gl with no compensating CT (Option A leaves it; Option
-    //     B would have added a counter-CT and ended at the same +95
-    //     because of how the bf7e6e27/other taxonomy CT pair offsets).
-    // Net residual: +95 EGP, NOT zero.
+    //     (the user previously accepted this 5 EGP residual as historical
+    //     noise).
+    //   · Row 3 (R3-B) voids JE-196 the stale duplicate; this fully closes
+    //     settlement-7's GL-side over-count (no more +100 phantom credit).
+    //   · Row 4 voids CT-245 (mirrors the JE-358 void) and recomputes
+    //     current_balance; this closes the cancelled-return chain.
+    //
+    // Final residual: −5 EGP (entirely from Row 2's accepted noise).
+    // ABU YUSUF's balance corrects from +70 (inflated by JE-196 duplicate)
+    // to −30 (business owes him 30). TB stays at 0.
     const md = renderResult({
       mode: 'dry-run',
       committed: false,
-      before: { current_balance: 34155, active_ct_sum: 34155, tagged_gl_1111: 34505, untagged_gl_1111: -2095, global_gl_1111: 32410, per_cashbox_drift: -350, global_gap: 1745 },
-      after:  { current_balance: 32505, active_ct_sum: 32505, tagged_gl_1111: 32410, untagged_gl_1111: 0, global_gl_1111: 32410, per_cashbox_drift: 95, global_gap: 95 },
+      before: { current_balance: 33885, active_ct_sum: 33885, tagged_gl_1111: 34235, untagged_gl_1111: -2095, global_gl_1111: 32140, per_cashbox_drift: -350, global_gap: 1745 },
+      after:  { current_balance: 32235, active_ct_sum: 32235, tagged_gl_1111: 32240, untagged_gl_1111: 0, global_gl_1111: 32240, per_cashbox_drift: -5, global_gap: -5 },
       rows: [
         { row_id: 'row-1', option: '1a', actions: [{ step: 'UPDATE expenses', status: 'executed' }] },
         { row_id: 'row-2', option: '2',  actions: [{ step: 'UPDATE journal_lines', status: 'executed' }] },
-        { row_id: 'row-3', option: '3a', actions: [{ step: 'UPDATE journal_lines (Row 3 tag-only)', status: 'executed' }] },
+        { row_id: 'row-3', option: '3a', actions: [{ step: 'UPDATE journal_entries SET is_void=TRUE on JE-2026-000196', status: 'executed' }] },
         { row_id: 'row-4', option: '4a', actions: [{ step: 'UPDATE cashbox_transactions (void CT-245)', status: 'executed' }] },
       ],
     });
     expect(md).toMatch(/# Cash\/GL cleanup — DRY-RUN/);
     expect(md).toMatch(/Committed: \*\*NO\*\*/);
-    expect(md).toMatch(/\| current_balance \| 34155\.00 \| 32505\.00 \| -1650\.00 \|/);
-    // global_gap moves from +1,745 → +95 (NOT zero — see comment above).
-    expect(md).toMatch(/\| global_gap \| 1745\.00 \| 95\.00 \| -1650\.00 \|/);
+    expect(md).toMatch(/\| current_balance \| 33885\.00 \| 32235\.00 \| -1650\.00 \|/);
+    // global_gap moves from +1,745 → −5 (Row 2 accepted residual).
+    expect(md).toMatch(/\| global_gap \| 1745\.00 \| -5\.00 \| -1750\.00 \|/);
     expect(md).toMatch(/### row-1 \(option 1a\)/);
+    expect(md).toMatch(/### row-3 \(option 3a\)/);
     expect(md).toMatch(/### row-4 \(option 4a\)/);
+    expect(md).toMatch(/JE-2026-000196/);
     expect(md).toMatch(/cleanup: PR-CASH-RECON-EXEC#1a/);
     expect(md).toMatch(/0 DELETEs/);
   });
