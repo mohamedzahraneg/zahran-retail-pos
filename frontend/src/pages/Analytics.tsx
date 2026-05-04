@@ -465,7 +465,12 @@ export default function Analytics() {
         <IndicatorTile
           icon={<Wallet size={16} />}
           label="السيولة المحاسبية"
-          tooltip="تشمل النقدية والبنوك والمحافظ والشيكات من الأستاذ العام"
+          // PR-AUDIT-LABELS-CASH-VS-GL — strengthen the tooltip from a
+          // vague "تشمل النقدية والبنوك..." to the explicit GL formula
+          // so the operator can verify which accounts roll up here.
+          // Mirrors the wording on the Finance Dashboard's
+          // CashEquivalentsCard title tooltip — both surfaces now agree.
+          tooltip="السيولة المحاسبية = الخزائن GL 1111 + البنوك GL 1113 + المحافظ GL 1114 + الشيكات GL 1115"
           testId="kpi-liquidity"
           value={EGP(indValue(indicators?.cash_on_hand))}
           sub={`تكفي ${indValue(indicators?.cash_runway_days)} يوم`}

@@ -244,6 +244,25 @@ describe('/cashboxes treasury grid — PR-FIN-CASHBOXES-TREASURY-GRID', () => {
     expect(within(card).queryByText('محاسبي')).toBeNull();
   });
 
+  // PR-AUDIT-LABELS-CASH-VS-GL — explicit hover hint clarifies that
+  // the cash card's headline is the operational running total, not a
+  // GL-derived figure. The structural caption used on non-cash cards
+  // (see ewallet test below) MUST NOT appear on cash cards.
+  it('cash card balance label has tooltip "رصيد تشغيلي من حركات الخزنة" — and NO structural caption (PR-AUDIT-LABELS-CASH-VS-GL)', async () => {
+    cashboxesMock.mockResolvedValue([
+      makeCashbox({ id: 'cb-cash', kind: 'cash', name_ar: 'الخزينة الرئيسية', current_balance: '31650' }),
+    ]);
+    renderPage();
+    const card = await screen.findByTestId('treasury-cashbox-card-cb-cash');
+    const labelEl = within(card).getByTestId('treasury-cashbox-card-balance-label-cb-cash');
+    const tooltip = labelEl.getAttribute('title') ?? '';
+    expect(tooltip).toMatch(/رصيد تشغيلي من حركات الخزنة/);
+    expect(tooltip).toMatch(/current_balance/);
+    // Cash cards must NOT carry the structural caption — that's only
+    // for non-cash kinds where the stored current_balance is structural-zero.
+    expect(within(card).queryByTestId('treasury-cashbox-card-structural-caption-cb-cash')).toBeNull();
+  });
+
   it('ewallet card renders explicit "الرصيد المحاسبي" label + accounting_balance + "محاسبي" pill', async () => {
     cashboxesMock.mockResolvedValue([
       makeCashbox({
@@ -260,6 +279,26 @@ describe('/cashboxes treasury grid — PR-FIN-CASHBOXES-TREASURY-GRID', () => {
     expect(within(card).getByText('محاسبي')).toBeInTheDocument();
     // Must NOT show the misleading stored 0 as the headline.
     expect(card.textContent).not.toMatch(/^.{0,20}0\.00\sج\.م/);
+  });
+
+  // PR-AUDIT-LABELS-CASH-VS-GL — the structural caption tells the
+  // operator why an ewallet "خزنة التحويلات" can show stored 0 EGP
+  // while the dashboard's "إجمالي المحافظ" shows non-zero. Names the
+  // GL code explicitly so future GL additions are easy to verify.
+  it('ewallet card carries the structural caption "خزنة هيكلية — الرصيد المحاسبي في GL 1114" (PR-AUDIT-LABELS-CASH-VS-GL)', async () => {
+    cashboxesMock.mockResolvedValue([
+      makeCashbox({
+        id: 'cb-ewallet', kind: 'ewallet', name_ar: 'خزنة التحويلات',
+        current_balance: '0',
+        accounting_gl_code: '1114', accounting_balance: '2190.00',
+      }),
+    ]);
+    renderPage();
+    const card = await screen.findByTestId('treasury-cashbox-card-cb-ewallet');
+    const caption = within(card).getByTestId('treasury-cashbox-card-structural-caption-cb-ewallet');
+    expect(caption.textContent).toMatch(/خزنة هيكلية/);
+    expect(caption.textContent).toMatch(/الرصيد المحاسبي/);
+    expect(caption.textContent).toMatch(/GL 1114/);
   });
 
   it('bank card uses GL 1113 + "الرصيد المحاسبي" label', async () => {
@@ -304,8 +343,10 @@ describe('/cashboxes treasury grid — PR-FIN-CASHBOXES-TREASURY-GRID', () => {
     );
     const grid = screen.getByTestId('treasury-cashboxes-grid');
     const ids = Array.from(grid.querySelectorAll('[data-testid^="treasury-cashbox-card-"]'))
-      // Only the outer card divs (filter out inner balance-label / details buttons).
-      .filter((el) => /^treasury-cashbox-card-(?!details-|balance-label-)/.test(el.getAttribute('data-testid') ?? ''))
+      // Only the outer card divs (filter out inner balance-label,
+      // details buttons, and the PR-AUDIT-LABELS-CASH-VS-GL
+      // structural-caption row that lives inside non-cash cards).
+      .filter((el) => /^treasury-cashbox-card-(?!details-|balance-label-|structural-caption-)/.test(el.getAttribute('data-testid') ?? ''))
       .map((el) => el.getAttribute('data-testid'));
     // cash kind first (sorted by name_ar Arabic), then ewallet, then bank, then check.
     expect(ids).toEqual([

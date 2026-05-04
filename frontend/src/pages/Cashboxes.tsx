@@ -1186,6 +1186,17 @@ function TreasuryCashboxCard({
       <div
         className="text-[10px] font-medium text-slate-500 mt-2"
         data-testid={`treasury-cashbox-card-balance-label-${cashbox.id}`}
+        // PR-AUDIT-LABELS-CASH-VS-GL — explicit hover hint distinguishes
+        // operational vs accounting balance. Cash drawers track the
+        // engine's running cashbox sum (current_balance ≈ active CT
+        // signed sum); non-cash kinds report the GL-derived figure.
+        title={
+          isCash
+            ? 'رصيد تشغيلي من حركات الخزنة (current_balance ≈ مجموع حركات الـ CT النشطة)'
+            : display.kind === 'accounting'
+              ? `الرصيد المحاسبي من حساب GL ${display.glCode}`
+              : undefined
+        }
       >
         {balanceLabel}
       </div>
@@ -1208,6 +1219,20 @@ function TreasuryCashboxCard({
           </span>
         )}
       </div>
+      {/* PR-AUDIT-LABELS-CASH-VS-GL — non-cash cashboxes (ewallet/
+          bank/check) are STRUCTURAL: their stored current_balance is
+          permanently 0 because non-cash payments don't write CT rows.
+          The headline figure is the GL roll-up; this caption tells
+          the operator why "خزنة التحويلات: 0" on a stored basis is
+          consistent with "إجمالي المحافظ: 2,340" on the dashboard. */}
+      {!isCash && display.kind === 'accounting' && (
+        <div
+          className="text-[10px] text-slate-500 mt-1.5 leading-snug"
+          data-testid={`treasury-cashbox-card-structural-caption-${cashbox.id}`}
+        >
+          خزنة هيكلية — الرصيد المحاسبي في GL {display.glCode}
+        </div>
+      )}
       <button
         type="button"
         onClick={(e) => { e.stopPropagation(); onOpenDetails(); }}

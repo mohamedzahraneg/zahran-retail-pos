@@ -124,16 +124,23 @@ describe('<Analytics /> liquidity tile — PR-FIN-ANALYTICS-LIQUIDITY-GL', () =>
   it('label carries an Arabic tooltip naming the GL accounts (cash + bank + wallet + check)', async () => {
     renderPage();
     const tile = await screen.findByTestId('kpi-liquidity');
-    // The tooltip lives on the label container as native HTML
-    // `title=`. We assert the substring covers the four bucket names.
+    // PR-AUDIT-LABELS-CASH-VS-GL — tooltip strengthened from the
+    // earlier vague "تشمل النقدية والبنوك..." to the explicit GL
+    // formula. Mirrors the same wording on the Finance Dashboard.
     const labelEl = within(tile).getByText('السيولة المحاسبية').closest('[title]');
     expect(labelEl).not.toBeNull();
     const tooltip = labelEl!.getAttribute('title') ?? '';
-    expect(tooltip).toMatch(/النقدية/);
+    expect(tooltip).toMatch(/السيولة المحاسبية/);
+    expect(tooltip).toMatch(/GL 1111/);
+    expect(tooltip).toMatch(/GL 1113/);
+    expect(tooltip).toMatch(/GL 1114/);
+    expect(tooltip).toMatch(/GL 1115/);
+    // The bucket nouns must still be present so the tooltip remains
+    // human-readable in addition to naming the codes.
+    expect(tooltip).toMatch(/الخزائن/);
     expect(tooltip).toMatch(/البنوك/);
     expect(tooltip).toMatch(/المحافظ/);
     expect(tooltip).toMatch(/الشيكات/);
-    expect(tooltip).toMatch(/الأستاذ العام/);
   });
 
   it('does NOT change adjacent tiles (revenue / inventory remain present + unchanged)', async () => {

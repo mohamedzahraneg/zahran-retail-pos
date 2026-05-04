@@ -9,7 +9,7 @@
  *   4. The page never imports DailyExpenses (frozen surface)
  */
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
 import { FinanceDashboard } from '@/pages/FinanceDashboard';
@@ -159,7 +159,13 @@ describe('<FinanceDashboard />', () => {
     await waitFor(() =>
       expect(screen.getByTestId('card-cash-equivalents')).toBeInTheDocument(),
     );
-    expect(screen.getByText('النقدية وما في حكمها')).toBeInTheDocument();
+    // PR-AUDIT-LABELS-CASH-VS-GL — title renamed from the ambiguous
+    // "النقدية وما في حكمها" to "السيولة المحاسبية" so the operator
+    // knows it's the GL roll-up (not the cash-drawer-only sum).
+    expect(screen.getByText('السيولة المحاسبية')).toBeInTheDocument();
+    // Defensive: refuse the previous ambiguous title within this card.
+    const cashCard = screen.getByTestId('card-cash-equivalents');
+    expect(cashCard.textContent).not.toMatch(/النقدية وما في حكمها/);
     expect(screen.getByText('أرصدة العملاء')).toBeInTheDocument();
     expect(screen.getByText('أرصدة الموردين')).toBeInTheDocument();
     expect(screen.getByText('أرصدة الموظفين')).toBeInTheDocument();
@@ -626,6 +632,65 @@ describe('<FinanceDashboard />', () => {
       // No NaN/undefined leaking into either breakdown row.
       expect(screen.getByTestId('expenses-period-advances').textContent).not.toMatch(/NaN|undefined/);
       expect(screen.getByTestId('expenses-period-non-advances').textContent).not.toMatch(/NaN|undefined/);
+    });
+  });
+
+  /* ────────────────────────────────────────────────────────────────
+   * PR-AUDIT-LABELS-CASH-VS-GL — disambiguates GL roll-up vs
+   * operational cashbox sums on the النقدية card. The card is now
+   * titled "السيولة المحاسبية"; each sub-row carries the explicit
+   * "(GL XXXX)" suffix; the card's <h4> exposes a `title` tooltip
+   * with the formula. Values must remain byte-identical for the
+   * same fixture (no formula change; this PR is purely labels).
+   * ────────────────────────────────────────────────────────────────*/
+  describe('CashEquivalentsCard — PR-AUDIT-LABELS-CASH-VS-GL', () => {
+    it('title is "السيولة المحاسبية" (NOT the old ambiguous "النقدية وما في حكمها")', async () => {
+      renderPage();
+      const card = await screen.findByTestId('card-cash-equivalents');
+      // New title present
+      const titleEl = within(card).getByTestId('card-cash-equivalents-title');
+      expect(titleEl).toHaveTextContent('السيولة المحاسبية');
+      // Old ambiguous title gone from this card
+      expect(card.textContent).not.toMatch(/النقدية وما في حكمها/);
+    });
+
+    it('title exposes the formula tooltip naming GL 1111 + 1113 + 1114 + 1115', async () => {
+      renderPage();
+      const card = await screen.findByTestId('card-cash-equivalents');
+      const titleEl = within(card).getByTestId('card-cash-equivalents-title');
+      const tooltip = titleEl.getAttribute('title') ?? '';
+      expect(tooltip).toMatch(/السيولة المحاسبية/);
+      expect(tooltip).toMatch(/GL 1111/);
+      expect(tooltip).toMatch(/GL 1113/);
+      expect(tooltip).toMatch(/GL 1114/);
+      expect(tooltip).toMatch(/GL 1115/);
+    });
+
+    it('sub-row labels are GL-suffixed (الخزائن المحاسبية, البنوك المحاسبية, المحافظ المحاسبية, الشيكات المحاسبية)', async () => {
+      renderPage();
+      const card = await screen.findByTestId('card-cash-equivalents');
+      expect(within(card).getByText('الخزائن المحاسبية (GL 1111)')).toBeInTheDocument();
+      expect(within(card).getByText('البنوك المحاسبية (GL 1113)')).toBeInTheDocument();
+      expect(within(card).getByText('المحافظ المحاسبية (GL 1114)')).toBeInTheDocument();
+      expect(within(card).getByText('الشيكات المحاسبية (GL 1115)')).toBeInTheDocument();
+      // The bare ambiguous labels are gone.
+      expect(card.textContent).not.toMatch(/إجمالي الخزائن(?!\s+الإلكترونية)/);
+      expect(card.textContent).not.toMatch(/إجمالي البنوك\b(?! 1113)/);
+      expect(card.textContent).not.toMatch(/إجمالي المحافظ\b(?! الإلكترونية)/);
+      expect(card.textContent).not.toMatch(/إجمالي الشيكات\b(?! 1115)/);
+    });
+
+    it('values are unchanged for the same fixture (label-only PR — no formula change)', async () => {
+      // Default fixture (see top-of-file `buildFixture`):
+      //   cashboxes_total=100, banks_total=200, wallets_total=50,
+      //   checks_total=0, total_cash_equivalents=350.
+      renderPage();
+      const card = await screen.findByTestId('card-cash-equivalents');
+      // Each displayed amount must be byte-identical to the fixture.
+      expect(card.textContent).toMatch(/100/); // cashboxes_total
+      expect(card.textContent).toMatch(/200/); // banks_total
+      expect(card.textContent).toMatch(/50/);  // wallets_total
+      expect(card.textContent).toMatch(/350/); // total
     });
   });
 });
