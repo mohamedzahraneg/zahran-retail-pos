@@ -20,6 +20,14 @@
  *     column on payment_accounts can carry a logo_url then.
  */
 
+import {
+  GL_BANK,
+  GL_CASH,
+  GL_CHECKS,
+  GL_WALLET,
+  LiquidGlCode,
+} from '../chart-of-accounts/gl-codes.constants';
+
 export type PaymentMethodCode =
   | 'cash'
   | 'card_visa'
@@ -47,7 +55,7 @@ export interface PaymentProvider {
    * `payment_account_snapshot` for invoice receipts).
    */
   logo_key: string;
-  default_gl_account_code: '1111' | '1113' | '1114' | '1115' | '1121';
+  default_gl_account_code: LiquidGlCode | '1121';
   /** UI grouping hint — "cash" / "instapay" / "wallet" / "card" / "bank". */
   group: 'cash' | 'instapay' | 'wallet' | 'card' | 'bank';
   /**
@@ -66,7 +74,7 @@ export const PAYMENT_PROVIDERS: PaymentProvider[] = [
     name_ar: 'كاش',
     name_en: 'Cash',
     icon_name: 'Banknote',
-    default_gl_account_code: '1111',
+    default_gl_account_code: GL_CASH,
     group: 'cash',
     requires_reference: false,
   },
@@ -79,7 +87,7 @@ export const PAYMENT_PROVIDERS: PaymentProvider[] = [
     name_ar: 'إنستا باي',
     name_en: 'InstaPay',
     icon_name: 'Smartphone',
-    default_gl_account_code: '1114',
+    default_gl_account_code: GL_WALLET,
     group: 'instapay',
     requires_reference: true,
   },
@@ -92,7 +100,7 @@ export const PAYMENT_PROVIDERS: PaymentProvider[] = [
     name_ar: 'فودافون كاش',
     name_en: 'Vodafone Cash',
     icon_name: 'Wallet',
-    default_gl_account_code: '1114',
+    default_gl_account_code: GL_WALLET,
     group: 'wallet',
     requires_reference: true,
   },
@@ -103,7 +111,7 @@ export const PAYMENT_PROVIDERS: PaymentProvider[] = [
     name_ar: 'أورانج كاش',
     name_en: 'Orange Cash',
     icon_name: 'Wallet',
-    default_gl_account_code: '1114',
+    default_gl_account_code: GL_WALLET,
     group: 'wallet',
     requires_reference: true,
   },
@@ -120,7 +128,7 @@ export const PAYMENT_PROVIDERS: PaymentProvider[] = [
     name_ar: 'اتصالات كاش',
     name_en: 'Etisalat Cash',
     icon_name: 'Wallet',
-    default_gl_account_code: '1114',
+    default_gl_account_code: GL_WALLET,
     group: 'wallet',
     requires_reference: true,
   },
@@ -131,7 +139,7 @@ export const PAYMENT_PROVIDERS: PaymentProvider[] = [
     name_ar: 'WE Pay',
     name_en: 'WE Pay',
     icon_name: 'Wallet',
-    default_gl_account_code: '1114',
+    default_gl_account_code: GL_WALLET,
     group: 'wallet',
     requires_reference: true,
   },
@@ -142,7 +150,7 @@ export const PAYMENT_PROVIDERS: PaymentProvider[] = [
     name_ar: 'محفظة بنكية',
     name_en: 'Bank Wallet',
     icon_name: 'Wallet',
-    default_gl_account_code: '1114',
+    default_gl_account_code: GL_WALLET,
     group: 'wallet',
     requires_reference: true,
   },
@@ -155,7 +163,7 @@ export const PAYMENT_PROVIDERS: PaymentProvider[] = [
     name_ar: 'فيزا',
     name_en: 'Visa',
     icon_name: 'CreditCard',
-    default_gl_account_code: '1113',
+    default_gl_account_code: GL_BANK,
     group: 'card',
     requires_reference: true,
   },
@@ -166,7 +174,7 @@ export const PAYMENT_PROVIDERS: PaymentProvider[] = [
     name_ar: 'ماستركارد',
     name_en: 'MasterCard',
     icon_name: 'CreditCard',
-    default_gl_account_code: '1113',
+    default_gl_account_code: GL_BANK,
     group: 'card',
     requires_reference: true,
   },
@@ -177,7 +185,7 @@ export const PAYMENT_PROVIDERS: PaymentProvider[] = [
     name_ar: 'ميزة',
     name_en: 'Meeza',
     icon_name: 'CreditCard',
-    default_gl_account_code: '1113',
+    default_gl_account_code: GL_BANK,
     group: 'card',
     requires_reference: true,
   },
@@ -188,7 +196,7 @@ export const PAYMENT_PROVIDERS: PaymentProvider[] = [
     name_ar: 'ماكينة POS',
     name_en: 'POS Terminal',
     icon_name: 'CreditCard',
-    default_gl_account_code: '1113',
+    default_gl_account_code: GL_BANK,
     group: 'card',
     requires_reference: true,
   },
@@ -201,7 +209,7 @@ export const PAYMENT_PROVIDERS: PaymentProvider[] = [
     name_ar: 'البنك الأهلي المصري',
     name_en: 'National Bank of Egypt',
     icon_name: 'Landmark',
-    default_gl_account_code: '1113',
+    default_gl_account_code: GL_BANK,
     group: 'bank',
     requires_reference: true,
   },
@@ -212,7 +220,7 @@ export const PAYMENT_PROVIDERS: PaymentProvider[] = [
     name_ar: 'بنك مصر',
     name_en: 'Banque Misr',
     icon_name: 'Landmark',
-    default_gl_account_code: '1113',
+    default_gl_account_code: GL_BANK,
     group: 'bank',
     requires_reference: true,
   },
@@ -223,7 +231,7 @@ export const PAYMENT_PROVIDERS: PaymentProvider[] = [
     name_ar: 'البنك التجاري الدولي (CIB)',
     name_en: 'CIB',
     icon_name: 'Landmark',
-    default_gl_account_code: '1113',
+    default_gl_account_code: GL_BANK,
     group: 'bank',
     requires_reference: true,
   },
@@ -234,7 +242,7 @@ export const PAYMENT_PROVIDERS: PaymentProvider[] = [
     name_ar: 'QNB الأهلي',
     name_en: 'QNB Al-Ahli',
     icon_name: 'Landmark',
-    default_gl_account_code: '1113',
+    default_gl_account_code: GL_BANK,
     group: 'bank',
     requires_reference: true,
   },
@@ -245,7 +253,7 @@ export const PAYMENT_PROVIDERS: PaymentProvider[] = [
     name_ar: 'بنك الإسكندرية',
     name_en: 'AlexBank',
     icon_name: 'Landmark',
-    default_gl_account_code: '1113',
+    default_gl_account_code: GL_BANK,
     group: 'bank',
     requires_reference: true,
   },
@@ -256,7 +264,7 @@ export const PAYMENT_PROVIDERS: PaymentProvider[] = [
     name_ar: 'بنك القاهرة',
     name_en: 'Banque du Caire',
     icon_name: 'Landmark',
-    default_gl_account_code: '1113',
+    default_gl_account_code: GL_BANK,
     group: 'bank',
     requires_reference: true,
   },
@@ -267,7 +275,7 @@ export const PAYMENT_PROVIDERS: PaymentProvider[] = [
     name_ar: 'البنك العربي الأفريقي الدولي',
     name_en: 'AAIB',
     icon_name: 'Landmark',
-    default_gl_account_code: '1113',
+    default_gl_account_code: GL_BANK,
     group: 'bank',
     requires_reference: true,
   },
@@ -278,7 +286,7 @@ export const PAYMENT_PROVIDERS: PaymentProvider[] = [
     name_ar: 'مصرف أبو ظبي الإسلامي',
     name_en: 'ADIB',
     icon_name: 'Landmark',
-    default_gl_account_code: '1113',
+    default_gl_account_code: GL_BANK,
     group: 'bank',
     requires_reference: true,
   },
@@ -297,7 +305,7 @@ export const PAYMENT_PROVIDERS: PaymentProvider[] = [
     name_ar: 'شيكات',
     name_en: 'Cheques',
     icon_name: 'FileCheck',
-    default_gl_account_code: '1115',
+    default_gl_account_code: GL_CHECKS,
     group: 'bank',           // closest existing group; check has no dedicated group on the FE side yet
     requires_reference: true, // cheque book number / serial is required
   },
@@ -317,16 +325,16 @@ export const METHOD_DEFAULT_GL_CODE: Record<
   Exclude<PaymentMethodCode, 'other'>,
   string
 > = {
-  cash: '1111',
-  card_visa: '1113',
-  card_mastercard: '1113',
-  card_meeza: '1113',
-  instapay: '1114',
-  vodafone_cash: '1114',
-  orange_cash: '1114',
-  wallet: '1114',         // PR-PAY-3.1: generic wallet umbrella
-  bank_transfer: '1113',
-  check: '1115',          // PR-FIN-PAYACCT-4B: الشيكات تحت التحصيل
+  cash: GL_CASH,
+  card_visa: GL_BANK,
+  card_mastercard: GL_BANK,
+  card_meeza: GL_BANK,
+  instapay: GL_WALLET,
+  vodafone_cash: GL_WALLET,
+  orange_cash: GL_WALLET,
+  wallet: GL_WALLET,           // PR-PAY-3.1: generic wallet umbrella
+  bank_transfer: GL_BANK,
+  check: GL_CHECKS,            // PR-FIN-PAYACCT-4B: الشيكات تحت التحصيل
   credit: '1121',
 };
 

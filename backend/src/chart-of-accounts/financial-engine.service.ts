@@ -1,5 +1,11 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { DataSource, EntityManager } from 'typeorm';
+import {
+  CASHBOX_KIND_TO_GL_CODE,
+  CashboxKindForGl,
+  GL_CASH,
+  LIQUID_GL_CODES,
+} from './gl-codes.constants';
 
 /**
  * FinancialEngineService — the SINGLE primitive through which every money
@@ -261,7 +267,7 @@ export function checkCashGlAlignment(input: {
   }>;
   code_by_account_id: Map<string, string> | Record<string, string>;
 }): CashGlAlignmentResult {
-  const LIQUID_CODES = new Set(['1111', '1113', '1114', '1115']);
+  const LIQUID_CODES = new Set<string>(LIQUID_GL_CODES);
   const codeOf = (id: string): string => {
     if (input.code_by_account_id instanceof Map) {
       return input.code_by_account_id.get(id) ?? '';
@@ -987,13 +993,7 @@ export class FinancialEngineService {
       `SELECT kind FROM cashboxes WHERE id = $1`,
       [cashboxId],
     );
-    const fallback: Record<string, string> = {
-      cash: '1111',
-      bank: '1113',
-      ewallet: '1114',
-      check: '1115',
-    };
-    const code = fallback[cb?.kind ?? 'cash'] || '1111';
+    const code = CASHBOX_KIND_TO_GL_CODE[(cb?.kind ?? 'cash') as CashboxKindForGl] || GL_CASH;
     return this.accountIdByCode(q, code);
   }
 

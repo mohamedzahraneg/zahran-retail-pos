@@ -72,6 +72,13 @@ import { Injectable, Optional } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { CashboxGlDriftHelper } from '../cash-desk/cashbox-gl-drift.helper';
 import {
+  GL_BANK,
+  GL_CASH,
+  GL_CHECKS,
+  GL_WALLET,
+  LIQUID_CODES_SQL_LIST,
+} from '../chart-of-accounts/gl-codes.constants';
+import {
   ConfidenceTier,
   DashboardFilters,
   FinanceDashboardResponse,
@@ -393,7 +400,7 @@ export class FinanceDashboardService {
          FROM journal_lines jl
          JOIN journal_entries je ON je.id = jl.entry_id
          JOIN chart_of_accounts coa ON coa.id = jl.account_id
-        WHERE coa.code IN ('1111','1113','1114','1115')
+        WHERE coa.code IN (${LIQUID_CODES_SQL_LIST})
           AND je.is_posted = TRUE
           AND je.is_void   = FALSE
         GROUP BY coa.code`,
@@ -401,10 +408,10 @@ export class FinanceDashboardService {
     const sumByCode = (code: string): number =>
       Number((rows.find((r: any) => r.code === code) ?? { total: 0 }).total ?? 0);
 
-    const cashboxes = sumByCode('1111');
-    const banks     = sumByCode('1113');
-    const wallets   = sumByCode('1114');
-    const checks    = sumByCode('1115');
+    const cashboxes = sumByCode(GL_CASH);
+    const banks     = sumByCode(GL_BANK);
+    const wallets   = sumByCode(GL_WALLET);
+    const checks    = sumByCode(GL_CHECKS);
     const total = round2(cashboxes + banks + wallets + checks);
     return {
       cashboxes_total: round2(cashboxes),
