@@ -10,6 +10,7 @@ import {
   Query,
   Req,
   UseGuards,
+  UseInterceptors,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { AccountingService } from './accounting.service';
@@ -36,6 +37,11 @@ import {
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles, Permissions } from '../common/decorators/roles.decorator';
+// PR-AUDIT-IDEMPOTENCY-ACCOUNTING-EXPENSES — opt-in idempotency on
+// the two expense-create routes. Without an Idempotency-Key header
+// the behavior is exactly unchanged. Other accounting handlers in
+// this controller stay unprotected (out of pilot scope).
+import { IdempotencyInterceptor } from '../common/interceptors/idempotency.interceptor';
 
 @ApiTags('accounting')
 @ApiBearerAuth()
@@ -212,6 +218,12 @@ export class AccountingController {
   @Post('expenses')
   @Roles('admin', 'manager', 'accountant')
   @ApiOperation({ summary: 'Create a new expense' })
+  // PR-AUDIT-IDEMPOTENCY-ACCOUNTING-EXPENSES — third protected endpoint
+  // after /pos/invoices (#275) and /cash-desk/transfer (#277). Optional
+  // Idempotency-Key header. Without it, today's behavior. With it,
+  // replays the cached 2xx for 24h or 425/409 for concurrent /
+  // payload-mismatch.
+  @UseInterceptors(IdempotencyInterceptor)
   createExpense(@Body() dto: CreateExpenseDto, @Req() req: any) {
     return this.service.createExpense(dto, req.user.sub ?? req.user.id);
   }
@@ -227,6 +239,11 @@ export class AccountingController {
   @Roles('admin', 'manager', 'accountant', 'cashier')
   @Permissions('expenses.daily.create')
   @ApiOperation({ summary: 'تسجيل مصروف يومي مرتبط بالموظف المسؤول' })
+  // PR-AUDIT-IDEMPOTENCY-ACCOUNTING-EXPENSES — high-volume cashier
+  // path; same protection contract as createExpense. Cache namespace
+  // includes the route path so /accounting/expenses and
+  // /accounting/expenses/daily keys cannot collide.
+  @UseInterceptors(IdempotencyInterceptor)
   createDailyExpense(
     @Body() dto: CreateDailyExpenseDto,
     @Req() req: any,
