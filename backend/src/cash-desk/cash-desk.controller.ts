@@ -6,6 +6,7 @@ import {
   ParseUUIDPipe,
   Post,
   Query,
+  UseInterceptors,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import {
@@ -24,6 +25,10 @@ import {
   CreateSupplierPaymentDto,
 } from './dto/payment.dto';
 import { Roles, Permissions } from '../common/decorators/roles.decorator';
+// PR-AUDIT-IDEMPOTENCY-CASH-DESK-TRANSFER — opt-in idempotency on
+// POST /cash-desk/transfer. Without an Idempotency-Key header the
+// behavior is exactly unchanged from today.
+import { IdempotencyInterceptor } from '../common/interceptors/idempotency.interceptor';
 import {
   CurrentUser,
   JwtUser,
@@ -157,6 +162,12 @@ export class CashDeskController {
   @Roles('admin', 'manager', 'accountant')
   @Permissions('cashdesk.view')
   @ApiOperation({ summary: 'تحويل نقدية بين خزنتين' })
+  // PR-AUDIT-IDEMPOTENCY-CASH-DESK-TRANSFER — second protected endpoint
+  // after POST /pos/invoices (PR #275). Optional Idempotency-Key header.
+  // Without it, today's behavior (cashier double-click → 2 transfers).
+  // With it, replays the cached 2xx response for 24h or 425/409 for
+  // concurrent / payload-mismatch.
+  @UseInterceptors(IdempotencyInterceptor)
   transfer(@Body() dto: TransferDto, @CurrentUser() user: JwtUser) {
     return this.svc.transferBetweenCashboxes(dto, user.userId);
   }
