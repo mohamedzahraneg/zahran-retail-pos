@@ -290,6 +290,137 @@ export interface OpenShiftPayload {
   notes?: string;
 }
 
+// ─── PR-SHIFT-REPORTS-AGGREGATED-DETAIL-FE ──────────────────────────
+// Types for the new POST /shifts/reports/aggregate-detail endpoint
+// (added to BE in PR #288). Read-only consolidated report across N
+// selected shifts (max 50).
+// ────────────────────────────────────────────────────────────────────
+
+export interface AggregateDetailFilters {
+  /** YYYY-MM-DD (Cairo). */
+  from?: string;
+  to?: string;
+  status?: 'open' | 'closed' | 'pending_close' | 'all';
+  /** Cashier user_id (opened_by). */
+  user_id?: string;
+  cashbox_id?: string;
+}
+
+export interface AggregateDetailRequest {
+  /**
+   * Explicit selection. When provided AND non-empty, the BE ignores
+   * `filters`. Wrapper enforces this in `aggregateDetail()` below.
+   */
+  shift_ids?: string[];
+  filters?: AggregateDetailFilters;
+}
+
+/** Header-shifts row — slim metadata for the "selected shifts" table. */
+export interface AggregateHeaderShift {
+  id: string;
+  shift_no: string;
+  status: ShiftStatus;
+  opened_at: string;
+  closed_at: string | null;
+  cashier_name: string | null;
+  cashbox_name: string | null;
+}
+
+export interface AggregateHeader {
+  date_range: { from: string | null; to: string | null };
+  shift_count: number;
+  shifts: AggregateHeaderShift[];
+  cashiers: Array<{ user_id: string; full_name: string | null }>;
+  cashboxes: Array<{ cashbox_id: string; name_ar: string | null }>;
+  selection_mode: 'explicit' | 'filters';
+  generated_by: { user_id: string; full_name: string | null };
+  /** Server-supplied ISO8601. */
+  generated_at: string;
+}
+
+export interface AggregateTotals {
+  opening_balance: number;
+  total_sales: number;
+  invoice_count: number;
+  cancelled_count: number;
+  total_cancelled: number;
+  remaining_receivable: number;
+  cash_total: number;
+  non_cash_total: number;
+  grand_payment_total: number;
+  customer_receipts: number;
+  supplier_payments: number;
+  other_cash_in: number;
+  other_cash_out: number;
+  total_returns: number;
+  return_count: number;
+  total_expenses: number;
+  expense_count: number;
+  total_operating_expenses: number;
+  operating_expense_count: number;
+  total_employee_advances: number;
+  employee_advance_count: number;
+  total_employee_settlements: number;
+  employee_settlement_count: number;
+  total_employee_cash_out: number;
+  total_refund_cash_out: number;
+  total_refund_cash_in: number;
+  net_refund_cash_impact: number;
+  cancelled_return_out_amount: number;
+  cancelled_return_reversal_amount: number;
+  cancelled_return_net: number;
+  total_cash_in: number;
+  total_cash_out: number;
+  expected_closing: number;
+  /** Sum across closed shifts only; null when no shift is closed. */
+  actual_closing: number | null;
+  variance: number | null;
+  closed_shift_count: number;
+  /** = expected_closing − opening_balance (rolled up). */
+  net_shift_amount: number;
+}
+
+/** Per-row shift context attached by the BE aggregator. */
+export interface ShiftContext {
+  shift_id: string;
+  shift_no: string;
+  /** YYYY-MM-DD (Cairo). */
+  shift_date: string | null;
+  cashier_name: string | null;
+  cashbox_name: string | null;
+  /** ISO8601 of the underlying source row (CT.created_at, expense.created_at, adjustment.adjusted_at, …). */
+  original_movement_at: string | null;
+}
+
+export type AggregateExpenseRow = ShiftExpenseRow & ShiftContext;
+export type AggregateEmployeeMovementRow = EmployeeCashMovement & ShiftContext;
+export type AggregateRefundMovementRow = RefundCashMovement & ShiftContext;
+export type AggregateAdjustmentRow = ShiftCountAdjustment & ShiftContext;
+
+export interface AggregateCashboxMovementRow extends ShiftContext {
+  /** Composite synthetic id from the BE: `${shift_id}:${category}`. */
+  id: string;
+  category:
+    | 'customer_receipts'
+    | 'supplier_payments'
+    | 'other_cash_in'
+    | 'other_cash_out';
+  amount: number;
+}
+
+export interface AggregateDetailResponse {
+  header: AggregateHeader;
+  totals: AggregateTotals;
+  sections: {
+    operating_expenses: AggregateExpenseRow[];
+    employee_cash_movements: AggregateEmployeeMovementRow[];
+    cashbox_movements: AggregateCashboxMovementRow[];
+    payment_breakdown: PaymentBreakdownMethod[];
+    refund_cash_movements: AggregateRefundMovementRow[];
+    closing_adjustments: AggregateAdjustmentRow[];
+  };
+}
+
 export const shiftsApi = {
   list: (params?: {
     status?: string;
@@ -352,4 +483,22 @@ export const shiftsApi = {
     unwrap<{ rejected: true; shift: Shift }>(
       api.post(`/shifts/${id}/reject-close`, { reason }),
     ),
+
+  // PR-SHIFT-REPORTS-AGGREGATED-DETAIL-FE
+  // Wrapper around POST /shifts/reports/aggregate-detail. Enforces the
+  // contract documented on the BE side: explicit selection wins over
+  // filters. Caller passes `shift_ids` (preferred when present and
+  // non-empty) and/or `filters`; the wrapper drops `filters` from the
+  // body when selection is present so the intent is unambiguous on
+  // the wire. Never sends `generated_by`/`generated_at` — the server
+  // sources both from the JWT user and the server clock.
+  aggregateDetail: (req: AggregateDetailRequest) => {
+    const useSelection = !!(req.shift_ids && req.shift_ids.length > 0);
+    const body: AggregateDetailRequest = useSelection
+      ? { shift_ids: req.shift_ids }
+      : { filters: req.filters ?? {} };
+    return unwrap<AggregateDetailResponse>(
+      api.post('/shifts/reports/aggregate-detail', body),
+    );
+  },
 };
