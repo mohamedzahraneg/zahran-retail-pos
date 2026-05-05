@@ -315,7 +315,7 @@ export interface AggregateDetailRequest {
   filters?: AggregateDetailFilters;
 }
 
-/** Header-shifts row — slim metadata for the "selected shifts" table. */
+/** Header-shifts row — per-shift metadata + cash-side reconciliation. */
 export interface AggregateHeaderShift {
   id: string;
   shift_no: string;
@@ -324,19 +324,42 @@ export interface AggregateHeaderShift {
   closed_at: string | null;
   cashier_name: string | null;
   cashbox_name: string | null;
-  // PR-FIX-SHIFT-AGGREGATE-OPENING-CASH-BALANCE
-  // Per-shift financials sourced from the LIVE single-shift summary
-  // (NOT from the stored `shifts.expected_closing` column, which is
-  // stale on open shifts). Same numbers the existing single-shift
-  // report displays.
+
+  // ── Cash-side reconciliation (LIVE single-shift summary fields) ──
+  // Sourced from the LIVE `summary(id)` recompute — NOT from the
+  // stored `shifts.expected_closing` column, which can be stale and
+  // can include non-cash payments. This guarantees non-cash amounts
+  // (InstaPay, wallet, bank transfer) NEVER inflate cash variance.
   opening_balance: number;
+  /** Cash-only expected closing balance (= already includes opening). */
   expected_closing: number;
-  /** NULL when the shift is still open. */
+  /** Cash counted at close. NULL when shift is still open. */
   actual_closing: number | null;
-  /** NULL when the shift is still open. */
+  /** = `actual_closing − expected_closing` (cash only). NULL when open. */
   variance: number | null;
-  /** = `expected_closing − opening_balance` (mirrors `totals.net_shift_amount`). */
+  /**
+   * "الصافي" — per business definition equals `expected_closing` (the
+   * cash-only expected closing balance, which already includes the
+   * opening balance via the single-shift summary formula).
+   */
   net_shift_amount: number;
+  /**
+   * Net cash movement during the shift, EXCLUDING the opening balance
+   * (= `expected_closing − opening_balance`). Exposed for callers
+   * that want this distinction; NEVER use it as the displayed "الصافي".
+   */
+  net_cash_movement: number;
+
+  // ── Sales + payment breakdown (from summary) ──
+  invoice_count: number;
+  total_sales: number;
+  total_collections: number;
+  cash_total: number;
+  non_cash_total: number;
+
+  // ── Expenses + returns ──
+  total_operating_expenses: number;
+  total_returns: number;
 }
 
 export interface AggregateHeader {
@@ -389,8 +412,14 @@ export interface AggregateTotals {
   actual_closing: number | null;
   variance: number | null;
   closed_shift_count: number;
-  /** = expected_closing − opening_balance (rolled up). */
+  /**
+   * "صافي إجمالي الورديات" — per business definition equals the sum
+   * of `expected_closing` across selected shifts (already includes
+   * each shift's opening balance via the summary formula).
+   */
   net_shift_amount: number;
+  /** Sum of (expected_closing − opening_balance) across selected shifts. */
+  net_cash_movement: number;
 }
 
 /** Per-row shift context attached by the BE aggregator. */

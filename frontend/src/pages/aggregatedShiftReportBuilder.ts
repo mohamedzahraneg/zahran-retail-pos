@@ -104,10 +104,22 @@ export function buildAggregatedShiftReportHtml(
     </tr>`;
 
   /* ─── 1. Selected shifts table (header) ─── */
-  // PR-FIX-SHIFT-AGGREGATE-OPENING-CASH-BALANCE — added 5 financial
-  // columns per shift (opening / expected / actual / variance / net).
-  // Same numbers the single-shift report displays. Open shifts show
-  // "—" for actual_closing and variance.
+  // PR-FIX-SHIFT-AGGREGATE-CASH-VS-NONCASH-VARIANCE
+  //
+  // Per-shift table columns:
+  //   1. رقم الوردية / التاريخ / الكاشير / الخزنة / الحالة
+  //   2. عدد الفواتير / إجمالي المبيعات / إجمالي التحصيلات
+  //   3. كاش / غير نقدي                  ← prevents non-cash being read
+  //                                       as cash shortage
+  //   4. المصروفات / المرتجعات
+  //   5. مبلغ الافتتاح
+  //   6. المتوقع النقدي / الإغلاق الفعلي النقدي / فرق الكاش
+  //                                       ← all three labelled "النقدي"
+  //                                       so it's unambiguous they're
+  //                                       cash-side reconciliation
+  //   7. الصافي                            ← business definition:
+  //                                       equals expected_closing
+  //                                       (already includes opening)
   const shiftsRows = header.shifts
     .map(
       (s) => `
@@ -117,8 +129,13 @@ export function buildAggregatedShiftReportHtml(
           <td>${escapeHtml(s.cashier_name)}</td>
           <td>${escapeHtml(s.cashbox_name)}</td>
           <td>${escapeHtml(STATUS_LABEL_AR[s.status] ?? s.status)}</td>
-          <td>${escapeHtml(fmtTime(s.opened_at))}</td>
-          <td>${escapeHtml(fmtTime(s.closed_at))}</td>
+          <td class="right">${s.invoice_count}</td>
+          <td class="right">${escapeHtml(EGP(s.total_sales))}</td>
+          <td class="right">${escapeHtml(EGP(s.total_collections))}</td>
+          <td class="right">${escapeHtml(EGP(s.cash_total))}</td>
+          <td class="right">${escapeHtml(EGP(s.non_cash_total))}</td>
+          <td class="right">${escapeHtml(EGP(s.total_operating_expenses))}</td>
+          <td class="right">${escapeHtml(EGP(s.total_returns))}</td>
           <td class="right">${escapeHtml(EGP(s.opening_balance))}</td>
           <td class="right">${escapeHtml(EGP(s.expected_closing))}</td>
           <td class="right">${s.actual_closing == null ? '—' : escapeHtml(EGP(s.actual_closing))}</td>
@@ -136,19 +153,31 @@ export function buildAggregatedShiftReportHtml(
           <th>الكاشير</th>
           <th>الخزنة</th>
           <th>الحالة</th>
-          <th>وقت الفتح</th>
-          <th>وقت الإغلاق</th>
+          <th>عدد الفواتير</th>
+          <th>إجمالي المبيعات</th>
+          <th>إجمالي التحصيلات</th>
+          <th>كاش</th>
+          <th>غير نقدي</th>
+          <th>المصروفات</th>
+          <th>المرتجعات</th>
           <th>مبلغ الافتتاح</th>
-          <th>المتوقع</th>
-          <th>الإغلاق الفعلي</th>
-          <th>الفرق</th>
+          <th>المتوقع النقدي</th>
+          <th>الإغلاق الفعلي النقدي</th>
+          <th>فرق الكاش</th>
           <th>الصافي</th>
         </tr>
       </thead>
       <tbody>${shiftsRows}</tbody>
       <tfoot>
         <tr style="background:#f1f5f9;font-weight:bold;">
-          <td colspan="7" class="right">الإجمالي عبر الورديات المحددة</td>
+          <td colspan="5" class="right">الإجمالي عبر الورديات المحددة</td>
+          <td class="right">${totals.invoice_count}</td>
+          <td class="right">${escapeHtml(EGP(totals.total_sales))}</td>
+          <td class="right">${escapeHtml(EGP(totals.grand_payment_total))}</td>
+          <td class="right">${escapeHtml(EGP(totals.cash_total))}</td>
+          <td class="right">${escapeHtml(EGP(totals.non_cash_total))}</td>
+          <td class="right">${escapeHtml(EGP(totals.total_operating_expenses))}</td>
+          <td class="right">${escapeHtml(EGP(totals.total_returns))}</td>
           <td class="right">${escapeHtml(EGP(totals.opening_balance))}</td>
           <td class="right">${escapeHtml(EGP(totals.expected_closing))}</td>
           <td class="right">${totals.actual_closing == null ? '—' : escapeHtml(EGP(totals.actual_closing))}</td>
@@ -616,8 +645,9 @@ export function buildAggregatedShiftReportSheets(
   ];
 
   /* Sheet 2 — الورديات (selected shifts metadata + per-shift financials) */
-  // PR-FIX-SHIFT-AGGREGATE-OPENING-CASH-BALANCE — same 5 financial
-  // columns as the HTML "selected shifts" table.
+  // PR-FIX-SHIFT-AGGREGATE-CASH-VS-NONCASH-VARIANCE — same column set
+  // as the HTML "selected shifts" table. Cash-side columns labelled
+  // explicitly "النقدي" so non-cash payments never read as cash deficit.
   const shiftsSheet =
     header.shifts.length > 0
       ? header.shifts.map((s) => ({
@@ -626,13 +656,18 @@ export function buildAggregatedShiftReportSheets(
           الكاشير: s.cashier_name || '—',
           الخزنة: s.cashbox_name || '—',
           الحالة: STATUS_LABEL_AR[s.status] ?? s.status,
-          'وقت الفتح': fmtTime(s.opened_at),
-          'وقت الإغلاق': fmtTime(s.closed_at),
+          'عدد الفواتير': Number(s.invoice_count),
+          'إجمالي المبيعات': Number(s.total_sales),
+          'إجمالي التحصيلات': Number(s.total_collections),
+          كاش: Number(s.cash_total),
+          'غير نقدي': Number(s.non_cash_total),
+          المصروفات: Number(s.total_operating_expenses),
+          المرتجعات: Number(s.total_returns),
           'مبلغ الافتتاح': Number(s.opening_balance),
-          المتوقع: Number(s.expected_closing),
-          'الإغلاق الفعلي':
+          'المتوقع النقدي': Number(s.expected_closing),
+          'الإغلاق الفعلي النقدي':
             s.actual_closing == null ? '' : Number(s.actual_closing),
-          الفرق: s.variance == null ? '' : Number(s.variance),
+          'فرق الكاش': s.variance == null ? '' : Number(s.variance),
           الصافي: Number(s.net_shift_amount),
         }))
       : [
@@ -642,12 +677,17 @@ export function buildAggregatedShiftReportSheets(
             الكاشير: '',
             الخزنة: '',
             الحالة: '',
-            'وقت الفتح': '',
-            'وقت الإغلاق': '',
+            'عدد الفواتير': '',
+            'إجمالي المبيعات': '',
+            'إجمالي التحصيلات': '',
+            كاش: '',
+            'غير نقدي': '',
+            المصروفات: '',
+            المرتجعات: '',
             'مبلغ الافتتاح': '',
-            المتوقع: '',
-            'الإغلاق الفعلي': '',
-            الفرق: '',
+            'المتوقع النقدي': '',
+            'الإغلاق الفعلي النقدي': '',
+            'فرق الكاش': '',
             الصافي: '',
           },
         ];

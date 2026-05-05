@@ -173,7 +173,18 @@ export default function ShiftReports() {
     },
   });
 
-  /** Shift rows enriched with cash / non-cash / grand from summaries. */
+  /**
+   * Shift rows enriched with cash / non-cash / grand from summaries.
+   *
+   * PR-FIX-SHIFT-AGGREGATE-CASH-VS-NONCASH-VARIANCE — also override
+   * `expected_closing`, `actual_closing`, and `variance` with the
+   * LIVE values from `summary(id)`. The stored `shifts` row carries
+   * the close-time snapshot which can briefly include non-cash
+   * payments (observed on SHF-2026-00016: stored expected=1660 vs
+   * live expected=1160 for a 500 InstaPay payment). Using the live
+   * values guarantees the on-screen preview matches the single-shift
+   * card (the source of truth) and the printed aggregated report.
+   */
   const enrichedShifts: ShiftRowWithBreakdown[] = useMemo(() => {
     const map = summariesQuery.data || {};
     return shifts.map((s) => {
@@ -184,6 +195,14 @@ export default function ShiftReports() {
         non_cash_total: sum?.non_cash_total ?? 0,
         grand_payment_total:
           sum?.grand_payment_total ?? sum?.total_sales ?? Number(s.total_sales || 0),
+        // Prefer live values when the per-shift summary is loaded.
+        expected_closing:
+          sum?.expected_closing ?? Number(s.expected_closing ?? 0),
+        actual_closing:
+          sum?.actual_closing != null
+            ? Number(sum.actual_closing)
+            : s.actual_closing,
+        variance: sum?.variance != null ? Number(sum.variance) : s.variance,
       } as ShiftRowWithBreakdown;
     });
   }, [shifts, summariesQuery.data]);

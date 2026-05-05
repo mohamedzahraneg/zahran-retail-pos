@@ -2003,10 +2003,15 @@ export class ShiftsService {
       variance: varianceTotal,
       closed_shift_count: closedSummaries.length,
 
-      // "net shift amount" — the user's spec metric. Defined as
-      // (sum expected_closing − sum opening_balance) so it carries
-      // the same intuition as the per-shift "صافي" displayed today.
-      net_shift_amount: expectedClosingTotal - openingBalanceTotal,
+      // PR-FIX-SHIFT-AGGREGATE-CASH-VS-NONCASH-VARIANCE
+      // Per business definition: "صافي إجمالي الورديات" = sum of
+      // each shift's expected_closing (which already includes its
+      // opening balance through the single-shift summary formula).
+      // The previous interpretation (`expected − opening`) is now
+      // exposed under `net_cash_movement` for callers that want net
+      // cash movement during the period without opening balances.
+      net_shift_amount: expectedClosingTotal,
+      net_cash_movement: expectedClosingTotal - openingBalanceTotal,
     };
 
     // 8. Header.
@@ -2037,13 +2042,22 @@ export class ShiftsService {
       ).entries(),
     ).map(([id, name]) => ({ cashbox_id: id, name_ar: name }));
 
-    // PR-FIX-SHIFT-AGGREGATE-OPENING-CASH-BALANCE
-    // Enrich each header.shifts[] row with the same per-shift
-    // financials the single-shift report displays. Source of truth
-    // is the LIVE `summary(id)` (already fetched into `enriched`),
-    // not the stored `shifts.expected_closing` column — that column
-    // is stale on open shifts (set at open-time = opening_balance).
-    // For closed shifts the two are equivalent.
+    // PR-FIX-SHIFT-AGGREGATE-OPENING-CASH-BALANCE +
+    // PR-FIX-SHIFT-AGGREGATE-CASH-VS-NONCASH-VARIANCE
+    //
+    // Enrich each header.shifts[] row with the same per-shift values
+    // the LIVE single-shift card displays. The stored
+    // `shifts.expected_closing` column can be stale (e.g. SHF-2026-
+    // 00016 has stored=1660 vs live=1160 because the close routine
+    // briefly included a non-cash payment). The aggregator MUST use
+    // `summary.expected_closing` so non-cash payments never inflate
+    // the cash side.
+    //
+    // Naming clarification (per business definition): the displayed
+    // "الصافي" equals `expected_closing` (the cash-only expected
+    // closing balance — already includes opening_balance through the
+    // single-shift summary formula). It is NOT
+    // `expected_closing − opening_balance`.
     const summaryByShiftId = new Map<string, any>(
       enriched.map(({ shift, summary }) => [shift.id, summary]),
     );
@@ -2067,15 +2081,35 @@ export class ShiftsService {
             closed_at: s.closed_at,
             cashier_name: s.opened_by_name ?? null,
             cashbox_name: s.cashbox_name ?? null,
-            // Per-shift financials (PR-FIX-SHIFT-AGGREGATE-OPENING-CASH-BALANCE)
+            // ── Cash-side reconciliation (single-shift summary fields) ──
             opening_balance: opening,
+            // Cash-only expected closing (does NOT include non-cash).
             expected_closing: expected,
             actual_closing: actual,
             variance,
-            // "الصافي" — same formula as the totals' net_shift_amount
-            // (`expected_closing − opening_balance`) so the sum across
-            // selected shifts equals `totals.net_shift_amount`.
-            net_shift_amount: expected - opening,
+            // Per business definition: "الصافي" = `expected_closing`.
+            // The previous formula (`expected − opening`) is exposed
+            // separately for callers that genuinely want net cash
+            // movement during the shift (no opening balance).
+            net_shift_amount: expected,
+            net_cash_movement: expected - opening,
+            // ── Sales + payment breakdown ──
+            invoice_count: Number(sum?.invoice_count ?? 0),
+            total_sales: Number(sum?.total_sales ?? 0),
+            // Total collections = grand_payment_total when present,
+            // falls back to total_sales for older summaries.
+            total_collections: Number(
+              sum?.grand_payment_total ?? sum?.total_sales ?? 0,
+            ),
+            cash_total: Number(
+              sum?.cash_total ?? sum?.payment_breakdown?.cash?.amount ?? 0,
+            ),
+            non_cash_total: Number(sum?.non_cash_total ?? 0),
+            // ── Expenses + returns ──
+            total_operating_expenses: Number(
+              sum?.total_operating_expenses ?? 0,
+            ),
+            total_returns: Number(sum?.total_returns ?? 0),
           };
         }),
         cashiers,
