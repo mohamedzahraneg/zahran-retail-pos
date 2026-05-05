@@ -377,6 +377,16 @@ export class CashDeskController {
   // ── Supplier payments ───────────────────────────────────────────────
   @Post('supplier-payments')
   @Roles('admin', 'manager', 'accountant')
+  // PR-AUDIT-IDEMPOTENCY-CASH-DESK-SUPPLIER-PAYMENTS — sixth protected
+  // endpoint after /pos/invoices (#275), /cash-desk/transfer (#277),
+  // /accounting/expenses + /accounting/expenses/daily (#279), and
+  // /cash-desk/customer-payments (#281). Symmetric counterpart of
+  // `receive`. Optional Idempotency-Key header — without it, today's
+  // behavior. With it, replays the cached 2xx for 24h or 425/409 for
+  // concurrent / payload-mismatch. The sibling /suppliers/:id/pay
+  // route is NOT in scope for this PR (different controller, different
+  // DTO, different service method).
+  @UseInterceptors(IdempotencyInterceptor)
   pay(
     @Body() dto: CreateSupplierPaymentDto,
     @CurrentUser() user: JwtUser,
