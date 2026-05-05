@@ -322,3 +322,130 @@ describe('<CashboxDetailsModal /> Fix 4 — period totals + linked totals + defa
     expect(screen.getByTestId('cashbox-range-all').textContent).toMatch(/الكل/);
   });
 });
+
+// ───── PR-AUDIT-EWALLET-GL-ONLY-UX (Sprint 2 / PR-5) ─────
+//
+// Pin a small reconciliation indicator inside the linked-payment-
+// accounts panel: when the cashbox is non-cash (ewallet/bank/check),
+// compare the linked-PA `net_debit` total to the GL-derived
+// `accounting_balance` and surface either:
+//   · "متطابق مع رصيد الأستاذ (GL ####)" (emerald) when |gap| ≤ 0.01
+//   · "فرق X EGP عن رصيد الأستاذ (GL ####)" (amber) otherwise
+// FE-only. No formula change. Both numbers come from already-shipped
+// API fields (`Cashbox.accounting_balance` + `PaymentAccountBalance.
+// net_debit`). Cash cashboxes never show this indicator (they don't
+// have a GL accounting balance — their stored figure IS canonical).
+describe('<CashboxDetailsModal /> PR-AUDIT-EWALLET-GL-ONLY-UX — linked-PA vs GL reconciliation indicator', () => {
+  it('ewallet with linked-PA total = accounting_balance → "متطابق مع رصيد الأستاذ (GL 1114)" emerald', async () => {
+    // Reconciled case: 1,895 + 295 = 2,190 = accounting_balance.
+    renderModal({
+      cashbox: makeCashbox({
+        id: 'cb-ewallet', kind: 'ewallet', name_ar: 'خزنة التحويلات',
+        current_balance: '0',
+        accounting_gl_code: '1114', accounting_balance: '2190.00',
+      } as any),
+      allBalances: [
+        makeBalance({
+          payment_account_id: 'pa-instapay', display_name: 'InstaPay',
+          method: 'instapay', cashbox_id: 'cb-ewallet', net_debit: '1895.00',
+        }),
+        makeBalance({
+          payment_account_id: 'pa-we', display_name: 'WE Pay', provider_key: 'we_pay',
+          method: 'wallet', cashbox_id: 'cb-ewallet', net_debit: '295.00',
+        }),
+      ],
+    });
+    const recon = screen.getByTestId('cashbox-details-linked-recon');
+    expect(recon).toBeInTheDocument();
+    expect(recon.className).toMatch(/emerald/);
+    expect(
+      screen.getByTestId('cashbox-details-linked-recon-status').textContent,
+    ).toMatch(/متطابق مع رصيد الأستاذ \(GL 1114\)/);
+    // Detail row shows both totals so the operator can audit the math.
+    const detail = screen.getByTestId('cashbox-details-linked-recon-detail');
+    expect(detail.textContent).toMatch(/المرتبط/);
+    expect(detail.textContent).toMatch(/2,190\.00/);
+    expect(detail.textContent).toMatch(/الأستاذ/);
+  });
+
+  it('ewallet with linked-PA total ≠ accounting_balance → "فرق X EGP عن رصيد الأستاذ (GL 1114)" amber', async () => {
+    // Unreconciled case from the production audit (read-only):
+    // خزنة التحويلات GL 1114 = 2,840 EGP but only 1,000 linked → gap +1,840.
+    renderModal({
+      cashbox: makeCashbox({
+        id: 'cb-ewallet', kind: 'ewallet', name_ar: 'خزنة التحويلات',
+        current_balance: '0',
+        accounting_gl_code: '1114', accounting_balance: '2840.00',
+      } as any),
+      allBalances: [
+        makeBalance({
+          payment_account_id: 'pa-instapay', display_name: 'InstaPay',
+          method: 'instapay', cashbox_id: 'cb-ewallet', net_debit: '1000.00',
+        }),
+      ],
+    });
+    const recon = screen.getByTestId('cashbox-details-linked-recon');
+    expect(recon).toBeInTheDocument();
+    expect(recon.className).toMatch(/amber/);
+    expect(
+      screen.getByTestId('cashbox-details-linked-recon-status').textContent,
+    ).toMatch(/فرق 1,840\.00 ج\.م عن رصيد الأستاذ \(GL 1114\)/);
+    // No "متطابق" wording when there's a real gap.
+    expect(
+      screen.getByTestId('cashbox-details-linked-recon-status').textContent,
+    ).not.toMatch(/متطابق/);
+  });
+
+  it('bank cashbox carries the same indicator with GL 1113', async () => {
+    renderModal({
+      cashbox: makeCashbox({
+        id: 'cb-bank', kind: 'bank', name_ar: 'حساب POS Visa',
+        current_balance: '0',
+        accounting_gl_code: '1113', accounting_balance: '4500.00',
+      } as any),
+      allBalances: [
+        makeBalance({
+          payment_account_id: 'pa-bank', display_name: 'Bank PA',
+          method: 'card_visa', gl_account_code: '1113', cashbox_id: 'cb-bank', net_debit: '4500.00',
+        } as any),
+      ],
+    });
+    expect(screen.getByTestId('cashbox-details-linked-recon')).toBeInTheDocument();
+    expect(
+      screen.getByTestId('cashbox-details-linked-recon-status').textContent,
+    ).toMatch(/متطابق مع رصيد الأستاذ \(GL 1113\)/);
+  });
+
+  it('cash cashbox does NOT render the indicator (no GL accounting balance to reconcile against)', async () => {
+    renderModal({
+      cashbox: makeCashbox({
+        id: 'cb-cash', kind: 'cash', name_ar: 'الخزينة الرئيسية',
+        current_balance: '34640',
+      }),
+      // Cash cashboxes don't normally carry linked PAs, but pin the
+      // contract anyway: even if they did, the indicator must not
+      // render — the displayCashboxBalance.kind for cash is 'cash',
+      // not 'accounting', so there's no GL net to compare to.
+      allBalances: [
+        makeBalance({
+          payment_account_id: 'pa-x', display_name: 'X',
+          method: 'instapay', cashbox_id: 'cb-cash', net_debit: '100.00',
+        }),
+      ],
+    });
+    expect(screen.queryByTestId('cashbox-details-linked-recon')).toBeNull();
+  });
+
+  it('non-cash cashbox with NO linked PAs renders neither the totals row nor the recon indicator', async () => {
+    renderModal({
+      cashbox: makeCashbox({
+        id: 'cb-orphan', kind: 'ewallet',
+        accounting_gl_code: '1114', accounting_balance: '500.00',
+      } as any),
+      allBalances: [],
+    });
+    expect(screen.queryByTestId('cashbox-details-linked-totals')).toBeNull();
+    expect(screen.queryByTestId('cashbox-details-linked-recon')).toBeNull();
+    expect(screen.getByTestId('cashbox-details-linked-empty')).toBeInTheDocument();
+  });
+});

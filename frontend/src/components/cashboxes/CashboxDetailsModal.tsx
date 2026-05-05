@@ -541,26 +541,66 @@ export function CashboxDetailsModal({
               (s, b) => s + Number(b.net_debit || 0),
               0,
             );
+            // PR-AUDIT-EWALLET-GL-ONLY-UX (Sprint 2 / PR-5) —
+            // surface whether the linked-PA total reconciles to the
+            // cashbox's GL accounting balance. The two should match
+            // when every relevant PA is linked; a gap means a PA
+            // exists in the GL but isn't tagged with this cashbox_id
+            // (or vice versa). FE-only — both numbers come from
+            // already-shipped API fields. No formula change.
+            const display = displayCashboxBalance(cashbox);
+            const showRecon = display.kind === 'accounting';
+            const recGap = showRecon ? linkedNetTotal - display.amount : 0;
+            const recAligned = Math.abs(recGap) <= 0.01;
             return (
-              <div
-                className="rounded-lg border border-emerald-200 bg-emerald-50/40 p-3 mb-3 flex items-center justify-between"
-                data-testid="cashbox-details-linked-totals"
-              >
-                <div>
-                  <div className="text-[12px] font-bold text-emerald-800">
-                    إجماليات الحسابات المرتبطة
-                  </div>
-                  <div className="text-[10px] text-emerald-700/80 mt-0.5">
-                    مجموع رصيد كل الحسابات المرتبطة — مستقل عن الفترة الزمنية
-                  </div>
-                </div>
+              <>
                 <div
-                  className="font-mono text-lg font-black text-emerald-800"
-                  data-testid="cashbox-details-linked-totals-amount"
+                  className="rounded-lg border border-emerald-200 bg-emerald-50/40 p-3 mb-3 flex items-center justify-between"
+                  data-testid="cashbox-details-linked-totals"
                 >
-                  {EGP(linkedNetTotal)}
+                  <div>
+                    <div className="text-[12px] font-bold text-emerald-800">
+                      إجماليات الحسابات المرتبطة
+                    </div>
+                    <div className="text-[10px] text-emerald-700/80 mt-0.5">
+                      مجموع رصيد كل الحسابات المرتبطة — مستقل عن الفترة الزمنية
+                    </div>
+                  </div>
+                  <div
+                    className="font-mono text-lg font-black text-emerald-800"
+                    data-testid="cashbox-details-linked-totals-amount"
+                  >
+                    {EGP(linkedNetTotal)}
+                  </div>
                 </div>
-              </div>
+                {showRecon && (
+                  <div
+                    className={`rounded-lg border p-2.5 mb-3 flex items-center justify-between text-[11px] ${
+                      recAligned
+                        ? 'border-emerald-200 bg-emerald-50/60 text-emerald-800'
+                        : 'border-amber-200 bg-amber-50/60 text-amber-800'
+                    }`}
+                    data-testid="cashbox-details-linked-recon"
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <span
+                        className="font-bold"
+                        data-testid="cashbox-details-linked-recon-status"
+                      >
+                        {recAligned
+                          ? `متطابق مع رصيد الأستاذ (GL ${display.glCode})`
+                          : `فرق ${EGP(Math.abs(recGap))} عن رصيد الأستاذ (GL ${display.glCode})`}
+                      </span>
+                    </div>
+                    <div
+                      className="font-mono"
+                      data-testid="cashbox-details-linked-recon-detail"
+                    >
+                      {`المرتبط ${EGP(linkedNetTotal)} · الأستاذ ${EGP(display.amount)}`}
+                    </div>
+                  </div>
+                )}
+              </>
             );
           })()}
           {linkedAccounts.length === 0 ? (
