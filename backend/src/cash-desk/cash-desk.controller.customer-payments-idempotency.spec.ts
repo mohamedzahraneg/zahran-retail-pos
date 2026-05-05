@@ -525,9 +525,14 @@ describe('CashDeskController route-level wiring — PR-AUDIT-IDEMPOTENCY-CASH-DE
     // ── Transfer retained from PR #277 — guards against regression.
     expect(hasInterceptor(controller.transfer)).toBe(true);
 
-    // ── Supplier-payments handler MUST remain undecorated.
-    //    Deferred to a future phased PR.
-    expect(hasInterceptor((controller as any).pay)).toBe(false);
+    // ── Supplier-payments handler — was undecorated when PR #281
+    //    shipped; PR-AUDIT-IDEMPOTENCY-CASH-DESK-SUPPLIER-PAYMENTS
+    //    now decorates it. The new spec
+    //    (cash-desk.controller.supplier-payments-idempotency.spec.ts)
+    //    owns the positive assertion. Updated here to a regression
+    //    guard so PR #281's contract STILL pins that pay carries
+    //    the interceptor.
+    expect(hasInterceptor((controller as any).pay)).toBe(true);
 
     // ── All other cash-desk POST handlers MUST be undecorated.
     const undecoratedSiblings: Array<keyof CashDeskController> = [
