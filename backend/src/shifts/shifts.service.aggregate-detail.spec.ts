@@ -335,7 +335,12 @@ describe('ShiftsService — PR-SHIFT-REPORTS-AGGREGATED-DETAIL-BE', () => {
     expect(out.totals.actual_closing).toBe(sumA.actual_closing);
     expect(out.totals.variance).toBe(sumA.variance);
     expect(out.totals.closed_shift_count).toBe(1);
-    expect(out.totals.net_shift_amount).toBe(
+    // PR-FIX-SHIFT-AGGREGATE-CASH-VS-NONCASH-VARIANCE
+    // Per business definition: net_shift_amount = expected_closing
+    // (the cash-only expected closing, which already includes opening).
+    expect(out.totals.net_shift_amount).toBe(sumA.expected_closing);
+    // The legacy formula is exposed under net_cash_movement.
+    expect((out.totals as any).net_cash_movement).toBe(
       sumA.expected_closing - sumA.opening_balance,
     );
   });
@@ -420,8 +425,10 @@ describe('ShiftsService — PR-SHIFT-REPORTS-AGGREGATED-DETAIL-BE', () => {
     expect(out.totals.actual_closing).toBe(1220); // 500+720
     expect(out.totals.variance).toBe(-65); // -85 + 20
 
-    // net_shift_amount = expected_closing_total − opening_balance_total
-    expect(out.totals.net_shift_amount).toBe(1385 - 600);
+    // PR-FIX-SHIFT-AGGREGATE-CASH-VS-NONCASH-VARIANCE
+    // net_shift_amount = sum of expected_closing across selected shifts.
+    expect(out.totals.net_shift_amount).toBe(1385); // 585+700+100
+    expect((out.totals as any).net_cash_movement).toBe(1385 - 600);
   });
 
   // ─── 3. Every detail row in every section carries shift context ───
@@ -857,19 +864,23 @@ describe('ShiftsService — PR-FIX-SHIFT-AGGREGATE-OPENING-CASH-BALANCE', () => 
 
     // The repro shift — Mahmoud Zahran's SHF-2026-00013 with
     // opening 105 must surface in the response.
+    // PR-FIX-SHIFT-AGGREGATE-CASH-VS-NONCASH-VARIANCE
+    // Per-shift net_shift_amount = expected_closing.
     const r1 = byNo('SHF-2026-00013');
     expect(r1.opening_balance).toBe(105);
     expect(r1.expected_closing).toBe(1455);
     expect(r1.actual_closing).toBe(1455);
     expect(r1.variance).toBe(0);
-    expect(r1.net_shift_amount).toBe(1455 - 105);
+    expect(r1.net_shift_amount).toBe(1455);
+    expect((r1 as any).net_cash_movement).toBe(1455 - 105);
 
     const r2 = byNo('SHF-2026-00014');
     expect(r2.opening_balance).toBe(350);
     expect(r2.expected_closing).toBe(5170);
     expect(r2.actual_closing).toBe(5195);
     expect(r2.variance).toBe(25);
-    expect(r2.net_shift_amount).toBe(5170 - 350);
+    expect(r2.net_shift_amount).toBe(5170);
+    expect((r2 as any).net_cash_movement).toBe(5170 - 350);
 
     // Open shift — actual_closing/variance NULL, but opening + expected
     // still populated.
@@ -878,7 +889,93 @@ describe('ShiftsService — PR-FIX-SHIFT-AGGREGATE-OPENING-CASH-BALANCE', () => 
     expect(r3.expected_closing).toBe(200);
     expect(r3.actual_closing).toBeNull();
     expect(r3.variance).toBeNull();
-    expect(r3.net_shift_amount).toBe(0);
+    expect(r3.net_shift_amount).toBe(200);
+    expect((r3 as any).net_cash_movement).toBe(0);
+  });
+
+  // ─── PR-FIX-SHIFT-AGGREGATE-CASH-VS-NONCASH-VARIANCE ──────────────
+  // SHF-2026-00016 repro: 500 InstaPay payment must NOT inflate cash
+  // variance. Live summary numbers from production:
+  //   opening = 465 / cash = 1225 / non_cash = 500 / expenses = 500
+  //   employee_settlement = 30 / total_sales = 1725 / invoice_count = 7
+  //   expected_closing (LIVE) = 1160 / actual_closing = 1160 / variance = 0
+  // The stored `shifts.expected_closing = 1660` is buggy (includes
+  // the 500 non-cash). The aggregator must use the LIVE summary.
+  it('SHF-2026-00016: 500 non-cash payment does NOT create cash deficit', async () => {
+    const SHF16 = '00000000-0000-4000-8000-000000000016';
+    const sum = summaryFixture(SHF16, {
+      opening_balance: 465,
+      total_sales: 1725,
+      invoice_count: 7,
+      cash_total: 1225,
+      non_cash_total: 500,
+      grand_payment_total: 1725,
+      total_operating_expenses: 500,
+      operating_expense_count: 3,
+      total_employee_settlements: 30,
+      employee_settlement_count: 1,
+      total_employee_cash_out: 30,
+      total_returns: 0,
+      return_count: 0,
+      total_cash_in: 1225,
+      total_cash_out: 530,
+      // LIVE expected — cash-only — does NOT include the 500 InstaPay.
+      expected_closing: 1160,
+      actual_closing: 1160,
+      variance: 0,
+    });
+    const { svc } = makeSvc({
+      dsResults: [
+        [
+          shiftRow(SHF16, 'SHF-2026-00016', {
+            opening_balance: '465',
+            // NB: stored shifts.expected_closing is intentionally buggy
+            // (1660) to mirror production. The aggregator must NOT
+            // propagate this; it must read from the LIVE summary.
+            expected_closing: '1660',
+            actual_closing: '1160',
+            opened_by_name: 'محمود زهران',
+          }),
+        ],
+        [{ full_name: 'مدير' }],
+      ],
+      summaries: { [SHF16]: sum },
+      adjustments: { [SHF16]: [] },
+    });
+
+    const out = await svc.aggregateDetail(
+      { shift_ids: [SHF16] },
+      { user_id: GENERATED_BY, username: 'manager' },
+    );
+
+    const row = out.header.shifts.find(
+      (s: any) => s.shift_no === 'SHF-2026-00016',
+    )!;
+    expect(row).toBeDefined();
+
+    // Cash-side reconciliation matches the single-shift card.
+    expect(row.opening_balance).toBe(465);
+    expect(row.expected_closing).toBe(1160); // LIVE — NOT 1660
+    expect(row.actual_closing).toBe(1160);
+    expect(row.variance).toBe(0); // NO deficit, NO 500
+    // "الصافي" — per business definition equals expected_closing.
+    expect(row.net_shift_amount).toBe(1160);
+    // The legacy formula is exposed under net_cash_movement.
+    expect((row as any).net_cash_movement).toBe(1160 - 465);
+
+    // Per-shift sales + payment breakdown columns (PR fix scope).
+    expect(row.invoice_count).toBe(7);
+    expect(row.total_sales).toBe(1725);
+    expect(row.total_collections).toBe(1725);
+    expect(row.cash_total).toBe(1225);
+    expect(row.non_cash_total).toBe(500); // The 500 lives HERE
+    expect(row.total_operating_expenses).toBe(500);
+    expect(row.total_returns).toBe(0);
+
+    // Top-level totals: net_shift_amount equals sum of expected, NOT
+    // sum of (expected − opening).
+    expect(out.totals.net_shift_amount).toBe(1160);
+    expect((out.totals as any).net_cash_movement).toBe(1160 - 465);
   });
 
   it('totals.opening_balance equals sum of header.shifts[].opening_balance', async () => {
