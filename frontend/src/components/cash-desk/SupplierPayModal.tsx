@@ -25,6 +25,13 @@ import toast from 'react-hot-toast';
 import { ArrowUpCircle, X } from 'lucide-react';
 import { cashDeskApi, type Cashbox, type PaymentMethod } from '@/api/cash-desk.api';
 import { suppliersApi, type Supplier } from '@/api/suppliers.api';
+// PR-AUDIT-IDEMPOTENCY-CASH-DESK-SUPPLIER-PAYMENTS-FE — reset the
+// per-modal Idempotency-Key on mount/unmount so each open
+// SupplierPayModal session is one supplier-payment intent. Within
+// an open session every retry of the same submit reuses the same
+// key. Field changes do NOT reset; body-tamper safety is BE-side
+// via 409 IDEMPOTENCY_KEY_PAYLOAD_MISMATCH.
+import { resetSupplierPaymentIdempotencyKey } from '@/lib/supplier-payment-idempotency';
 import {
   paymentsApi,
   METHOD_LABEL_AR,
@@ -69,6 +76,16 @@ export function SupplierPayModal({
   const [amount, setAmount] = useState('');
   const [reference, setReference] = useState('');
   const [notes, setNotes] = useState('');
+
+  // PR-AUDIT-IDEMPOTENCY-CASH-DESK-SUPPLIER-PAYMENTS-FE — clean slate
+  // on mount, defensive reset on unmount. Mounted conditionally from
+  // Suppliers.tsx via `{payTarget && <SupplierPayModal/>}`, so the
+  // mount/unmount lifecycle naturally bounds one supplier-payment
+  // intent.
+  useEffect(() => {
+    resetSupplierPaymentIdempotencyKey();
+    return () => resetSupplierPaymentIdempotencyKey();
+  }, []);
 
   useEffect(() => {
     if (!cashboxId && cashboxes.length) setCashboxId(cashboxes[0].id);

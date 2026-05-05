@@ -428,6 +428,40 @@ export interface CreateSupplierPaymentPayload {
   payment_account_id?: string | null;
 }
 
+/**
+ * PR-AUDIT-IDEMPOTENCY-CASH-DESK-SUPPLIER-PAYMENTS-FE — payload
+ * canonicalization for `pay`. Mirror of `canonicalizeReceivePayload`.
+ *
+ * Sorts `allocations` by `invoice_id` ascending so the BE's body-hash
+ * is identical across legitimate retries that present the same set
+ * of allocations in different click order.
+ *
+ * Defensive future-proof: SupplierPayModal does NOT currently send
+ * an allocations array — the modal's submit payload is flat. This
+ * helper short-circuits on undefined / non-array allocations and
+ * returns the payload untouched. The helper is wired at the api
+ * boundary so a future allocations-supporting UI gets the correct
+ * canonicalization automatically without modal-level logic.
+ *
+ * Returns a NEW payload object; the input is NOT mutated. Empty
+ * arrays are preserved as []. Note: the inner DTO field is named
+ * `invoice_id` even though semantically (on the supplier side) it
+ * stores `purchase_id` — that's a pre-existing pattern; renaming
+ * is out of scope.
+ *
+ * Exported for direct unit testing in
+ * `frontend/src/lib/supplier-payment-idempotency.spec.ts`.
+ */
+export function canonicalizePayPayload(
+  payload: CreateSupplierPaymentPayload,
+): CreateSupplierPaymentPayload {
+  if (!Array.isArray(payload.allocations)) return payload;
+  const sorted = [...payload.allocations].sort((a, b) =>
+    a.invoice_id < b.invoice_id ? -1 : a.invoice_id > b.invoice_id ? 1 : 0,
+  );
+  return { ...payload, allocations: sorted };
+}
+
 export const cashDeskApi = {
   cashboxes: (includeInactive = false) =>
     unwrap<Cashbox[]>(
@@ -608,7 +642,12 @@ export const cashDeskApi = {
 
   // Supplier payments
   pay: (payload: CreateSupplierPaymentPayload) =>
-    unwrap<SupplierPayment>(api.post('/cash-desk/supplier-payments', payload)),
+    unwrap<SupplierPayment>(
+      api.post(
+        '/cash-desk/supplier-payments',
+        canonicalizePayPayload(payload),
+      ),
+    ),
 
   listSupplierPayments: (supplier_id?: string) =>
     unwrap<SupplierPayment[]>(
