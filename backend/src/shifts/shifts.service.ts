@@ -279,13 +279,21 @@ export class ShiftsService {
     // Cashbox txns during the shift — these cover BOTH invoice-linked
     // in/outs AND manual receipts / disbursements. We break them down by
     // category (the actual column; some older code called it "source").
+    //
+    // PR-AUDIT-VOID-LEAK: filter `is_void = FALSE` so voided
+    // cancellation/reversal CT rows don't inflate the per-category
+    // amount/count buckets that feed customerReceipts / supplierPayments
+    // / otherCashIn / otherCashOut downstream. Same bug class as
+    // analytics.cashFlowWaterfall (PR #266) and cash-desk.cashflowToday.
     const txRows = await q.query(
       `
       SELECT direction::text AS direction, category::text AS category,
              COALESCE(SUM(amount),0)::numeric AS amount,
              COUNT(*)::int AS count
         FROM cashbox_transactions
-       WHERE cashbox_id = $1 AND created_at >= $2
+       WHERE cashbox_id = $1
+         AND created_at >= $2
+         AND is_void = FALSE
        GROUP BY direction, category
       `,
       [shift.cashbox_id, shift.opened_at],
