@@ -718,8 +718,15 @@ describe('AccountingPostingService — PR-FIN-PAYACCT-4D-DRIFT-ROOT-FIX-1', () =
  *
  * The fix threads `payment_account.cashbox_id` (frozen on the snapshot
  * at edit-time, or live-resolved as a back-compat fallback) onto:
- *   1. the non-cash GL line (`cashbox_id` + `resolve_from_cashbox_id`),
- *      satisfying Guard A.
+ *   1. the non-cash GL line as `cashbox_id` ONLY — the line's selector
+ *      is `account_code` (e.g. '1114'), so adding
+ *      `resolve_from_cashbox_id` would violate the engine's
+ *      "exactly one of account_code | account_id |
+ *      resolve_from_cashbox_id" rule (see
+ *      PR-FIX-POS-INVOICE-EDIT-WALLET-EXACTLY-ONE-ACCOUNT-SELECTOR
+ *      which corrected the original PR #286 to drop the second
+ *      selector). `cashbox_id` is a TAG and coexists with the
+ *      selector, satisfying Guard A.
  *   2. a paired entry in `cash_movements`, satisfying Guard B.
  *
  * The `skipCashMovements` opt is unchanged in semantics for CASH legs
@@ -785,6 +792,31 @@ describe('AccountingPostingService — PR-FIX-POS-INVOICE-EDIT-WALLET-CASHBOX-ID
     (svc as any).cashboxAccountId = async (_q: any, cashboxId: string) =>
       `acc-cashbox-${cashboxId}`;
     return { svc, engine, engineCalls, dsCalls };
+  }
+
+  /**
+   * PR-FIX-POS-INVOICE-EDIT-WALLET-EXACTLY-ONE-ACCOUNT-SELECTOR
+   *
+   * The engine requires every gl_line to specify exactly ONE of
+   * `account_code` | `account_id` | `resolve_from_cashbox_id`
+   * (financial-engine.service.ts — Phase-1 line shape check).
+   * `cashbox_id` is a TAG and does NOT count as a selector. This
+   * helper lets each test assert the rule line-by-line so a future
+   * regression that re-introduces a duplicate selector (the bug we
+   * fixed) is caught immediately.
+   */
+  function expectExactlyOneSelector(line: any): string {
+    const selectors = ['account_code', 'account_id', 'resolve_from_cashbox_id']
+      .filter((k) => line[k] !== undefined && line[k] !== null);
+    expect(selectors).toHaveLength(1);
+    return selectors[0];
+  }
+
+  /** Apply expectExactlyOneSelector across every line in a spec. */
+  function expectAllLinesHaveOneSelector(spec: any): void {
+    for (const l of spec.gl_lines as any[]) {
+      expectExactlyOneSelector(l);
+    }
   }
 
   /**
@@ -881,6 +913,10 @@ describe('AccountingPostingService — PR-FIX-POS-INVOICE-EDIT-WALLET-CASHBOX-ID
     expect(walletLine).toBeDefined();
     expect(walletLine.cashbox_id).toBeUndefined();
     expect(walletLine.resolve_from_cashbox_id).toBeUndefined();
+    // Even without paCashboxId, the line must still have exactly one
+    // selector (account_code = '1114' here).
+    expect(expectExactlyOneSelector(walletLine)).toBe('account_code');
+    expectAllLinesHaveOneSelector(spec);
 
     // Pipe through real engine validator to confirm Guard A would fire.
     const align = passesEngineCashGlAlignment(spec);
@@ -924,7 +960,13 @@ describe('AccountingPostingService — PR-FIX-POS-INVOICE-EDIT-WALLET-CASHBOX-ID
     );
     expect(walletLine).toBeDefined();
     expect(walletLine.cashbox_id).toBe('cb-wallet-instapay');
-    expect(walletLine.resolve_from_cashbox_id).toBe('cb-wallet-instapay');
+    // Engine "exactly one selector" rule: the wallet line uses
+    // `account_code = '1114'` as its selector, so
+    // `resolve_from_cashbox_id` MUST be absent. `cashbox_id` is a
+    // tag and coexists with the selector to satisfy Guard A.
+    expect(walletLine.resolve_from_cashbox_id).toBeUndefined();
+    expect(expectExactlyOneSelector(walletLine)).toBe('account_code');
+    expectAllLinesHaveOneSelector(spec);
 
     // The paired cash_movement MUST be emitted (regardless of
     // skipCashMovements) so engine Guard B passes. skipCashMovements
@@ -985,7 +1027,9 @@ describe('AccountingPostingService — PR-FIX-POS-INVOICE-EDIT-WALLET-CASHBOX-ID
       (l) => l.account_code === '1113',
     );
     expect(bankLine.cashbox_id).toBe('cb-bank-nbe');
-    expect(bankLine.resolve_from_cashbox_id).toBe('cb-bank-nbe');
+    expect(bankLine.resolve_from_cashbox_id).toBeUndefined();
+    expect(expectExactlyOneSelector(bankLine)).toBe('account_code');
+    expectAllLinesHaveOneSelector(spec);
 
     const bankMv = (spec.cash_movements as any[]).find(
       (m) => m.cashbox_id === 'cb-bank-nbe',
@@ -1032,6 +1076,9 @@ describe('AccountingPostingService — PR-FIX-POS-INVOICE-EDIT-WALLET-CASHBOX-ID
       (l) => l.account_code === '1115',
     );
     expect(checkLine.cashbox_id).toBe('cb-checks');
+    expect(checkLine.resolve_from_cashbox_id).toBeUndefined();
+    expect(expectExactlyOneSelector(checkLine)).toBe('account_code');
+    expectAllLinesHaveOneSelector(spec);
 
     const checkMv = (spec.cash_movements as any[]).find(
       (m) => m.cashbox_id === 'cb-checks',
@@ -1065,6 +1112,15 @@ describe('AccountingPostingService — PR-FIX-POS-INVOICE-EDIT-WALLET-CASHBOX-ID
     );
     expect(cashLine).toBeDefined();
     expect(cashLine.cashbox_id).toBe('cb-pos-1');
+    // The cash leg deliberately uses `resolve_from_cashbox_id` AS the
+    // selector (no `account_code` set) — the engine resolves the
+    // cashbox's GL bucket. This is the inverse pattern from non-cash
+    // legs (which use `account_code` as selector + `cashbox_id` tag).
+    // Both shapes satisfy the "exactly one selector" rule.
+    expect(cashLine.account_code).toBeUndefined();
+    expect(cashLine.account_id).toBeUndefined();
+    expect(expectExactlyOneSelector(cashLine)).toBe('resolve_from_cashbox_id');
+    expectAllLinesHaveOneSelector(spec);
 
     // skipCashMovements suppresses cash entries.
     expect(spec.cash_movements).toEqual([]);
@@ -1119,6 +1175,15 @@ describe('AccountingPostingService — PR-FIX-POS-INVOICE-EDIT-WALLET-CASHBOX-ID
     expect(walletLine).toBeDefined();
     expect(walletLine.debit).toBe(500);
 
+    // The two legs use opposite selector patterns — both valid under
+    // the "exactly one selector" rule.
+    expect(expectExactlyOneSelector(cashLine)).toBe(
+      'resolve_from_cashbox_id',
+    );
+    expect(expectExactlyOneSelector(walletLine)).toBe('account_code');
+    expect(walletLine.resolve_from_cashbox_id).toBeUndefined();
+    expectAllLinesHaveOneSelector(spec);
+
     // skipCashMovements suppresses cash entries on inv.cashbox_id; the
     // wallet movement on the payment-account cashbox is still emitted.
     expect(spec.cash_movements).toHaveLength(1);
@@ -1172,6 +1237,9 @@ describe('AccountingPostingService — PR-FIX-POS-INVOICE-EDIT-WALLET-CASHBOX-ID
     // Fix still tags the cashbox even for sub-accounts (consistent
     // tagging makes the later CT-vs-GL reconciliation easier).
     expect(walletLine.cashbox_id).toBe('cb-wallet-vodacash');
+    expect(walletLine.resolve_from_cashbox_id).toBeUndefined();
+    expect(expectExactlyOneSelector(walletLine)).toBe('account_code');
+    expectAllLinesHaveOneSelector(spec);
 
     // Engine validator: '1114-001' is NOT a liquid code, so Guards A
     // and B don't fire. Pass through.
@@ -1217,6 +1285,9 @@ describe('AccountingPostingService — PR-FIX-POS-INVOICE-EDIT-WALLET-CASHBOX-ID
       (l) => l.account_code === '1114',
     );
     expect(walletLine.cashbox_id).toBe('cb-wallet-live');
+    expect(walletLine.resolve_from_cashbox_id).toBeUndefined();
+    expect(expectExactlyOneSelector(walletLine)).toBe('account_code');
+    expectAllLinesHaveOneSelector(spec);
 
     expect(passesEngineCashGlAlignment(spec)).toBe(true);
   });
@@ -1254,6 +1325,9 @@ describe('AccountingPostingService — PR-FIX-POS-INVOICE-EDIT-WALLET-CASHBOX-ID
       (l) => l.account_code === '1114',
     );
     expect(walletLines).toHaveLength(1);
+    expect(walletLines[0].resolve_from_cashbox_id).toBeUndefined();
+    expect(expectExactlyOneSelector(walletLines[0])).toBe('account_code');
+    expectAllLinesHaveOneSelector(spec);
     // Exactly one wallet cash_movement.
     const walletMvs = (spec.cash_movements as any[]).filter(
       (m) => m.cashbox_id === 'cb-wallet-instapay',
@@ -1293,6 +1367,9 @@ describe('AccountingPostingService — PR-FIX-POS-INVOICE-EDIT-WALLET-CASHBOX-ID
       (l) => l.account_code === '1114',
     );
     expect(walletLine.cashbox_id).toBe('cb-wallet-instapay');
+    expect(walletLine.resolve_from_cashbox_id).toBeUndefined();
+    expect(expectExactlyOneSelector(walletLine)).toBe('account_code');
+    expectAllLinesHaveOneSelector(spec);
 
     const walletMv = (spec.cash_movements as any[]).find(
       (m) => m.cashbox_id === 'cb-wallet-instapay',
@@ -1302,4 +1379,388 @@ describe('AccountingPostingService — PR-FIX-POS-INVOICE-EDIT-WALLET-CASHBOX-ID
     expect(passesEngineCashGlAlignment(spec)).toBe(true);
   });
 });
+
+/**
+ * PR-FIX-POS-INVOICE-EDIT-WALLET-EXACTLY-ONE-ACCOUNT-SELECTOR
+ *
+ * Dedicated regression suite for the bug introduced by PR #286.
+ *
+ * PR #286 fixed the missing-cashbox_id Guard A failure on cash → wallet
+ * edits, but it did so by setting BOTH `account_code` AND
+ * `resolve_from_cashbox_id` on the same wallet GL line. The engine
+ * rejects that with:
+ *
+ *     "each line must specify exactly one of account_code /
+ *      account_id / resolve_from_cashbox_id"
+ *
+ * (financial-engine.service.ts — Phase-1 line shape check.) The fix
+ * for the fix is to drop `resolve_from_cashbox_id` on non-cash lines
+ * — `account_code` already serves as the selector, and `cashbox_id`
+ * is a TAG that coexists with the selector to satisfy Guard A.
+ *
+ * The cash leg is unchanged: it deliberately uses
+ * `resolve_from_cashbox_id` AS its selector (no `account_code` set),
+ * so it has exactly one selector too.
+ *
+ * These tests pin the corrected shape end-to-end so the bug cannot
+ * regress.
+ */
+describe(
+  'AccountingPostingService — PR-FIX-POS-INVOICE-EDIT-WALLET-EXACTLY-ONE-ACCOUNT-SELECTOR',
+  () => {
+    function makeSvc(opts: { dsResults: any[][] }) {
+      let i = 0;
+      const dsManager = {
+        query: async (_sql: string, _params: any[] = []) => {
+          return opts.dsResults[i++] ?? [];
+        },
+      };
+      const ds: any = { manager: dsManager, query: dsManager.query };
+      const engineCalls: any[] = [];
+      const engine: any = {
+        recordTransaction: jest.fn().mockImplementation(async (spec: any) => {
+          engineCalls.push(spec);
+          return { ok: true, entry_id: 'je-mock' };
+        }),
+      };
+      const svc = new AccountingPostingService(ds, engine);
+      (svc as any).cashboxAccountId = async (_q: any, cashboxId: string) =>
+        `acc-cashbox-${cashboxId}`;
+      return { svc, engine, engineCalls };
+    }
+
+    function selectors(line: any): string[] {
+      return ['account_code', 'account_id', 'resolve_from_cashbox_id'].filter(
+        (k) => line[k] !== undefined && line[k] !== null,
+      );
+    }
+
+    // Inline copy of the engine's Phase-1 selector validation so we
+    // catch a regression even if the engine itself is mocked away.
+    function assertEngineSelectorRule(spec: any): void {
+      for (const l of spec.gl_lines as any[]) {
+        const s = selectors(l);
+        expect(s).toHaveLength(1);
+      }
+    }
+
+    // ─── A. The exact reported regression: cash → wallet edit ──────
+    it('cash → wallet edit (the reported bug): wallet line has account_code only, NO resolve_from_cashbox_id', async () => {
+      const { svc, engineCalls } = makeSvc({
+        dsResults: [
+          [{
+            id: 'inv-r1', invoice_no: 'INV-R1', grand_total: 500,
+            paid_amount: 500, tax_amount: 0, status: 'paid',
+            customer_id: 'c-1', cashbox_id: 'cb-pos-1',
+            completed_at: '2026-05-04',
+          }],
+          [{ cogs: 0 }],
+          [{
+            payment_method: 'wallet',
+            amount: '500',
+            payment_account_id: 'pa-wallet-1',
+            payment_account_snapshot: {
+              id: 'pa-wallet-1',
+              method: 'wallet',
+              display_name: 'InstaPay',
+              gl_account_code: '1114',
+              cashbox_id: 'cb-wallet-instapay',
+            },
+          }],
+        ],
+      });
+
+      // editInvoice posts via skipCashMovements=true.
+      await svc.postInvoice('inv-r1', 'user-1', undefined, {
+        skipCashMovements: true,
+      });
+
+      expect(engineCalls).toHaveLength(1);
+      const spec = engineCalls[0];
+
+      const walletLine = (spec.gl_lines as any[]).find(
+        (l) => l.account_code === '1114',
+      );
+      expect(walletLine).toBeDefined();
+      expect(walletLine.account_code).toBe('1114');
+      expect(walletLine.cashbox_id).toBe('cb-wallet-instapay');
+      // The bug we fixed:
+      expect(walletLine.resolve_from_cashbox_id).toBeUndefined();
+      expect(selectors(walletLine)).toEqual(['account_code']);
+
+      // Engine Phase-1 rule passes for every line in the spec.
+      assertEngineSelectorRule(spec);
+    });
+
+    // ─── B. Symmetric: cash → bank ─────────────────────────────────
+    it('cash → bank edit: bank line has account_code only, NO resolve_from_cashbox_id', async () => {
+      const { svc, engineCalls } = makeSvc({
+        dsResults: [
+          [{
+            id: 'inv-r2', invoice_no: 'INV-R2', grand_total: 1200,
+            paid_amount: 1200, tax_amount: 0, status: 'paid',
+            customer_id: 'c-1', cashbox_id: 'cb-pos-1',
+            completed_at: '2026-05-04',
+          }],
+          [{ cogs: 0 }],
+          [{
+            payment_method: 'bank_transfer',
+            amount: '1200',
+            payment_account_id: 'pa-bank-1',
+            payment_account_snapshot: {
+              id: 'pa-bank-1',
+              method: 'bank_transfer',
+              display_name: 'NBE',
+              gl_account_code: '1113',
+              cashbox_id: 'cb-bank-nbe',
+            },
+          }],
+        ],
+      });
+
+      await svc.postInvoice('inv-r2', 'user-1', undefined, {
+        skipCashMovements: true,
+      });
+
+      const spec = engineCalls[0];
+      const bankLine = (spec.gl_lines as any[]).find(
+        (l) => l.account_code === '1113',
+      );
+      expect(bankLine.cashbox_id).toBe('cb-bank-nbe');
+      expect(bankLine.resolve_from_cashbox_id).toBeUndefined();
+      expect(selectors(bankLine)).toEqual(['account_code']);
+      assertEngineSelectorRule(spec);
+    });
+
+    // ─── C. Symmetric: cash → check ────────────────────────────────
+    it('cash → check edit: check line has account_code only, NO resolve_from_cashbox_id', async () => {
+      const { svc, engineCalls } = makeSvc({
+        dsResults: [
+          [{
+            id: 'inv-r3', invoice_no: 'INV-R3', grand_total: 800,
+            paid_amount: 800, tax_amount: 0, status: 'paid',
+            customer_id: 'c-1', cashbox_id: 'cb-pos-1',
+            completed_at: '2026-05-04',
+          }],
+          [{ cogs: 0 }],
+          [{
+            payment_method: 'check',
+            amount: '800',
+            payment_account_id: 'pa-check-1',
+            payment_account_snapshot: {
+              id: 'pa-check-1',
+              method: 'check',
+              display_name: 'شيك',
+              gl_account_code: '1115',
+              cashbox_id: 'cb-checks',
+            },
+          }],
+        ],
+      });
+
+      await svc.postInvoice('inv-r3', 'user-1', undefined, {
+        skipCashMovements: true,
+      });
+
+      const spec = engineCalls[0];
+      const checkLine = (spec.gl_lines as any[]).find(
+        (l) => l.account_code === '1115',
+      );
+      expect(checkLine.cashbox_id).toBe('cb-checks');
+      expect(checkLine.resolve_from_cashbox_id).toBeUndefined();
+      expect(selectors(checkLine)).toEqual(['account_code']);
+      assertEngineSelectorRule(spec);
+    });
+
+    // ─── D. Cash leg: still uses resolve_from_cashbox_id AS selector ─
+    it('cash leg: uses resolve_from_cashbox_id as selector (no account_code, no conflict)', async () => {
+      const { svc, engineCalls } = makeSvc({
+        dsResults: [
+          [{
+            id: 'inv-r4', invoice_no: 'INV-R4', grand_total: 300,
+            paid_amount: 300, tax_amount: 0, status: 'paid',
+            customer_id: 'c-1', cashbox_id: 'cb-pos-1',
+            completed_at: '2026-05-04',
+          }],
+          [{ cogs: 0 }],
+          [{
+            payment_method: 'cash',
+            amount: '300',
+            payment_account_id: null,
+            payment_account_snapshot: null,
+          }],
+        ],
+      });
+
+      await svc.postInvoice('inv-r4', 'user-1', undefined, {
+        skipCashMovements: true,
+      });
+
+      const spec = engineCalls[0];
+      const cashLine = (spec.gl_lines as any[]).find(
+        (l) => l.resolve_from_cashbox_id === 'cb-pos-1',
+      );
+      expect(cashLine).toBeDefined();
+      expect(cashLine.cashbox_id).toBe('cb-pos-1');
+      expect(cashLine.account_code).toBeUndefined();
+      expect(cashLine.account_id).toBeUndefined();
+      expect(selectors(cashLine)).toEqual(['resolve_from_cashbox_id']);
+      assertEngineSelectorRule(spec);
+    });
+
+    // ─── E. Mixed cash + wallet: BOTH legs valid, opposite patterns ─
+    it('mixed cash + wallet: both legs satisfy the rule with opposite selector patterns', async () => {
+      const { svc, engineCalls } = makeSvc({
+        dsResults: [
+          [{
+            id: 'inv-r5', invoice_no: 'INV-R5', grand_total: 800,
+            paid_amount: 800, tax_amount: 0, status: 'paid',
+            customer_id: 'c-1', cashbox_id: 'cb-pos-1',
+            completed_at: '2026-05-04',
+          }],
+          [{ cogs: 0 }],
+          [
+            { payment_method: 'cash', amount: '300',
+              payment_account_id: null, payment_account_snapshot: null },
+            {
+              payment_method: 'wallet',
+              amount: '500',
+              payment_account_id: 'pa-wallet-1',
+              payment_account_snapshot: {
+                id: 'pa-wallet-1',
+                method: 'wallet',
+                display_name: 'InstaPay',
+                gl_account_code: '1114',
+                cashbox_id: 'cb-wallet-instapay',
+              },
+            },
+          ],
+        ],
+      });
+
+      await svc.postInvoice('inv-r5', 'user-1', undefined, {
+        skipCashMovements: true,
+      });
+
+      const spec = engineCalls[0];
+      const cashLine = (spec.gl_lines as any[]).find(
+        (l) => l.cashbox_id === 'cb-pos-1',
+      );
+      const walletLine = (spec.gl_lines as any[]).find(
+        (l) => l.cashbox_id === 'cb-wallet-instapay',
+      );
+      expect(selectors(cashLine!)).toEqual(['resolve_from_cashbox_id']);
+      expect(selectors(walletLine!)).toEqual(['account_code']);
+      assertEngineSelectorRule(spec);
+    });
+
+    // ─── F. No duplicates: one wallet GL line + one wallet movement ─
+    it('no duplicate JE/CT/cash_movement on wallet edit', async () => {
+      const { svc, engineCalls } = makeSvc({
+        dsResults: [
+          [{
+            id: 'inv-r6', invoice_no: 'INV-R6', grand_total: 500,
+            paid_amount: 500, tax_amount: 0, status: 'paid',
+            customer_id: 'c-1', cashbox_id: 'cb-pos-1',
+            completed_at: '2026-05-04',
+          }],
+          [{ cogs: 0 }],
+          [{
+            payment_method: 'wallet',
+            amount: '500',
+            payment_account_id: 'pa-wallet-1',
+            payment_account_snapshot: {
+              id: 'pa-wallet-1',
+              method: 'wallet',
+              display_name: 'InstaPay',
+              gl_account_code: '1114',
+              cashbox_id: 'cb-wallet-instapay',
+            },
+          }],
+        ],
+      });
+
+      await svc.postInvoice('inv-r6', 'user-1', undefined, {
+        skipCashMovements: true,
+      });
+
+      const spec = engineCalls[0];
+      // recordTransaction was called exactly once (one JE).
+      expect(engineCalls).toHaveLength(1);
+      // Exactly one wallet line.
+      const walletLines = (spec.gl_lines as any[]).filter(
+        (l) => l.account_code === '1114',
+      );
+      expect(walletLines).toHaveLength(1);
+      // Exactly one wallet movement.
+      const walletMvs = (spec.cash_movements as any[]).filter(
+        (m) => m.cashbox_id === 'cb-wallet-instapay',
+      );
+      expect(walletMvs).toHaveLength(1);
+    });
+
+    // ─── G. Real engine validator: checkCashGlAlignment passes ─────
+    it('cash → wallet edit: real engine checkCashGlAlignment passes (Guards A/B/C)', async () => {
+      const { svc, engineCalls } = makeSvc({
+        dsResults: [
+          [{
+            id: 'inv-r7', invoice_no: 'INV-R7', grand_total: 500,
+            paid_amount: 500, tax_amount: 0, status: 'paid',
+            customer_id: 'c-1', cashbox_id: 'cb-pos-1',
+            completed_at: '2026-05-04',
+          }],
+          [{ cogs: 0 }],
+          [{
+            payment_method: 'wallet',
+            amount: '500',
+            payment_account_id: 'pa-wallet-1',
+            payment_account_snapshot: {
+              id: 'pa-wallet-1',
+              method: 'wallet',
+              display_name: 'InstaPay',
+              gl_account_code: '1114',
+              cashbox_id: 'cb-wallet-instapay',
+            },
+          }],
+        ],
+      });
+
+      // Don't pass skipCashMovements — initial-sale path emits the
+      // paired wallet movement so Guard B passes alongside Guard A.
+      await svc.postInvoice('inv-r7', 'user-1');
+
+      const spec = engineCalls[0];
+
+      // Build the resolved-lines + code map shape the engine validator
+      // expects, then pipe the spec through.
+      const codeById = new Map<string, string>();
+      const resolvedLines = (spec.gl_lines as any[]).map((l) => {
+        const accountId = String(
+          l.account_code ?? `cashbox:${l.resolve_from_cashbox_id}`,
+        );
+        const code =
+          l.account_code ?? (l.resolve_from_cashbox_id ? '1111' : '');
+        codeById.set(accountId, code);
+        return {
+          account_id: accountId,
+          debit: Number(l.debit ?? 0),
+          credit: Number(l.credit ?? 0),
+          cashbox_id: l.cashbox_id ?? l.resolve_from_cashbox_id ?? null,
+        };
+      });
+
+      const result = checkCashGlAlignment({
+        reference_type: spec.reference_type,
+        reference_id: spec.reference_id,
+        accounting_only: spec.accounting_only ?? false,
+        resolved_lines: resolvedLines,
+        cash_movements: spec.cash_movements ?? [],
+        code_by_account_id: codeById,
+      });
+      expect(
+        result === null || result === 'accounting_only_bypass_logged',
+      ).toBe(true);
+    });
+  },
+);
 

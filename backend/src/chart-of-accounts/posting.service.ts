@@ -256,12 +256,13 @@ export class AccountingPostingService {
         continue;
       }
 
-      // Non-cash GL line. When payment_account.cashbox_id is set,
-      // tag both `cashbox_id` and `resolve_from_cashbox_id` so the
-      // engine's Phase-2 auto-tag path keeps the cashbox attribution
-      // through resolution AND the line passes Guard A regardless of
-      // whether the resolved gl_code lands on a raw liquid bucket
-      // (1111/1113/1114/1115) or a non-liquid sub-account.
+      // Non-cash GL line. `account_code` is the line SELECTOR, so we
+      // must NOT also set `resolve_from_cashbox_id` (engine enforces
+      // exactly one of account_code | account_id |
+      // resolve_from_cashbox_id per line). `cashbox_id` is a TAG and
+      // can coexist with the selector — it carries the
+      // payment_account-bound virtual cashbox through to satisfy
+      // Guard A on raw liquid buckets (1113/1114/1115).
       const lineEntry: any = {
         account_code: rp.glCode,
         debit: rp.amount,
@@ -271,7 +272,6 @@ export class AccountingPostingService {
       };
       if (rp.paCashboxId) {
         lineEntry.cashbox_id = rp.paCashboxId;
-        lineEntry.resolve_from_cashbox_id = rp.paCashboxId;
       }
       lines.push(lineEntry);
     }
