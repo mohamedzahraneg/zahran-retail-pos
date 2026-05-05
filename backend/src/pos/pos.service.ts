@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   NotFoundException,
   Optional,
@@ -15,6 +16,7 @@ import { AccountingPostingService } from '../chart-of-accounts/posting.service';
 import { FinancialEngineService } from '../chart-of-accounts/financial-engine.service';
 import { PaymentsService } from '../payments/payments.service';
 import { resolveLogoKey } from '../payments/providers.catalog';
+import { ShiftsService } from '../shifts/shifts.service';
 
 @Injectable()
 export class PosService {
@@ -28,6 +30,13 @@ export class PosService {
     @Optional() private readonly posting?: AccountingPostingService,
     @Optional() private readonly engine?: FinancialEngineService,
     @Optional() private readonly payments?: PaymentsService,
+    // PR-FIX-POS-INVOICE-EDIT-REFRESH-CLOSED-SHIFT-SNAPSHOT
+    // Used by editInvoice to refresh the parent shift's stored
+    // close-time snapshot when an invoice belonging to a closed
+    // shift is edited (cash↔non-cash payment-method swap, amount
+    // change, etc.). @Optional so existing unit tests that stub a
+    // bare PosService keep working.
+    @Optional() private readonly shifts?: ShiftsService,
   ) {}
 
   /**
@@ -1118,6 +1127,30 @@ export class PosService {
         if (postRes?.error) {
           throw new BadRequestException(
             `فشل ترحيل القيد بعد تعديل الفاتورة: ${postRes.error}`,
+          );
+        }
+      }
+
+      // ── 10) PR-FIX-POS-INVOICE-EDIT-REFRESH-CLOSED-SHIFT-SNAPSHOT
+      // If the invoice belongs to an already-closed shift, the cash
+      // delta from a payment-method swap (e.g. cash → InstaPay) leaves
+      // the shift's stored close snapshot stale: total_cash_in /
+      // expected_closing still reflect the pre-edit cash, so the
+      // generated `difference` mis-flags the shift as a shortage.
+      //
+      // Recompute the snapshot inside the SAME transaction so a
+      // failure rolls the entire edit back. If finance has already
+      // posted a variance JE / treatment for the shift, refuse with a
+      // clear 409 — the user must reverse the variance treatment
+      // first.
+      if (orig.shift_id && this.shifts) {
+        const refresh = await this.shifts.refreshClosedShiftSnapshot(
+          orig.shift_id,
+          em,
+        );
+        if (refresh.status === 'blocked') {
+          throw new ConflictException(
+            'لا يمكن تعديل فاتورة لوردية مغلقة سبق ترحيل فروقاتها محاسبياً. يجب تسوية أو إلغاء معالجة الفروقات أولاً.',
           );
         }
       }
