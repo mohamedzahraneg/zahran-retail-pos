@@ -7,6 +7,7 @@ import {
   Patch,
   Post,
   Query,
+  UseInterceptors,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import {
@@ -54,6 +55,12 @@ import {
   CurrentUser,
   JwtUser,
 } from '../common/decorators/current-user.decorator';
+// PR-AUDIT-IDEMPOTENCY-JOURNAL-CREATE — opt-in idempotency on the
+// only direct manual-JE creation route. Without an Idempotency-Key
+// header the behavior is exactly unchanged. The sibling void /
+// backfill / closeYear / etc. handlers in this controller stay
+// unprotected (out of scope — most are naturally idempotent today).
+import { IdempotencyInterceptor } from '../common/interceptors/idempotency.interceptor';
 
 const ACC_TYPES = ['asset', 'liability', 'equity', 'revenue', 'expense'] as const;
 const NORMAL_BAL = ['debit', 'credit'] as const;
@@ -214,6 +221,20 @@ export class ChartOfAccountsController {
 
   @Post('journal')
   @Permissions('accounts.journal.post')
+  // PR-AUDIT-IDEMPOTENCY-JOURNAL-CREATE — seventh protected endpoint
+  // after /pos/invoices (#275), /cash-desk/transfer (#277),
+  // /accounting/expenses + /accounting/expenses/daily (#279),
+  // /cash-desk/customer-payments (#281), and /cash-desk/supplier-
+  // payments (#283). This is the ONLY direct manual-JE creation
+  // path in the system — every other JE write reaches the financial
+  // engine via a parent entity (invoice, expense, transfer, payment)
+  // whose UUID anchors `posting.safe()`'s (reference_type, reference_id)
+  // dedupe. Manual entries auto-generate a fresh reference per call,
+  // so duplicate submission today produces 2 independent posted JEs.
+  // Optional Idempotency-Key header — without it, today's behavior.
+  // With it, replays the cached 2xx for 24h or 425/409 for concurrent /
+  // payload-mismatch.
+  @UseInterceptors(IdempotencyInterceptor)
   createJournal(
     @Body() dto: CreateJournalDtoIn,
     @CurrentUser() user: JwtUser,
