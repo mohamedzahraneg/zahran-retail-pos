@@ -82,17 +82,23 @@ export default function Shifts() {
       shiftsApi.list({ status: statusFilter || undefined }),
   });
 
-  // PR-FIX-SHIFT-REPORTS-LIVE-VARIANCE-EXPENSES-RETURNS-NET
+  // PR-FIX-SHIFTS-PAGE-BULK-LIVE-VARIANCE
+  //
   // The Shifts list table previously showed `s.variance` directly
   // from `shifts.list()`, which is computed as
   // `actual_closing − stored_expected_closing`. The stored
   // `expected_closing` can be stale on shifts whose close routine
   // briefly captured a non-cash payment (observed on
   // SHF-2026-00016: stored 1660, live 1160 due to a 500 InstaPay).
-  // The single-shift card's LIVE summary is the source of truth, so
-  // we fan out `summary(id)` for closed shifts and override the
-  // displayed variance. The fan-out is bounded by `shifts.list()`'s
-  // own page limit (200/1000 rows) and only fires for closed shifts.
+  //
+  // PR #292 patched this by fanning out `summary(id)` per closed
+  // shift. That ran 8 SQL queries × N shifts on every page refresh
+  // and exhausted the Supavisor pooler with EMAXCONNSESSION (max
+  // pool_size: 15). We're now using a dedicated bulk endpoint
+  // that returns LIVE variance + cash/non-cash totals in 5
+  // grouped SQL queries — total round-trips bounded at 5 per
+  // request, regardless of N. The endpoint caps at 100 shift_ids
+  // server-side; the wrapper slices client-side as defense.
   const closedShiftIds = useMemo(
     () => shifts.filter((s) => s.status === 'closed').map((s) => s.id),
     [shifts],
@@ -101,18 +107,20 @@ export default function Shifts() {
     queryKey: ['shifts-live-summaries', closedShiftIds],
     enabled: closedShiftIds.length > 0,
     queryFn: async () => {
-      const arr = await Promise.all(
-        closedShiftIds.map((id) =>
-          shiftsApi.summary(id).catch(() => null),
-        ),
+      // Single bulk request — no per-row fan-out.
+      const rows = await shiftsApi.listLiveSummary(closedShiftIds).catch(
+        () => [] as Awaited<ReturnType<typeof shiftsApi.listLiveSummary>>,
       );
-      const map: Record<string, ShiftSummary> = {};
-      closedShiftIds.forEach((id, i) => {
-        const s = arr[i];
-        if (s) map[id] = s;
-      });
+      const map: Record<
+        string,
+        Awaited<ReturnType<typeof shiftsApi.listLiveSummary>>[number]
+      > = {};
+      for (const r of rows) map[r.shift_id] = r;
       return map;
     },
+    // The bulk call is light, but a refetch on every focus/refetch-
+    // window-boundary is unnecessary. 60s stale window matches the
+    // typical cashier dwell time on /shifts.
     staleTime: 60_000,
   });
   const liveVarianceMap = liveSummariesQuery.data ?? {};

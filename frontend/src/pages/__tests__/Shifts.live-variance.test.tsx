@@ -1,21 +1,22 @@
 /**
  * Shifts.live-variance.test.tsx
  * ─────────────────────────────────────────────────────────────────────
- * PR-FIX-SHIFT-REPORTS-LIVE-VARIANCE-EXPENSES-RETURNS-NET
+ * PR-FIX-SHIFTS-PAGE-BULK-LIVE-VARIANCE
  *
- * Pins the live-variance override on the main Shifts list page.
+ * Pins the bulk live-variance pattern on the main Shifts list page.
  *
- * Repro: SHF-2026-00016 had a 500 EGP InstaPay payment. The stored
- * `shifts.expected_closing` briefly captured the 500 (= 1660), so
- * `shifts.list()` returned `variance = -500` even though the LIVE
- * single-shift card correctly shows variance = 0.
+ * Repro: PR #292 introduced a per-row `summary(id)` fan-out that
+ * exhausted the Supavisor pooler with EMAXCONNSESSION on refresh.
  *
- * Fix: Shifts.tsx now fans out `summary(id)` for every closed shift
- * and overrides the displayed variance with the LIVE summary value.
+ * Fix: Shifts.tsx now calls a single `shiftsApi.listLiveSummary(ids)`
+ * with the visible closed-shift ids. The BE returns one row per
+ * shift with the LIVE variance, sourced via 5 grouped SQL queries
+ * (NOT N × computeSummary). The FE keeps the same DiffBadge
+ * override pattern.
  *
- * The Shifts page mounts a deep tree (multiple modals, payment
- * accounts, mutations, …); rather than booting the whole page, this
- * test source-greps the relevant branches.
+ * Source-grep style (matches the existing Shifts test file
+ * conventions) — Shifts.tsx mounts a deep tree we'd rather not boot
+ * just to assert two query references.
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -26,13 +27,27 @@ const SHIFTS_SRC = readFileSync(
   'utf8',
 );
 
-describe('Shifts list — live variance override (PR-FIX-SHIFT-REPORTS-LIVE-VARIANCE-EXPENSES-RETURNS-NET)', () => {
-  it('declares a `liveSummariesQuery` keyed off closed shift ids', () => {
-    expect(SHIFTS_SRC).toContain('liveSummariesQuery');
-    expect(SHIFTS_SRC).toContain("'shifts-live-summaries'");
+describe('Shifts list — bulk live-variance (PR-FIX-SHIFTS-PAGE-BULK-LIVE-VARIANCE)', () => {
+  it('does NOT fan out shiftsApi.summary(id) for closed shifts in the live-summary query', () => {
+    // The old (post-PR #292, pre-this-PR) pattern was
+    //   const arr = await Promise.all(closedShiftIds.map((id) =>
+    //     shiftsApi.summary(id).catch(() => null)
+    //   ));
+    // It must NOT survive in the queryFn.
+    expect(SHIFTS_SRC).not.toMatch(
+      /closedShiftIds\.map\([^)]*shiftsApi\.summary/,
+    );
+    expect(SHIFTS_SRC).not.toMatch(
+      /Promise\.all\([^)]*shiftsApi\.summary/,
+    );
   });
 
-  it('only fires for closed shifts (avoids unnecessary fan-out on open ones)', () => {
+  it('calls shiftsApi.listLiveSummary(closedShiftIds) once via the React Query queryFn', () => {
+    expect(SHIFTS_SRC).toContain('shiftsApi.listLiveSummary(closedShiftIds)');
+  });
+
+  it('keeps the React Query cache key `shifts-live-summaries` keyed off closed shift ids', () => {
+    expect(SHIFTS_SRC).toContain("'shifts-live-summaries'");
     expect(SHIFTS_SRC).toMatch(
       /closedShiftIds[\s\S]+filter\(\(s\) => s\.status === 'closed'\)/,
     );
@@ -42,8 +57,6 @@ describe('Shifts list — live variance override (PR-FIX-SHIFT-REPORTS-LIVE-VARI
     expect(SHIFTS_SRC).toMatch(
       /liveVarianceMap\[s\.id\]\?\.variance\s*!=\s*null[\s\S]+Number\(liveVarianceMap\[s\.id\]\.variance\)/,
     );
-    // Fallback path is preserved (so initial render before fan-out
-    // resolves still shows something instead of empty).
     expect(SHIFTS_SRC).toMatch(
       /\(s as any\)\.variance \?\? s\.difference \?\? 0/,
     );
