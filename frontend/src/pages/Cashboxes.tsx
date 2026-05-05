@@ -1167,7 +1167,14 @@ function TreasuryCashboxCard({
   const Icon = KIND_ICON[cashbox.kind] ?? Wallet;
   const display = displayCashboxBalance(cashbox);
   const isCash = cashbox.kind === 'cash';
-  const balanceLabel = isCash ? 'رصيد الخزنة' : 'الرصيد المحاسبي';
+  // PR-AUDIT-LABELS-CASH-VS-GL — promote the explicit source phrasing
+  // from tooltip to visible label so the operator sees, on the card
+  // itself, whether the figure is operational (cashbox CT) or
+  // accounting (GL liquid). PR #269 already had the right tooltips
+  // and tone; this PR just makes the label self-documenting.
+  const balanceLabel = isCash
+    ? 'رصيد تشغيلي من حركات الخزنة'
+    : 'رصيد محاسبي من الأستاذ العام';
   const tone = isCash
     ? { border: 'border-emerald-200', bg: 'bg-emerald-50/30', text: 'text-emerald-800', sub: 'text-emerald-700' }
     : cashbox.kind === 'ewallet'

@@ -68,10 +68,13 @@ function CashEquivalentsCard({ data }: { data: FinanceDashboard['liquidity'] }) 
           PR-AUDIT-LABELS-CASH-VS-GL — sub-row labels now carry the
           explicit "(GL XXXX)" suffix so the operator can never confuse
           these accounting roll-ups with the operational cashbox sum. */}
-      <KpiRow label="الخزائن المحاسبية (GL 1111)"  value={fmtEGP(data.cashboxes_total)} />
-      <KpiRow label="البنوك المحاسبية (GL 1113)"   value={fmtEGP(data.banks_total)} />
-      <KpiRow label="المحافظ المحاسبية (GL 1114)"  value={fmtEGP(data.wallets_total)} />
-      <KpiRow label="الشيكات المحاسبية (GL 1115)"  value={fmtEGP(data.checks_total)} />
+      {/* PR-AUDIT-LABELS-CASH-VS-GL — labels carry "إجمالي" prefix +
+          "(محاسبي GL ####)" suffix so the formula source is explicit.
+          Values are unchanged — same `data.liquidity.*` fields. */}
+      <KpiRow label="إجمالي الخزائن (محاسبي GL 1111)"  value={fmtEGP(data.cashboxes_total)} />
+      <KpiRow label="إجمالي البنوك (محاسبي GL 1113)"   value={fmtEGP(data.banks_total)} />
+      <KpiRow label="إجمالي المحافظ (محاسبي GL 1114)"  value={fmtEGP(data.wallets_total)} />
+      <KpiRow label="إجمالي الشيكات (محاسبي GL 1115)"  value={fmtEGP(data.checks_total)} />
       <div className="border-t border-slate-200 dark:border-slate-700 pt-2 mt-1">
         <KpiRow
           label="الإجمالي"

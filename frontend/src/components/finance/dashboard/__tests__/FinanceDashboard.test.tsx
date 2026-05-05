@@ -666,18 +666,20 @@ describe('<FinanceDashboard />', () => {
       expect(tooltip).toMatch(/GL 1115/);
     });
 
-    it('sub-row labels are GL-suffixed (الخزائن المحاسبية, البنوك المحاسبية, المحافظ المحاسبية, الشيكات المحاسبية)', async () => {
+    it('sub-row labels carry "إجمالي X (محاسبي GL ####)" prefix/suffix (PR-AUDIT-LABELS-CASH-VS-GL — Sprint 2 / PR-4)', async () => {
       renderPage();
       const card = await screen.findByTestId('card-cash-equivalents');
-      expect(within(card).getByText('الخزائن المحاسبية (GL 1111)')).toBeInTheDocument();
-      expect(within(card).getByText('البنوك المحاسبية (GL 1113)')).toBeInTheDocument();
-      expect(within(card).getByText('المحافظ المحاسبية (GL 1114)')).toBeInTheDocument();
-      expect(within(card).getByText('الشيكات المحاسبية (GL 1115)')).toBeInTheDocument();
-      // The bare ambiguous labels are gone.
-      expect(card.textContent).not.toMatch(/إجمالي الخزائن(?!\s+الإلكترونية)/);
-      expect(card.textContent).not.toMatch(/إجمالي البنوك\b(?! 1113)/);
-      expect(card.textContent).not.toMatch(/إجمالي المحافظ\b(?! الإلكترونية)/);
-      expect(card.textContent).not.toMatch(/إجمالي الشيكات\b(?! 1115)/);
+      // New labels carry the "إجمالي" prefix and an explicit "(محاسبي GL ####)"
+      // suffix — operator can identify both the bucket AND the source.
+      expect(within(card).getByText('إجمالي الخزائن (محاسبي GL 1111)')).toBeInTheDocument();
+      expect(within(card).getByText('إجمالي البنوك (محاسبي GL 1113)')).toBeInTheDocument();
+      expect(within(card).getByText('إجمالي المحافظ (محاسبي GL 1114)')).toBeInTheDocument();
+      expect(within(card).getByText('إجمالي الشيكات (محاسبي GL 1115)')).toBeInTheDocument();
+      // The previous PR #269 phrasings ("X المحاسبية (GL ####)") are gone.
+      expect(card.textContent).not.toMatch(/الخزائن المحاسبية \(GL 1111\)/);
+      expect(card.textContent).not.toMatch(/البنوك المحاسبية \(GL 1113\)/);
+      expect(card.textContent).not.toMatch(/المحافظ المحاسبية \(GL 1114\)/);
+      expect(card.textContent).not.toMatch(/الشيكات المحاسبية \(GL 1115\)/);
     });
 
     it('values are unchanged for the same fixture (label-only PR — no formula change)', async () => {
