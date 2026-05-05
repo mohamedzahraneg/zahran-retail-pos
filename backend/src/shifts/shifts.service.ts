@@ -1029,6 +1029,31 @@ export class ShiftsService {
     //    write, and the optional employee_deductions insert commit
     //    together or roll back together. No half-states. ─────────────
     return this.ds.transaction(async (em) => {
+      // PR-FIX-SHIFT-SNAPSHOT-REALTIME-INTEGRITY-GUARD: independently
+      // recompute canonical totals from authoritative source tables
+      // and validate the about-to-be-written `summary` matches.
+      // Phantom cash_out / non-cash-as-cash / invoice_count drift
+      // all surface here BEFORE the UPDATE runs.
+      const canonical = await this.computeCanonicalSnapshot(
+        id,
+        Number(shift.opening_balance) || 0,
+        em,
+      );
+      this.assertSnapshotIntegrity(
+        shift.shift_no,
+        {
+          total_sales: Number(summary.total_sales) || 0,
+          total_returns: Number(summary.total_returns) || 0,
+          total_expenses: Number(summary.total_expenses) || 0,
+          total_cash_in: Number(summary.total_cash_in) || 0,
+          total_cash_out: Number(summary.total_cash_out) || 0,
+          invoice_count: Number(summary.invoice_count) || 0,
+          expected_closing: Number(summary.expected_closing) || 0,
+        },
+        canonical,
+        'close',
+      );
+
       const [updated] = await em.query(
         `
         UPDATE shifts SET
@@ -1193,24 +1218,44 @@ export class ShiftsService {
     // (which reads the shifts row directly) doesn't see the stale
     // shift-opening value. Without this the modal showed fake variances
     // like "+1,035 surplus" while the real variance was "-7 shortage".
-    const [row] = await this.ds.query(
-      `UPDATE shifts
-          SET status                 = 'pending_close',
-              close_requested_at     = NOW(),
-              close_requested_by     = $1,
-              close_requested_amount = $2::numeric,
-              expected_closing       = $5::numeric,
-              close_requested_notes  = $3
-        WHERE id = $4
-        RETURNING *`,
-      [
-        userId,
-        actual,
-        dto.notes ?? null,
+    //
+    // PR-FIX-SHIFT-SNAPSHOT-REALTIME-INTEGRITY-GUARD: this UPDATE
+    // writes expected_closing, which is a snapshot field. Wrap in a
+    // transaction so the canonical recompute + guard can roll back
+    // together if the cash math doesn't reconcile.
+    const row = await this.ds.transaction(async (em) => {
+      const canonical = await this.computeCanonicalSnapshot(
         id,
-        Number(summary.expected_closing || 0),
-      ],
-    );
+        Number(shift.opening_balance) || 0,
+        em,
+      );
+      this.assertSnapshotIntegrity(
+        shift.shift_no,
+        { expected_closing: Number(summary.expected_closing || 0) },
+        canonical,
+        'request_close',
+      );
+
+      const [r] = await em.query(
+        `UPDATE shifts
+            SET status                 = 'pending_close',
+                close_requested_at     = NOW(),
+                close_requested_by     = $1,
+                close_requested_amount = $2::numeric,
+                expected_closing       = $5::numeric,
+                close_requested_notes  = $3
+          WHERE id = $4
+          RETURNING *`,
+        [
+          userId,
+          actual,
+          dto.notes ?? null,
+          id,
+          Number(summary.expected_closing || 0),
+        ],
+      );
+      return r;
+    });
     return {
       pending: true,
       shift: row,
@@ -1681,6 +1726,31 @@ export class ShiftsService {
 
     const summary = await this.computeSummary(shift, em);
 
+    // PR-FIX-SHIFT-SNAPSHOT-REALTIME-INTEGRITY-GUARD: validate the
+    // computed summary against an independent canonical recompute
+    // BEFORE persisting. If the cash math doesn't reconcile (phantom
+    // expense, non-cash counted as cash, etc.) throw ConflictException
+    // and let the caller's transaction roll back.
+    const canonical = await this.computeCanonicalSnapshot(
+      shiftId,
+      Number(shift.opening_balance) || 0,
+      em,
+    );
+    this.assertSnapshotIntegrity(
+      shift.shift_no,
+      {
+        total_sales: Number(summary.total_sales) || 0,
+        total_returns: Number(summary.total_returns) || 0,
+        total_expenses: Number(summary.total_expenses) || 0,
+        total_cash_in: Number(summary.total_cash_in) || 0,
+        total_cash_out: Number(summary.total_cash_out) || 0,
+        invoice_count: Number(summary.invoice_count) || 0,
+        expected_closing: Number(summary.expected_closing) || 0,
+      },
+      canonical,
+      'refresh',
+    );
+
     const [updated] = await em.query(
       `
       UPDATE shifts SET
@@ -1707,6 +1777,260 @@ export class ShiftsService {
     );
 
     return { status: 'updated', shift: updated };
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // PR-FIX-SHIFT-SNAPSHOT-REALTIME-INTEGRITY-GUARD
+  //
+  // Real-time integrity guard for any code path that writes the
+  // close-snapshot fields on `shifts` (expected_closing, total_sales,
+  // total_returns, total_expenses, total_cash_in, total_cash_out,
+  // invoice_count). The guard recomputes the canonical totals
+  // independently from authoritative source tables, then asserts the
+  // about-to-be-written `summary` matches within EGP 0.01 tolerance.
+  //
+  // Phantom-attribution motivation: the audit
+  // (PR-AUDIT-SHIFT-ACCOUNTING-INTEGRITY) found that pre-trigger
+  // shifts SHF-2026-00001 / 00002 carry `total_expenses` /
+  // `total_cash_out` values with NO matching expense / settlement /
+  // return / CT row. With this guard in place, no future close or
+  // refresh can persist a snapshot whose cash math is not backed by
+  // canonical source rows.
+  //
+  // Canonical formula (cash only — non-cash NEVER inflates expected):
+  //   expected_closing = opening_balance
+  //                    + Σ(invoice_payments.amount cash, !is_return, !voided)
+  //                    − Σ(invoice_payments.amount cash, is_return,  !voided)
+  //                    − Σ(returns.net_refund cash, !cancelled, refunded)
+  //                    − Σ(expenses.amount cash, approved, !advance)
+  //                    − Σ(expenses.amount cash, approved, advance)
+  //                    − Σ(employee_settlements.amount cash, !void)
+  //
+  // total_expenses = Σ(expenses.amount cash, approved)            [ops + advances]
+  // total_cash_in  = Σ(invoice_payments.amount cash, !is_return)  [cash-side only]
+  // total_cash_out = Σ(invoice_payments.amount cash, is_return)
+  //                + Σ(returns.net_refund cash, !cancelled, refunded)
+  //                + total_expenses
+  //                + Σ(employee_settlements.amount cash, !void)
+  //
+  // ALL joins use explicit `shift_id`. NO cashbox+window fallback —
+  // that fallback is what produced the historical phantom
+  // attribution. New rows must carry shift_id; legacy rows that
+  // don't are deliberately excluded from canonical totals.
+  //
+  // CT category 'sale' is intentionally NOT used here — it stores
+  // grand_total (includes non-cash) and double-counts on edits.
+  // The truth lives in `invoice_payments` filtered to cash.
+  //
+  // Tolerance: 0.01 EGP. Stricter than the legacy "1 EGP" threshold
+  // because production data shows reconciled shifts agree to 0.01.
+  // ──────────────────────────────────────────────────────────────────
+
+  /**
+   * Independently compute canonical totals for a shift from
+   * authoritative source tables. Runs on the caller-supplied
+   * EntityManager so reads serialize with the in-flight transaction
+   * (no race against concurrent invoice / expense edits).
+   */
+  private async computeCanonicalSnapshot(
+    shiftId: string,
+    openingBalance: number,
+    em: EntityManager,
+  ): Promise<{
+    total_sales: number;
+    total_returns: number;
+    invoice_count: number;
+    total_expenses: number;
+    total_cash_in: number;
+    total_cash_out: number;
+    expected_closing: number;
+    breakdown: {
+      opening_balance: number;
+      cash_in_invoices: number;
+      cash_out_inv_returns: number;
+      returns_cash_refund: number;
+      expenses_cash: number;
+      advances_cash: number;
+      settlements_cash: number;
+      instapay_in: number;
+      wallet_in: number;
+    };
+  }> {
+    const [agg] = await em.query(
+      `WITH inv AS (
+         SELECT
+           COALESCE(SUM(grand_total) FILTER (WHERE is_return = false AND voided_at IS NULL), 0)::numeric AS total_sales,
+           COALESCE(SUM(grand_total) FILTER (WHERE is_return = true  AND voided_at IS NULL), 0)::numeric AS total_returns,
+           COUNT(*) FILTER (WHERE is_return = false AND voided_at IS NULL)::int                          AS invoice_count
+         FROM invoices WHERE shift_id = $1::uuid
+       ),
+       ip AS (
+         SELECT
+           COALESCE(SUM(p.amount) FILTER (WHERE p.payment_method='cash'     AND i.is_return=false AND i.voided_at IS NULL), 0)::numeric AS cash_in_invoices,
+           COALESCE(SUM(p.amount) FILTER (WHERE p.payment_method='cash'     AND i.is_return=true  AND i.voided_at IS NULL), 0)::numeric AS cash_out_inv_returns,
+           COALESCE(SUM(p.amount) FILTER (WHERE p.payment_method='instapay' AND i.is_return=false AND i.voided_at IS NULL), 0)::numeric AS instapay_in,
+           COALESCE(SUM(p.amount) FILTER (WHERE p.payment_method='wallet'   AND i.is_return=false AND i.voided_at IS NULL), 0)::numeric AS wallet_in
+         FROM invoice_payments p
+         JOIN invoices i ON i.id = p.invoice_id
+         WHERE i.shift_id = $1::uuid
+       ),
+       exp AS (
+         SELECT
+           COALESCE(SUM(amount) FILTER (WHERE payment_method='cash' AND is_approved = true AND is_advance = false), 0)::numeric AS expenses_cash,
+           COALESCE(SUM(amount) FILTER (WHERE payment_method='cash' AND is_approved = true AND is_advance = true ), 0)::numeric AS advances_cash
+         FROM expenses WHERE shift_id = $1::uuid
+       ),
+       es AS (
+         SELECT
+           COALESCE(SUM(amount) FILTER (WHERE method='cash' AND is_void = false), 0)::numeric AS settlements_cash
+         FROM employee_settlements WHERE shift_id = $1::uuid
+       ),
+       ret AS (
+         SELECT
+           COALESCE(SUM(net_refund) FILTER (WHERE refund_method='cash' AND cancelled_at IS NULL AND refunded_at IS NOT NULL), 0)::numeric AS returns_cash_refund
+         FROM returns WHERE shift_id = $1::uuid
+       )
+       SELECT
+         inv.total_sales, inv.total_returns, inv.invoice_count,
+         ip.cash_in_invoices, ip.cash_out_inv_returns, ip.instapay_in, ip.wallet_in,
+         exp.expenses_cash, exp.advances_cash,
+         es.settlements_cash,
+         ret.returns_cash_refund
+       FROM inv, ip, exp, es, ret`,
+      [shiftId],
+    );
+
+    const totalSales       = Number(agg?.total_sales)          || 0;
+    const totalReturns     = Number(agg?.total_returns)        || 0;
+    const invoiceCount     = Number(agg?.invoice_count)        || 0;
+    const cashInInvoices   = Number(agg?.cash_in_invoices)     || 0;
+    const cashOutInvRet    = Number(agg?.cash_out_inv_returns) || 0;
+    const instapayIn       = Number(agg?.instapay_in)          || 0;
+    const walletIn         = Number(agg?.wallet_in)            || 0;
+    const expensesCash     = Number(agg?.expenses_cash)        || 0;
+    const advancesCash     = Number(agg?.advances_cash)        || 0;
+    const settlementsCash  = Number(agg?.settlements_cash)     || 0;
+    const returnsCashRefund = Number(agg?.returns_cash_refund) || 0;
+
+    const totalExpenses = expensesCash + advancesCash;
+    const totalCashIn   = cashInInvoices;
+    const totalCashOut  =
+      cashOutInvRet +
+      returnsCashRefund +
+      expensesCash +
+      advancesCash +
+      settlementsCash;
+    const expectedClosing = openingBalance + totalCashIn - totalCashOut;
+
+    return {
+      total_sales: totalSales,
+      total_returns: totalReturns,
+      invoice_count: invoiceCount,
+      total_expenses: totalExpenses,
+      total_cash_in: totalCashIn,
+      total_cash_out: totalCashOut,
+      expected_closing: expectedClosing,
+      breakdown: {
+        opening_balance: openingBalance,
+        cash_in_invoices: cashInInvoices,
+        cash_out_inv_returns: cashOutInvRet,
+        returns_cash_refund: returnsCashRefund,
+        expenses_cash: expensesCash,
+        advances_cash: advancesCash,
+        settlements_cash: settlementsCash,
+        instapay_in: instapayIn,
+        wallet_in: walletIn,
+      },
+    };
+  }
+
+  /**
+   * Compare the about-to-be-written snapshot fields against the
+   * canonical recompute. Throws ConflictException with an Arabic
+   * message + diagnostic breakdown if any field exceeds tolerance.
+   *
+   * `expected` is the field the writer plans to persist (subset of
+   * snapshot — every caller passes whatever it intends to UPDATE).
+   * Numeric fields use 0.01 EGP tolerance; `invoice_count` is exact.
+   */
+  private assertSnapshotIntegrity(
+    shiftNo: string | undefined,
+    expected: Partial<{
+      total_sales: number;
+      total_returns: number;
+      total_expenses: number;
+      total_cash_in: number;
+      total_cash_out: number;
+      invoice_count: number;
+      expected_closing: number;
+    }>,
+    canonical: {
+      total_sales: number;
+      total_returns: number;
+      total_expenses: number;
+      total_cash_in: number;
+      total_cash_out: number;
+      invoice_count: number;
+      expected_closing: number;
+      breakdown: Record<string, number>;
+    },
+    context: 'close' | 'request_close' | 'refresh',
+  ): void {
+    const TOLERANCE = 0.01;
+    const mismatches: Array<{
+      field: string;
+      intended: number;
+      canonical: number;
+      delta: number;
+    }> = [];
+
+    const checkNumeric = (field: keyof typeof canonical, intended: number) => {
+      const can = Number(canonical[field] as number);
+      const intd = Number(intended);
+      if (!Number.isFinite(intd)) return; // nothing intended → skip
+      const delta = intd - can;
+      if (Math.abs(delta) > TOLERANCE) {
+        mismatches.push({
+          field: String(field),
+          intended: intd,
+          canonical: can,
+          delta,
+        });
+      }
+    };
+    const checkExact = (field: 'invoice_count', intended: number) => {
+      const can = Number(canonical[field]);
+      const intd = Number(intended);
+      if (!Number.isFinite(intd)) return;
+      if (intd !== can) {
+        mismatches.push({
+          field,
+          intended: intd,
+          canonical: can,
+          delta: intd - can,
+        });
+      }
+    };
+
+    if (expected.total_sales      !== undefined) checkNumeric('total_sales',      expected.total_sales);
+    if (expected.total_returns    !== undefined) checkNumeric('total_returns',    expected.total_returns);
+    if (expected.total_expenses   !== undefined) checkNumeric('total_expenses',   expected.total_expenses);
+    if (expected.total_cash_in    !== undefined) checkNumeric('total_cash_in',    expected.total_cash_in);
+    if (expected.total_cash_out   !== undefined) checkNumeric('total_cash_out',   expected.total_cash_out);
+    if (expected.expected_closing !== undefined) checkNumeric('expected_closing', expected.expected_closing);
+    if (expected.invoice_count    !== undefined) checkExact  ('invoice_count',    expected.invoice_count);
+
+    if (mismatches.length === 0) return;
+
+    throw new ConflictException({
+      message:
+        'لا يمكن حفظ إغلاق الوردية لأن إجماليات الوردية لا تطابق الحركات الفعلية. راجع المصروفات والتحصيلات وحركات الموظفين.',
+      code: 'SHIFT_SNAPSHOT_INTEGRITY_VIOLATION',
+      shift_no: shiftNo,
+      context,
+      mismatches,
+      canonical_breakdown: canonical.breakdown,
+    });
   }
 
   // ──────────────────────────────────────────────────────────────────

@@ -98,6 +98,46 @@ const fakeSummaryAfterEdit = {
   invoice_count: 7,
 };
 
+// Canonical aggregate row that the new
+// PR-FIX-SHIFT-SNAPSHOT-REALTIME-INTEGRITY-GUARD computes inline.
+// Must reconcile to the fakeSummaryAfterEdit values within EGP 0.01:
+//   total_expenses = expenses_cash + advances_cash = 10 + 490 = 500   ✓
+//   total_cash_in  = cash_in_invoices                = 1225            ✓
+//   total_cash_out = cash_out_inv_returns + returns_cash_refund
+//                  + expenses_cash + advances_cash + settlements_cash
+//                  = 0 + 0 + 10 + 490 + 30           = 530             ✓
+//   expected       = 465 (opening) + 1225 − 530      = 1160            ✓
+//   invoice_count  = 7                                                  ✓
+const fakeCanonicalAggMatchingSummary = {
+  total_sales: '1725',
+  total_returns: '0',
+  invoice_count: 7,
+  cash_in_invoices: '1225',
+  cash_out_inv_returns: '0',
+  instapay_in: '500',
+  wallet_in: '0',
+  expenses_cash: '10',
+  advances_cash: '490',
+  settlements_cash: '30',
+  returns_cash_refund: '0',
+};
+
+// Inverse: cash_in_invoices = 1725 (all cash). Matches the
+// "InstaPay → cash" test's summary (expected_closing 1660).
+const fakeCanonicalAggAllCash = {
+  total_sales: '1725',
+  total_returns: '0',
+  invoice_count: 7,
+  cash_in_invoices: '1725',
+  cash_out_inv_returns: '0',
+  instapay_in: '0',
+  wallet_in: '0',
+  expenses_cash: '10',
+  advances_cash: '490',
+  settlements_cash: '30',
+  returns_cash_refund: '0',
+};
+
 describe('ShiftsService.refreshClosedShiftSnapshot', () => {
   it('SHF-2026-00016 happy path: refreshes expected_closing from 1660 → 1160 (cash-only) without touching actual_closing', async () => {
     const svc = makeSvc();
@@ -110,7 +150,9 @@ describe('ShiftsService.refreshClosedShiftSnapshot', () => {
       rows: [
         // Q1: SELECT shift FOR UPDATE → return the stale closed row.
         [{ ...baseClosedShift }],
-        // Q2: UPDATE … RETURNING * → return the refreshed row.
+        // Q2: canonical recompute (NEW guard) → row that reconciles to summary.
+        [{ ...fakeCanonicalAggMatchingSummary }],
+        // Q3: UPDATE … RETURNING * → return the refreshed row.
         [
           {
             ...baseClosedShift,
@@ -140,13 +182,24 @@ describe('ShiftsService.refreshClosedShiftSnapshot', () => {
     }
 
     // Q1 must be a FOR UPDATE select.
-    expect(calls).toHaveLength(2);
+    expect(calls).toHaveLength(3);
     expect(calls[0].sql).toMatch(/SELECT \* FROM shifts/i);
     expect(calls[0].sql).toMatch(/FOR UPDATE/i);
     expect(calls[0].params).toEqual([SHIFT_ID]);
 
-    // Q2 must be an UPDATE that touches ONLY snapshot fields.
-    const updSql = calls[1].sql;
+    // Q2 = canonical recompute (PR-FIX-SHIFT-SNAPSHOT-REALTIME-
+    // INTEGRITY-GUARD). Single CTE that aggregates from authoritative
+    // source tables filtered by shift_id only — no cashbox+window.
+    expect(calls[1].sql).toMatch(/WITH\s+inv\s+AS/i);
+    expect(calls[1].sql).toMatch(/FROM\s+invoices\s+WHERE\s+shift_id/i);
+    expect(calls[1].sql).toMatch(/FROM\s+invoice_payments/i);
+    expect(calls[1].sql).toMatch(/FROM\s+expenses\s+WHERE\s+shift_id/i);
+    expect(calls[1].sql).toMatch(/FROM\s+employee_settlements\s+WHERE\s+shift_id/i);
+    expect(calls[1].sql).toMatch(/FROM\s+returns\s+WHERE\s+shift_id/i);
+    expect(calls[1].params).toEqual([SHIFT_ID]);
+
+    // Q3 must be an UPDATE that touches ONLY snapshot fields.
+    const updSql = calls[2].sql;
     expect(updSql).toMatch(/UPDATE shifts SET/i);
     expect(updSql).toMatch(/expected_closing\s*=\s*\$2/);
     expect(updSql).toMatch(/total_sales\s*=\s*\$3/);
@@ -172,10 +225,10 @@ describe('ShiftsService.refreshClosedShiftSnapshot', () => {
     expect(updSql).not.toMatch(/cashbox_id\s*=/);
 
     // UPDATE WHERE id binds the shift id we passed in.
-    expect(calls[1].params[0]).toBe(SHIFT_ID);
-    expect(calls[1].params[1]).toBe(1160); // expected_closing
-    expect(calls[1].params[5]).toBe(1225); // total_cash_in
-    expect(calls[1].params[6]).toBe(530); // total_cash_out
+    expect(calls[2].params[0]).toBe(SHIFT_ID);
+    expect(calls[2].params[1]).toBe(1160); // expected_closing
+    expect(calls[2].params[5]).toBe(1225); // total_cash_in
+    expect(calls[2].params[6]).toBe(530); // total_cash_out
   });
 
   it('InstaPay → cash edit increases expected_closing correctly', async () => {
@@ -193,13 +246,19 @@ describe('ShiftsService.refreshClosedShiftSnapshot', () => {
     } as any);
 
     const { em, calls } = makeEm({
-      rows: [[{ ...baseClosedShift, expected_closing: '1160' }], [{}]],
+      rows: [
+        [{ ...baseClosedShift, expected_closing: '1160' }],
+        // canonical recompute returns the all-cash variant
+        [{ ...fakeCanonicalAggAllCash }],
+        [{}],
+      ],
     });
 
     const r = await svc.refreshClosedShiftSnapshot(SHIFT_ID, em);
     expect(r.status).toBe('updated');
-    expect(calls[1].params[1]).toBe(1660); // expected_closing flipped up
-    expect(calls[1].params[5]).toBe(1725); // total_cash_in
+    // calls[2] is now the UPDATE (calls[0]=SELECT, calls[1]=canonical).
+    expect(calls[2].params[1]).toBe(1660); // expected_closing flipped up
+    expect(calls[2].params[5]).toBe(1725); // total_cash_in
   });
 
   it('blocks when variance_journal_entry_id IS NOT NULL', async () => {
@@ -298,7 +357,11 @@ describe('ShiftsService.refreshClosedShiftSnapshot', () => {
       .spyOn(svc as any, 'computeSummary')
       .mockResolvedValue(fakeSummaryAfterEdit as any);
     const { em } = makeEm({
-      rows: [[{ ...baseClosedShift }], [{}]],
+      rows: [
+        [{ ...baseClosedShift }],
+        [{ ...fakeCanonicalAggMatchingSummary }],
+        [{}],
+      ],
     });
 
     await svc.refreshClosedShiftSnapshot(SHIFT_ID, em);
@@ -314,11 +377,16 @@ describe('ShiftsService.refreshClosedShiftSnapshot', () => {
       .spyOn(svc as any, 'computeSummary')
       .mockResolvedValue(fakeSummaryAfterEdit as any);
     const { em, calls } = makeEm({
-      rows: [[{ ...baseClosedShift }], [{}]],
+      rows: [
+        [{ ...baseClosedShift }],
+        [{ ...fakeCanonicalAggMatchingSummary }],
+        [{}],
+      ],
     });
 
     await svc.refreshClosedShiftSnapshot(SHIFT_ID, em);
-    const updSql = calls[1].sql;
+    // calls[0]=SELECT, calls[1]=canonical, calls[2]=UPDATE.
+    const updSql = calls[2].sql;
 
     // Snapshot fields that close() writes AND we should write here:
     for (const col of [
