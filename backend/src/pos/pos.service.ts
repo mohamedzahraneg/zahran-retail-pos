@@ -344,6 +344,17 @@ export class PosService {
               provider_key: acct.provider_key,
               identifier: acct.identifier,
               gl_account_code: acct.gl_account_code,
+              // PR-FIX-POS-INVOICE-EDIT-WALLET-CASHBOX-ID — freeze
+              // the payment_account's bound cashbox_id so the GL
+              // repost in `posting.postInvoice` can tag the wallet/
+              // bank/check GL line with `cashbox_id` and emit a
+              // matching cash_movement (engine Guards A + B). Without
+              // this, an edit cash → wallet would surface
+              // "GL line on 1114 requires cashbox_id ..." and roll
+              // back. Snapshot is preferred over a live lookup so a
+              // later admin rename / cashbox-rebind doesn't change
+              // the historical posting.
+              cashbox_id: acct.cashbox_id ?? null,
               // PR-PAY-6 — frozen logo_key so receipts render the same
               // brand badge the cashier saw at sale time.
               logo_key: resolveLogoKey(acct.provider_key, acct.method),
@@ -951,6 +962,17 @@ export class PosService {
               provider_key: acct.provider_key,
               identifier: acct.identifier,
               gl_account_code: acct.gl_account_code,
+              // PR-FIX-POS-INVOICE-EDIT-WALLET-CASHBOX-ID — freeze
+              // the payment_account's bound cashbox_id so the GL
+              // repost in `posting.postInvoice` can tag the wallet/
+              // bank/check GL line with `cashbox_id` and emit a
+              // matching cash_movement (engine Guards A + B). Without
+              // this, an edit cash → wallet would surface
+              // "GL line on 1114 requires cashbox_id ..." and roll
+              // back. Snapshot is preferred over a live lookup so a
+              // later admin rename / cashbox-rebind doesn't change
+              // the historical posting.
+              cashbox_id: acct.cashbox_id ?? null,
               // PR-PAY-6 — frozen logo_key so receipts render the same
               // brand badge the cashier saw at sale time.
               logo_key: resolveLogoKey(acct.provider_key, acct.method),
