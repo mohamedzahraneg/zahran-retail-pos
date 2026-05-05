@@ -82,48 +82,34 @@ export default function Shifts() {
       shiftsApi.list({ status: statusFilter || undefined }),
   });
 
-  // PR-FIX-SHIFTS-PAGE-BULK-LIVE-VARIANCE
+  // PR-FIX-SHIFTS-PAGE-LIVE-VARIANCE-REVERT
   //
-  // The Shifts list table previously showed `s.variance` directly
-  // from `shifts.list()`, which is computed as
-  // `actual_closing − stored_expected_closing`. The stored
-  // `expected_closing` can be stale on shifts whose close routine
-  // briefly captured a non-cash payment (observed on
-  // SHF-2026-00016: stored 1660, live 1160 due to a 500 InstaPay).
+  // The main Shifts list now displays the stored close-time variance
+  // directly from `shifts.list()` — it is the user-facing source of
+  // truth and matches what the cashier sees on the close card at
+  // close time.
   //
-  // PR #292 patched this by fanning out `summary(id)` per closed
-  // shift. That ran 8 SQL queries × N shifts on every page refresh
-  // and exhausted the Supavisor pooler with EMAXCONNSESSION (max
-  // pool_size: 15). We're now using a dedicated bulk endpoint
-  // that returns LIVE variance + cash/non-cash totals in 5
-  // grouped SQL queries — total round-trips bounded at 5 per
-  // request, regardless of N. The endpoint caps at 100 shift_ids
-  // server-side; the wrapper slices client-side as defense.
-  const closedShiftIds = useMemo(
-    () => shifts.filter((s) => s.status === 'closed').map((s) => s.id),
-    [shifts],
-  );
-  const liveSummariesQuery = useQuery({
-    queryKey: ['shifts-live-summaries', closedShiftIds],
-    enabled: closedShiftIds.length > 0,
-    queryFn: async () => {
-      // Single bulk request — no per-row fan-out.
-      const rows = await shiftsApi.listLiveSummary(closedShiftIds).catch(
-        () => [] as Awaited<ReturnType<typeof shiftsApi.listLiveSummary>>,
-      );
-      const map: Record<
-        string,
-        Awaited<ReturnType<typeof shiftsApi.listLiveSummary>>[number]
-      > = {};
-      for (const r of rows) map[r.shift_id] = r;
-      return map;
-    },
-    // The bulk call is light, but a refetch on every focus/refetch-
-    // window-boundary is unnecessary. 60s stale window matches the
-    // typical cashier dwell time on /shifts.
-    staleTime: 60_000,
-  });
-  const liveVarianceMap = liveSummariesQuery.data ?? {};
+  // History:
+  //   - PR #292 fanned out `shiftsApi.summary(id)` per closed shift to
+  //     override stored variance with a LIVE recompute. This exhausted
+  //     the Supavisor pooler (EMAXCONNSESSION, pool_size=15).
+  //   - PR #293 replaced the fan-out with a bulk endpoint
+  //     (POST /shifts/reports/list-live-summary, 5 grouped queries).
+  //     The bulk endpoint is functionally lightweight but returns
+  //     values that disagree with stored variance for shifts that
+  //     drifted since close (SHF-2026-00013, 00012, 00002, 00001 all
+  //     showed false shortages even though they're matched).
+  //
+  // Decision (per user, after audit on the 4 known-good shifts):
+  // display stored variance unconditionally. The bulk endpoint
+  // remains deployed but is intentionally NOT invoked from this page;
+  // it can be re-enabled in a future PR once full parity with
+  // computeSummary AND with the close-time snapshot is achieved.
+  //
+  // The known data bug for SHF-2026-00016 (stored expected briefly
+  // captured a non-cash payment → stored variance −500) must be
+  // handled as a one-off close-snapshot correction, not by live
+  // recomputing every closed shift on the main list.
 
   return (
     <div className="space-y-6">
@@ -246,16 +232,15 @@ export default function Shifts() {
                     <td className="px-3 py-2 font-bold">
                       {s.status === 'closed' ? (
                         <DiffBadge
-                          // PR-FIX-SHIFT-REPORTS-LIVE-VARIANCE-EXPENSES-RETURNS-NET
-                          // Prefer the LIVE summary's variance when loaded;
-                          // fall back to the stored variance until then.
-                          value={
-                            liveVarianceMap[s.id]?.variance != null
-                              ? Number(liveVarianceMap[s.id].variance)
-                              : Number(
-                                  (s as any).variance ?? s.difference ?? 0,
-                                )
-                          }
+                          // PR-FIX-SHIFTS-PAGE-LIVE-VARIANCE-REVERT —
+                          // stored close-time variance is the source of
+                          // truth here. Do NOT replace with live
+                          // computeSummary or the bulk endpoint —
+                          // see the block comment above for the audit
+                          // history.
+                          value={Number(
+                            (s as any).variance ?? s.difference ?? 0,
+                          )}
                         />
                       ) : (
                         '—'
