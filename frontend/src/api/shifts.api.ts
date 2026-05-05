@@ -324,6 +324,19 @@ export interface AggregateHeaderShift {
   closed_at: string | null;
   cashier_name: string | null;
   cashbox_name: string | null;
+  // PR-FIX-SHIFT-AGGREGATE-OPENING-CASH-BALANCE
+  // Per-shift financials sourced from the LIVE single-shift summary
+  // (NOT from the stored `shifts.expected_closing` column, which is
+  // stale on open shifts). Same numbers the existing single-shift
+  // report displays.
+  opening_balance: number;
+  expected_closing: number;
+  /** NULL when the shift is still open. */
+  actual_closing: number | null;
+  /** NULL when the shift is still open. */
+  variance: number | null;
+  /** = `expected_closing − opening_balance` (mirrors `totals.net_shift_amount`). */
+  net_shift_amount: number;
 }
 
 export interface AggregateHeader {

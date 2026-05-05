@@ -104,6 +104,10 @@ export function buildAggregatedShiftReportHtml(
     </tr>`;
 
   /* ─── 1. Selected shifts table (header) ─── */
+  // PR-FIX-SHIFT-AGGREGATE-OPENING-CASH-BALANCE — added 5 financial
+  // columns per shift (opening / expected / actual / variance / net).
+  // Same numbers the single-shift report displays. Open shifts show
+  // "—" for actual_closing and variance.
   const shiftsRows = header.shifts
     .map(
       (s) => `
@@ -115,6 +119,11 @@ export function buildAggregatedShiftReportHtml(
           <td>${escapeHtml(STATUS_LABEL_AR[s.status] ?? s.status)}</td>
           <td>${escapeHtml(fmtTime(s.opened_at))}</td>
           <td>${escapeHtml(fmtTime(s.closed_at))}</td>
+          <td class="right">${escapeHtml(EGP(s.opening_balance))}</td>
+          <td class="right">${escapeHtml(EGP(s.expected_closing))}</td>
+          <td class="right">${s.actual_closing == null ? '—' : escapeHtml(EGP(s.actual_closing))}</td>
+          <td class="right">${s.variance == null ? '—' : escapeHtml(EGP(s.variance))}</td>
+          <td class="right">${escapeHtml(EGP(s.net_shift_amount))}</td>
         </tr>`,
     )
     .join('');
@@ -129,9 +138,24 @@ export function buildAggregatedShiftReportHtml(
           <th>الحالة</th>
           <th>وقت الفتح</th>
           <th>وقت الإغلاق</th>
+          <th>مبلغ الافتتاح</th>
+          <th>المتوقع</th>
+          <th>الإغلاق الفعلي</th>
+          <th>الفرق</th>
+          <th>الصافي</th>
         </tr>
       </thead>
       <tbody>${shiftsRows}</tbody>
+      <tfoot>
+        <tr style="background:#f1f5f9;font-weight:bold;">
+          <td colspan="7" class="right">الإجمالي عبر الورديات المحددة</td>
+          <td class="right">${escapeHtml(EGP(totals.opening_balance))}</td>
+          <td class="right">${escapeHtml(EGP(totals.expected_closing))}</td>
+          <td class="right">${totals.actual_closing == null ? '—' : escapeHtml(EGP(totals.actual_closing))}</td>
+          <td class="right">${totals.variance == null ? '—' : escapeHtml(EGP(totals.variance))}</td>
+          <td class="right">${escapeHtml(EGP(totals.net_shift_amount))}</td>
+        </tr>
+      </tfoot>
     </table>`;
 
   /* ─── 2. Operating expenses (concatenated) ─── */
@@ -591,7 +615,9 @@ export function buildAggregatedShiftReportSheets(
     { البند: 'صافي إجمالي الورديات', القيمة: Number(totals.net_shift_amount) },
   ];
 
-  /* Sheet 2 — الورديات (selected shifts metadata) */
+  /* Sheet 2 — الورديات (selected shifts metadata + per-shift financials) */
+  // PR-FIX-SHIFT-AGGREGATE-OPENING-CASH-BALANCE — same 5 financial
+  // columns as the HTML "selected shifts" table.
   const shiftsSheet =
     header.shifts.length > 0
       ? header.shifts.map((s) => ({
@@ -602,6 +628,12 @@ export function buildAggregatedShiftReportSheets(
           الحالة: STATUS_LABEL_AR[s.status] ?? s.status,
           'وقت الفتح': fmtTime(s.opened_at),
           'وقت الإغلاق': fmtTime(s.closed_at),
+          'مبلغ الافتتاح': Number(s.opening_balance),
+          المتوقع: Number(s.expected_closing),
+          'الإغلاق الفعلي':
+            s.actual_closing == null ? '' : Number(s.actual_closing),
+          الفرق: s.variance == null ? '' : Number(s.variance),
+          الصافي: Number(s.net_shift_amount),
         }))
       : [
           {
@@ -612,6 +644,11 @@ export function buildAggregatedShiftReportSheets(
             الحالة: '',
             'وقت الفتح': '',
             'وقت الإغلاق': '',
+            'مبلغ الافتتاح': '',
+            المتوقع: '',
+            'الإغلاق الفعلي': '',
+            الفرق: '',
+            الصافي: '',
           },
         ];
 

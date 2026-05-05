@@ -2037,19 +2037,47 @@ export class ShiftsService {
       ).entries(),
     ).map(([id, name]) => ({ cashbox_id: id, name_ar: name }));
 
+    // PR-FIX-SHIFT-AGGREGATE-OPENING-CASH-BALANCE
+    // Enrich each header.shifts[] row with the same per-shift
+    // financials the single-shift report displays. Source of truth
+    // is the LIVE `summary(id)` (already fetched into `enriched`),
+    // not the stored `shifts.expected_closing` column — that column
+    // is stale on open shifts (set at open-time = opening_balance).
+    // For closed shifts the two are equivalent.
+    const summaryByShiftId = new Map<string, any>(
+      enriched.map(({ shift, summary }) => [shift.id, summary]),
+    );
     return {
       header: {
         date_range: dateRange,
         shift_count: shifts.length,
-        shifts: shifts.map((s) => ({
-          id: s.id,
-          shift_no: s.shift_no,
-          status: s.status,
-          opened_at: s.opened_at,
-          closed_at: s.closed_at,
-          cashier_name: s.opened_by_name ?? null,
-          cashbox_name: s.cashbox_name ?? null,
-        })),
+        shifts: shifts.map((s) => {
+          const sum = summaryByShiftId.get(s.id);
+          const opening = Number(sum?.opening_balance ?? 0);
+          const expected = Number(sum?.expected_closing ?? 0);
+          const actual =
+            sum?.actual_closing == null ? null : Number(sum.actual_closing);
+          const variance =
+            sum?.variance == null ? null : Number(sum.variance);
+          return {
+            id: s.id,
+            shift_no: s.shift_no,
+            status: s.status,
+            opened_at: s.opened_at,
+            closed_at: s.closed_at,
+            cashier_name: s.opened_by_name ?? null,
+            cashbox_name: s.cashbox_name ?? null,
+            // Per-shift financials (PR-FIX-SHIFT-AGGREGATE-OPENING-CASH-BALANCE)
+            opening_balance: opening,
+            expected_closing: expected,
+            actual_closing: actual,
+            variance,
+            // "الصافي" — same formula as the totals' net_shift_amount
+            // (`expected_closing − opening_balance`) so the sum across
+            // selected shifts equals `totals.net_shift_amount`.
+            net_shift_amount: expected - opening,
+          };
+        }),
         cashiers,
         cashboxes,
         selection_mode: useSelection ? 'explicit' : 'filters',

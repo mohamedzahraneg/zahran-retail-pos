@@ -790,3 +790,128 @@ describe('ShiftsService — PR-SHIFT-REPORTS-AGGREGATED-DETAIL-BE', () => {
     expect(occurrences[0]).not.toHaveProperty('_attributed_shift_opened_at');
   });
 });
+
+/**
+ * PR-FIX-SHIFT-AGGREGATE-OPENING-CASH-BALANCE
+ *
+ * Pins the per-shift financial enrichment on `header.shifts[]`.
+ * Source of truth = LIVE `summary(id)` (already in `enriched`).
+ * Bug repro: PR #288 dropped `opening_balance` / `expected_closing` /
+ * `actual_closing` / `variance` from each shift row in the response,
+ * so the FE had nothing to render in the "selected shifts" table
+ * and a real shift (e.g. Mahmoud Zahran's SHF-2026-00013, opening
+ * 105.00) showed up with no opening amount.
+ */
+describe('ShiftsService — PR-FIX-SHIFT-AGGREGATE-OPENING-CASH-BALANCE', () => {
+  it('header.shifts[] includes opening_balance / expected_closing / actual_closing / variance / net_shift_amount per shift', async () => {
+    const sumA = summaryFixture(SHIFT_A, {
+      opening_balance: 105,
+      expected_closing: 1455,
+      actual_closing: 1455,
+      variance: 0,
+    });
+    const sumB = summaryFixture(SHIFT_B, {
+      opening_balance: 350,
+      expected_closing: 5170,
+      actual_closing: 5195,
+      variance: 25,
+    });
+    const sumC = summaryFixture(SHIFT_C, {
+      opening_balance: 200,
+      expected_closing: 200,
+      actual_closing: null,
+      variance: null,
+    });
+    const { svc } = makeSvc({
+      dsResults: [
+        [
+          shiftRow(SHIFT_A, 'SHF-2026-00013', {
+            opened_by_name: 'محمود زهران',
+          }),
+          shiftRow(SHIFT_B, 'SHF-2026-00014', {
+            opened_at: '2026-05-04T16:00:00+02:00',
+            opened_by_name: 'محمود زهران',
+          }),
+          shiftRow(SHIFT_C, 'SHF-2026-00017', {
+            opened_at: '2026-05-05T07:00:00+02:00',
+            closed_at: null,
+            status: 'open',
+            actual_closing: null,
+            opened_by_name: 'كاشير آخر',
+          }),
+        ],
+        [{ full_name: 'مدير' }],
+      ],
+      summaries: { [SHIFT_A]: sumA, [SHIFT_B]: sumB, [SHIFT_C]: sumC },
+      adjustments: { [SHIFT_A]: [], [SHIFT_B]: [], [SHIFT_C]: [] },
+    });
+
+    const out = await svc.aggregateDetail(
+      { shift_ids: [SHIFT_A, SHIFT_B, SHIFT_C] },
+      { user_id: GENERATED_BY, username: 'manager' },
+    );
+
+    expect(out.header.shifts).toHaveLength(3);
+    const byNo = (no: string) =>
+      out.header.shifts.find((s: any) => s.shift_no === no)!;
+
+    // The repro shift — Mahmoud Zahran's SHF-2026-00013 with
+    // opening 105 must surface in the response.
+    const r1 = byNo('SHF-2026-00013');
+    expect(r1.opening_balance).toBe(105);
+    expect(r1.expected_closing).toBe(1455);
+    expect(r1.actual_closing).toBe(1455);
+    expect(r1.variance).toBe(0);
+    expect(r1.net_shift_amount).toBe(1455 - 105);
+
+    const r2 = byNo('SHF-2026-00014');
+    expect(r2.opening_balance).toBe(350);
+    expect(r2.expected_closing).toBe(5170);
+    expect(r2.actual_closing).toBe(5195);
+    expect(r2.variance).toBe(25);
+    expect(r2.net_shift_amount).toBe(5170 - 350);
+
+    // Open shift — actual_closing/variance NULL, but opening + expected
+    // still populated.
+    const r3 = byNo('SHF-2026-00017');
+    expect(r3.opening_balance).toBe(200);
+    expect(r3.expected_closing).toBe(200);
+    expect(r3.actual_closing).toBeNull();
+    expect(r3.variance).toBeNull();
+    expect(r3.net_shift_amount).toBe(0);
+  });
+
+  it('totals.opening_balance equals sum of header.shifts[].opening_balance', async () => {
+    const sumA = summaryFixture(SHIFT_A, { opening_balance: 105 });
+    const sumB = summaryFixture(SHIFT_B, { opening_balance: 350 });
+    const sumC = summaryFixture(SHIFT_C, { opening_balance: 475 });
+    const { svc } = makeSvc({
+      dsResults: [
+        [
+          shiftRow(SHIFT_A, 'SHF-2026-00013'),
+          shiftRow(SHIFT_B, 'SHF-2026-00014', {
+            opened_at: '2026-05-04T16:00:00+02:00',
+          }),
+          shiftRow(SHIFT_C, 'SHF-2026-00015', {
+            opened_at: '2026-05-05T07:00:00+02:00',
+          }),
+        ],
+        [{ full_name: 'مدير' }],
+      ],
+      summaries: { [SHIFT_A]: sumA, [SHIFT_B]: sumB, [SHIFT_C]: sumC },
+      adjustments: { [SHIFT_A]: [], [SHIFT_B]: [], [SHIFT_C]: [] },
+    });
+
+    const out = await svc.aggregateDetail(
+      { shift_ids: [SHIFT_A, SHIFT_B, SHIFT_C] },
+      { user_id: GENERATED_BY, username: 'manager' },
+    );
+
+    const sumOfOpenings = out.header.shifts.reduce(
+      (acc: number, s: any) => acc + Number(s.opening_balance || 0),
+      0,
+    );
+    expect(out.totals.opening_balance).toBe(sumOfOpenings);
+    expect(out.totals.opening_balance).toBe(930); // 105 + 350 + 475
+  });
+});
