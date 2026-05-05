@@ -19,6 +19,7 @@ import {
   CurrentUser,
   JwtUser,
 } from '../common/decorators/current-user.decorator';
+import { AggregateDetailDto } from './dto/aggregate-detail.dto';
 
 @ApiBearerAuth()
 @ApiTags('shifts')
@@ -125,6 +126,28 @@ export class ShiftsController {
   @ApiOperation({ summary: 'ملخص مالي حي للوردية (للإقفال والمتابعة)' })
   summary(@Param('id', ParseUUIDPipe) id: string) {
     return this.svc.summary(id);
+  }
+
+  // ─── PR-SHIFT-REPORTS-AGGREGATED-DETAIL-BE ──────────────────────
+  // POST /shifts/reports/aggregate-detail
+  // Consolidated detailed report across N selected shifts (max 50).
+  // Selection wins over filters when both are supplied. JSON only;
+  // PDF/XLSX deferred to a follow-up. Existing single-shift summary
+  // and shifts list endpoints are unchanged.
+  // ────────────────────────────────────────────────────────────────
+  @Post('reports/aggregate-detail')
+  @ApiOperation({
+    summary:
+      'تقرير مفصل مجمّع للورديات المحددة أو ناتج الفلاتر الحالية',
+  })
+  aggregateDetail(
+    @Body() dto: AggregateDetailDto,
+    @CurrentUser() user: JwtUser,
+  ) {
+    return this.svc.aggregateDetail(
+      { shift_ids: dto.shift_ids, filters: dto.filters },
+      { user_id: user.userId, username: user.username ?? null },
+    );
   }
 
   // ─── PR-B1 — Counted-cash adjustment workflow (migration 096) ───
