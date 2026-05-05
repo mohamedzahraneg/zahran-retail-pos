@@ -52,15 +52,17 @@ function makeFixture(): AggregateDetailResponse {
           expected_closing: 1085,
           actual_closing: 1085,
           variance: 0,
-          net_shift_amount: 1085, // = expected_closing per business definition
-          net_cash_movement: 785, // = expected − opening
+          net_shift_amount: 785, // = expected − opening (الصافي)
           invoice_count: 3,
           total_sales: 1000,
           total_collections: 1000,
           cash_total: 700,
           non_cash_total: 300,
           total_operating_expenses: 60,
+          total_employee_cash_out: 100,
+          total_cash_out: 160, // 60 + 100
           total_returns: 0,
+          total_refund_cash_out: 0,
         },
         {
           id: 'sh-B',
@@ -74,15 +76,17 @@ function makeFixture(): AggregateDetailResponse {
           expected_closing: 880,
           actual_closing: 895,
           variance: 15,
-          net_shift_amount: 880, // = expected_closing
-          net_cash_movement: 580,
+          net_shift_amount: 580, // = expected − opening
           invoice_count: 2,
           total_sales: 500,
           total_collections: 500,
           cash_total: 400,
           non_cash_total: 100,
           total_operating_expenses: 40,
+          total_employee_cash_out: 100,
+          total_cash_out: 140,
           total_returns: 0,
+          total_refund_cash_out: 0,
         },
       ],
       cashiers: [
@@ -131,8 +135,7 @@ function makeFixture(): AggregateDetailResponse {
       actual_closing: 1980,
       variance: 15,
       closed_shift_count: 2,
-      net_shift_amount: 1965, // = sum of expected_closing
-      net_cash_movement: 1365, // = sum (expected − opening)
+      net_shift_amount: 1365, // = sum (expected − opening)
     },
     sections: {
       operating_expenses: [
@@ -306,9 +309,9 @@ describe('buildAggregatedShiftReportHtml — 2-shift fixture', () => {
     // Major totals — formatted as "<n> ج.م"
     expect(html).toContain('1,500.00 ج.م'); // total_sales
     expect(html).toContain('1,100.00 ج.م'); // cash_total
-    // PR-FIX-SHIFT-AGGREGATE-CASH-VS-NONCASH-VARIANCE
-    // net_shift_amount = sum of expected_closing = 1085 + 880 = 1965
-    expect(html).toContain('1,965.00 ج.م'); // net_shift_amount
+    // PR-FIX-SHIFT-REPORTS-LIVE-VARIANCE-EXPENSES-RETURNS-NET
+    // net_shift_amount = sum (expected − opening) = (1085−300)+(880−300) = 1365
+    expect(html).toContain('1,365.00 ج.م'); // net_shift_amount
     expect(html).toContain('200.00 ج.م'); // total_employee_cash_out
   });
 
@@ -400,11 +403,10 @@ describe('buildAggregatedShiftReportSheets — 2-shift fixture', () => {
     expect(findRow('عدد الورديات')?.['القيمة']).toBe(2);
     expect(findRow('إجمالي المبيعات')?.['القيمة']).toBe(1500);
     expect(findRow('إجمالي التحصيلات')?.['القيمة']).toBe(1500);
-    // PR-FIX-SHIFT-AGGREGATE-CASH-VS-NONCASH-VARIANCE
-    // صافي إجمالي الورديات = sum of expected_closing across selected
-    // shifts (already includes opening). Was 1365 (= expected − opening)
-    // pre-fix.
-    expect(findRow('صافي إجمالي الورديات')?.['القيمة']).toBe(1965);
+    // PR-FIX-SHIFT-REPORTS-LIVE-VARIANCE-EXPENSES-RETURNS-NET
+    // صافي إجمالي الورديات = sum (expected − opening) per business
+    // definition. Reverted from PR #291's interpretation.
+    expect(findRow('صافي إجمالي الورديات')?.['القيمة']).toBe(1365);
     expect(findRow('مُصدِر التقرير')?.['القيمة']).toBe('سارة المديرة');
   });
 
@@ -461,15 +463,17 @@ describe('buildAggregated — per-shift financial columns (Mahmoud Zahran repro)
             expected_closing: 1455,
             actual_closing: 1455,
             variance: 0,
-            net_shift_amount: 1455, // = expected_closing
-            net_cash_movement: 1350, // = 1455 − 105
+            net_shift_amount: 1350, // = expected − opening
             invoice_count: 4,
             total_sales: 1350,
             total_collections: 1350,
             cash_total: 1350,
             non_cash_total: 0,
             total_operating_expenses: 0,
+            total_employee_cash_out: 0,
+            total_cash_out: 0,
             total_returns: 0,
+            total_refund_cash_out: 0,
           },
           {
             id: 'sh-MZ-17',
@@ -483,15 +487,17 @@ describe('buildAggregated — per-shift financial columns (Mahmoud Zahran repro)
             expected_closing: 200,
             actual_closing: null,
             variance: null,
-            net_shift_amount: 200, // = expected_closing (open shift, no cash movement yet)
-            net_cash_movement: 0,
+            net_shift_amount: 0, // = expected − opening (no movement yet)
             invoice_count: 0,
             total_sales: 0,
             total_collections: 0,
             cash_total: 0,
             non_cash_total: 0,
             total_operating_expenses: 0,
+            total_employee_cash_out: 0,
+            total_cash_out: 0,
             total_returns: 0,
+            total_refund_cash_out: 0,
           },
         ],
         cashiers: [{ user_id: 'u-mz', full_name: 'محمود زهران' }],
@@ -537,8 +543,7 @@ describe('buildAggregated — per-shift financial columns (Mahmoud Zahran repro)
         actual_closing: 1455, // closed shifts only
         variance: 0,
         closed_shift_count: 1,
-        net_shift_amount: 1655, // = sum of expected_closing per business definition
-        net_cash_movement: 1350, // = 1655 − 305 (legacy formula)
+        net_shift_amount: 1350, // = 1655 − 305 (sum of expected − opening)
       },
       sections: {
         operating_expenses: [],
@@ -553,9 +558,10 @@ describe('buildAggregated — per-shift financial columns (Mahmoud Zahran repro)
 
   it('HTML "selected shifts" table renders the 5 new columns (مبلغ الافتتاح / المتوقع / الإغلاق الفعلي / الفرق / الصافي)', () => {
     const html = buildAggregatedShiftReportHtml(mahmoudFixture());
-    // PR-FIX-SHIFT-AGGREGATE-CASH-VS-NONCASH-VARIANCE
+    // PR-FIX-SHIFT-REPORTS-LIVE-VARIANCE-EXPENSES-RETURNS-NET
     // Cash-side columns labelled "النقدي" so non-cash payments are
-    // never read as cash deficit.
+    // never read as cash deficit. Outgoing breakdown split into 3
+    // explicit columns. Returns split into legacy + CT-derived.
     expect(html).toContain('<th>مبلغ الافتتاح</th>');
     expect(html).toContain('<th>المتوقع النقدي</th>');
     expect(html).toContain('<th>الإغلاق الفعلي النقدي</th>');
@@ -567,23 +573,26 @@ describe('buildAggregated — per-shift financial columns (Mahmoud Zahran repro)
     expect(html).toContain('<th>إجمالي التحصيلات</th>');
     expect(html).toContain('<th>كاش</th>');
     expect(html).toContain('<th>غير نقدي</th>');
-    expect(html).toContain('<th>المصروفات</th>');
+    // Outgoing breakdown columns (NEW in this PR).
+    expect(html).toContain('<th>مصروفات تشغيلية</th>');
+    expect(html).toContain('<th>حركات الموظفين</th>');
+    expect(html).toContain('<th>إجمالي الخارج</th>');
     expect(html).toContain('<th>المرتجعات</th>');
+    expect(html).toContain('<th>المرتجع المصروف</th>');
   });
 
-  it('Mahmoud Zahran SHF-2026-00013 row shows opening 105.00 ج.م + الصافي 1,455.00 (= expected_closing)', () => {
+  it('Mahmoud Zahran SHF-2026-00013 row shows opening 105.00 ج.م + الصافي 1,350.00 (= expected − opening)', () => {
     const html = buildAggregatedShiftReportHtml(mahmoudFixture());
-    // Slice between the shifts header and the financial summary so we
-    // assert specifically against the per-shift table.
     const start = html.indexOf('الورديات المشمولة');
     const end = html.indexOf('الملخص المالي المجمّع');
     const shiftsBlock = html.slice(start, end);
     expect(shiftsBlock).toContain('SHF-2026-00013');
     expect(shiftsBlock).toContain('محمود زهران');
     expect(shiftsBlock).toContain('105.00 ج.م');
-    // expected_closing + actual_closing + الصافي all equal 1,455.00
-    // (الصافي = expected_closing per business definition).
+    // expected_closing + actual_closing both = 1,455.00 (cash side).
     expect(shiftsBlock).toContain('1,455.00 ج.م');
+    // الصافي = 1,455 − 105 = 1,350.
+    expect(shiftsBlock).toContain('1,350.00 ج.م');
   });
 
   it('open-shift row renders "—" for actual_closing and variance', () => {
@@ -598,15 +607,16 @@ describe('buildAggregated — per-shift financial columns (Mahmoud Zahran repro)
     expect(dashes.length).toBeGreaterThanOrEqual(2);
   });
 
-  it('HTML shifts-table tfoot shows aggregated opening (305.00) and total الصافي (1,655.00 = sum expected)', () => {
+  it('HTML shifts-table tfoot shows aggregated opening (305.00) + sum expected (1,655.00) + الصافي (1,350.00)', () => {
     const html = buildAggregatedShiftReportHtml(mahmoudFixture());
     const start = html.indexOf('الورديات المشمولة');
     const end = html.indexOf('الملخص المالي المجمّع');
     const shiftsBlock = html.slice(start, end);
     expect(shiftsBlock).toContain('الإجمالي عبر الورديات المحددة');
     expect(shiftsBlock).toContain('305.00 ج.م'); // sum opening
-    // sum expected = 1455 + 200 = 1655 (also the new total الصافي).
-    expect(shiftsBlock).toContain('1,655.00 ج.م');
+    expect(shiftsBlock).toContain('1,655.00 ج.م'); // sum expected
+    // الصافي total = 1,655 − 305 = 1,350.
+    expect(shiftsBlock).toContain('1,350.00 ج.م');
   });
 
   it('XLSX "الورديات" sheet includes opening + cash-side + sales + collections + cash + non_cash + expenses + returns columns', () => {
@@ -627,20 +637,24 @@ describe('buildAggregated — per-shift financial columns (Mahmoud Zahran repro)
     expect(r13['إجمالي التحصيلات']).toBe(1350);
     expect(r13['كاش']).toBe(1350);
     expect(r13['غير نقدي']).toBe(0);
-    expect(r13['المصروفات']).toBe(0);
+    // Outgoing breakdown — relabelled + 2 new columns.
+    expect(r13['مصروفات تشغيلية']).toBe(0);
+    expect(r13['حركات الموظفين']).toBe(0);
+    expect(r13['إجمالي الخارج']).toBe(0);
     expect(r13['المرتجعات']).toBe(0);
+    expect(r13['المرتجع المصروف']).toBe(0);
     // Cash-side reconciliation
     expect(r13['مبلغ الافتتاح']).toBe(105);
     expect(r13['المتوقع النقدي']).toBe(1455);
     expect(r13['الإغلاق الفعلي النقدي']).toBe(1455);
     expect(r13['فرق الكاش']).toBe(0);
-    expect(r13['الصافي']).toBe(1455); // = expected_closing per business definition
-    // Open shift — actual / variance blank, الصافي = expected = 200.
+    expect(r13['الصافي']).toBe(1350); // = expected − opening (= 1455 − 105)
+    // Open shift — actual / variance blank, الصافي = 200 − 200 = 0.
     expect(r17['مبلغ الافتتاح']).toBe(200);
     expect(r17['المتوقع النقدي']).toBe(200);
     expect(r17['الإغلاق الفعلي النقدي']).toBe('');
     expect(r17['فرق الكاش']).toBe('');
-    expect(r17['الصافي']).toBe(200);
+    expect(r17['الصافي']).toBe(0);
   });
 
   it('XLSX "ملخص" sheet includes the total opening amount (إجمالي رصيد البداية = 305)', () => {
@@ -688,15 +702,19 @@ describe('buildAggregated — SHF-2026-00016: 500 InstaPay does NOT create cash 
             expected_closing: 1160, // CASH-ONLY — does NOT include the 500 InstaPay
             actual_closing: 1160,
             variance: 0, // matched, NOT 500
-            net_shift_amount: 1160, // = expected_closing
-            net_cash_movement: 695, // legacy: 1160 − 465
+            // PR-FIX-SHIFT-REPORTS-LIVE-VARIANCE-EXPENSES-RETURNS-NET
+            // الصافي = expected − opening = 1160 − 465 = 695.
+            net_shift_amount: 695,
             invoice_count: 7,
             total_sales: 1725,
             total_collections: 1725,
             cash_total: 1225,
             non_cash_total: 500, // The 500 EGP InstaPay lives HERE
             total_operating_expenses: 500,
+            total_employee_cash_out: 30, // 1 settlement
+            total_cash_out: 530, // 500 + 30
             total_returns: 0,
+            total_refund_cash_out: 0,
           },
         ],
         cashiers: [{ user_id: 'u-mz', full_name: 'محمود زهران' }],
@@ -742,8 +760,7 @@ describe('buildAggregated — SHF-2026-00016: 500 InstaPay does NOT create cash 
         actual_closing: 1160,
         variance: 0,
         closed_shift_count: 1,
-        net_shift_amount: 1160,
-        net_cash_movement: 695,
+        net_shift_amount: 695, // = 1160 − 465 (expected − opening)
       },
       sections: {
         operating_expenses: [],
@@ -796,18 +813,22 @@ describe('buildAggregated — SHF-2026-00016: 500 InstaPay does NOT create cash 
     expect(row['المتوقع النقدي']).toBe(1160);
     expect(row['الإغلاق الفعلي النقدي']).toBe(1160);
     expect(row['فرق الكاش']).toBe(0); // No deficit.
-    expect(row['الصافي']).toBe(1160); // = expected_closing
+    expect(row['الصافي']).toBe(695); // = expected − opening (= 1160 − 465)
     // Sales / payment breakdown.
     expect(row['عدد الفواتير']).toBe(7);
     expect(row['إجمالي المبيعات']).toBe(1725);
     expect(row['إجمالي التحصيلات']).toBe(1725);
     expect(row['كاش']).toBe(1225);
     expect(row['غير نقدي']).toBe(500); // The 500 InstaPay.
-    expect(row['المصروفات']).toBe(500);
+    // Outgoing breakdown (relabelled + new columns).
+    expect(row['مصروفات تشغيلية']).toBe(500);
+    expect(row['حركات الموظفين']).toBe(30);
+    expect(row['إجمالي الخارج']).toBe(530);
     expect(row['المرتجعات']).toBe(0);
+    expect(row['المرتجع المصروف']).toBe(0);
   });
 
-  it('SHF-16 totals: net_shift_amount equals expected_closing, NOT (expected − opening)', () => {
+  it('SHF-16 totals: net_shift_amount equals (expected − opening), NOT expected_closing', () => {
     const fx = shf16Fixture();
     const sheets = buildAggregatedShiftReportSheets(fx);
     const summary = sheets.find((s) => s.name === 'ملخص');
@@ -818,8 +839,136 @@ describe('buildAggregated — SHF-2026-00016: 500 InstaPay does NOT create cash 
     // Live cash totals — 1,225 cash + 500 non-cash, NOT all under cash.
     expect(findRow('مبيعات نقدية (كاش)')!['القيمة']).toBe(1225);
     expect(findRow('مبيعات غير نقدية')!['القيمة']).toBe(500);
-    // الصافي per business definition = sum of expected_closing.
-    expect(fx.totals.net_shift_amount).toBe(1160);
-    expect(fx.totals.net_cash_movement).toBe(695);
+    // PR-FIX-SHIFT-REPORTS-LIVE-VARIANCE-EXPENSES-RETURNS-NET
+    // الصافي = expected − opening (does NOT include opening).
+    expect(fx.totals.net_shift_amount).toBe(1160 - 465);
+  });
+});
+
+/**
+ * PR-FIX-SHIFT-REPORTS-LIVE-VARIANCE-EXPENSES-RETURNS-NET
+ *
+ * Per the user's example:
+ *   SHF-2026-00013 single-shift report shows:
+ *     operating expenses = 10
+ *     employee cash movements = 520
+ *     total outgoing = 530
+ *   The aggregated row was previously showing only 10 under
+ *   المصروفات → missing the 520 employee movements.
+ *
+ * The aggregated selected-shifts row must surface ALL three:
+ *   مصروفات تشغيلية = 10, حركات الموظفين = 520, إجمالي الخارج = 530.
+ */
+describe('buildAggregated — SHF-2026-00013-style: outgoing breakdown shows operating + employee + total', () => {
+  function shf13Fixture(): AggregateDetailResponse {
+    return {
+      header: {
+        date_range: { from: '2026-04-30', to: '2026-05-02' },
+        shift_count: 1,
+        shifts: [
+          {
+            id: 'sh-MZ-13',
+            shift_no: 'SHF-2026-00013',
+            status: 'closed',
+            opened_at: '2026-04-30T11:22:35+00:00',
+            closed_at: '2026-05-02T20:49:25+00:00',
+            cashier_name: 'محمود زهران',
+            cashbox_name: 'الخزينة الرئيسية',
+            opening_balance: 105,
+            expected_closing: 925, // 105 + 1350 − 530
+            actual_closing: 925,
+            variance: 0,
+            net_shift_amount: 820, // = 925 − 105
+            invoice_count: 4,
+            total_sales: 1350,
+            total_collections: 1350,
+            cash_total: 1350,
+            non_cash_total: 0,
+            total_operating_expenses: 10,
+            total_employee_cash_out: 520, // 200 advances + 320 settlements
+            total_cash_out: 530, // 10 + 520
+            total_returns: 0,
+            total_refund_cash_out: 0,
+          },
+        ],
+        cashiers: [{ user_id: 'u-mz', full_name: 'محمود زهران' }],
+        cashboxes: [{ cashbox_id: 'cb-1', name_ar: 'الخزينة الرئيسية' }],
+        selection_mode: 'explicit',
+        generated_by: { user_id: 'mgr', full_name: 'مدير' },
+        generated_at: '2026-05-05T15:00:00.000Z',
+      },
+      totals: {
+        opening_balance: 105,
+        total_sales: 1350,
+        invoice_count: 4,
+        cancelled_count: 0,
+        total_cancelled: 0,
+        remaining_receivable: 0,
+        cash_total: 1350,
+        non_cash_total: 0,
+        grand_payment_total: 1350,
+        customer_receipts: 0,
+        supplier_payments: 0,
+        other_cash_in: 0,
+        other_cash_out: 0,
+        total_returns: 0,
+        return_count: 0,
+        total_expenses: 10,
+        expense_count: 1,
+        total_operating_expenses: 10,
+        operating_expense_count: 1,
+        total_employee_advances: 200,
+        employee_advance_count: 1,
+        total_employee_settlements: 320,
+        employee_settlement_count: 1,
+        total_employee_cash_out: 520,
+        total_refund_cash_out: 0,
+        total_refund_cash_in: 0,
+        net_refund_cash_impact: 0,
+        cancelled_return_out_amount: 0,
+        cancelled_return_reversal_amount: 0,
+        cancelled_return_net: 0,
+        total_cash_in: 1350,
+        total_cash_out: 530,
+        expected_closing: 925,
+        actual_closing: 925,
+        variance: 0,
+        closed_shift_count: 1,
+        net_shift_amount: 820,
+      },
+      sections: {
+        operating_expenses: [],
+        employee_cash_movements: [],
+        cashbox_movements: [],
+        payment_breakdown: [],
+        refund_cash_movements: [],
+        closing_adjustments: [],
+      },
+    };
+  }
+
+  it('HTML row shows operating=10, employee=520, total=530, all in distinct cells', () => {
+    const html = buildAggregatedShiftReportHtml(shf13Fixture());
+    const start = html.indexOf('الورديات المشمولة');
+    const end = html.indexOf('الملخص المالي المجمّع');
+    const block = html.slice(start, end);
+    const rowStart = block.indexOf('SHF-2026-00013');
+    const row = block.slice(rowStart, rowStart + 4000);
+    expect(row).toContain('10.00 ج.م');   // operating
+    expect(row).toContain('520.00 ج.م');  // employee
+    expect(row).toContain('530.00 ج.م');  // total outgoing
+  });
+
+  it('XLSX row exposes operating=10, employee=520, total=530 under distinct keys', () => {
+    const sheets = buildAggregatedShiftReportSheets(shf13Fixture());
+    const wardyat = sheets.find((s) => s.name === 'الورديات');
+    const row = wardyat!.rows.find(
+      (r: any) => r['رقم الوردية'] === 'SHF-2026-00013',
+    );
+    expect(row['مصروفات تشغيلية']).toBe(10);
+    expect(row['حركات الموظفين']).toBe(520);
+    expect(row['إجمالي الخارج']).toBe(530);
+    // Net = expected − opening = 925 − 105 = 820.
+    expect(row['الصافي']).toBe(820);
   });
 });

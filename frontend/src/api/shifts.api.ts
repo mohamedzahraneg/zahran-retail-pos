@@ -342,13 +342,13 @@ export interface AggregateHeaderShift {
    * cash-only expected closing balance, which already includes the
    * opening balance via the single-shift summary formula).
    */
-  net_shift_amount: number;
   /**
-   * Net cash movement during the shift, EXCLUDING the opening balance
-   * (= `expected_closing − opening_balance`). Exposed for callers
-   * that want this distinction; NEVER use it as the displayed "الصافي".
+   * "الصافي" — daily net cash movement during the shift
+   * (`expected_closing − opening_balance`). Does NOT include the
+   * opening balance. The expected closing balance is exposed
+   * separately as `expected_closing`.
    */
-  net_cash_movement: number;
+  net_shift_amount: number;
 
   // ── Sales + payment breakdown (from summary) ──
   invoice_count: number;
@@ -357,9 +357,16 @@ export interface AggregateHeaderShift {
   cash_total: number;
   non_cash_total: number;
 
-  // ── Expenses + returns ──
+  // ── Outgoing breakdown (matches single-shift card sections) ──
   total_operating_expenses: number;
+  /** Sum of employee advances + employee settlements (cash leaving for employees). */
+  total_employee_cash_out: number;
+  /** Total cash out: operating + employee + supplier + other + refund_cash_out. */
+  total_cash_out: number;
+  /** Returns sourced from the legacy returns table (joined via invoices). */
   total_returns: number;
+  /** Refund cash out sourced from cashbox_transactions (PR-21 semantics). */
+  total_refund_cash_out: number;
 }
 
 export interface AggregateHeader {
@@ -413,13 +420,12 @@ export interface AggregateTotals {
   variance: number | null;
   closed_shift_count: number;
   /**
-   * "صافي إجمالي الورديات" — per business definition equals the sum
-   * of `expected_closing` across selected shifts (already includes
-   * each shift's opening balance via the summary formula).
+   * "صافي إجمالي الورديات" — sum of (expected_closing − opening_balance)
+   * across selected shifts. Daily net cash movement, EXCLUDING opening
+   * balances. The aggregate expected closing balance is exposed
+   * separately as `expected_closing`.
    */
   net_shift_amount: number;
-  /** Sum of (expected_closing − opening_balance) across selected shifts. */
-  net_cash_movement: number;
 }
 
 /** Per-row shift context attached by the BE aggregator. */

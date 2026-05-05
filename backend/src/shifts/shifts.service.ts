@@ -2003,15 +2003,13 @@ export class ShiftsService {
       variance: varianceTotal,
       closed_shift_count: closedSummaries.length,
 
-      // PR-FIX-SHIFT-AGGREGATE-CASH-VS-NONCASH-VARIANCE
-      // Per business definition: "صافي إجمالي الورديات" = sum of
-      // each shift's expected_closing (which already includes its
-      // opening balance through the single-shift summary formula).
-      // The previous interpretation (`expected − opening`) is now
-      // exposed under `net_cash_movement` for callers that want net
-      // cash movement during the period without opening balances.
-      net_shift_amount: expectedClosingTotal,
-      net_cash_movement: expectedClosingTotal - openingBalanceTotal,
+      // PR-FIX-SHIFT-REPORTS-LIVE-VARIANCE-EXPENSES-RETURNS-NET
+      // "صافي إجمالي الورديات" = daily net cash movement across all
+      // selected shifts (does NOT include opening balances).
+      // Reverted to the original formula. The aggregate expected
+      // closing balance is exposed separately as
+      // `totals.expected_closing`.
+      net_shift_amount: expectedClosingTotal - openingBalanceTotal,
     };
 
     // 8. Header.
@@ -2087,12 +2085,13 @@ export class ShiftsService {
             expected_closing: expected,
             actual_closing: actual,
             variance,
-            // Per business definition: "الصافي" = `expected_closing`.
-            // The previous formula (`expected − opening`) is exposed
-            // separately for callers that genuinely want net cash
-            // movement during the shift (no opening balance).
-            net_shift_amount: expected,
-            net_cash_movement: expected - opening,
+            // PR-FIX-SHIFT-REPORTS-LIVE-VARIANCE-EXPENSES-RETURNS-NET
+            // "الصافي" = daily net cash movement = expected_closing −
+            // opening_balance (does NOT include opening). Reverted from
+            // the prior interpretation. The expected closing balance
+            // is exposed separately as `expected_closing` (column
+            // "المتوقع النقدي" in the FE table).
+            net_shift_amount: expected - opening,
             // ── Sales + payment breakdown ──
             invoice_count: Number(sum?.invoice_count ?? 0),
             total_sales: Number(sum?.total_sales ?? 0),
@@ -2105,11 +2104,22 @@ export class ShiftsService {
               sum?.cash_total ?? sum?.payment_breakdown?.cash?.amount ?? 0,
             ),
             non_cash_total: Number(sum?.non_cash_total ?? 0),
-            // ── Expenses + returns ──
+            // ── Expenses + employee cash + outgoing total + returns ──
             total_operating_expenses: Number(
               sum?.total_operating_expenses ?? 0,
             ),
+            // PR-FIX-SHIFT-REPORTS-LIVE-VARIANCE-EXPENSES-RETURNS-NET
+            // Employee cash movements (advances + settlements) and
+            // total cash out — same numbers the single-shift card
+            // displays. Adding these so the per-shift summary row in
+            // the aggregated report can show the FULL outgoing
+            // breakdown, not just operating expenses.
+            total_employee_cash_out: Number(
+              sum?.total_employee_cash_out ?? 0,
+            ),
+            total_cash_out: Number(sum?.total_cash_out ?? 0),
             total_returns: Number(sum?.total_returns ?? 0),
+            total_refund_cash_out: Number(sum?.total_refund_cash_out ?? 0),
           };
         }),
         cashiers,

@@ -157,8 +157,14 @@ export default function ShiftReports() {
   /* ─── Per-shift summary fan-out (only fetched when needed) ─── */
   const shiftIds = useMemo(() => shifts.map((s) => s.id), [shifts]);
   const summariesQuery = useQuery({
+    // PR-FIX-SHIFT-REPORTS-LIVE-VARIANCE-EXPENSES-RETURNS-NET
+    // Also fan out summaries on the aggregated tab — otherwise
+    // `enrichedShifts` falls back to the stored (stale) variance
+    // and the on-screen preview shows عجز that contradicts the
+    // single-shift card.
     queryKey: ['report-shift-summaries', shiftIds],
-    enabled: tab === 'all' && shiftIds.length > 0,
+    enabled:
+      (tab === 'all' || tab === 'aggregated') && shiftIds.length > 0,
     queryFn: async () => {
       const arr = await Promise.all(
         shiftIds.map((id) =>

@@ -82,6 +82,41 @@ export default function Shifts() {
       shiftsApi.list({ status: statusFilter || undefined }),
   });
 
+  // PR-FIX-SHIFT-REPORTS-LIVE-VARIANCE-EXPENSES-RETURNS-NET
+  // The Shifts list table previously showed `s.variance` directly
+  // from `shifts.list()`, which is computed as
+  // `actual_closing − stored_expected_closing`. The stored
+  // `expected_closing` can be stale on shifts whose close routine
+  // briefly captured a non-cash payment (observed on
+  // SHF-2026-00016: stored 1660, live 1160 due to a 500 InstaPay).
+  // The single-shift card's LIVE summary is the source of truth, so
+  // we fan out `summary(id)` for closed shifts and override the
+  // displayed variance. The fan-out is bounded by `shifts.list()`'s
+  // own page limit (200/1000 rows) and only fires for closed shifts.
+  const closedShiftIds = useMemo(
+    () => shifts.filter((s) => s.status === 'closed').map((s) => s.id),
+    [shifts],
+  );
+  const liveSummariesQuery = useQuery({
+    queryKey: ['shifts-live-summaries', closedShiftIds],
+    enabled: closedShiftIds.length > 0,
+    queryFn: async () => {
+      const arr = await Promise.all(
+        closedShiftIds.map((id) =>
+          shiftsApi.summary(id).catch(() => null),
+        ),
+      );
+      const map: Record<string, ShiftSummary> = {};
+      closedShiftIds.forEach((id, i) => {
+        const s = arr[i];
+        if (s) map[id] = s;
+      });
+      return map;
+    },
+    staleTime: 60_000,
+  });
+  const liveVarianceMap = liveSummariesQuery.data ?? {};
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between flex-wrap gap-3">
@@ -203,7 +238,16 @@ export default function Shifts() {
                     <td className="px-3 py-2 font-bold">
                       {s.status === 'closed' ? (
                         <DiffBadge
-                          value={Number((s as any).variance ?? s.difference ?? 0)}
+                          // PR-FIX-SHIFT-REPORTS-LIVE-VARIANCE-EXPENSES-RETURNS-NET
+                          // Prefer the LIVE summary's variance when loaded;
+                          // fall back to the stored variance until then.
+                          value={
+                            liveVarianceMap[s.id]?.variance != null
+                              ? Number(liveVarianceMap[s.id].variance)
+                              : Number(
+                                  (s as any).variance ?? s.difference ?? 0,
+                                )
+                          }
                         />
                       ) : (
                         '—'
