@@ -29,6 +29,7 @@ import {
   Wallet,
   Layers,
   ClipboardList,
+  Files,
 } from 'lucide-react';
 
 import { useAuthStore } from '@/stores/auth.store';
@@ -49,6 +50,11 @@ import {
   ShiftRowWithBreakdown,
   computeAllShiftsTotals,
 } from './shiftsPeriodReportBuilder';
+// PR-SHIFT-REPORTS-AGGREGATED-DETAIL-FE
+import {
+  buildAggregatedShiftReportHtml,
+  buildAggregatedShiftReportSheets,
+} from './aggregatedShiftReportBuilder';
 
 const EGP = (n: number | string) =>
   `${Number(n).toLocaleString('en-US', {
@@ -57,8 +63,9 @@ const EGP = (n: number | string) =>
   })} ج.م`;
 
 type Preset = 'today' | 'week' | 'month' | 'custom';
-type ReportTab = 'single' | 'all' | 'channels';
+type ReportTab = 'single' | 'all' | 'channels' | 'aggregated';
 type StatusFilter = 'all' | 'open' | 'closed' | 'pending_close';
+const MAX_AGGREGATE_SHIFTS = 50;
 
 /** Cairo-local YYYY-MM-DD for `d` (browser TZ-agnostic). */
 function cairoIso(d: Date): string {
@@ -106,6 +113,13 @@ export default function ShiftReports() {
   const [cashierId, setCashierId] = useState<string>('');
   const [tab, setTab] = useState<ReportTab>('all');
   const [selectedShiftId, setSelectedShiftId] = useState<string>('');
+  // PR-SHIFT-REPORTS-AGGREGATED-DETAIL-FE — multi-select state for the
+  // aggregated-report tab. Lives at the page level so the all-shifts
+  // table's checkboxes survive tab switches without re-querying.
+  const [selectedAggregateIds, setSelectedAggregateIds] = useState<
+    Set<string>
+  >(new Set());
+  const [aggregating, setAggregating] = useState(false);
 
   const setPresetAndRange = (p: Preset) => {
     setPreset(p);
@@ -217,6 +231,81 @@ export default function ShiftReports() {
 
   /* ─── Print + Export handlers ─── */
   const rangeLabel = presetLabel(preset, from, to);
+
+  // PR-SHIFT-REPORTS-AGGREGATED-DETAIL-FE
+  // Build & dispatch the aggregated report. Selection wins over filters;
+  // filters are sent only when no row is selected (matches BE contract).
+  const fetchAggregateAndDispatch = async (
+    dispatch: (
+      html: string,
+      sheets: Array<{ name: string; rows: any[] }>,
+      title: string,
+      filename: string,
+    ) => void,
+  ) => {
+    const useSelection = selectedAggregateIds.size > 0;
+    if (useSelection && selectedAggregateIds.size > MAX_AGGREGATE_SHIFTS) {
+      toast.error(
+        `الحد الأقصى ${MAX_AGGREGATE_SHIFTS} وردية لكل تقرير مجمّع — تم اختيار ${selectedAggregateIds.size}.`,
+      );
+      return;
+    }
+    if (!useSelection && shifts.length === 0) {
+      toast.error('لا توجد ورديات في الفلاتر الحالية');
+      return;
+    }
+    if (!useSelection && shifts.length > MAX_AGGREGATE_SHIFTS) {
+      toast.error(
+        `الحد الأقصى ${MAX_AGGREGATE_SHIFTS} وردية لكل تقرير مجمّع — الفلاتر الحالية تطابق ${shifts.length} وردية. ضيّق الفلاتر أو اختر يدوياً.`,
+      );
+      return;
+    }
+    setAggregating(true);
+    try {
+      const data = await shiftsApi.aggregateDetail(
+        useSelection
+          ? { shift_ids: Array.from(selectedAggregateIds) }
+          : {
+              filters: {
+                from,
+                to,
+                status: statusFilter,
+                user_id: cashierId || undefined,
+                cashbox_id: cashboxId || undefined,
+              },
+            },
+      );
+      const html = buildAggregatedShiftReportHtml(data);
+      const sheets = buildAggregatedShiftReportSheets(data);
+      const titleSuffix = useSelection
+        ? `الورديات المحددة (${data.header.shift_count})`
+        : `كل الورديات في الفلاتر الحالية (${data.header.shift_count})`;
+      const filename = `aggregated-shifts-${from}_${to}-${data.header.shift_count}`;
+      dispatch(html, sheets, `تقرير مفصل مجمّع — ${titleSuffix}`, filename);
+    } catch (e: any) {
+      const status = e?.response?.status;
+      const msg = e?.response?.data?.message || e?.message;
+      if (status === 422) {
+        toast.error(msg || `الحد الأقصى ${MAX_AGGREGATE_SHIFTS} وردية`);
+      } else if (status === 400) {
+        toast.error(msg || 'الفلاتر الحالية لا تطابق أي وردية');
+      } else {
+        toast.error(msg || 'تعذّر إنشاء التقرير المجمّع');
+      }
+    } finally {
+      setAggregating(false);
+    }
+  };
+
+  const handlePrintAggregate = () =>
+    fetchAggregateAndDispatch((html, _sheets, title) =>
+      printReport(title, html),
+    );
+
+  const handleExportAggregate = () =>
+    fetchAggregateAndDispatch((_html, sheets, _title, filename) =>
+      exportMultiSheet(filename, sheets),
+    );
 
   const handlePrintAll = () => {
     if (enrichedShifts.length === 0) {
@@ -435,6 +524,16 @@ export default function ShiftReports() {
         >
           <Wallet size={16} /> تقرير وسائل الدفع
         </button>
+        <button
+          onClick={() => setTab('aggregated')}
+          className={`px-4 py-2 rounded-lg flex items-center gap-2 ${
+            tab === 'aggregated'
+              ? 'bg-brand-600 text-white'
+              : 'bg-white border border-slate-200'
+          }`}
+        >
+          <Files size={16} /> تقرير مفصل مجمّع
+        </button>
       </div>
 
       {/* ── Report panels ── */}
@@ -446,6 +545,47 @@ export default function ShiftReports() {
           totals={allShiftsTotals}
           onPrint={handlePrintAll}
           onExport={handleExportAll}
+        />
+      )}
+
+      {tab === 'aggregated' && (
+        <AllShiftsPanel
+          shifts={enrichedShifts}
+          loading={shiftsQuery.isLoading || summariesQuery.isFetching}
+          rangeLabel={rangeLabel}
+          totals={allShiftsTotals}
+          onPrint={handlePrintAll}
+          onExport={handleExportAll}
+          aggregateMode
+          selectedAggregateIds={selectedAggregateIds}
+          onToggleAggregateId={(id) => {
+            setSelectedAggregateIds((prev) => {
+              const next = new Set(prev);
+              if (next.has(id)) next.delete(id);
+              else next.add(id);
+              return next;
+            });
+          }}
+          onToggleAllAggregate={(allVisible) => {
+            setSelectedAggregateIds((prev) => {
+              if (allVisible) {
+                const next = new Set(prev);
+                for (const s of enrichedShifts) next.add(s.id);
+                return next;
+              }
+              const visibleIds = new Set(enrichedShifts.map((s) => s.id));
+              const next = new Set<string>();
+              for (const id of prev) {
+                if (!visibleIds.has(id)) next.add(id);
+              }
+              return next;
+            });
+          }}
+          aggregating={aggregating}
+          maxAggregateShifts={MAX_AGGREGATE_SHIFTS}
+          onPrintAggregate={handlePrintAggregate}
+          onExportAggregate={handleExportAggregate}
+          onClearAggregate={() => setSelectedAggregateIds(new Set())}
         />
       )}
 
@@ -483,31 +623,125 @@ function AllShiftsPanel(props: {
   totals: ReturnType<typeof computeAllShiftsTotals>;
   onPrint: () => void;
   onExport: () => void;
+  // PR-SHIFT-REPORTS-AGGREGATED-DETAIL-FE — when `aggregateMode` is
+  // true, the table renders a leading checkbox column (row + select-
+  // all) and a sticky action bar surfaces print/export buttons that
+  // call the new BE endpoint via the aggregate handlers below.
+  aggregateMode?: boolean;
+  selectedAggregateIds?: Set<string>;
+  onToggleAggregateId?: (id: string) => void;
+  onToggleAllAggregate?: (allVisible: boolean) => void;
+  aggregating?: boolean;
+  maxAggregateShifts?: number;
+  onPrintAggregate?: () => void;
+  onExportAggregate?: () => void;
+  onClearAggregate?: () => void;
 }) {
-  const { shifts, loading, rangeLabel, totals, onPrint, onExport } = props;
+  const {
+    shifts,
+    loading,
+    rangeLabel,
+    totals,
+    onPrint,
+    onExport,
+    aggregateMode,
+    selectedAggregateIds,
+    onToggleAggregateId,
+    onToggleAllAggregate,
+    aggregating,
+    maxAggregateShifts,
+    onPrintAggregate,
+    onExportAggregate,
+    onClearAggregate,
+  } = props;
+  const selectedCount = selectedAggregateIds?.size ?? 0;
+  const visibleIds = useMemo(() => shifts.map((s) => s.id), [shifts]);
+  const allVisibleSelected =
+    aggregateMode &&
+    visibleIds.length > 0 &&
+    visibleIds.every((id) => selectedAggregateIds?.has(id));
+  const someVisibleSelected =
+    aggregateMode &&
+    !allVisibleSelected &&
+    visibleIds.some((id) => selectedAggregateIds?.has(id));
+  const aggregateActionLabel =
+    selectedCount > 0
+      ? `تقرير مفصل مجمّع للورديات المحددة (${selectedCount})`
+      : 'كل الورديات في الفلاتر الحالية';
+  const overLimit =
+    !!maxAggregateShifts &&
+    (selectedCount > 0
+      ? selectedCount > maxAggregateShifts
+      : shifts.length > maxAggregateShifts);
   return (
     <div className="bg-white rounded-2xl border border-slate-200 p-4 space-y-4">
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div className="text-sm text-slate-600 flex items-center gap-2">
           <CalendarDays size={16} /> {rangeLabel} · عدد الورديات: {shifts.length}
         </div>
-        <div className="flex gap-2">
-          <button
-            className="btn-secondary flex items-center gap-2"
-            onClick={onPrint}
-            disabled={loading || shifts.length === 0}
-          >
-            <Printer size={16} /> طباعة
-          </button>
-          <button
-            className="btn-primary flex items-center gap-2"
-            onClick={onExport}
-            disabled={loading || shifts.length === 0}
-          >
-            <Download size={16} /> Excel
-          </button>
-        </div>
+        {!aggregateMode && (
+          <div className="flex gap-2">
+            <button
+              className="btn-secondary flex items-center gap-2"
+              onClick={onPrint}
+              disabled={loading || shifts.length === 0}
+            >
+              <Printer size={16} /> طباعة
+            </button>
+            <button
+              className="btn-primary flex items-center gap-2"
+              onClick={onExport}
+              disabled={loading || shifts.length === 0}
+            >
+              <Download size={16} /> Excel
+            </button>
+          </div>
+        )}
       </div>
+
+      {aggregateMode && (
+        <div
+          data-testid="aggregate-action-bar"
+          className="flex items-center justify-between flex-wrap gap-3 p-3 rounded-lg bg-brand-50 border border-brand-200"
+        >
+          <div className="text-sm text-slate-700">
+            <span className="font-bold">{aggregateActionLabel}</span>
+            {overLimit && maxAggregateShifts && (
+              <span className="text-rose-700 ms-2">
+                — يتجاوز الحد الأقصى ({maxAggregateShifts}). ضيّق الاختيار.
+              </span>
+            )}
+          </div>
+          <div className="flex gap-2">
+            {selectedCount > 0 && (
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={onClearAggregate}
+                disabled={!!aggregating}
+              >
+                مسح الاختيار
+              </button>
+            )}
+            <button
+              type="button"
+              className="btn-secondary flex items-center gap-2"
+              onClick={onPrintAggregate}
+              disabled={!!aggregating || overLimit || shifts.length === 0}
+            >
+              <Printer size={16} /> طباعة
+            </button>
+            <button
+              type="button"
+              className="btn-primary flex items-center gap-2"
+              onClick={onExportAggregate}
+              disabled={!!aggregating || overLimit || shifts.length === 0}
+            >
+              <Download size={16} /> Excel
+            </button>
+          </div>
+        </div>
+      )}
 
       {loading && shifts.length === 0 && (
         <div className="text-center text-slate-500 py-8">جارٍ التحميل…</div>
@@ -545,6 +779,21 @@ function AllShiftsPanel(props: {
             <table className="w-full text-sm">
               <thead className="bg-slate-50 text-slate-600">
                 <tr>
+                  {aggregateMode && (
+                    <th className="p-2 text-right" style={{ width: 32 }}>
+                      <input
+                        type="checkbox"
+                        aria-label="تحديد كل الورديات الظاهرة"
+                        checked={!!allVisibleSelected}
+                        ref={(el) => {
+                          if (el) el.indeterminate = !!someVisibleSelected;
+                        }}
+                        onChange={() =>
+                          onToggleAllAggregate?.(!allVisibleSelected)
+                        }
+                      />
+                    </th>
+                  )}
                   <th className="p-2 text-right">الرقم</th>
                   <th className="p-2 text-right">التاريخ</th>
                   <th className="p-2 text-right">الكاشير</th>
@@ -560,6 +809,16 @@ function AllShiftsPanel(props: {
               <tbody>
                 {shifts.map((s) => (
                   <tr key={s.id} className="border-t border-slate-100">
+                    {aggregateMode && (
+                      <td className="p-2">
+                        <input
+                          type="checkbox"
+                          aria-label={`تحديد الوردية ${s.shift_no}`}
+                          checked={!!selectedAggregateIds?.has(s.id)}
+                          onChange={() => onToggleAggregateId?.(s.id)}
+                        />
+                      </td>
+                    )}
                     <td className="p-2">{s.shift_no}</td>
                     <td className="p-2">
                       {new Date(s.opened_at).toLocaleDateString('en-GB', {
