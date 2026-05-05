@@ -1273,6 +1273,11 @@ export class CashDeskService {
     // continue to include every direction='in' row today; refining them
     // symmetrically (to drop edit_replay, reversal_*_in, transfer_in,
     // shift_variance surplus) is a separate decision.
+    // PR-AUDIT-VOID-LEAK: filter voided CTs out of the KPI tile
+    // aggregations. The void filter goes on the LEFT JOIN's ON clause
+    // (NOT in WHERE) so cashboxes with zero active CTs still appear in
+    // the result with 0/0/0/0/0 — putting it in WHERE would silently
+    // drop them. Same pattern as accounting.trialBalance().
     return this.ds.query(`
       SELECT
         cb.id                                  AS cashbox_id,
@@ -1306,7 +1311,9 @@ export class CashDeskService {
           WHERE DATE(ct.created_at AT TIME ZONE 'Africa/Cairo') = CURRENT_DATE
         )::int                                 AS transactions_today
       FROM cashboxes cb
-      LEFT JOIN cashbox_transactions ct ON ct.cashbox_id = cb.id
+      LEFT JOIN cashbox_transactions ct
+        ON ct.cashbox_id = cb.id
+       AND ct.is_void = FALSE
       WHERE cb.is_active = TRUE
       GROUP BY cb.id, cb.name_ar, cb.current_balance
       ORDER BY cb.name_ar
