@@ -1,4 +1,5 @@
 import {
+  ConflictException,
   HttpException,
   HttpStatus,
   Injectable,
@@ -7,7 +8,7 @@ import {
   NotFoundException,
   Optional,
 } from '@nestjs/common';
-import { DataSource } from 'typeorm';
+import { DataSource, EntityManager } from 'typeorm';
 import {
   ApproveCloseDto,
   CloseShiftDto,
@@ -84,7 +85,14 @@ export class ShiftsService {
     return this.computeSummary(shift);
   }
 
-  private async computeSummary(shift: any) {
+  private async computeSummary(shift: any, em?: EntityManager) {
+    // PR-FIX-POS-INVOICE-EDIT-REFRESH-CLOSED-SHIFT-SNAPSHOT
+    // Optional `em` parameter lets a caller (e.g. PosService.editInvoice)
+    // run computeSummary inside an active transaction so the recompute
+    // and any follow-up snapshot UPDATE roll back together. When `em` is
+    // omitted (the original close path) we route through `this.ds`
+    // exactly like before — behavior is unchanged for existing callers.
+    const q = em ?? this.ds;
     // When the shift is still open we bound by NOW; when closed we stop at
     // the closed_at timestamp. This lets the summary stay stable for closed
     // shifts and live for open ones.
@@ -104,7 +112,7 @@ export class ShiftsService {
       )
     )`;
 
-    const [inv] = await this.ds.query(
+    const [inv] = await q.query(
       `
       SELECT
         COALESCE(SUM(CASE WHEN i.status IN ('paid','completed','partially_paid') THEN i.grand_total ELSE 0 END),0)::numeric AS total_sales,
@@ -124,7 +132,7 @@ export class ShiftsService {
     // "Wallet 500 (WE Pay 200, Vodafone 300)" without a second
     // round-trip. Account labels prefer the snapshot frozen at sale
     // time so admin renames/deactivations don't rewrite history.
-    const payRows = await this.ds.query(
+    const payRows = await q.query(
       `
       SELECT ip.payment_method::text AS method,
              ip.payment_account_id,
@@ -255,7 +263,7 @@ export class ShiftsService {
     const bankSales = legacyBucket('bank_transfer').amount;
 
     // Returns refunded within the shift window against the same invoices.
-    const [ret] = await this.ds.query(
+    const [ret] = await q.query(
       `
       SELECT
         COALESCE(SUM(r.net_refund),0)::numeric AS total_returns,
@@ -271,7 +279,7 @@ export class ShiftsService {
     // Cashbox txns during the shift — these cover BOTH invoice-linked
     // in/outs AND manual receipts / disbursements. We break them down by
     // category (the actual column; some older code called it "source").
-    const txRows = await this.ds.query(
+    const txRows = await q.query(
       `
       SELECT direction::text AS direction, category::text AS category,
              COALESCE(SUM(amount),0)::numeric AS amount,
@@ -339,7 +347,7 @@ export class ShiftsService {
     //       still reflected in `cashbox_transactions` and surfaces as
     //       a variance at close — the cashier annotates it as an
     //       unattached settlement, not as a shift outflow.
-    const expenseRows = await this.ds.query(
+    const expenseRows = await q.query(
       `
       SELECT e.id, e.expense_no, e.amount, e.description,
              ec.name_ar AS category_name, e.expense_date,
@@ -424,7 +432,7 @@ export class ShiftsService {
     // for legacy rows. The `link_method` column tells the UI which
     // path matched so the badge can render "مرتبط بالوردية" (explicit)
     // or "مرتبط تلقائياً بالوردية" (derived).
-    const settlementRows = await this.ds.query(
+    const settlementRows = await q.query(
       `
       SELECT es.id::text AS id,
              es.user_id AS employee_user_id,
@@ -575,7 +583,7 @@ export class ShiftsService {
     // Each row carries its source return's status so the FE can render
     // a "ملغي" badge AND group the original-out + reversal-in pair so
     // the net effect for a cancelled cash return is zero.
-    const refundCtRows = await this.ds.query(
+    const refundCtRows = await q.query(
       `
       WITH ct_in_window AS (
         SELECT ct.id, ct.amount, ct.direction, ct.reference_type, ct.reference_id,
@@ -1597,6 +1605,108 @@ export class ShiftsService {
         ORDER BY a.adjusted_at DESC`,
       [shiftId],
     );
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // PR-FIX-POS-INVOICE-EDIT-REFRESH-CLOSED-SHIFT-SNAPSHOT
+  //
+  // Refresh the stored close-time snapshot for an already-closed shift
+  // when one of its invoices was edited (cash↔non-cash payment-method
+  // swap, amount change, etc.) AFTER close. The cashier's counted
+  // `actual_closing` is the source of truth for the physical drawer
+  // and is NEVER overwritten — only the recompute-derived snapshot
+  // fields are refreshed so the stored variance reflects the new cash
+  // reality.
+  //
+  // Caller contract: must run inside an active transaction (`em`)
+  // alongside the invoice edit so the recompute and the snapshot
+  // UPDATE roll back together with any failure in the edit pipeline.
+  //
+  // Guards:
+  //   · status !== 'closed'  → no-op (open shifts are recomputed on
+  //                            their next live read; nothing to do).
+  //   · variance_journal_entry_id IS NOT NULL
+  //     OR variance_treatment IS NOT NULL
+  //     OR variance_employee_id IS NOT NULL
+  //                          → refuse: finance has already classified
+  //                            and (likely) posted a JE for this shift's
+  //                            variance. Silently rewriting the snapshot
+  //                            would invalidate that decision. Caller
+  //                            should surface a 409 to the user.
+  //
+  // Fields refreshed (all derived from `computeSummary`):
+  //   expected_closing, total_sales, total_returns, total_expenses,
+  //   total_cash_in, total_cash_out, invoice_count.
+  //
+  // Fields explicitly NOT touched:
+  //   actual_closing, closed_at, closed_by, status,
+  //   variance_journal_entry_id, variance_treatment,
+  //   variance_employee_id, variance_notes, variance_approved_by,
+  //   variance_approved_at, opening_balance, opened_at, opened_by,
+  //   cashbox_id, warehouse_id, shift_no, notes, created_at.
+  //
+  // Generated columns (`difference`, `variance_amount`, `variance_type`)
+  // recompute automatically.
+  // ──────────────────────────────────────────────────────────────────
+  async refreshClosedShiftSnapshot(
+    shiftId: string,
+    em: EntityManager,
+  ): Promise<
+    | { status: 'no_op'; reason: 'not_closed'; shift: any }
+    | { status: 'blocked'; reason: 'variance_treated'; shift: any }
+    | { status: 'updated'; shift: any }
+  > {
+    // Lock the row for the duration of the transaction so concurrent
+    // edits to the same shift serialize correctly.
+    const [shift] = await em.query(
+      `SELECT * FROM shifts WHERE id = $1::uuid FOR UPDATE`,
+      [shiftId],
+    );
+    if (!shift) {
+      throw new NotFoundException('الوردية غير موجودة');
+    }
+    if (shift.status !== 'closed') {
+      return { status: 'no_op', reason: 'not_closed', shift };
+    }
+
+    // Variance-treated guard. ANY of the three signals indicates
+    // finance has already touched this shift's variance — refuse.
+    if (
+      shift.variance_journal_entry_id != null ||
+      (shift.variance_treatment != null && shift.variance_treatment !== '') ||
+      shift.variance_employee_id != null
+    ) {
+      return { status: 'blocked', reason: 'variance_treated', shift };
+    }
+
+    const summary = await this.computeSummary(shift, em);
+
+    const [updated] = await em.query(
+      `
+      UPDATE shifts SET
+        expected_closing = $2::numeric,
+        total_sales      = $3::numeric,
+        total_returns    = $4::numeric,
+        total_expenses   = $5::numeric,
+        total_cash_in    = $6::numeric,
+        total_cash_out   = $7::numeric,
+        invoice_count    = $8::int
+      WHERE id = $1::uuid
+      RETURNING *
+      `,
+      [
+        shiftId,
+        Number(summary.expected_closing) || 0,
+        Number(summary.total_sales) || 0,
+        Number(summary.total_returns) || 0,
+        Number(summary.total_expenses) || 0,
+        Number(summary.total_cash_in) || 0,
+        Number(summary.total_cash_out) || 0,
+        Number(summary.invoice_count) || 0,
+      ],
+    );
+
+    return { status: 'updated', shift: updated };
   }
 
   // ──────────────────────────────────────────────────────────────────
