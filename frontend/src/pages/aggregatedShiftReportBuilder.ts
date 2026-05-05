@@ -104,22 +104,22 @@ export function buildAggregatedShiftReportHtml(
     </tr>`;
 
   /* ─── 1. Selected shifts table (header) ─── */
-  // PR-FIX-SHIFT-AGGREGATE-CASH-VS-NONCASH-VARIANCE
+  // PR-FIX-SHIFT-REPORTS-LIVE-VARIANCE-EXPENSES-RETURNS-NET
   //
   // Per-shift table columns:
   //   1. رقم الوردية / التاريخ / الكاشير / الخزنة / الحالة
   //   2. عدد الفواتير / إجمالي المبيعات / إجمالي التحصيلات
   //   3. كاش / غير نقدي                  ← prevents non-cash being read
   //                                       as cash shortage
-  //   4. المصروفات / المرتجعات
-  //   5. مبلغ الافتتاح
-  //   6. المتوقع النقدي / الإغلاق الفعلي النقدي / فرق الكاش
-  //                                       ← all three labelled "النقدي"
-  //                                       so it's unambiguous they're
-  //                                       cash-side reconciliation
-  //   7. الصافي                            ← business definition:
-  //                                       equals expected_closing
-  //                                       (already includes opening)
+  //   4. مصروفات تشغيلية / حركات الموظفين / إجمالي الخارج
+  //   5. المرتجعات / المرتجع المصروف     ← legacy + CT-derived figures
+  //   6. مبلغ الافتتاح
+  //   7. المتوقع النقدي / الإغلاق الفعلي النقدي / فرق الكاش
+  //                                       ← cash-side reconciliation,
+  //                                       all three labelled "النقدي"
+  //   8. الصافي                            ← daily net cash movement
+  //                                       (= expected_closing − opening),
+  //                                       does NOT include opening
   const shiftsRows = header.shifts
     .map(
       (s) => `
@@ -135,7 +135,10 @@ export function buildAggregatedShiftReportHtml(
           <td class="right">${escapeHtml(EGP(s.cash_total))}</td>
           <td class="right">${escapeHtml(EGP(s.non_cash_total))}</td>
           <td class="right">${escapeHtml(EGP(s.total_operating_expenses))}</td>
+          <td class="right">${escapeHtml(EGP(s.total_employee_cash_out))}</td>
+          <td class="right">${escapeHtml(EGP(s.total_cash_out))}</td>
           <td class="right">${escapeHtml(EGP(s.total_returns))}</td>
+          <td class="right">${escapeHtml(EGP(s.total_refund_cash_out))}</td>
           <td class="right">${escapeHtml(EGP(s.opening_balance))}</td>
           <td class="right">${escapeHtml(EGP(s.expected_closing))}</td>
           <td class="right">${s.actual_closing == null ? '—' : escapeHtml(EGP(s.actual_closing))}</td>
@@ -158,8 +161,11 @@ export function buildAggregatedShiftReportHtml(
           <th>إجمالي التحصيلات</th>
           <th>كاش</th>
           <th>غير نقدي</th>
-          <th>المصروفات</th>
+          <th>مصروفات تشغيلية</th>
+          <th>حركات الموظفين</th>
+          <th>إجمالي الخارج</th>
           <th>المرتجعات</th>
+          <th>المرتجع المصروف</th>
           <th>مبلغ الافتتاح</th>
           <th>المتوقع النقدي</th>
           <th>الإغلاق الفعلي النقدي</th>
@@ -177,7 +183,10 @@ export function buildAggregatedShiftReportHtml(
           <td class="right">${escapeHtml(EGP(totals.cash_total))}</td>
           <td class="right">${escapeHtml(EGP(totals.non_cash_total))}</td>
           <td class="right">${escapeHtml(EGP(totals.total_operating_expenses))}</td>
+          <td class="right">${escapeHtml(EGP(totals.total_employee_cash_out))}</td>
+          <td class="right">${escapeHtml(EGP(totals.total_cash_out))}</td>
           <td class="right">${escapeHtml(EGP(totals.total_returns))}</td>
+          <td class="right">${escapeHtml(EGP(totals.total_refund_cash_out))}</td>
           <td class="right">${escapeHtml(EGP(totals.opening_balance))}</td>
           <td class="right">${escapeHtml(EGP(totals.expected_closing))}</td>
           <td class="right">${totals.actual_closing == null ? '—' : escapeHtml(EGP(totals.actual_closing))}</td>
@@ -645,9 +654,10 @@ export function buildAggregatedShiftReportSheets(
   ];
 
   /* Sheet 2 — الورديات (selected shifts metadata + per-shift financials) */
-  // PR-FIX-SHIFT-AGGREGATE-CASH-VS-NONCASH-VARIANCE — same column set
-  // as the HTML "selected shifts" table. Cash-side columns labelled
-  // explicitly "النقدي" so non-cash payments never read as cash deficit.
+  // PR-FIX-SHIFT-REPORTS-LIVE-VARIANCE-EXPENSES-RETURNS-NET — same
+  // column set as the HTML "selected shifts" table. Outgoing split:
+  // operating / employee / total. Returns split: legacy total / CT
+  // refund-out. الصافي reverted to (expected − opening).
   const shiftsSheet =
     header.shifts.length > 0
       ? header.shifts.map((s) => ({
@@ -661,8 +671,11 @@ export function buildAggregatedShiftReportSheets(
           'إجمالي التحصيلات': Number(s.total_collections),
           كاش: Number(s.cash_total),
           'غير نقدي': Number(s.non_cash_total),
-          المصروفات: Number(s.total_operating_expenses),
+          'مصروفات تشغيلية': Number(s.total_operating_expenses),
+          'حركات الموظفين': Number(s.total_employee_cash_out),
+          'إجمالي الخارج': Number(s.total_cash_out),
           المرتجعات: Number(s.total_returns),
+          'المرتجع المصروف': Number(s.total_refund_cash_out),
           'مبلغ الافتتاح': Number(s.opening_balance),
           'المتوقع النقدي': Number(s.expected_closing),
           'الإغلاق الفعلي النقدي':
@@ -682,8 +695,11 @@ export function buildAggregatedShiftReportSheets(
             'إجمالي التحصيلات': '',
             كاش: '',
             'غير نقدي': '',
-            المصروفات: '',
+            'مصروفات تشغيلية': '',
+            'حركات الموظفين': '',
+            'إجمالي الخارج': '',
             المرتجعات: '',
+            'المرتجع المصروف': '',
             'مبلغ الافتتاح': '',
             'المتوقع النقدي': '',
             'الإغلاق الفعلي النقدي': '',
