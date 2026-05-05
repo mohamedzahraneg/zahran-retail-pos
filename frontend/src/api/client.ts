@@ -14,6 +14,10 @@ import { attachTransferIdempotencyKeyIfApplicable } from '@/lib/transfer-idempot
 // Strict equality on the URL gate so suffix routes (e.g.
 // /accounting/expenses/:id/approve) can't accidentally receive the header.
 import { attachExpenseIdempotencyKeyIfApplicable } from '@/lib/expense-idempotency';
+// PR-AUDIT-IDEMPOTENCY-CASH-DESK-CUSTOMER-PAYMENTS-FE — fourth sibling
+// helper. Gates strictly on POST /cash-desk/customer-payments — does
+// NOT fire on the /:id/void suffix route or on supplier-payments.
+import { attachCustomerPaymentIdempotencyKeyIfApplicable } from '@/lib/customer-payment-idempotency';
 
 const envApiUrl = import.meta.env.VITE_API_URL as string | undefined;
 const baseURL = envApiUrl ?? 'http://localhost:3000';
@@ -40,6 +44,10 @@ api.interceptors.request.use((config) => {
   // route except POST /accounting/expenses and POST
   // /accounting/expenses/daily, where it adds the per-modal key.
   attachExpenseIdempotencyKeyIfApplicable(config);
+  // PR-AUDIT-IDEMPOTENCY-CASH-DESK-CUSTOMER-PAYMENTS-FE — no-op on
+  // every route except POST /cash-desk/customer-payments, where it
+  // adds the per-ReceiptModal key.
+  attachCustomerPaymentIdempotencyKeyIfApplicable(config);
   return config;
 });
 

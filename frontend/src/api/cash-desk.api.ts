@@ -367,6 +367,32 @@ export interface PaymentAllocation {
   amount: number;
 }
 
+/**
+ * PR-AUDIT-IDEMPOTENCY-CASH-DESK-CUSTOMER-PAYMENTS-FE — payload
+ * canonicalization for `receive`.
+ *
+ * Sorts `allocations` by `invoice_id` ascending so the BE's body-hash
+ * is identical across legitimate retries that present the same set
+ * of allocations in different click order. The modal's UI display
+ * order is unaffected — only the wire payload is canonicalized.
+ *
+ * Returns a NEW payload object; the input is not mutated. If
+ * `allocations` is undefined or not an array, the field is left
+ * untouched (refund / deposit kinds intentionally omit allocations).
+ *
+ * Exported for direct unit testing in
+ * `frontend/src/lib/customer-payment-idempotency.spec.ts`.
+ */
+export function canonicalizeReceivePayload(
+  payload: CreateCustomerPaymentPayload,
+): CreateCustomerPaymentPayload {
+  if (!Array.isArray(payload.allocations)) return payload;
+  const sorted = [...payload.allocations].sort((a, b) =>
+    a.invoice_id < b.invoice_id ? -1 : a.invoice_id > b.invoice_id ? 1 : 0,
+  );
+  return { ...payload, allocations: sorted };
+}
+
 export interface CreateCustomerPaymentPayload {
   customer_id: string;
   cashbox_id: string;
@@ -561,7 +587,12 @@ export const cashDeskApi = {
 
   // Customer receipts
   receive: (payload: CreateCustomerPaymentPayload) =>
-    unwrap<CustomerPayment>(api.post('/cash-desk/customer-payments', payload)),
+    unwrap<CustomerPayment>(
+      api.post(
+        '/cash-desk/customer-payments',
+        canonicalizeReceivePayload(payload),
+      ),
+    ),
 
   listCustomerPayments: (customer_id?: string) =>
     unwrap<CustomerPayment[]>(
