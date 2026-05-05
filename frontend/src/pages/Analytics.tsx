@@ -393,9 +393,15 @@ export default function Analytics() {
           Drill-down `to` opens the source screen so the user can see
           the underlying documents. */}
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+        {/* PR-AUDIT-DASHBOARD-ANALYTICS-LABELS — make the basis of each
+            top-grid metric explicit. Revenue / Gross-Margin are pure
+            invoice-derived; Net-Profit is mixed (revenue=invoice,
+            expenses=GL); Liquidity already labeled by PR #298. */}
         <IndicatorTile
           icon={<DollarSign size={16} />}
           label="الإيرادات"
+          tooltip="الإيرادات = مجموع (grand_total − tax_amount) على الفواتير المكتملة في الفترة — أساس فاتورة (صافي من الضريبة)"
+          testId="kpi-revenue"
           value={EGP(indValue(indicators?.revenue))}
           sub={`${indValue(indicators?.invoice_count)} فاتورة`}
           color="emerald"
@@ -405,6 +411,8 @@ export default function Analytics() {
         <IndicatorTile
           icon={<Percent size={16} />}
           label="الهامش الإجمالي"
+          tooltip="الهامش الإجمالي = مجمل الربح ÷ الإيرادات × 100 — أساس فاتورة"
+          testId="kpi-gross-margin"
           value={`${indValue(indicators?.gross_margin_pct).toFixed(1)}%`}
           sub={`ربح ${EGP(indValue(indicators?.gross_profit))}`}
           color={
@@ -419,6 +427,8 @@ export default function Analytics() {
         <IndicatorTile
           icon={<TrendingUp size={16} />}
           label="صافي الربح"
+          tooltip="صافي الربح = الإيرادات − COGS − المصروفات (من قائمة الدخل GL، حسابات expense) − قيمة المرتجعات — أساس مختلط: إيرادات بأساس فاتورة، مصروفات بأساس محاسبي GL"
+          testId="kpi-net-profit"
           value={EGP(indValue(indicators?.net_profit))}
           sub={`${indValue(indicators?.net_margin_pct).toFixed(1)}% هامش`}
           color={
@@ -509,6 +519,8 @@ export default function Analytics() {
         />
         <MiniStat
           label="متوسط الإنفاق اليومي"
+          tooltip="متوسط الإنفاق اليومي = إجمالي المصروفات (من قائمة الدخل GL، حسابات account_type='expense'، posted+!void) ÷ عدد أيام الفترة — أساس محاسبي GL"
+          testId="kpi-daily-burn"
           value={EGP(indValue(indicators?.daily_burn))}
           sub="من قائمة الدخل ÷ أيام الفترة"
           scope="period"
@@ -745,6 +757,8 @@ function MiniStat({
   color = 'slate',
   scope,
   to,
+  tooltip,
+  testId,
 }: {
   label: string;
   value: string;
@@ -753,6 +767,14 @@ function MiniStat({
   color?: 'slate' | 'amber' | 'rose';
   scope: KpiScope;
   to?: string;
+  /**
+   * PR-AUDIT-DASHBOARD-ANALYTICS-LABELS — optional native tooltip
+   * on the label so the operator can hover to see the formula /
+   * basis (cash-basis vs GL/accrual). Mirrors `IndicatorTile.tooltip`.
+   */
+  tooltip?: string;
+  /** Optional `data-testid` on the tile root so specs can target it. */
+  testId?: string;
 }) {
   const cls: Record<string, string> = {
     slate: 'text-slate-700 border-slate-200',
@@ -760,9 +782,17 @@ function MiniStat({
     rose: 'text-rose-700 border-rose-200',
   };
   return (
-    <div className={`card p-3 border min-w-0 h-full ${cls[color]}`}>
+    <div
+      className={`card p-3 border min-w-0 h-full ${cls[color]}`}
+      data-testid={testId}
+    >
       <div className="flex items-center justify-between gap-1">
-        <div className="text-xs text-slate-500 break-words min-w-0">{label}</div>
+        <div
+          className="text-xs text-slate-500 break-words min-w-0"
+          title={tooltip}
+        >
+          {label}
+        </div>
         <div className="shrink-0">
           <ScopeBadge scope={scope} />
         </div>

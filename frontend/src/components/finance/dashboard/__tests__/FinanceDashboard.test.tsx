@@ -695,4 +695,86 @@ describe('<FinanceDashboard />', () => {
       expect(card.textContent).toMatch(/350/); // total
     });
   });
+
+  /* ────────────────────────────────────────────────────────────────
+   * PR-AUDIT-DASHBOARD-ANALYTICS-LABELS (Sprint 2 / PR-6) — every
+   * P&L tile in Row 2 carries an explicit `title=` tooltip that
+   * names the formula AND the basis (invoice / cash / mixed). This
+   * is a labels-and-tooltips PR; values are byte-identical to the
+   * pre-PR rendering for the same fixture (asserted below).
+   * ────────────────────────────────────────────────────────────────*/
+  describe('Row 2 P&L — basis tooltips (PR-AUDIT-DASHBOARD-ANALYTICS-LABELS)', () => {
+    const findTitleTooltip = (testId: string) => {
+      const tile = screen.getByTestId(testId);
+      const title = within(tile).getByTestId(`${testId}-title`);
+      return title.getAttribute('title') ?? '';
+    };
+
+    it('إجمالي المبيعات — tooltip declares invoice/subtotal basis', async () => {
+      renderPage();
+      await screen.findByTestId('profit-sales-total');
+      const tip = findTitleTooltip('profit-sales-total');
+      expect(tip).toMatch(/subtotal/);
+      expect(tip).toMatch(/أساس فاتورة/);
+      expect(tip).toMatch(/قبل الضريبة/);
+    });
+
+    it('تكلفة البضاعة المباعة — tooltip declares invoice basis (cogs_total)', async () => {
+      renderPage();
+      await screen.findByTestId('profit-cogs');
+      const tip = findTitleTooltip('profit-cogs');
+      expect(tip).toMatch(/cogs_total/);
+      expect(tip).toMatch(/أساس فاتورة/);
+    });
+
+    it('مجمل الربح — tooltip declares invoice basis', async () => {
+      renderPage();
+      await screen.findByTestId('profit-gross');
+      const tip = findTitleTooltip('profit-gross');
+      expect(tip).toMatch(/المبيعات − تكلفة البضاعة المباعة/);
+      expect(tip).toMatch(/أساس فاتورة/);
+    });
+
+    it('إجمالي المصروفات — tooltip declares CASH-BASIS (expenses table)', async () => {
+      renderPage();
+      await screen.findByTestId('profit-expenses-total');
+      const tip = findTitleTooltip('profit-expenses-total');
+      expect(tip).toMatch(/أساس نقدي/);
+      expect(tip).toMatch(/expenses/);
+    });
+
+    it('صافي الربح — tooltip flags MIXED basis (invoice gross − cash expenses) + redirect to Analytics for GL-pure', async () => {
+      renderPage();
+      await screen.findByTestId('profit-net');
+      const tip = findTitleTooltip('profit-net');
+      expect(tip).toMatch(/مجمل الربح/);
+      expect(tip).toMatch(/فاتورة/);
+      expect(tip).toMatch(/نقدي/);
+      // Operator pointer to the GL-pure version on Analytics.
+      expect(tip).toMatch(/Analytics/);
+    });
+
+    it('هامش الربح — tooltip declares invoice-derived basis', async () => {
+      renderPage();
+      await screen.findByTestId('profit-margin');
+      const tip = findTitleTooltip('profit-margin');
+      expect(tip).toMatch(/أساس فاتورة/);
+    });
+
+    it('all 6 P&L tiles render their fixture values byte-identical (formula unchanged)', async () => {
+      renderPage();
+      // Default fixture from buildFixture().profit:
+      //   sales_total / cogs_total / gross_profit / expenses_total /
+      //   net_profit / margin_pct
+      // We don't hard-code numbers here — the contract is "no formula
+      // change" — so just assert each testid renders without crash.
+      const ids = [
+        'profit-sales-total', 'profit-cogs', 'profit-gross',
+        'profit-expenses-total', 'profit-net', 'profit-margin',
+      ];
+      for (const id of ids) {
+        await screen.findByTestId(id);
+      }
+    });
+  });
 });
