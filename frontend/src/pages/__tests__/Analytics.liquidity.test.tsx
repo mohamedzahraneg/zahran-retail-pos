@@ -153,3 +153,66 @@ describe('<Analytics /> liquidity tile — PR-FIN-ANALYTICS-LIQUIDITY-GL', () =>
     expect(liquidityHits).toHaveLength(1);
   });
 });
+
+/* ──────────────────────────────────────────────────────────────────
+ * PR-AUDIT-DASHBOARD-ANALYTICS-LABELS (Sprint 2 / PR-6) — every
+ * Analytics top-grid + supplementary KPI carries an explicit
+ * `title=` tooltip naming the formula AND the basis. Liquidity
+ * already covered by the suite above. Values are byte-identical
+ * for the same fixture (label-only PR).
+ * ──────────────────────────────────────────────────────────────────*/
+describe('<Analytics /> basis tooltips — PR-AUDIT-DASHBOARD-ANALYTICS-LABELS', () => {
+  const findLabelTooltip = (testId: string, labelText: string) => {
+    const tile = screen.getByTestId(testId);
+    const labelEl = within(tile).getByText(labelText).closest('[title]');
+    return labelEl?.getAttribute('title') ?? '';
+  };
+
+  it('الإيرادات — tooltip declares invoice basis (grand_total − tax_amount)', async () => {
+    renderPage();
+    await screen.findByTestId('kpi-revenue');
+    const tip = findLabelTooltip('kpi-revenue', 'الإيرادات');
+    expect(tip).toMatch(/grand_total/);
+    expect(tip).toMatch(/tax_amount/);
+    expect(tip).toMatch(/أساس فاتورة/);
+    expect(tip).toMatch(/صافي من الضريبة/);
+  });
+
+  it('الهامش الإجمالي — tooltip declares invoice-derived basis', async () => {
+    renderPage();
+    await screen.findByTestId('kpi-gross-margin');
+    const tip = findLabelTooltip('kpi-gross-margin', 'الهامش الإجمالي');
+    expect(tip).toMatch(/مجمل الربح ÷ الإيرادات/);
+    expect(tip).toMatch(/أساس فاتورة/);
+  });
+
+  it('صافي الربح — tooltip flags MIXED basis (revenue=invoice, expenses=GL)', async () => {
+    renderPage();
+    await screen.findByTestId('kpi-net-profit');
+    const tip = findLabelTooltip('kpi-net-profit', 'صافي الربح');
+    expect(tip).toMatch(/الإيرادات/);
+    expect(tip).toMatch(/قائمة الدخل GL/);
+    expect(tip).toMatch(/أساس مختلط/);
+  });
+
+  it('متوسط الإنفاق اليومي (daily_burn) — tooltip declares GL/accrual basis', async () => {
+    renderPage();
+    await screen.findByTestId('kpi-daily-burn');
+    const tip = findLabelTooltip('kpi-daily-burn', 'متوسط الإنفاق اليومي');
+    expect(tip).toMatch(/قائمة الدخل GL/);
+    expect(tip).toMatch(/account_type='expense'/);
+    expect(tip).toMatch(/posted\+!void/);
+    expect(tip).toMatch(/أساس محاسبي GL/);
+  });
+
+  it('value bindings are unchanged (label-only PR — no formula change)', async () => {
+    renderPage();
+    // Each tile still binds to its existing indicator field. React
+    // Query takes a tick to populate, so wait until the rendered
+    // amount matches the fixture rather than asserting synchronously.
+    const liq = await screen.findByTestId('kpi-liquidity');
+    await waitFor(() => expect(liq.textContent).toMatch(/31,850\.00/)); // cash_on_hand
+    const burn = await screen.findByTestId('kpi-daily-burn');
+    await waitFor(() => expect(burn.textContent).toMatch(/293\.76/));   // daily_burn
+  });
+});

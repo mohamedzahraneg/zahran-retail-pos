@@ -45,8 +45,16 @@ export function Row2ProfitSummary({ data }: { data: FinanceDashboard }) {
         className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-3 2xl:grid-cols-9 gap-3"
         dir="rtl"
       >
+        {/* PR-AUDIT-DASHBOARD-ANALYTICS-LABELS — disambiguate basis on
+            every P&L tile. Sales/COGS/Gross/Margin all derive from the
+            invoice tables (subtotal / cogs_total / gross_profit) =
+            invoice basis. Total Expenses sums the `expenses` table
+            cash-paid amounts in the period = cash basis. Net = the two
+            mixed → tooltip flags this so the operator knows to compare
+            against Analytics → "صافي الربح" for the GL-pure version. */}
         <ProfitMetric
           title="إجمالي المبيعات"
+          titleTooltip="إجمالي المبيعات = مجموع subtotal الفواتير في الفترة (قبل الضريبة) — أساس فاتورة"
           value={fmtEGP(p.sales_total)}
           icon={<TrendingUp size={18} />}
           tone="indigo"
@@ -55,6 +63,7 @@ export function Row2ProfitSummary({ data }: { data: FinanceDashboard }) {
         />
         <ProfitMetric
           title="تكلفة البضاعة المباعة"
+          titleTooltip="تكلفة البضاعة المباعة = مجموع cogs_total على فواتير الفترة — أساس فاتورة"
           value={fmtEGP(p.cogs_total)}
           icon={<Package size={18} />}
           tone="violet"
@@ -64,6 +73,7 @@ export function Row2ProfitSummary({ data }: { data: FinanceDashboard }) {
         />
         <ProfitMetric
           title="مجمل الربح"
+          titleTooltip="مجمل الربح = المبيعات − تكلفة البضاعة المباعة — أساس فاتورة"
           value={fmtEGP(p.gross_profit)}
           icon={<Sparkles size={18} />}
           tone="emerald"
@@ -72,6 +82,7 @@ export function Row2ProfitSummary({ data }: { data: FinanceDashboard }) {
         />
         <ProfitMetric
           title="إجمالي المصروفات"
+          titleTooltip="إجمالي المصروفات = مجموع نقدية المصروفات في الفترة (جدول expenses، يشمل السلف) — أساس نقدي"
           value={fmtEGP(p.expenses_total)}
           icon={<Receipt size={18} />}
           tone="rose"
@@ -81,6 +92,7 @@ export function Row2ProfitSummary({ data }: { data: FinanceDashboard }) {
         />
         <ProfitMetric
           title="صافي الربح"
+          titleTooltip="صافي الربح = مجمل الربح (فاتورة) − إجمالي المصروفات (نقدي). للمقارنة المحاسبية البحتة استخدم Analytics → صافي الربح"
           value={fmtEGP(p.net_profit)}
           icon={<Coins size={18} />}
           tone="emerald"
@@ -91,6 +103,7 @@ export function Row2ProfitSummary({ data }: { data: FinanceDashboard }) {
         />
         <ProfitMetric
           title="هامش الربح"
+          titleTooltip="هامش الربح = مجمل الربح ÷ إجمالي المبيعات × 100 — أساس فاتورة"
           value={fmtPct(p.margin_pct)}
           icon={<Percent size={18} />}
           tone="amber"
@@ -125,6 +138,7 @@ export function Row2ProfitSummary({ data }: { data: FinanceDashboard }) {
 
 function ProfitMetric({
   title,
+  titleTooltip,
   value,
   icon,
   tone,
@@ -136,6 +150,12 @@ function ProfitMetric({
   testId,
 }: {
   title: string;
+  /**
+   * Optional tooltip on the card title — surfaces the formula / basis
+   * (invoice / cash / GL / mixed) for the operator. Forwarded to the
+   * existing `KpiCard.titleTooltip` prop.
+   */
+  titleTooltip?: string;
   value: string;
   icon: React.ReactNode;
   tone: 'emerald' | 'rose' | 'amber' | 'indigo' | 'sky' | 'violet' | 'pink';
@@ -147,7 +167,7 @@ function ProfitMetric({
   testId?: string;
 }) {
   return (
-    <KpiCard title={title} icon={icon} tone={tone} testId={testId}>
+    <KpiCard title={title} titleTooltip={titleTooltip} icon={icon} tone={tone} testId={testId}>
       <div
         className={`font-mono tabular-nums ${emphasized ? 'text-2xl font-black text-emerald-700 dark:text-emerald-400' : 'text-xl font-black text-slate-900 dark:text-slate-100'}`}
       >
