@@ -1,4 +1,6 @@
 import {
+  HttpException,
+  HttpStatus,
   Injectable,
   BadRequestException,
   ForbiddenException,
@@ -1595,5 +1597,477 @@ export class ShiftsService {
         ORDER BY a.adjusted_at DESC`,
       [shiftId],
     );
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // PR-SHIFT-REPORTS-AGGREGATED-DETAIL-BE
+  //
+  // Consolidated aggregated detailed report across N selected shifts.
+  // Additive only — fan-out reuse of `summary(id)` + `listAdjustments(id)`
+  // + a pure reducer. The 830-line `computeSummary` and the existing
+  // `summary(id)` / `list(...)` endpoints are NOT touched.
+  //
+  // Response shape, attribution rules, and dedupe tiebreaker are all
+  // documented inline at the call sites below.
+  // ──────────────────────────────────────────────────────────────────
+
+  /**
+   * `POST /shifts/reports/aggregate-detail` handler logic.
+   *
+   * Selection precedence: explicit `shift_ids` (when provided AND
+   * non-empty) wins. Otherwise the same predicate as
+   * `GET /shifts` (`list(...)`) resolves the set.
+   *
+   * Validation:
+   *   · empty final selection           → 400
+   *   · selection > 50 shifts           → 422
+   *
+   * `generated_by` and `generated_at` are server-supplied; client
+   * values would be ignored if present.
+   */
+  async aggregateDetail(
+    body: {
+      shift_ids?: string[];
+      filters?: {
+        from?: string;
+        to?: string;
+        status?: string;
+        user_id?: string;
+        cashbox_id?: string;
+      };
+    },
+    generatedBy: { user_id: string; username?: string | null },
+  ) {
+    // 1. Resolve target shifts. Selection wins.
+    const useSelection = !!(body.shift_ids && body.shift_ids.length > 0);
+    let shifts: Array<any>;
+    if (useSelection) {
+      shifts = await this.ds.query(
+        `
+        SELECT s.*,
+               cb.name_ar AS cashbox_name,
+               w.name_ar  AS warehouse_name,
+               u1.full_name AS opened_by_name,
+               u2.full_name AS closed_by_name,
+               (s.actual_closing - s.expected_closing) AS variance
+          FROM shifts s
+          LEFT JOIN cashboxes cb ON cb.id = s.cashbox_id
+          LEFT JOIN warehouses w ON w.id = s.warehouse_id
+          LEFT JOIN users u1 ON u1.id = s.opened_by
+          LEFT JOIN users u2 ON u2.id = s.closed_by
+         WHERE s.id = ANY($1::uuid[])
+         ORDER BY s.opened_at ASC
+        `,
+        [body.shift_ids],
+      );
+    } else {
+      const f = body.filters ?? {};
+      shifts = await this.list(
+        f.status,
+        f.user_id,
+        f.cashbox_id,
+        f.from,
+        f.to,
+      );
+    }
+
+    if (!shifts || shifts.length === 0) {
+      throw new BadRequestException('لا توجد ورديات مطابقة');
+    }
+    if (shifts.length > 50) {
+      throw new HttpException(
+        `الحد الأقصى 50 وردية لكل تقرير مجمّع — تم اختيار ${shifts.length}.`,
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
+    }
+
+    // 2. Resolve generated_by full_name (best-effort; falls back to
+    // the JWT username when the users row is missing or DS errors).
+    let generatedByName: string | null = generatedBy.username ?? null;
+    try {
+      const [u] = await this.ds.query(
+        `SELECT full_name FROM users WHERE id = $1 LIMIT 1`,
+        [generatedBy.user_id],
+      );
+      if (u?.full_name) generatedByName = u.full_name;
+    } catch {
+      /* keep username fallback */
+    }
+
+    // 3. Fan-out: per-shift summary + adjustments. We deliberately
+    // call the public `summary(id)` so the per-shift attribution
+    // semantics are guaranteed identical to the single-shift report.
+    const enriched = await Promise.all(
+      shifts.map(async (s) => ({
+        shift: s,
+        summary: await this.summary(s.id),
+        adjustments: await this.listAdjustments(s.id),
+      })),
+    );
+
+    // 4. Per-row context helper. Shape matches the audit spec:
+    //   shift_id, shift_no, shift_date, cashier_name, cashbox_name,
+    //   original_movement_at.
+    const cairoDate = (d: any): string | null => {
+      if (!d) return null;
+      const dt = d instanceof Date ? d : new Date(d);
+      // Format as YYYY-MM-DD in Africa/Cairo. Do NOT use toLocaleDateString
+      // with locale 'ar-EG' here (would emit Arabic-Indic digits).
+      const parts = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Africa/Cairo',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      }).formatToParts(dt);
+      const y = parts.find((p) => p.type === 'year')?.value;
+      const m = parts.find((p) => p.type === 'month')?.value;
+      const day = parts.find((p) => p.type === 'day')?.value;
+      return y && m && day ? `${y}-${m}-${day}` : null;
+    };
+    const ctxFor = (shift: any) => ({
+      shift_id: shift.id,
+      shift_no: shift.shift_no,
+      shift_date: cairoDate(shift.opened_at),
+      cashier_name: shift.opened_by_name ?? null,
+      cashbox_name: shift.cashbox_name ?? null,
+    });
+    const tag = (row: any, shift: any, originalAt: any) => ({
+      ...row,
+      ...ctxFor(shift),
+      original_movement_at: originalAt ?? null,
+      _attributed_shift_opened_at: shift.opened_at,
+    });
+
+    // 5. Dedupe across selected shifts.
+    //
+    // The legacy fallback for `expenses` (cashbox / warehouse /
+    // created_by + window) and the cashbox+window attribution for
+    // `cashbox_transactions`-derived rows can match the SAME source
+    // row under MULTIPLE selected shifts when shifts share a
+    // cashbox/warehouse/cashier and overlap in time.
+    //
+    // Tiebreaker (deterministic):
+    //   1. A row whose own `shift_id === <attributed_shift>.id`
+    //      (explicit attribution) beats a row attributed by fallback.
+    //   2. Among rows of equal explicit/fallback status, the row
+    //      attributed to the shift with the LATEST `opened_at` wins.
+    //   3. Final tiebreaker: lexicographic `shift_id` order.
+    const dedupeById = (rows: any[]) => {
+      const out = new Map<string, any>();
+      for (const r of rows) {
+        if (!r?.id) {
+          // Keep rows without an id (cashbox_movements aggregate rows
+          // synthesize their own composite id below; this branch is
+          // for safety only).
+          out.set(`__noid__${out.size}`, r);
+          continue;
+        }
+        const existing = out.get(r.id);
+        if (!existing) {
+          out.set(r.id, r);
+          continue;
+        }
+        // Tiebreaker — see the dedupeById header comment above. Both
+        // candidates carry the SAME source-row data (same `id`,
+        // therefore same `shift_id` from the source table), so the
+        // explicit-vs-fallback discriminator collapses to "the row
+        // attributed to the later-opened shift wins." Lexicographic
+        // shift_id is the final stable tiebreaker.
+        const exTs = new Date(existing._attributed_shift_opened_at).getTime();
+        const newTs = new Date(r._attributed_shift_opened_at).getTime();
+        if (newTs > exTs) out.set(r.id, r);
+        else if (newTs === exTs && r.shift_id < existing.shift_id) {
+          out.set(r.id, r);
+        }
+      }
+      // Strip the internal helper field before returning.
+      return Array.from(out.values()).map((r) => {
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        const { _attributed_shift_opened_at, ...rest } = r;
+        return rest;
+      });
+    };
+
+    // 6. Build sections.
+    //   · operating_expenses, employee_cash_movements,
+    //     refund_cash_movements: concat across shifts → dedupe.
+    //   · closing_adjustments: clean shift_id FK on
+    //     `shift_count_adjustments`; dedupe is a no-op but applied
+    //     defensively.
+    //   · cashbox_movements: derived per-shift summary rows (4 per
+    //     shift: customer_receipts, supplier_payments, other_cash_in,
+    //     other_cash_out). One row per (shift × category). No source
+    //     row collision possible.
+    //   · payment_breakdown: aggregated by (method × account) across
+    //     all selected shifts via merge — see mergePaymentBreakdown
+    //     below. Per-row shift context does NOT apply (these are
+    //     roll-ups, not source rows).
+    const operating_expenses = dedupeById(
+      enriched.flatMap(({ shift, summary }) =>
+        (summary.expenses ?? []).map((e: any) =>
+          tag(e, shift, e.created_at),
+        ),
+      ),
+    );
+
+    const employee_cash_movements = dedupeById(
+      enriched.flatMap(({ shift, summary }) =>
+        (summary.employee_cash_movements ?? []).map((m: any) =>
+          tag(m, shift, m.created_at),
+        ),
+      ),
+    );
+
+    const refund_cash_movements = dedupeById(
+      enriched.flatMap(({ shift, summary }) =>
+        (summary.refund_cash_movements ?? []).map((m: any) =>
+          tag(m, shift, m.created_at),
+        ),
+      ),
+    );
+
+    const closing_adjustments = dedupeById(
+      enriched.flatMap(({ shift, adjustments }) =>
+        (adjustments ?? []).map((a: any) =>
+          tag(a, shift, a.adjusted_at),
+        ),
+      ),
+    );
+
+    const cashbox_movements = enriched.flatMap(({ shift, summary }) => {
+      const ctx = ctxFor(shift);
+      const at = shift.opened_at;
+      const synth = (
+        category:
+          | 'customer_receipts'
+          | 'supplier_payments'
+          | 'other_cash_in'
+          | 'other_cash_out',
+      ) => ({
+        // synthetic composite id keeps dedupe deterministic if a
+        // future caller pipes these through the same dedupe helper.
+        id: `${shift.id}:${category}`,
+        category,
+        amount: Number(summary[category] ?? 0),
+        ...ctx,
+        original_movement_at: at,
+      });
+      return [
+        synth('customer_receipts'),
+        synth('supplier_payments'),
+        synth('other_cash_in'),
+        synth('other_cash_out'),
+      ];
+    });
+
+    // payment_breakdown — merge per (method × payment_account_id).
+    type AcctRow = {
+      payment_account_id: string | null;
+      display_name: string | null;
+      identifier: string | null;
+      provider_key: string | null;
+      total_amount: number;
+      invoice_count: number;
+      payment_count: number;
+    };
+    type MethodRow = {
+      method: string;
+      method_label_ar: string;
+      total_amount: number;
+      invoice_count: number;
+      payment_count: number;
+      accounts: AcctRow[];
+    };
+    const methodMap = new Map<string, MethodRow>();
+    for (const { summary } of enriched) {
+      const v2: MethodRow[] = (summary as any).payment_breakdown_v2 ?? [];
+      for (const m of v2) {
+        let merged = methodMap.get(m.method);
+        if (!merged) {
+          merged = {
+            method: m.method,
+            method_label_ar: m.method_label_ar,
+            total_amount: 0,
+            invoice_count: 0,
+            payment_count: 0,
+            accounts: [],
+          };
+          methodMap.set(m.method, merged);
+        }
+        merged.total_amount += Number(m.total_amount || 0);
+        merged.invoice_count += Number(m.invoice_count || 0);
+        merged.payment_count += Number(m.payment_count || 0);
+        const acctMap = new Map<string, AcctRow>(
+          merged.accounts.map((a) => [
+            `${a.payment_account_id ?? '__null__'}`,
+            a,
+          ]),
+        );
+        for (const a of m.accounts ?? []) {
+          const k = `${a.payment_account_id ?? '__null__'}`;
+          const existing = acctMap.get(k);
+          if (!existing) {
+            acctMap.set(k, {
+              payment_account_id: a.payment_account_id,
+              display_name: a.display_name,
+              identifier: a.identifier,
+              provider_key: a.provider_key,
+              total_amount: Number(a.total_amount || 0),
+              invoice_count: Number(a.invoice_count || 0),
+              payment_count: Number(a.payment_count || 0),
+            });
+          } else {
+            existing.total_amount += Number(a.total_amount || 0);
+            existing.invoice_count += Number(a.invoice_count || 0);
+            existing.payment_count += Number(a.payment_count || 0);
+          }
+        }
+        merged.accounts = Array.from(acctMap.values());
+      }
+    }
+    const payment_breakdown = Array.from(methodMap.values());
+
+    // 7. Totals — sum every numeric `summary` field across enriched
+    // shifts. `actual_closing` and `variance` are NULL on open
+    // shifts; they're summed only over closed shifts and exposed as
+    // `*_total` plus a `closed_shift_count` denominator.
+    const sumNum = (key: string) =>
+      enriched.reduce((s, { summary }) => s + Number(((summary as any)[key]) || 0), 0);
+    const closedSummaries = enriched.filter(
+      ({ summary }) => (summary as any).actual_closing !== null,
+    );
+    const actualClosingTotal = closedSummaries.length
+      ? closedSummaries.reduce(
+          (s, { summary }) => s + Number((summary as any).actual_closing || 0),
+          0,
+        )
+      : null;
+    const varianceTotal = closedSummaries.length
+      ? closedSummaries.reduce(
+          (s, { summary }) => s + Number((summary as any).variance || 0),
+          0,
+        )
+      : null;
+    const openingBalanceTotal = sumNum('opening_balance');
+    const expectedClosingTotal = sumNum('expected_closing');
+
+    const totals = {
+      opening_balance: openingBalanceTotal,
+
+      // sales
+      total_sales: sumNum('total_sales'),
+      invoice_count: sumNum('invoice_count'),
+      cancelled_count: sumNum('cancelled_count'),
+      total_cancelled: sumNum('total_cancelled'),
+      remaining_receivable: sumNum('remaining_receivable'),
+
+      // payments roll-up
+      cash_total: sumNum('cash_total'),
+      non_cash_total: sumNum('non_cash_total'),
+      grand_payment_total: sumNum('grand_payment_total'),
+
+      // cashbox flows
+      customer_receipts: sumNum('customer_receipts'),
+      supplier_payments: sumNum('supplier_payments'),
+      other_cash_in: sumNum('other_cash_in'),
+      other_cash_out: sumNum('other_cash_out'),
+
+      // returns + expenses + employee cash
+      total_returns: sumNum('total_returns'),
+      return_count: sumNum('return_count'),
+      total_expenses: sumNum('total_expenses'),
+      expense_count: sumNum('expense_count'),
+      total_operating_expenses: sumNum('total_operating_expenses'),
+      operating_expense_count: sumNum('operating_expense_count'),
+      total_employee_advances: sumNum('total_employee_advances'),
+      employee_advance_count: sumNum('employee_advance_count'),
+      total_employee_settlements: sumNum('total_employee_settlements'),
+      employee_settlement_count: sumNum('employee_settlement_count'),
+      total_employee_cash_out: sumNum('total_employee_cash_out'),
+
+      // refunds
+      total_refund_cash_out: sumNum('total_refund_cash_out'),
+      total_refund_cash_in: sumNum('total_refund_cash_in'),
+      net_refund_cash_impact: sumNum('net_refund_cash_impact'),
+      cancelled_return_out_amount: sumNum('cancelled_return_out_amount'),
+      cancelled_return_reversal_amount: sumNum(
+        'cancelled_return_reversal_amount',
+      ),
+      cancelled_return_net: sumNum('cancelled_return_net'),
+
+      // reconciliation
+      total_cash_in: sumNum('total_cash_in'),
+      total_cash_out: sumNum('total_cash_out'),
+      expected_closing: expectedClosingTotal,
+      actual_closing: actualClosingTotal,
+      variance: varianceTotal,
+      closed_shift_count: closedSummaries.length,
+
+      // "net shift amount" — the user's spec metric. Defined as
+      // (sum expected_closing − sum opening_balance) so it carries
+      // the same intuition as the per-shift "صافي" displayed today.
+      net_shift_amount: expectedClosingTotal - openingBalanceTotal,
+    };
+
+    // 8. Header.
+    const dateRange = (() => {
+      const opened = shifts.map((s) => +new Date(s.opened_at));
+      const closedOrNow = shifts.map(
+        (s) => +new Date(s.closed_at ?? Date.now()),
+      );
+      return {
+        from: cairoDate(new Date(Math.min(...opened))),
+        to: cairoDate(new Date(Math.max(...closedOrNow))),
+      };
+    })();
+
+    const cashiers = Array.from(
+      new Map(
+        shifts
+          .map((s) => [s.opened_by, s.opened_by_name ?? null] as [string, string | null])
+          .filter(([id]) => !!id),
+      ).entries(),
+    ).map(([id, name]) => ({ user_id: id, full_name: name }));
+
+    const cashboxes = Array.from(
+      new Map(
+        shifts
+          .map((s) => [s.cashbox_id, s.cashbox_name ?? null] as [string, string | null])
+          .filter(([id]) => !!id),
+      ).entries(),
+    ).map(([id, name]) => ({ cashbox_id: id, name_ar: name }));
+
+    return {
+      header: {
+        date_range: dateRange,
+        shift_count: shifts.length,
+        shifts: shifts.map((s) => ({
+          id: s.id,
+          shift_no: s.shift_no,
+          status: s.status,
+          opened_at: s.opened_at,
+          closed_at: s.closed_at,
+          cashier_name: s.opened_by_name ?? null,
+          cashbox_name: s.cashbox_name ?? null,
+        })),
+        cashiers,
+        cashboxes,
+        selection_mode: useSelection ? 'explicit' : 'filters',
+        generated_by: {
+          user_id: generatedBy.user_id,
+          full_name: generatedByName,
+        },
+        generated_at: new Date().toISOString(),
+      },
+      totals,
+      sections: {
+        operating_expenses,
+        employee_cash_movements,
+        cashbox_movements,
+        payment_breakdown,
+        refund_cash_movements,
+        closing_adjustments,
+      },
+    };
   }
 }
