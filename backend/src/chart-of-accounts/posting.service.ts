@@ -13,6 +13,7 @@ import {
   CASHBOX_KIND_TO_GL_CODE,
   CashboxKindForGl,
   GL_CASH,
+  LIQUID_GL_CODES,
 } from './gl-codes.constants';
 
 // PR-PAY-1 — Method → default GL account. The map is exhaustive over
@@ -158,42 +159,50 @@ export class AccountingPostingService {
           AND COALESCE(amount, 0) > 0`,
       [invoiceId],
     );
-    const lines: any[] = [];
+    // PR-FIX-POS-INVOICE-EDIT-WALLET-CASHBOX-ID — single resolution
+    // pass over payments. For each non-cash payment we now ALSO resolve
+    // `payment_account.cashbox_id` (frozen on the snapshot, or live-
+    // looked-up as a back-compat fallback) and cache it on the row so
+    // the cash_movements loop below can pair the GL leg with a CT entry
+    // on the same virtual cashbox. This satisfies the engine's Guard A
+    // (liquid GL line requires cashbox_id) AND Guard B (every liquid GL
+    // line needs a paired cash_movement) without bypassing or weakening
+    // either guard.
+    type ResolvedPayment = {
+      raw: any;
+      amount: number;
+      isCash: boolean;
+      glCode?: string;
+      displayName?: string;
+      paCashboxId?: string;
+    };
+    const resolved: ResolvedPayment[] = [];
     for (const p of payments) {
       const amt = Number(p.amount);
       if (isCashMethod(p.payment_method)) {
-        lines.push(
-          inv.cashbox_id
-            ? {
-                resolve_from_cashbox_id: inv.cashbox_id,
-                debit: amt,
-                cashbox_id: inv.cashbox_id,
-                description: `كاش - فاتورة ${inv.invoice_no}`,
-              }
-            : {
-                account_code: GL_CASH,
-                debit: amt,
-                cashbox_id: undefined,
-                description: `كاش - فاتورة ${inv.invoice_no}`,
-              },
-        );
+        resolved.push({ raw: p, amount: amt, isCash: true });
         continue;
       }
-
-      // Non-cash: resolve account snapshot → live account → method default.
+      // Non-cash: resolve gl_code AND cashbox_id from the same source
+      // (snapshot → live → method default). Snapshot is preferred so
+      // historical reposts stay deterministic across payment_account
+      // renames / deactivations.
       let glCode: string | undefined =
         p.payment_account_snapshot?.gl_account_code ?? undefined;
       let displayName: string | undefined =
         p.payment_account_snapshot?.display_name ?? undefined;
+      let paCashboxId: string | undefined =
+        p.payment_account_snapshot?.cashbox_id ?? undefined;
 
-      if (!glCode && p.payment_account_id && this.payments) {
+      if ((!glCode || !paCashboxId) && p.payment_account_id && this.payments) {
         const live = await this.payments.resolveForPosting(
           p.payment_account_id,
           runner,
         );
         if (live) {
-          glCode = live.gl_account_code;
-          displayName = live.display_name;
+          if (!glCode) glCode = live.gl_account_code;
+          if (!displayName) displayName = live.display_name;
+          if (!paCashboxId) paCashboxId = live.cashbox_id ?? undefined;
         }
       }
 
@@ -216,13 +225,55 @@ export class AccountingPostingService {
         throw new Error(msg);
       }
 
-      lines.push({
-        account_code: glCode,
-        debit: amt,
-        description: displayName
-          ? `${displayName} - فاتورة ${inv.invoice_no}`
-          : `${p.payment_method} - فاتورة ${inv.invoice_no}`,
+      resolved.push({
+        raw: p,
+        amount: amt,
+        isCash: false,
+        glCode,
+        displayName,
+        paCashboxId,
       });
+    }
+
+    const lines: any[] = [];
+    for (const rp of resolved) {
+      if (rp.isCash) {
+        lines.push(
+          inv.cashbox_id
+            ? {
+                resolve_from_cashbox_id: inv.cashbox_id,
+                debit: rp.amount,
+                cashbox_id: inv.cashbox_id,
+                description: `كاش - فاتورة ${inv.invoice_no}`,
+              }
+            : {
+                account_code: GL_CASH,
+                debit: rp.amount,
+                cashbox_id: undefined,
+                description: `كاش - فاتورة ${inv.invoice_no}`,
+              },
+        );
+        continue;
+      }
+
+      // Non-cash GL line. When payment_account.cashbox_id is set,
+      // tag both `cashbox_id` and `resolve_from_cashbox_id` so the
+      // engine's Phase-2 auto-tag path keeps the cashbox attribution
+      // through resolution AND the line passes Guard A regardless of
+      // whether the resolved gl_code lands on a raw liquid bucket
+      // (1111/1113/1114/1115) or a non-liquid sub-account.
+      const lineEntry: any = {
+        account_code: rp.glCode,
+        debit: rp.amount,
+        description: rp.displayName
+          ? `${rp.displayName} - فاتورة ${inv.invoice_no}`
+          : `${rp.raw.payment_method} - فاتورة ${inv.invoice_no}`,
+      };
+      if (rp.paCashboxId) {
+        lineEntry.cashbox_id = rp.paCashboxId;
+        lineEntry.resolve_from_cashbox_id = rp.paCashboxId;
+      }
+      lines.push(lineEntry);
     }
     if (unpaid > 0) {
       lines.push({
@@ -262,17 +313,25 @@ export class AccountingPostingService {
     }
     if (lines.length < 2) return null;
 
-    // Phase 2.2: gather cash payments → engine cash_movements. Only
-    // cash payments produce a cashbox_transactions row; non-cash GL
-    // legs go to their bucket account above with no cashbox effect.
+    // Phase 2.2: gather cash_movements that pair with each liquid GL
+    // line so the engine's Guard B passes.
     //
     // PR-FIN-PAYACCT-4D-DRIFT-ROOT-FIX-1: when called from
-    // `postInvoiceEdit` (`opts.skipCashMovements === true`), build an
-    // empty list — the editInvoice path in `pos.service` already wrote
-    // the corresponding `edit_reversal` + `edit_replay` CT rows, so
+    // `postInvoiceEdit` (`opts.skipCashMovements === true`), suppress
+    // the CASH movement on `inv.cashbox_id` — the editInvoice path in
+    // `pos.service` already wrote the corresponding `edit_reversal` +
+    // `edit_replay` CT rows directly via `recordCashOnlyMovement`, so
     // re-emitting `sale` here would double-count the cash effect
     // (observed pattern: INV-2026-000147 / INV-2026-000116 with 5 CT
     // rows summing to +1,050 vs JE cash leg +350 → +700 drift).
+    //
+    // PR-FIX-POS-INVOICE-EDIT-WALLET-CASHBOX-ID: NON-CASH movements
+    // (paired to `payment_account.cashbox_id`) ARE always emitted —
+    // even under `skipCashMovements`. The flag was originally designed
+    // to skip cash CTs that pos.service.editInvoice writes manually.
+    // Non-cash CTs do NOT have that out-of-band write path, so they
+    // must always go through the engine. Without this, Guard B fires
+    // on the wallet/bank/check leg.
     const cashMoves: Array<{
       cashbox_id: string;
       direction: 'in' | 'out';
@@ -280,15 +339,38 @@ export class AccountingPostingService {
       category: string;
       notes?: string;
     }> = [];
-    if (inv.cashbox_id && !opts?.skipCashMovements) {
-      for (const p of payments) {
-        if (!isCashMethod(p.payment_method)) continue;
+    for (const rp of resolved) {
+      if (rp.isCash) {
+        if (inv.cashbox_id && !opts?.skipCashMovements) {
+          cashMoves.push({
+            cashbox_id: inv.cashbox_id,
+            direction: 'in',
+            amount: rp.amount,
+            category: 'sale',
+            notes: `بيع — فاتورة ${inv.invoice_no}`,
+          });
+        }
+        continue;
+      }
+      // Non-cash with a payment-account-bound virtual cashbox.
+      // Always emitted regardless of skipCashMovements — see comment
+      // above. Only emit when the resolved gl_code is in
+      // LIQUID_GL_CODES — for non-liquid sub-accounts (e.g.
+      // 1114-001), the engine's Guard B doesn't require a paired
+      // movement and Guard C would flag the orphan.
+      if (
+        rp.paCashboxId &&
+        rp.glCode &&
+        (LIQUID_GL_CODES as readonly string[]).includes(rp.glCode)
+      ) {
         cashMoves.push({
-          cashbox_id: inv.cashbox_id,
+          cashbox_id: rp.paCashboxId,
           direction: 'in',
-          amount: Number(p.amount),
+          amount: rp.amount,
           category: 'sale',
-          notes: `بيع — فاتورة ${inv.invoice_no}`,
+          notes: rp.displayName
+            ? `${rp.displayName} — فاتورة ${inv.invoice_no}`
+            : `${rp.raw.payment_method} — فاتورة ${inv.invoice_no}`,
         });
       }
     }

@@ -1,4 +1,8 @@
 import { AccountingPostingService } from './posting.service';
+// PR-FIX-POS-INVOICE-EDIT-WALLET-CASHBOX-ID — direct import of the
+// engine's pure cash/GL alignment validator so we can pipe a real
+// spec through it in unit tests without booting the full engine.
+import { checkCashGlAlignment } from './financial-engine.service';
 
 /**
  * PR-DRIFT-3F — focused unit tests for the cashbox-resolution helper.
@@ -690,6 +694,612 @@ describe('AccountingPostingService — PR-FIN-PAYACCT-4D-DRIFT-ROOT-FIX-1', () =
       expect(c.sql).not.toMatch(/auto[_ ]?settle/i);
       expect(c.sql).not.toMatch(/drift[_ ]?correction/i);
     }
+  });
+});
+
+/**
+ * PR-FIX-POS-INVOICE-EDIT-WALLET-CASHBOX-ID
+ *
+ * Bug repro + fix verification.
+ *
+ * BEFORE the fix, `postInvoice` built non-cash payment GL lines without
+ * a `cashbox_id`. When the resolved `gl_account_code` is a LIQUID code
+ * (1111 cash / 1113 bank / 1114 wallet / 1115 check) the engine's
+ * Guard A rejects the line:
+ *
+ *     "GL line on 1114 requires cashbox_id ... Use resolve_from_cashbox_id
+ *      or set cashbox_id explicitly."
+ *
+ * Repro path: edit an invoice changing the payment method from cash to
+ * wallet/InstaPay/bank/check. `postInvoiceEdit` voids the old JE and
+ * reposts via `postInvoice`. The new JE has the wallet leg with no
+ * cashbox tag → Guard A fires → the entire edit transaction rolls back
+ * with "فشل ترحيل القيد بعد تعديل الفاتورة".
+ *
+ * The fix threads `payment_account.cashbox_id` (frozen on the snapshot
+ * at edit-time, or live-resolved as a back-compat fallback) onto:
+ *   1. the non-cash GL line (`cashbox_id` + `resolve_from_cashbox_id`),
+ *      satisfying Guard A.
+ *   2. a paired entry in `cash_movements`, satisfying Guard B.
+ *
+ * The `skipCashMovements` opt is unchanged in semantics for CASH legs
+ * (which `pos.service.editInvoice` writes manually via
+ * `recordCashOnlyMovement`). Non-cash legs always go through the engine
+ * because nothing in `pos.service` writes their CTs out-of-band.
+ *
+ * Symmetric coverage:
+ *   · cash → wallet  (the reported bug, GL 1114)
+ *   · cash → bank    (GL 1113)
+ *   · cash → check   (GL 1115)
+ *   · wallet → cash  (regression check — existing inv.cashbox_id path)
+ *   · mixed cash + wallet
+ *   · sub-account GL like 1114-001 (NOT in LIQUID_GL_CODES) — should
+ *     pass through without cashbox tagging.
+ */
+describe('AccountingPostingService — PR-FIX-POS-INVOICE-EDIT-WALLET-CASHBOX-ID', () => {
+  function makeServiceWithEngineSpy(opts: {
+    dsResults: any[][];
+    coaIds?: Record<string, string>;
+    /**
+     * Optional mock for the live PaymentsService.resolveForPosting()
+     * lookup. The fix consults this only when the snapshot is missing
+     * `cashbox_id` (back-compat for rows written before this PR).
+     */
+    liveLookup?: (
+      paymentAccountId: string,
+    ) => Promise<{
+      id: string;
+      method: string;
+      gl_account_code: string;
+      display_name: string | null;
+      cashbox_id: string | null;
+    } | null>;
+  }) {
+    const dsCalls: Array<{ sql: string; params: any[] }> = [];
+    let i = 0;
+    const dsManager = {
+      query: async (sql: string, params: any[] = []) => {
+        dsCalls.push({ sql, params });
+        return opts.dsResults[i++] ?? [];
+      },
+    };
+    const ds: any = {
+      manager: dsManager,
+      query: dsManager.query,
+    };
+    const engineCalls: any[] = [];
+    const engine: any = {
+      recordTransaction: jest.fn().mockImplementation(async (spec: any) => {
+        engineCalls.push(spec);
+        return { ok: true, entry_id: 'je-mock' };
+      }),
+    };
+    const payments: any = opts.liveLookup
+      ? { resolveForPosting: jest.fn().mockImplementation(opts.liveLookup) }
+      : undefined;
+    const svc = new AccountingPostingService(ds, engine, payments);
+    if (opts.coaIds) {
+      (svc as any).accountIdByCode = async (_q: any, code: string) =>
+        opts.coaIds![code] ?? null;
+    }
+    (svc as any).cashboxAccountId = async (_q: any, cashboxId: string) =>
+      `acc-cashbox-${cashboxId}`;
+    return { svc, engine, engineCalls, dsCalls };
+  }
+
+  /**
+   * Tiny helper: build the resolvedLines + code map shape that
+   * checkCashGlAlignment expects, given the engine spec we observed.
+   * This lets us pipe a real engine spec through the pure validator
+   * to assert Guards A/B/C all pass — covering the user's
+   * requirement #6 ("liquid GL lines still satisfy the engine guard").
+   */
+  function passesEngineCashGlAlignment(spec: any): true | string {
+    // For unit testing we use the account_code directly as the
+    // "account_id" + "code" so the validator can match codes without
+    // a real chart_of_accounts lookup.
+    const codeById = new Map<string, string>();
+    const resolvedLines = (spec.gl_lines as any[]).map((l) => {
+      const accountId = String(
+        l.account_code ?? `cashbox:${l.resolve_from_cashbox_id}`,
+      );
+      const code =
+        l.account_code ??
+        (l.resolve_from_cashbox_id ? '1111' : '');
+      codeById.set(accountId, code);
+      return {
+        account_id: accountId,
+        debit: Number(l.debit ?? 0),
+        credit: Number(l.credit ?? 0),
+        cashbox_id:
+          l.cashbox_id ?? l.resolve_from_cashbox_id ?? null,
+      };
+    });
+    const result = checkCashGlAlignment({
+      reference_type: spec.reference_type,
+      reference_id: spec.reference_id,
+      accounting_only: spec.accounting_only ?? false,
+      resolved_lines: resolvedLines,
+      cash_movements: spec.cash_movements ?? [],
+      code_by_account_id: codeById,
+    });
+    if (result === null || result === 'accounting_only_bypass_logged') {
+      return true;
+    }
+    return result;
+  }
+
+  // ─── 1. Bug repro (pre-fix behavior captured before the fix lands) ─
+  it('cash → wallet WITHOUT payment_account.cashbox_id: snapshot has no cashbox → engine guard would fail (degraded config)', async () => {
+    // This pins the EXISTING configuration-degraded case: the operator
+    // hasn't pinned a cashbox to their wallet payment_account. After the
+    // fix, the engine call still emits a wallet line on 1114 with NO
+    // cashbox_id, so the engine's Guard A still rejects it. The fix is
+    // explicitly NOT to invent a cashbox out of thin air; operators must
+    // configure payment_account.cashbox_id on their wallet/InstaPay
+    // accounts. We pin this so the failure mode is visible: the FIX is
+    // CONDITIONAL on payment_account.cashbox_id being present.
+    const { svc, engineCalls } = makeServiceWithEngineSpy({
+      dsResults: [
+        [{ id: 'inv-1', invoice_no: 'INV-1', grand_total: 500,
+           paid_amount: 500, tax_amount: 0, status: 'paid',
+           customer_id: 'c-1', cashbox_id: 'cb-pos-1', completed_at: '2026-04-30' }],
+        [{ cogs: 0 }],
+        [{
+          payment_method: 'wallet',
+          amount: '500',
+          payment_account_id: 'pa-wallet-1',
+          // Snapshot frozen pre-fix — no cashbox_id field.
+          payment_account_snapshot: {
+            id: 'pa-wallet-1',
+            method: 'wallet',
+            display_name: 'InstaPay',
+            gl_account_code: '1114',
+            // cashbox_id intentionally absent
+          },
+        }],
+      ],
+      // Live lookup also returns null cashbox_id (configuration-degraded).
+      liveLookup: async () => ({
+        id: 'pa-wallet-1',
+        method: 'wallet',
+        gl_account_code: '1114',
+        display_name: 'InstaPay',
+        cashbox_id: null,
+      }),
+    });
+
+    await svc.postInvoice('inv-1', 'user-1', undefined, {
+      skipCashMovements: true,
+    });
+
+    expect(engineCalls).toHaveLength(1);
+    const spec = engineCalls[0];
+    const walletLine = (spec.gl_lines as any[]).find(
+      (l) => l.account_code === '1114',
+    );
+    expect(walletLine).toBeDefined();
+    expect(walletLine.cashbox_id).toBeUndefined();
+    expect(walletLine.resolve_from_cashbox_id).toBeUndefined();
+
+    // Pipe through real engine validator to confirm Guard A would fire.
+    const align = passesEngineCashGlAlignment(spec);
+    expect(typeof align).toBe('string');
+    expect(align as string).toMatch(
+      /cash GL line on 1114 requires cashbox_id/i,
+    );
+  });
+
+  // ─── 2. Happy path: cash → wallet WITH snapshot.cashbox_id ───────
+  it('cash → wallet WITH payment_account_snapshot.cashbox_id: wallet GL line carries cashbox_id + paired cash_movement; engine guards all pass', async () => {
+    const { svc, engineCalls } = makeServiceWithEngineSpy({
+      dsResults: [
+        [{ id: 'inv-2', invoice_no: 'INV-2', grand_total: 500,
+           paid_amount: 500, tax_amount: 0, status: 'paid',
+           customer_id: 'c-1', cashbox_id: 'cb-pos-1', completed_at: '2026-04-30' }],
+        [{ cogs: 0 }],
+        [{
+          payment_method: 'wallet',
+          amount: '500',
+          payment_account_id: 'pa-wallet-1',
+          payment_account_snapshot: {
+            id: 'pa-wallet-1',
+            method: 'wallet',
+            display_name: 'InstaPay الأهلي',
+            gl_account_code: '1114',
+            cashbox_id: 'cb-wallet-instapay', // ← present after the fix wires it through
+          },
+        }],
+      ],
+    });
+
+    await svc.postInvoice('inv-2', 'user-1', undefined, {
+      skipCashMovements: true,
+    });
+
+    expect(engineCalls).toHaveLength(1);
+    const spec = engineCalls[0];
+    const walletLine = (spec.gl_lines as any[]).find(
+      (l) => l.account_code === '1114',
+    );
+    expect(walletLine).toBeDefined();
+    expect(walletLine.cashbox_id).toBe('cb-wallet-instapay');
+    expect(walletLine.resolve_from_cashbox_id).toBe('cb-wallet-instapay');
+
+    // The paired cash_movement MUST be emitted (regardless of
+    // skipCashMovements) so engine Guard B passes. skipCashMovements
+    // suppresses ONLY cash payments tied to inv.cashbox_id; non-cash
+    // payments tied to payment_account.cashbox_id always go through
+    // the engine because pos.service.editInvoice does NOT write their
+    // CTs out-of-band.
+    const walletMv = (spec.cash_movements as any[]).find(
+      (m) => m.cashbox_id === 'cb-wallet-instapay',
+    );
+    expect(walletMv).toBeDefined();
+    expect(walletMv).toMatchObject({
+      cashbox_id: 'cb-wallet-instapay',
+      direction: 'in',
+      amount: 500,
+      category: 'sale',
+    });
+
+    // No CASH movement (skipCashMovements suppresses inv.cashbox_id).
+    const cashMv = (spec.cash_movements as any[]).find(
+      (m) => m.cashbox_id === 'cb-pos-1',
+    );
+    expect(cashMv).toBeUndefined();
+
+    // Real engine validator: Guards A + B + C all pass.
+    expect(passesEngineCashGlAlignment(spec)).toBe(true);
+  });
+
+  // ─── 3. Symmetric: cash → bank (GL 1113) ─────────────────────────
+  it('cash → bank with snapshot.cashbox_id: bank GL line carries cashbox_id, engine guards pass', async () => {
+    const { svc, engineCalls } = makeServiceWithEngineSpy({
+      dsResults: [
+        [{ id: 'inv-3', invoice_no: 'INV-3', grand_total: 1200,
+           paid_amount: 1200, tax_amount: 0, status: 'paid',
+           customer_id: 'c-1', cashbox_id: 'cb-pos-1', completed_at: '2026-04-30' }],
+        [{ cogs: 0 }],
+        [{
+          payment_method: 'bank_transfer',
+          amount: '1200',
+          payment_account_id: 'pa-bank-1',
+          payment_account_snapshot: {
+            id: 'pa-bank-1',
+            method: 'bank_transfer',
+            display_name: 'NBE — حساب جاري',
+            gl_account_code: '1113',
+            cashbox_id: 'cb-bank-nbe',
+          },
+        }],
+      ],
+    });
+
+    await svc.postInvoice('inv-3', 'user-1', undefined, {
+      skipCashMovements: true,
+    });
+
+    const spec = engineCalls[0];
+    const bankLine = (spec.gl_lines as any[]).find(
+      (l) => l.account_code === '1113',
+    );
+    expect(bankLine.cashbox_id).toBe('cb-bank-nbe');
+    expect(bankLine.resolve_from_cashbox_id).toBe('cb-bank-nbe');
+
+    const bankMv = (spec.cash_movements as any[]).find(
+      (m) => m.cashbox_id === 'cb-bank-nbe',
+    );
+    expect(bankMv).toMatchObject({
+      cashbox_id: 'cb-bank-nbe',
+      direction: 'in',
+      amount: 1200,
+      category: 'sale',
+    });
+
+    expect(passesEngineCashGlAlignment(spec)).toBe(true);
+  });
+
+  // ─── 4. Symmetric: cash → check (GL 1115) ────────────────────────
+  it('cash → check with snapshot.cashbox_id: check GL line carries cashbox_id, engine guards pass', async () => {
+    const { svc, engineCalls } = makeServiceWithEngineSpy({
+      dsResults: [
+        [{ id: 'inv-4', invoice_no: 'INV-4', grand_total: 800,
+           paid_amount: 800, tax_amount: 0, status: 'paid',
+           customer_id: 'c-1', cashbox_id: 'cb-pos-1', completed_at: '2026-04-30' }],
+        [{ cogs: 0 }],
+        [{
+          payment_method: 'check',
+          amount: '800',
+          payment_account_id: 'pa-check-1',
+          payment_account_snapshot: {
+            id: 'pa-check-1',
+            method: 'check',
+            display_name: 'شيك مؤجل',
+            gl_account_code: '1115',
+            cashbox_id: 'cb-checks',
+          },
+        }],
+      ],
+    });
+
+    await svc.postInvoice('inv-4', 'user-1', undefined, {
+      skipCashMovements: true,
+    });
+
+    const spec = engineCalls[0];
+    const checkLine = (spec.gl_lines as any[]).find(
+      (l) => l.account_code === '1115',
+    );
+    expect(checkLine.cashbox_id).toBe('cb-checks');
+
+    const checkMv = (spec.cash_movements as any[]).find(
+      (m) => m.cashbox_id === 'cb-checks',
+    );
+    expect(checkMv).toMatchObject({ cashbox_id: 'cb-checks', amount: 800 });
+
+    expect(passesEngineCashGlAlignment(spec)).toBe(true);
+  });
+
+  // ─── 5. Reverse direction: wallet → cash (regression guard) ──────
+  it('wallet → cash: cash leg uses inv.cashbox_id (existing behavior unchanged)', async () => {
+    const { svc, engineCalls } = makeServiceWithEngineSpy({
+      dsResults: [
+        [{ id: 'inv-5', invoice_no: 'INV-5', grand_total: 300,
+           paid_amount: 300, tax_amount: 0, status: 'paid',
+           customer_id: 'c-1', cashbox_id: 'cb-pos-1', completed_at: '2026-04-30' }],
+        [{ cogs: 0 }],
+        // Post-edit: only cash payment.
+        [{ payment_method: 'cash', amount: '300',
+           payment_account_id: null, payment_account_snapshot: null }],
+      ],
+    });
+
+    await svc.postInvoice('inv-5', 'user-1', undefined, {
+      skipCashMovements: true,
+    });
+
+    const spec = engineCalls[0];
+    const cashLine = (spec.gl_lines as any[]).find(
+      (l) => l.resolve_from_cashbox_id === 'cb-pos-1',
+    );
+    expect(cashLine).toBeDefined();
+    expect(cashLine.cashbox_id).toBe('cb-pos-1');
+
+    // skipCashMovements suppresses cash entries.
+    expect(spec.cash_movements).toEqual([]);
+
+    // No wallet GL line (post-edit state has no wallet payment).
+    const walletLine = (spec.gl_lines as any[]).find(
+      (l) => l.account_code === '1114',
+    );
+    expect(walletLine).toBeUndefined();
+  });
+
+  // ─── 6. Mixed cash + wallet ──────────────────────────────────────
+  it('mixed cash + wallet edit: both legs have cashbox_id; only wallet movement emitted under skipCashMovements', async () => {
+    const { svc, engineCalls } = makeServiceWithEngineSpy({
+      dsResults: [
+        [{ id: 'inv-6', invoice_no: 'INV-6', grand_total: 800,
+           paid_amount: 800, tax_amount: 0, status: 'paid',
+           customer_id: 'c-1', cashbox_id: 'cb-pos-1', completed_at: '2026-04-30' }],
+        [{ cogs: 0 }],
+        [
+          { payment_method: 'cash', amount: '300',
+            payment_account_id: null, payment_account_snapshot: null },
+          {
+            payment_method: 'wallet',
+            amount: '500',
+            payment_account_id: 'pa-wallet-1',
+            payment_account_snapshot: {
+              id: 'pa-wallet-1',
+              method: 'wallet',
+              display_name: 'InstaPay',
+              gl_account_code: '1114',
+              cashbox_id: 'cb-wallet-instapay',
+            },
+          },
+        ],
+      ],
+    });
+
+    await svc.postInvoice('inv-6', 'user-1', undefined, {
+      skipCashMovements: true,
+    });
+
+    const spec = engineCalls[0];
+    const cashLine = (spec.gl_lines as any[]).find(
+      (l) => l.cashbox_id === 'cb-pos-1',
+    );
+    const walletLine = (spec.gl_lines as any[]).find(
+      (l) => l.cashbox_id === 'cb-wallet-instapay',
+    );
+    expect(cashLine).toBeDefined();
+    expect(cashLine.debit).toBe(300);
+    expect(walletLine).toBeDefined();
+    expect(walletLine.debit).toBe(500);
+
+    // skipCashMovements suppresses cash entries on inv.cashbox_id; the
+    // wallet movement on the payment-account cashbox is still emitted.
+    expect(spec.cash_movements).toHaveLength(1);
+    expect(spec.cash_movements[0]).toMatchObject({
+      cashbox_id: 'cb-wallet-instapay',
+      direction: 'in',
+      amount: 500,
+      category: 'sale',
+    });
+
+    // Engine validator: cash leg has no paired CT (skipCashMovements is
+    // the existing semantics — pos.service.editInvoice writes the cash
+    // CT manually). The validator would catch this in isolation; the
+    // production path is OK because the manually-written CTs cover it.
+    // We only assert the wallet leg is correctly tagged here.
+    expect(walletLine.cashbox_id).toBe('cb-wallet-instapay');
+  });
+
+  // ─── 7. Sub-account GL (1114-001) — NOT in LIQUID_GL_CODES ───────
+  it('non-liquid sub-account (e.g. 1114-001): GL line still gets cashbox_id when payment_account has it; engine guard does NOT require it', async () => {
+    const { svc, engineCalls } = makeServiceWithEngineSpy({
+      dsResults: [
+        [{ id: 'inv-7', invoice_no: 'INV-7', grand_total: 200,
+           paid_amount: 200, tax_amount: 0, status: 'paid',
+           customer_id: 'c-1', cashbox_id: 'cb-pos-1', completed_at: '2026-04-30' }],
+        [{ cogs: 0 }],
+        [{
+          payment_method: 'wallet',
+          amount: '200',
+          payment_account_id: 'pa-wallet-2',
+          payment_account_snapshot: {
+            id: 'pa-wallet-2',
+            method: 'wallet',
+            display_name: 'فودافون كاش',
+            gl_account_code: '1114-001', // sub-account, NOT in LIQUID_GL_CODES
+            cashbox_id: 'cb-wallet-vodacash',
+          },
+        }],
+      ],
+    });
+
+    await svc.postInvoice('inv-7', 'user-1', undefined, {
+      skipCashMovements: true,
+    });
+
+    const spec = engineCalls[0];
+    const walletLine = (spec.gl_lines as any[]).find(
+      (l) => l.account_code === '1114-001',
+    );
+    expect(walletLine).toBeDefined();
+    // Fix still tags the cashbox even for sub-accounts (consistent
+    // tagging makes the later CT-vs-GL reconciliation easier).
+    expect(walletLine.cashbox_id).toBe('cb-wallet-vodacash');
+
+    // Engine validator: '1114-001' is NOT a liquid code, so Guards A
+    // and B don't fire. Pass through.
+    expect(passesEngineCashGlAlignment(spec)).toBe(true);
+  });
+
+  // ─── 8. Snapshot missing cashbox_id → live fallback ──────────────
+  it('snapshot WITHOUT cashbox_id (legacy row): falls back to live payment_account.cashbox_id', async () => {
+    const { svc, engineCalls } = makeServiceWithEngineSpy({
+      dsResults: [
+        [{ id: 'inv-8', invoice_no: 'INV-8', grand_total: 400,
+           paid_amount: 400, tax_amount: 0, status: 'paid',
+           customer_id: 'c-1', cashbox_id: 'cb-pos-1', completed_at: '2026-04-30' }],
+        [{ cogs: 0 }],
+        [{
+          payment_method: 'wallet',
+          amount: '400',
+          payment_account_id: 'pa-wallet-1',
+          payment_account_snapshot: {
+            id: 'pa-wallet-1',
+            method: 'wallet',
+            display_name: 'InstaPay',
+            gl_account_code: '1114',
+            // cashbox_id missing — pre-fix snapshot
+          },
+        }],
+      ],
+      liveLookup: async (paId) => ({
+        id: paId,
+        method: 'wallet',
+        gl_account_code: '1114',
+        display_name: 'InstaPay',
+        cashbox_id: 'cb-wallet-live', // live fallback
+      }),
+    });
+
+    await svc.postInvoice('inv-8', 'user-1', undefined, {
+      skipCashMovements: true,
+    });
+
+    const spec = engineCalls[0];
+    const walletLine = (spec.gl_lines as any[]).find(
+      (l) => l.account_code === '1114',
+    );
+    expect(walletLine.cashbox_id).toBe('cb-wallet-live');
+
+    expect(passesEngineCashGlAlignment(spec)).toBe(true);
+  });
+
+  // ─── 9. No duplicate gl_lines / cash_movements ───────────────────
+  it('no duplicate JE/CT lines on a single-payment edit', async () => {
+    const { svc, engineCalls } = makeServiceWithEngineSpy({
+      dsResults: [
+        [{ id: 'inv-9', invoice_no: 'INV-9', grand_total: 300,
+           paid_amount: 300, tax_amount: 0, status: 'paid',
+           customer_id: 'c-1', cashbox_id: 'cb-pos-1', completed_at: '2026-04-30' }],
+        [{ cogs: 0 }],
+        [{
+          payment_method: 'wallet',
+          amount: '300',
+          payment_account_id: 'pa-wallet-1',
+          payment_account_snapshot: {
+            id: 'pa-wallet-1',
+            method: 'wallet',
+            display_name: 'InstaPay',
+            gl_account_code: '1114',
+            cashbox_id: 'cb-wallet-instapay',
+          },
+        }],
+      ],
+    });
+
+    await svc.postInvoice('inv-9', 'user-1', undefined, {
+      skipCashMovements: true,
+    });
+
+    const spec = engineCalls[0];
+    // Exactly one wallet GL line.
+    const walletLines = (spec.gl_lines as any[]).filter(
+      (l) => l.account_code === '1114',
+    );
+    expect(walletLines).toHaveLength(1);
+    // Exactly one wallet cash_movement.
+    const walletMvs = (spec.cash_movements as any[]).filter(
+      (m) => m.cashbox_id === 'cb-wallet-instapay',
+    );
+    expect(walletMvs).toHaveLength(1);
+  });
+
+  // ─── 10. Default postInvoice (no skipCashMovements) — initial sale
+  // wallet payment — full happy path through engine validator ───────
+  it('initial-sale wallet payment (no skipCashMovements): wallet leg + matching cash_movement, engine guards pass', async () => {
+    const { svc, engineCalls } = makeServiceWithEngineSpy({
+      dsResults: [
+        [{ id: 'inv-10', invoice_no: 'INV-10', grand_total: 700,
+           paid_amount: 700, tax_amount: 0, status: 'paid',
+           customer_id: 'c-1', cashbox_id: 'cb-pos-1', completed_at: '2026-04-30' }],
+        [{ cogs: 0 }],
+        [{
+          payment_method: 'wallet',
+          amount: '700',
+          payment_account_id: 'pa-wallet-1',
+          payment_account_snapshot: {
+            id: 'pa-wallet-1',
+            method: 'wallet',
+            display_name: 'InstaPay',
+            gl_account_code: '1114',
+            cashbox_id: 'cb-wallet-instapay',
+          },
+        }],
+      ],
+    });
+
+    // No skipCashMovements → initial sale path.
+    await svc.postInvoice('inv-10', 'user-1');
+
+    const spec = engineCalls[0];
+    const walletLine = (spec.gl_lines as any[]).find(
+      (l) => l.account_code === '1114',
+    );
+    expect(walletLine.cashbox_id).toBe('cb-wallet-instapay');
+
+    const walletMv = (spec.cash_movements as any[]).find(
+      (m) => m.cashbox_id === 'cb-wallet-instapay',
+    );
+    expect(walletMv).toMatchObject({ direction: 'in', amount: 700 });
+
+    expect(passesEngineCashGlAlignment(spec)).toBe(true);
   });
 });
 
