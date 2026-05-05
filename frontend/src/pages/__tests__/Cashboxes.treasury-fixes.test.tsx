@@ -186,7 +186,7 @@ beforeEach(() => {
 
 // ───────── Fix 1 — treasury card uses cash-desk endpoint's accounting_balance ─────────
 describe('/cashboxes treasury card — Fix 1: ewallet receives accounting_balance', () => {
-  it('ewallet card shows الرصيد المحاسبي 2,190.00 (not stored 0) when cash-desk ships accounting_balance', async () => {
+  it('ewallet card shows "رصيد محاسبي من الأستاذ العام" 2,190.00 (not stored 0) when cash-desk ships accounting_balance (PR-AUDIT-LABELS-CASH-VS-GL)', async () => {
     cashboxesMock.mockResolvedValue([
       makeCashbox({
         id: 'cb-ewallet', kind: 'ewallet', name_ar: 'خزنة التحويلات',
@@ -197,12 +197,12 @@ describe('/cashboxes treasury card — Fix 1: ewallet receives accounting_balanc
     renderPage();
     const card = await screen.findByTestId('treasury-cashbox-card-cb-ewallet');
     expect(within(card).getByTestId('treasury-cashbox-card-balance-label-cb-ewallet').textContent)
-      .toBe('الرصيد المحاسبي');
+      .toBe('رصيد محاسبي من الأستاذ العام');
     expect(card.textContent).toMatch(/2,190\.00/);
     expect(within(card).getByText('محاسبي')).toBeInTheDocument();
   });
 
-  it('cash card unchanged: shows رصيد الخزنة + current_balance, no "محاسبي" pill', async () => {
+  it('cash card shows "رصيد تشغيلي من حركات الخزنة" + current_balance, no "محاسبي" pill (PR-AUDIT-LABELS-CASH-VS-GL)', async () => {
     cashboxesMock.mockResolvedValue([
       makeCashbox({
         id: 'cb-cash', kind: 'cash', name_ar: 'الخزينة الرئيسية',
@@ -213,16 +213,17 @@ describe('/cashboxes treasury card — Fix 1: ewallet receives accounting_balanc
     renderPage();
     const card = await screen.findByTestId('treasury-cashbox-card-cb-cash');
     expect(within(card).getByTestId('treasury-cashbox-card-balance-label-cb-cash').textContent)
-      .toBe('رصيد الخزنة');
+      .toBe('رصيد تشغيلي من حركات الخزنة');
     expect(card.textContent).toMatch(/31,650\.00/);
     expect(within(card).queryByText('محاسبي')).toBeNull();
   });
 
   it('ewallet card with accounting_balance:null still degrades to current_balance (no crash)', async () => {
     // Pre-deploy / older BE that hasn't shipped accounting columns yet —
-    // FE helper falls back gracefully; card label flips to "رصيد الخزنة"
-    // semantics (because helper returns kind='cash' fallback), and
-    // amount is the stored figure.
+    // FE helper falls back gracefully; card label keeps the accounting
+    // phrasing (because cashbox.kind is 'ewallet'), and the amount is
+    // the stored 0 figure. No crash, no "محاسبي" pill (helper returned
+    // kind='cash' fallback for missing accounting columns).
     cashboxesMock.mockResolvedValue([
       makeCashbox({
         id: 'cb-old', kind: 'ewallet', name_ar: 'خزنة قديمة',
@@ -233,11 +234,8 @@ describe('/cashboxes treasury card — Fix 1: ewallet receives accounting_balanc
     renderPage();
     const card = await screen.findByTestId('treasury-cashbox-card-cb-old');
     expect(card).toBeInTheDocument();
-    // Label still says "الرصيد المحاسبي" because cashbox.kind is 'ewallet';
-    // the figure is 0 because the BE didn't ship accounting_balance.
-    // No crash, no "محاسبي" pill (helper returned kind='cash' fallback).
     expect(within(card).getByTestId('treasury-cashbox-card-balance-label-cb-old').textContent)
-      .toBe('الرصيد المحاسبي');
+      .toBe('رصيد محاسبي من الأستاذ العام');
     expect(within(card).queryByText('محاسبي')).toBeNull();
   });
 });

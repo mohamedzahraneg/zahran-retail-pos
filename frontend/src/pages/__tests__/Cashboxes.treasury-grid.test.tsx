@@ -6,10 +6,11 @@
  *   ✓ renders a card for every active cashbox (any kind)
  *   ✓ a freshly-created cashbox in the API response shows up
  *     automatically — no hardcoded id/name in the page
- *   ✓ cash cards render the explicit "رصيد الخزنة" label and the
+ *   ✓ cash cards render the explicit "رصيد تشغيلي من حركات الخزنة"
+ *     label (PR-AUDIT-LABELS-CASH-VS-GL — Sprint 2 / PR-4) and the
  *     stored `current_balance`
- *   ✓ ewallet/bank/check cards render "الرصيد المحاسبي" and the
- *     GL-derived `accounting_balance` with the "محاسبي" pill
+ *   ✓ ewallet/bank/check cards render "رصيد محاسبي من الأستاذ العام"
+ *     and the GL-derived `accounting_balance` with the "محاسبي" pill
  *   ✓ inactive cashboxes are excluded
  *   ✓ sort: cash first, then ewallet/bank/check, then name_ar
  *   ✓ clicking the card body OR the "عرض التفاصيل" button opens the
@@ -229,13 +230,15 @@ describe('/cashboxes treasury grid — PR-FIN-CASHBOXES-TREASURY-GRID', () => {
     expect(screen.getByTestId('treasury-cashbox-card-cb-check')).toBeInTheDocument();
   });
 
-  it('cash card renders explicit "رصيد الخزنة" label + current_balance', async () => {
+  it('cash card renders explicit "رصيد تشغيلي من حركات الخزنة" label + current_balance (PR-AUDIT-LABELS-CASH-VS-GL)', async () => {
     cashboxesMock.mockResolvedValue([
       makeCashbox({ id: 'cb-cash', kind: 'cash', name_ar: 'الخزينة الرئيسية', current_balance: '31650' }),
     ]);
     renderPage();
     const card = await screen.findByTestId('treasury-cashbox-card-cb-cash');
-    expect(within(card).getByTestId('treasury-cashbox-card-balance-label-cb-cash').textContent).toBe('رصيد الخزنة');
+    expect(within(card).getByTestId('treasury-cashbox-card-balance-label-cb-cash').textContent).toBe('رصيد تشغيلي من حركات الخزنة');
+    // Old terse label must be gone now that the source is in the label itself.
+    expect(within(card).getByTestId('treasury-cashbox-card-balance-label-cb-cash').textContent).not.toBe('رصيد الخزنة');
     expect(card.textContent).toMatch(/31,650/);
     expect(within(card).getByText('نقدي')).toBeInTheDocument();
     expect(within(card).getByText('الخزينة الرئيسية')).toBeInTheDocument();
@@ -263,7 +266,7 @@ describe('/cashboxes treasury grid — PR-FIN-CASHBOXES-TREASURY-GRID', () => {
     expect(within(card).queryByTestId('treasury-cashbox-card-structural-caption-cb-cash')).toBeNull();
   });
 
-  it('ewallet card renders explicit "الرصيد المحاسبي" label + accounting_balance + "محاسبي" pill', async () => {
+  it('ewallet card renders explicit "رصيد محاسبي من الأستاذ العام" label + accounting_balance + "محاسبي" pill (PR-AUDIT-LABELS-CASH-VS-GL)', async () => {
     cashboxesMock.mockResolvedValue([
       makeCashbox({
         id: 'cb-ewallet', kind: 'ewallet', name_ar: 'خزنة التحويلات',
@@ -273,7 +276,8 @@ describe('/cashboxes treasury grid — PR-FIN-CASHBOXES-TREASURY-GRID', () => {
     ]);
     renderPage();
     const card = await screen.findByTestId('treasury-cashbox-card-cb-ewallet');
-    expect(within(card).getByTestId('treasury-cashbox-card-balance-label-cb-ewallet').textContent).toBe('الرصيد المحاسبي');
+    expect(within(card).getByTestId('treasury-cashbox-card-balance-label-cb-ewallet').textContent).toBe('رصيد محاسبي من الأستاذ العام');
+    expect(within(card).getByTestId('treasury-cashbox-card-balance-label-cb-ewallet').textContent).not.toBe('الرصيد المحاسبي');
     expect(card.textContent).toMatch(/2,190\.00/);
     expect(within(card).getByText('محفظة إلكترونية')).toBeInTheDocument();
     expect(within(card).getByText('محاسبي')).toBeInTheDocument();
@@ -301,7 +305,7 @@ describe('/cashboxes treasury grid — PR-FIN-CASHBOXES-TREASURY-GRID', () => {
     expect(caption.textContent).toMatch(/GL 1114/);
   });
 
-  it('bank card uses GL 1113 + "الرصيد المحاسبي" label', async () => {
+  it('bank card uses GL 1113 + "رصيد محاسبي من الأستاذ العام" label (PR-AUDIT-LABELS-CASH-VS-GL)', async () => {
     cashboxesMock.mockResolvedValue([
       makeCashbox({
         id: 'cb-bank', kind: 'bank', name_ar: 'حساب POS Visa',
@@ -311,7 +315,8 @@ describe('/cashboxes treasury grid — PR-FIN-CASHBOXES-TREASURY-GRID', () => {
     ]);
     renderPage();
     const card = await screen.findByTestId('treasury-cashbox-card-cb-bank');
-    expect(within(card).getByTestId('treasury-cashbox-card-balance-label-cb-bank').textContent).toBe('الرصيد المحاسبي');
+    expect(within(card).getByTestId('treasury-cashbox-card-balance-label-cb-bank').textContent).toBe('رصيد محاسبي من الأستاذ العام');
+    expect(within(card).getByTestId('treasury-cashbox-card-balance-label-cb-bank').textContent).not.toBe('الرصيد المحاسبي');
     expect(card.textContent).toMatch(/4,500\.00/);
     expect(within(card).getByText('بنكي')).toBeInTheDocument();
   });
