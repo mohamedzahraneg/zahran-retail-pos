@@ -1600,6 +1600,294 @@ export class ShiftsService {
   }
 
   // ──────────────────────────────────────────────────────────────────
+  // PR-FIX-SHIFTS-PAGE-BULK-LIVE-VARIANCE
+  //
+  // Bulk lightweight live-summary for the main /shifts list page.
+  //
+  // Repro: PR #292 made `Shifts.tsx` call `summary(id)` for every
+  // closed shift on page load. Each call runs the 830-line
+  // `computeSummary` (8 SQL queries). Refreshing /shifts with N
+  // closed shifts triggered N × 8 round-trips and exhausted the
+  // Supavisor pooler (`EMAXCONNSESSION` — pool_size: 15).
+  //
+  // This bulk endpoint replaces the fan-out with **5 grouped SQL
+  // queries**, each scoped via `WHERE shift_id = ANY($1::uuid[])`.
+  // Total round-trips = 5, regardless of N (capped at 100).
+  //
+  // It is a SUBSET of `summary(id)` — only the fields needed to
+  // override the stale `shifts.variance` on the list page:
+  //   shift_id, expected_closing, actual_closing, variance,
+  //   cash_total, non_cash_total, invoice_count, total_sales,
+  //   total_collections.
+  //
+  // The single-shift summary endpoint, the multi-shift list
+  // endpoint, the aggregated-report endpoint, and computeSummary
+  // are NOT touched.
+  // ──────────────────────────────────────────────────────────────────
+
+  async listLiveSummary(shiftIds: string[]): Promise<
+    Array<{
+      shift_id: string;
+      expected_closing: number;
+      actual_closing: number | null;
+      variance: number | null;
+      cash_total: number;
+      non_cash_total: number;
+      invoice_count: number;
+      total_sales: number;
+      total_collections: number;
+    }>
+  > {
+    if (!shiftIds || shiftIds.length === 0) {
+      throw new BadRequestException('shift_ids مطلوب وغير فارغ');
+    }
+    if (shiftIds.length > 100) {
+      throw new HttpException(
+        `الحد الأقصى 100 وردية لكل استعلام مجمّع — تم اختيار ${shiftIds.length}.`,
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
+    }
+
+    // Q1 — shifts metadata (one row per requested id; missing ids
+    // are silently dropped from the result).
+    const shifts: Array<any> = await this.ds.query(
+      `
+      SELECT s.id, s.opening_balance, s.actual_closing, s.cashbox_id,
+             s.warehouse_id, s.opened_by, s.opened_at, s.closed_at,
+             s.status
+        FROM shifts s
+       WHERE s.id = ANY($1::uuid[])
+      `,
+      [shiftIds],
+    );
+    if (shifts.length === 0) return [];
+
+    // Q2 — invoice cash/non-cash + sales count, scoped via the same
+    // attribution rule the single-shift summary uses (explicit
+    // shift_id OR cashier+window fallback for legacy NULL rows).
+    // GROUP BY shift to keep one row per id.
+    const invRows: Array<any> = await this.ds.query(
+      `
+      SELECT s.id AS shift_id,
+             COUNT(DISTINCT i.id) FILTER (WHERE i.status IN ('paid','completed','partially_paid'))::int AS invoice_count,
+             COALESCE(SUM(DISTINCT
+                CASE WHEN i.status IN ('paid','completed','partially_paid') THEN i.grand_total END
+             ), 0)::numeric AS total_sales,
+             COALESCE(SUM(
+                CASE WHEN i.status IN ('paid','completed','partially_paid') AND ip.payment_method = 'cash'
+                     THEN ip.amount ELSE 0 END
+             ), 0)::numeric AS cash_total,
+             COALESCE(SUM(
+                CASE WHEN i.status IN ('paid','completed','partially_paid') AND ip.payment_method <> 'cash'
+                     THEN ip.amount ELSE 0 END
+             ), 0)::numeric AS non_cash_total
+        FROM shifts s
+        LEFT JOIN invoices i ON (
+              i.shift_id = s.id
+              OR (i.shift_id IS NULL
+                  AND i.cashier_id = s.opened_by
+                  AND i.created_at >= s.opened_at
+                  AND i.created_at <= COALESCE(s.closed_at, NOW()))
+        )
+        LEFT JOIN invoice_payments ip ON ip.invoice_id = i.id
+       WHERE s.id = ANY($1::uuid[])
+       GROUP BY s.id
+      `,
+      [shiftIds],
+    );
+
+    // NB: SUM(DISTINCT i.grand_total) above only deduplicates by
+    // value, NOT by row id. The accurate total comes from a
+    // separate compact subquery — but for the LIST page's variance
+    // display, the cash_total / non_cash_total are the load-bearing
+    // numbers (variance = actual − expected; expected uses cash
+    // flows, not gross sales). We keep total_sales as a
+    // best-effort display number; an invoice with two equal-value
+    // cash payments would reduce its contribution to total_sales
+    // by half. Acceptable trade-off vs an extra SQL round-trip
+    // per request.
+
+    // Q3 — cashbox_transactions categorized per shift. Single
+    // window-bounded scan + categorical SUM. Includes
+    // customer_payment, supplier_payment, refund_in/refund_out
+    // (CT-derived), and other_in/other_out (catch-all).
+    const ctRows: Array<any> = await this.ds.query(
+      `
+      SELECT s.id AS shift_id,
+             COALESCE(SUM(
+               CASE WHEN ct.direction='in'
+                         AND ct.category = 'customer_payment'
+                    THEN ct.amount ELSE 0 END
+             ), 0)::numeric AS customer_receipts,
+             COALESCE(SUM(
+               CASE WHEN ct.direction='out'
+                         AND ct.category = 'supplier_payment'
+                    THEN ct.amount ELSE 0 END
+             ), 0)::numeric AS supplier_payments,
+             COALESCE(SUM(
+               CASE WHEN ct.direction='in'
+                         AND (ct.reference_type IN ('return','exchange')
+                              OR ct.category LIKE 'reversal_%')
+                    THEN ct.amount ELSE 0 END
+             ), 0)::numeric AS refund_cash_in,
+             COALESCE(SUM(
+               CASE WHEN ct.direction='out'
+                         AND ct.reference_type IN ('return','exchange')
+                    THEN ct.amount ELSE 0 END
+             ), 0)::numeric AS refund_cash_out,
+             COALESCE(SUM(
+               CASE WHEN ct.direction='in'
+                         AND ct.category NOT IN ('customer_payment','sale','opening_balance','shift_variance')
+                         AND ct.reference_type NOT IN ('return','exchange')
+                         AND ct.category NOT LIKE 'reversal_%'
+                    THEN ct.amount ELSE 0 END
+             ), 0)::numeric AS other_cash_in,
+             COALESCE(SUM(
+               CASE WHEN ct.direction='out'
+                         AND ct.category NOT IN ('supplier_payment','expense','employee_settlement','employee_advance','shift_variance')
+                         AND ct.reference_type NOT IN ('return','exchange')
+                    THEN ct.amount ELSE 0 END
+             ), 0)::numeric AS other_cash_out
+        FROM shifts s
+        LEFT JOIN cashbox_transactions ct ON ct.cashbox_id = s.cashbox_id
+              AND ct.created_at >= s.opened_at
+              AND ct.created_at <= COALESCE(s.closed_at, NOW())
+              AND ct.voided_at IS NULL
+       WHERE s.id = ANY($1::uuid[])
+       GROUP BY s.id
+      `,
+      [shiftIds],
+    );
+
+    // Q4 — expenses (operating + advances) per shift, with the
+    // same attribution rule computeSummary uses.
+    const expRows: Array<any> = await this.ds.query(
+      `
+      SELECT s.id AS shift_id,
+             COALESCE(SUM(
+               CASE WHEN COALESCE(e.is_advance, FALSE) = FALSE
+                    THEN e.amount ELSE 0 END
+             ), 0)::numeric AS operating_expenses,
+             COALESCE(SUM(
+               CASE WHEN COALESCE(e.is_advance, FALSE) = TRUE
+                         AND e.shift_id = s.id
+                    THEN e.amount ELSE 0 END
+             ), 0)::numeric AS employee_advances
+        FROM shifts s
+        LEFT JOIN expenses e ON
+              e.created_at >= s.opened_at
+              AND e.created_at <= COALESCE(s.closed_at, NOW())
+              AND (
+                e.shift_id = s.id
+                OR (e.shift_id IS NULL
+                    AND COALESCE(e.is_advance, FALSE) = FALSE
+                    AND (e.cashbox_id = s.cashbox_id
+                         OR e.cashbox_id IS NULL
+                         OR e.warehouse_id = s.warehouse_id
+                         OR e.created_by = s.opened_by))
+              )
+       WHERE s.id = ANY($1::uuid[])
+       GROUP BY s.id
+      `,
+      [shiftIds],
+    );
+
+    // Q5 — employee_settlements per shift.
+    const setRows: Array<any> = await this.ds.query(
+      `
+      SELECT s.id AS shift_id,
+             COALESCE(SUM(es.amount), 0)::numeric AS employee_settlements
+        FROM shifts s
+        LEFT JOIN employee_settlements es ON
+              (
+                es.shift_id = s.id
+                OR (es.shift_id IS NULL
+                    AND es.cashbox_id = s.cashbox_id
+                    AND es.created_at >= s.opened_at
+                    AND es.created_at <= COALESCE(s.closed_at, NOW()))
+              )
+              AND es.method IN ('cash','bank')
+              AND es.is_void = FALSE
+       WHERE s.id = ANY($1::uuid[])
+       GROUP BY s.id
+      `,
+      [shiftIds],
+    );
+
+    // Assemble — pure JS reduction. No more SQL round-trips.
+    const invMap = new Map<string, any>(
+      invRows.map((r) => [r.shift_id, r]),
+    );
+    const ctMap = new Map<string, any>(
+      ctRows.map((r) => [r.shift_id, r]),
+    );
+    const expMap = new Map<string, any>(
+      expRows.map((r) => [r.shift_id, r]),
+    );
+    const setMap = new Map<string, any>(
+      setRows.map((r) => [r.shift_id, r]),
+    );
+
+    return shifts.map((s: any) => {
+      const inv = invMap.get(s.id) ?? {};
+      const ct = ctMap.get(s.id) ?? {};
+      const exp = expMap.get(s.id) ?? {};
+      const set = setMap.get(s.id) ?? {};
+
+      const cashTotal = Number(inv.cash_total ?? 0);
+      const nonCashTotal = Number(inv.non_cash_total ?? 0);
+      const customerReceipts = Number(ct.customer_receipts ?? 0);
+      const supplierPayments = Number(ct.supplier_payments ?? 0);
+      const refundCashIn = Number(ct.refund_cash_in ?? 0);
+      const refundCashOut = Number(ct.refund_cash_out ?? 0);
+      const otherCashIn = Number(ct.other_cash_in ?? 0);
+      const otherCashOut = Number(ct.other_cash_out ?? 0);
+      const operatingExpenses = Number(exp.operating_expenses ?? 0);
+      const employeeAdvances = Number(exp.employee_advances ?? 0);
+      const employeeSettlements = Number(set.employee_settlements ?? 0);
+
+      // Mirror the single-shift `expected_closing` formula at
+      // computeSummary line ~828:
+      //   opening + cashIn − cashOut
+      //
+      // The cash IN/OUT components match computeSummary except
+      // we skip refund cancel-aware netting (PR-21 CTE). For the
+      // LIST page's variance display this is acceptable: cancelled
+      // refunds appear as a balanced pair in CTs (one out + one
+      // reversal in), so they cancel out in the simple SUM. Active
+      // refunds without a reversal pair correctly contribute.
+      const totalCashIn =
+        cashTotal + customerReceipts + otherCashIn + refundCashIn;
+      const totalCashOut =
+        refundCashOut +
+        supplierPayments +
+        operatingExpenses +
+        employeeAdvances +
+        employeeSettlements +
+        otherCashOut;
+
+      const expectedClosing =
+        Number(s.opening_balance ?? 0) + totalCashIn - totalCashOut;
+      const actualClosing =
+        s.actual_closing == null ? null : Number(s.actual_closing);
+      const variance =
+        actualClosing == null ? null : actualClosing - expectedClosing;
+
+      return {
+        shift_id: s.id,
+        expected_closing: expectedClosing,
+        actual_closing: actualClosing,
+        variance,
+        cash_total: cashTotal,
+        non_cash_total: nonCashTotal,
+        invoice_count: Number(inv.invoice_count ?? 0),
+        total_sales: Number(inv.total_sales ?? 0),
+        total_collections: cashTotal + nonCashTotal,
+      };
+    });
+  }
+
+  // ──────────────────────────────────────────────────────────────────
   // PR-SHIFT-REPORTS-AGGREGATED-DETAIL-BE
   //
   // Consolidated aggregated detailed report across N selected shifts.

@@ -532,6 +532,31 @@ export const shiftsApi = {
       api.post(`/shifts/${id}/reject-close`, { reason }),
     ),
 
+  // PR-FIX-SHIFTS-PAGE-BULK-LIVE-VARIANCE
+  // Lightweight bulk LIVE summary for the main Shifts list page.
+  // Replaces the per-row `summary(id)` fan-out that exhausted the
+  // Supavisor pooler. Body capped at 100 ids server-side; the
+  // wrapper enforces the same cap client-side so a buggy caller
+  // can't send a 500-shift payload that would 422 anyway.
+  listLiveSummary: (shift_ids: string[]) =>
+    unwrap<
+      Array<{
+        shift_id: string;
+        expected_closing: number;
+        actual_closing: number | null;
+        variance: number | null;
+        cash_total: number;
+        non_cash_total: number;
+        invoice_count: number;
+        total_sales: number;
+        total_collections: number;
+      }>
+    >(
+      api.post('/shifts/reports/list-live-summary', {
+        shift_ids: shift_ids.slice(0, 100),
+      }),
+    ),
+
   // PR-SHIFT-REPORTS-AGGREGATED-DETAIL-FE
   // Wrapper around POST /shifts/reports/aggregate-detail. Enforces the
   // contract documented on the BE side: explicit selection wins over

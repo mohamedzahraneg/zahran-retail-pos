@@ -20,6 +20,7 @@ import {
   JwtUser,
 } from '../common/decorators/current-user.decorator';
 import { AggregateDetailDto } from './dto/aggregate-detail.dto';
+import { ListLiveSummaryDto } from './dto/list-live-summary.dto';
 
 @ApiBearerAuth()
 @ApiTags('shifts')
@@ -148,6 +149,23 @@ export class ShiftsController {
       { shift_ids: dto.shift_ids, filters: dto.filters },
       { user_id: user.userId, username: user.username ?? null },
     );
+  }
+
+  // ─── PR-FIX-SHIFTS-PAGE-BULK-LIVE-VARIANCE ──────────────────────
+  // POST /shifts/reports/list-live-summary
+  // Lightweight bulk live-summary for the Shifts list page
+  // (replaces the per-row N×summary fan-out that exhausted the
+  // Supavisor pooler). Body: { shift_ids: string[] } (max 100).
+  // Returns one row per shift with cash-only expected/actual/
+  // variance + cash/non-cash totals + invoice/sales counts.
+  // ────────────────────────────────────────────────────────────────
+  @Post('reports/list-live-summary')
+  @ApiOperation({
+    summary:
+      'ملخص LIVE خفيف لقائمة الورديات (5 استعلامات مجمّعة بدون fan-out)',
+  })
+  listLiveSummary(@Body() dto: ListLiveSummaryDto) {
+    return this.svc.listLiveSummary(dto.shift_ids);
   }
 
   // ─── PR-B1 — Counted-cash adjustment workflow (migration 096) ───
