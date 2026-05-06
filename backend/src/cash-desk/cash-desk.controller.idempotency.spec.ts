@@ -469,7 +469,13 @@ describe('CashDeskController route-level wiring', () => {
       'createCashbox',
       'updateCashbox',
       'removeCashbox',
-      'deposit',
+      // 'deposit' was undecorated when PR #277 shipped; PR-FIX-
+      // IDEMPOTENCY-DIRECT-CT-WRITES (Sprint 4 / PR-11A) now
+      // decorates it and re-asserts its decoration in its own
+      // dedicated spec (cash-desk.controller.deposit-idempotency.
+      // spec.ts). Removed here so this PR-#277 wiring assertion
+      // stays scoped to the transfer-only contract that PR
+      // established.
       // 'receive' was undecorated when PR #277 shipped; PR-AUDIT-
       // IDEMPOTENCY-CASH-DESK-CUSTOMER-PAYMENTS now decorates it
       // and re-asserts its decoration in its own dedicated spec

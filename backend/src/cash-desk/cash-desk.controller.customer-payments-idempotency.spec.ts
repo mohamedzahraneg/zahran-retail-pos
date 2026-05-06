@@ -22,8 +22,11 @@
  *   · `transfer` STILL carries the interceptor from PR #277.
  *   · `pay` (supplier-payments) does NOT carry the interceptor —
  *     deliberately deferred to a future phased PR.
- *   · All other cash-desk handlers (deposit, voids, reconciliation,
- *     cashbox CRUD) do NOT carry the interceptor.
+ *   · All other cash-desk handlers (voids, reconciliation, cashbox
+ *     CRUD) do NOT carry the interceptor. (`deposit` was undecorated
+ *     when this spec shipped; PR-FIX-IDEMPOTENCY-DIRECT-CT-WRITES
+ *     decorated it — this spec's regression assertion was updated
+ *     accordingly.)
  *
  * Bodies in tests use a realistic customer-payments shape including
  * the optional `allocations: [{invoice_id, amount}, ...]` array.
@@ -460,8 +463,11 @@ describe('namespace isolation: /cash-desk/customer-payments vs all previously pr
  *     interceptor — guards against accidental regressions.
  *   · `pay` (supplier-payments) MUST NOT carry the interceptor —
  *     out of scope for this PR; will get its own phased PR.
- *   · All other cash-desk handlers (deposit, voids, reconciliation,
- *     cashbox CRUD) MUST NOT carry the interceptor.
+ *   · All other cash-desk handlers (voids, reconciliation, cashbox
+ *     CRUD) MUST NOT carry the interceptor. `deposit` was on this
+ *     undecorated list when the spec shipped — PR-FIX-IDEMPOTENCY-
+ *     DIRECT-CT-WRITES (Sprint 4 / PR-11A) decorated it; the
+ *     assertion below now pins that as a regression guard.
  */
 describe('CashDeskController route-level wiring — PR-AUDIT-IDEMPOTENCY-CASH-DESK-CUSTOMER-PAYMENTS', () => {
   it('receive has IdempotencyInterceptor; transfer retains it; pay + siblings do NOT', async () => {
@@ -534,6 +540,13 @@ describe('CashDeskController route-level wiring — PR-AUDIT-IDEMPOTENCY-CASH-DE
     //    the interceptor.
     expect(hasInterceptor((controller as any).pay)).toBe(true);
 
+    // ── Deposit — was undecorated when this spec shipped;
+    //    PR-FIX-IDEMPOTENCY-DIRECT-CT-WRITES (Sprint 4 / PR-11A)
+    //    decorated it. The new spec
+    //    (cash-desk.controller.deposit-idempotency.spec.ts) owns
+    //    the positive assertion. Updated here to a regression guard.
+    expect(hasInterceptor((controller as any).deposit)).toBe(true);
+
     // ── All other cash-desk POST handlers MUST be undecorated.
     const undecoratedSiblings: Array<keyof CashDeskController> = [
       'cashboxes',
@@ -541,7 +554,6 @@ describe('CashDeskController route-level wiring — PR-AUDIT-IDEMPOTENCY-CASH-DE
       'createCashbox',
       'updateCashbox',
       'removeCashbox',
-      'deposit',
       'voidCustomer',
       'voidSupplier',
       'listReconciliation',
