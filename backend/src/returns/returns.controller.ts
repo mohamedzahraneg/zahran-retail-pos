@@ -6,6 +6,7 @@ import {
   ParseUUIDPipe,
   Post,
   Query,
+  UseInterceptors,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { ReturnsService } from './returns.service';
@@ -23,6 +24,10 @@ import {
   CurrentUser,
   JwtUser,
 } from '../common/decorators/current-user.decorator';
+// PR-FIX-IDEMPOTENCY-EXCHANGES-INVOICE-EDITS (Sprint 4 / PR-11C) —
+// opt-in Idempotency-Key support on POST /exchanges. Without the
+// header, behavior is exactly unchanged from today.
+import { IdempotencyInterceptor } from '../common/interceptors/idempotency.interceptor';
 
 @ApiBearerAuth()
 @ApiTags('returns')
@@ -121,6 +126,19 @@ export class ReturnsController {
     summary:
       'إرجاع منتج واستبداله بآخر في خطوة واحدة (مع حساب فرق السعر)',
   })
+  // PR-FIX-IDEMPOTENCY-EXCHANGES-INVOICE-EDITS (Sprint 4 / PR-11C) —
+  // exchanges have the largest blast radius of any route in the
+  // system: a single POST writes a `returns` row + `return_items`,
+  // a new `invoices` row + `invoice_items` + `invoice_payments`, and
+  // both inbound and outbound `stock_movements`, plus the engine
+  // posts JE/CT for both the refund and the new sale. A duplicate
+  // POST during a network retry could partially apply some of these
+  // stages before the engine guard catches the JE leg, leaving an
+  // orphan return + invoice pair pointing at the same physical
+  // goods. The Redis-backed interceptor's 60s lock + 24h replay is
+  // the cleaner outer defence. Without an Idempotency-Key header,
+  // behavior is exactly unchanged from today.
+  @UseInterceptors(IdempotencyInterceptor)
   exchange(@Body() dto: CreateExchangeDto, @CurrentUser() user: JwtUser) {
     return this.svc.createExchange(dto, user.userId, user.permissions ?? []);
   }
