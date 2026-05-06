@@ -7,6 +7,7 @@ import {
   Patch,
   Post,
   Query,
+  UseInterceptors,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import {
@@ -25,6 +26,11 @@ import {
   CurrentUser,
   JwtUser,
 } from '../common/decorators/current-user.decorator';
+// PR-FIX-IDEMPOTENCY-EMPLOYEE-PAYROLL-P0 (Sprint 4 / PR-11D) — opt-in
+// Idempotency-Key support on the 3 P0 financial routes in this
+// controller (addBonus, addDeduction, addSettlement). Without the
+// header, behavior is exactly unchanged from today.
+import { IdempotencyInterceptor } from '../common/interceptors/idempotency.interceptor';
 
 class RequestDto {
   // 'advance' removed from the generic dropdown (audit #4 — triple-path
@@ -303,6 +309,15 @@ export class EmployeesController {
 
   @Post(':id/bonuses')
   @Permissions('employee.bonuses.manage')
+  // PR-FIX-IDEMPOTENCY-EMPLOYEE-PAYROLL-P0 (Sprint 4 / PR-11D) —
+  // `addBonus` INSERTs an employee_bonuses row whose migration-040
+  // mirror trigger propagates into employee_transactions and whose
+  // migration-038 fn_trg_employee_txn_post posts a JE. There is NO
+  // application-level (reference_type, reference_id) idempotency
+  // anchor — every duplicate POST creates a fresh bonus id and a
+  // fresh JE. Without an Idempotency-Key header, behavior is
+  // exactly unchanged from today.
+  @UseInterceptors(IdempotencyInterceptor)
   addBonus(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: BonusDto,
@@ -319,6 +334,12 @@ export class EmployeesController {
 
   @Post(':id/deductions')
   @Permissions('employee.deductions.manage')
+  // PR-FIX-IDEMPOTENCY-EMPLOYEE-PAYROLL-P0 (Sprint 4 / PR-11D) —
+  // `addDeduction` INSERTs an employee_deductions row → mirror
+  // trigger → JE via the same trigger-driven path as bonuses. Same
+  // duplicate-POST risk. Without an Idempotency-Key header, behavior
+  // is exactly unchanged from today.
+  @UseInterceptors(IdempotencyInterceptor)
   addDeduction(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: DeductionDto,
@@ -371,6 +392,18 @@ export class EmployeesController {
 
   @Post(':id/settlements')
   @Permissions('employee.ledger.view')
+  // PR-FIX-IDEMPOTENCY-EMPLOYEE-PAYROLL-P0 (Sprint 4 / PR-11D) —
+  // `recordSettlement` INSERTs employee_settlements (BIGSERIAL id)
+  // and posts a JE via engine.recordTransaction with
+  // reference_id = uuid_v5('employee_settlement:'+bigint_id). The
+  // bigint id is FRESH on every POST, so duplicates produce DIFFERENT
+  // uuids and bypass the engine guard — the audit identified this
+  // as the most consequential P0 in this domain (duplicate creates
+  // 2 settlement rows + 2 JEs + 2 CT rows + double cashbox decrement
+  // for cash/bank methods). The HTTP-level interceptor is the
+  // correct fix; the engine code stays unchanged. Without an
+  // Idempotency-Key header, behavior is exactly unchanged from today.
+  @UseInterceptors(IdempotencyInterceptor)
   addSettlement(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: SettlementDto,
