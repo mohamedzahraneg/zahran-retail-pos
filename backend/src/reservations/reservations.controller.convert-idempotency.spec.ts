@@ -1,21 +1,37 @@
 /**
- * reservations.controller.cancel-idempotency.spec.ts
- * — PR-FIX-IDEMPOTENCY-DEFERRED-VOID-CANCEL-ROUTES (Sprint 4 / PR-11E-bis)
+ * reservations.controller.convert-idempotency.spec.ts
+ * — PR-FIX-IDEMPOTENCY-RESERVATION-CONVERT (Sprint 4 / PR-11G)
  *
  * Pins the existing Redis-backed IdempotencyInterceptor on:
  *
- *   · POST /reservations/:id/cancel
+ *   · POST /reservations/:id/convert
  *
- * `cancel` is a multi-stage path: INSERTs a `reservation_refunds`
- * row (per refund policy) + UPDATEs the reservation status, which
- * triggers `stock.quantity_reserved` release. State-guarded by
- * `mustBeActive(id)`; HTTP interceptor adds outer race defence.
+ * `convert` is the final true financial/stock idempotency gap
+ * identified in the Sprint 4 rollup audit. Multi-stage path:
  *
- * Scope (audit-defined):
- *   · `cancel` (newly decorated) MUST have the interceptor.
- *   · ALL other ReservationsController POST/PATCH handlers (create,
- *     addPayment, convert, extend) MUST remain undecorated — out
- *     of scope for this PR.
+ *   1. State guard — `mustBeActive(id)` (service layer).
+ *   2. INSERT `invoices` (status=completed) → triggers stock
+ *      on_hand decrement + INSERT `stock_movements`.
+ *   3. INSERT `invoice_lines`.
+ *   4. INSERT `invoice_payments` (final payment) + post JE + CT
+ *      (cashbox/ledger writes).
+ *   5. INSERT `reservation_payments` (final-payment row, kind='final').
+ *   6. UPDATE `reservations` status → 'converted'.
+ *
+ * Without retry-safety, two simultaneous POSTs that pass the state
+ * guard before the status flip commits would produce 2 distinct
+ * invoices + 2 sets of JE/CT + duplicate stock movements.
+ *
+ * Module providers were already wired in PR-11E-bis (for `cancel`)
+ * and reused by PR-11F-bis (for `addPayment`); this PR only adds
+ * the `@UseInterceptors` decorator on the `convert` handler — no
+ * module change.
+ *
+ * Scope:
+ *   · `convert` (newly decorated) MUST have the interceptor.
+ *   · `cancel` MUST stay decorated (PR-11E-bis regression guard).
+ *   · `addPayment` MUST stay decorated (PR-11F-bis regression guard).
+ *   · `create`, `extend` MUST remain undecorated.
  */
 
 import { Test } from '@nestjs/testing';
@@ -33,15 +49,15 @@ import {
 
 const VALID_KEY = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 const RES_ID = 'rsrsrsrs-rsrs-rsrs-rsrs-rsrsrsrsrsrs';
-const ROUTE_PATH = '/reservations/:id/cancel';
+const ROUTE_PATH = '/reservations/:id/convert';
 
 const makeReq = (overrides: Partial<any> = {}) => ({
   method: 'POST',
-  url: `/reservations/${RES_ID}/cancel`,
-  originalUrl: `/reservations/${RES_ID}/cancel`,
+  url: `/reservations/${RES_ID}/convert`,
+  originalUrl: `/reservations/${RES_ID}/convert`,
   route: { path: ROUTE_PATH },
   headers: {}, body: {}, params: { id: RES_ID },
-  user: { userId: 'user-AAA' },
+  user: { userId: 'cashier-AAA', id: 'cashier-AAA' },
   ...overrides,
 });
 
@@ -65,17 +81,20 @@ const next = (v: unknown): CallHandler => ({ handle: jest.fn(() => of(v)) } as a
 const failNext = (e: Error): CallHandler => ({ handle: jest.fn(() => throwError(() => e)) } as any);
 
 const sampleBody = {
-  refund_policy: 'partial' as const,
-  refund_method: 'cash',
-  reason: 'العميل ألغى الحجز قبل 3 أيام من الموعد',
+  final_payments: [
+    { payment_method: 'cash' as const, amount: 1500 },
+  ],
+  notes: 'العميل استلم البضاعة ودفع المتبقي',
 };
 const sampleSuccess = {
   reservation_id: RES_ID,
-  status: 'cancelled',
-  refund: { gross: 200, fee: 30, net: 170 },
+  invoice_id: 'inv-AAA',
+  invoice_number: 'INV-2026-0001',
+  je_id: 'je-AAA',
+  status: 'converted',
 };
 
-describe('IdempotencyInterceptor on POST /reservations/:id/cancel — PR-FIX-IDEMPOTENCY-DEFERRED-VOID-CANCEL-ROUTES', () => {
+describe('IdempotencyInterceptor on POST /reservations/:id/convert — PR-FIX-IDEMPOTENCY-RESERVATION-CONVERT', () => {
   let interceptor: IdempotencyInterceptor;
   let cache: jest.Mocked<IdempotencyCacheService>;
 
@@ -93,7 +112,7 @@ describe('IdempotencyInterceptor on POST /reservations/:id/cancel — PR-FIX-IDE
     interceptor = new IdempotencyInterceptor(cache);
   });
 
-  it('no header → handler called, replay false', async () => {
+  it('no header → handler called, replay false (behavior exactly unchanged)', async () => {
     const req = makeReq(), res = makeRes();
     const result = await firstValueFrom(
       (await interceptor.intercept(ctx(req, res), next(sampleSuccess))) as any,
@@ -115,7 +134,7 @@ describe('IdempotencyInterceptor on POST /reservations/:id/cancel — PR-FIX-IDE
     expect(IDEMPOTENCY_TTL_SECONDS).toBe(24 * 60 * 60);
   });
 
-  it('replay → cached body, handler NOT invoked (no duplicate refund row)', async () => {
+  it('replay → cached body, handler NOT invoked (no duplicate invoice/JE/CT/stock_movements)', async () => {
     const req = makeReq({ headers: { 'idempotency-key': VALID_KEY }, body: sampleBody });
     const res = makeRes();
     const handler = jest.fn();
@@ -131,10 +150,10 @@ describe('IdempotencyInterceptor on POST /reservations/:id/cancel — PR-FIX-IDE
     expect(res.setHeader).toHaveBeenCalledWith('X-Idempotent-Replay', 'true');
   });
 
-  it('payload mismatch (different refund_policy) → 409', async () => {
+  it('payload mismatch (different final_payments) → 409 IDEMPOTENCY_KEY_PAYLOAD_MISMATCH', async () => {
     const req = makeReq({
       headers: { 'idempotency-key': VALID_KEY },
-      body: { ...sampleBody, refund_policy: 'full' as const },
+      body: { ...sampleBody, final_payments: [{ payment_method: 'card' as const, amount: 9999 }] },
     });
     const handler = jest.fn();
     cache.tryAcquireOrReplay.mockResolvedValueOnce({
@@ -151,56 +170,50 @@ describe('IdempotencyInterceptor on POST /reservations/:id/cancel — PR-FIX-IDE
     expect(handler).not.toHaveBeenCalled();
   });
 
-  it('concurrent → 425', async () => {
+  it('concurrent → 425 (in-progress, service called once across both requests)', async () => {
     const req = makeReq({ headers: { 'idempotency-key': VALID_KEY }, body: sampleBody });
     cache.tryAcquireOrReplay.mockResolvedValueOnce({ kind: 'in_progress', cacheKey: 'k' } as AcquireResult);
     try {
       await interceptor.intercept(ctx(req, makeRes()), next(null));
       throw new Error('expected HttpException');
-    } catch (err: any) {
-      expect(err.getStatus()).toBe(425);
-    }
+    } catch (err: any) { expect(err.getStatus()).toBe(425); }
   });
 
-  it('Redis unavailable → 503', async () => {
+  it('Redis unavailable → 503 (fail-closed)', async () => {
     const req = makeReq({ headers: { 'idempotency-key': VALID_KEY }, body: sampleBody });
     cache.tryAcquireOrReplay.mockResolvedValueOnce({ kind: 'unavailable' } as AcquireResult);
     try {
       await interceptor.intercept(ctx(req, makeRes()), next(null));
       throw new Error('expected HttpException');
-    } catch (err: any) {
-      expect(err.getStatus()).toBe(503);
-    }
+    } catch (err: any) { expect(err.getStatus()).toBe(503); }
   });
 
-  it('invalid key → 400', async () => {
+  it('invalid key → 400 (no acquire attempted)', async () => {
     const req = makeReq({ headers: { 'idempotency-key': 'bad!' }, body: sampleBody });
     try {
       await interceptor.intercept(ctx(req, makeRes()), next(null));
       throw new Error('expected HttpException');
-    } catch (err: any) {
-      expect(err.getStatus()).toBe(400);
-    }
+    } catch (err: any) { expect(err.getStatus()).toBe(400); }
     expect(cache.tryAcquireOrReplay).not.toHaveBeenCalled();
   });
 
-  it('handler throws → lock released', async () => {
+  it('handler throws → lock released, key NOT poisoned', async () => {
     const req = makeReq({ headers: { 'idempotency-key': VALID_KEY }, body: sampleBody });
     cache.tryAcquireOrReplay.mockResolvedValueOnce({ kind: 'acquired', cacheKey: 'k' } as AcquireResult);
     await expect(
       firstValueFrom(
         (await interceptor.intercept(
-          ctx(req, makeRes()), failNext(new Error('synthetic reservation cancel failure')),
+          ctx(req, makeRes()), failNext(new Error('synthetic reservation convert failure')),
         )) as any,
       ),
-    ).rejects.toThrow(/synthetic reservation cancel failure/);
+    ).rejects.toThrow(/synthetic reservation convert failure/);
     expect(cache.cacheResult).not.toHaveBeenCalled();
     expect(cache.releaseLock).toHaveBeenCalledTimes(1);
   });
 });
 
-describe('namespace isolation: reservation cancel vs other reservation routes', () => {
-  it('keyed calls invoke tryAcquireOrReplay with route-distinct paths', async () => {
+describe('namespace isolation: reservation convert vs other reservation routes', () => {
+  it('keyed calls invoke tryAcquireOrReplay with route-distinct paths (convert NOT collide with create/cancel/payments/extend)', async () => {
     const cache = {
       tryAcquireOrReplay: jest.fn().mockResolvedValue({ kind: 'acquired', cacheKey: 'k' } as AcquireResult),
       cacheResult: jest.fn(),
@@ -213,11 +226,11 @@ describe('namespace isolation: reservation cancel vs other reservation routes', 
     } as any as jest.Mocked<IdempotencyCacheService>;
     const interceptor = new IdempotencyInterceptor(cache);
     const distinctPaths = [
-      ROUTE_PATH,
-      '/reservations',
-      '/reservations/:id/payments',
-      '/reservations/:id/convert',
-      '/reservations/:id/extend',
+      ROUTE_PATH,                          // convert (this PR)
+      '/reservations',                     // create
+      '/reservations/:id/cancel',          // PR-11E-bis
+      '/reservations/:id/payments',        // PR-11F-bis
+      '/reservations/:id/extend',          // out of scope
     ];
     for (const path of distinctPaths) {
       const req = { method: 'POST', url: path, originalUrl: path, route: { path }, headers: { 'idempotency-key': VALID_KEY }, body: { x: 1 } };
@@ -230,8 +243,8 @@ describe('namespace isolation: reservation cancel vs other reservation routes', 
   });
 });
 
-describe('ReservationsController route-level wiring — PR-FIX-IDEMPOTENCY-DEFERRED-VOID-CANCEL-ROUTES', () => {
-  it('cancel decorated (PR-11E-bis); addPayment decorated (PR-11F-bis); convert decorated (PR-11G); create + extend NOT decorated', async () => {
+describe('ReservationsController route-level wiring — PR-FIX-IDEMPOTENCY-RESERVATION-CONVERT', () => {
+  it('convert decorated (this PR); cancel + addPayment decorated (regression guards); create + extend NOT decorated', async () => {
     const moduleRef = await Test.createTestingModule({
       controllers: [ReservationsController],
       providers: [
@@ -261,35 +274,18 @@ describe('ReservationsController route-level wiring — PR-FIX-IDEMPOTENCY-DEFER
       );
     };
 
-    // ── PR-11E-bis target (still decorated; regression guard).
-    expect(hasInterceptor((controller as any).cancel)).toBe(true);
-
-    // ── PR-11F-bis added decoration on addPayment (multi-stage
-    //    installment with JE + CT — same risk profile as
-    //    suppliers/:id/pay and purchases/:id/pay). Track here so the
-    //    sibling-list test below stays in sync; the dedicated spec
-    //    `reservations.controller.payments-idempotency.spec.ts`
-    //    pins the full interceptor contract.
-    expect(hasInterceptor((controller as any).addPayment)).toBe(true);
-
-    // ── PR-11G added decoration on convert (closes the final true
-    //    financial/stock idempotency gap from the Sprint 4 rollup
-    //    audit). Multi-stage: invoices + invoice_lines +
-    //    invoice_payments + reservation_payments + JE + CT + stock
-    //    on_hand decrement. Track here for sibling-list sync; the
-    //    dedicated spec
-    //    `reservations.controller.convert-idempotency.spec.ts`
-    //    pins the full interceptor contract.
+    // ── This PR's target.
     expect(hasInterceptor((controller as any).convert)).toBe(true);
 
-    // ── Remaining ReservationsController POST/PATCH handlers MUST
-    //    stay undecorated. `create` only INSERTs reservation +
-    //    items + deposit row without posting JE/CT (the deposit
-    //    becomes JE/CT only at protected `:id/payments` or
-    //    `:id/convert`). `extend` is a date-field UPDATE only.
+    // ── Regression guards: prior PRs must remain decorated.
+    expect(hasInterceptor((controller as any).cancel)).toBe(true);     // PR-11E-bis
+    expect(hasInterceptor((controller as any).addPayment)).toBe(true); // PR-11F-bis
+
+    // ── Out-of-scope siblings stay undecorated. `create` only INSERTs
+    //    reservation + items + deposit row (no JE/CT at create time);
+    //    `extend` is a date-field UPDATE only.
     const undecoratedSiblings: Array<keyof ReservationsController> = [
-      'create',
-      'extend',
+      'create', 'extend',
     ];
     for (const name of undecoratedSiblings) {
       const target = (controller as any)[name];
