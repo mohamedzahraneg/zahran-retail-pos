@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { FinancialEngineService } from '../chart-of-accounts/financial-engine.service';
+import { assertExpenseInvariants } from './expense-invariants';
 
 export interface CreateRuleDto {
   name_ar: string;
@@ -278,6 +279,21 @@ export class ExpenseApprovalService {
         );
 
         if (exp && this.engine) {
+          // PR-FIX-EXPENSES-APP-LEVEL-CASHBOX-GUARD — multi-level
+          // approval terminal step. Same invariant as approveExpense:
+          // refuse to call engine.recordExpense on a stored cash
+          // expense that has no cashbox_id. Throwing here aborts the
+          // transaction, leaving the approval status as just-flipped
+          // — but since the whole `decide` runs inside a single ds.
+          // transaction the UPDATE on expense_approvals is rolled
+          // back too, so the approval row stays pending and the
+          // operator can fix the expense before re-approving.
+          assertExpenseInvariants(
+            exp.payment_method,
+            exp.cashbox_id,
+            'multilevel_approve',
+          );
+
           const res = await this.engine.recordExpense({
             expense_id: exp.id,
             expense_no: exp.expense_no,
