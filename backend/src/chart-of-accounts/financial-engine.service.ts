@@ -5,6 +5,10 @@ import {
   CashboxKindForGl,
   GL_CASH,
   GL_EMPLOYEE_RECEIVABLE,
+  GL_SHIFT_DEFICIT,
+  GL_SHIFT_SURPLUS,
+  GL_SUPPLIER_PAYABLE,
+  GL_VAT_SUSPENSE,
   LIQUID_GL_CODES,
 } from './gl-codes.constants';
 
@@ -1222,7 +1226,9 @@ export class FinancialEngineService {
           error: `invalid treatment '${treatment}' for surplus`,
         };
       }
-      const creditCode = treatment === 'suspense' ? '215' : '421';
+      // PR-AUDIT-GL-CODE-CONSTANTS — '215' suspense and '421' shift surplus
+      // both centralized; rendered SQL byte-identical (same string values).
+      const creditCode = treatment === 'suspense' ? GL_VAT_SUSPENSE : GL_SHIFT_SURPLUS;
       return this.recordTransaction({
         kind: 'shift_variance',
         reference_type: 'shift_variance',
@@ -1265,12 +1271,13 @@ export class FinancialEngineService {
         error: 'employee_id required for charge_employee treatment',
       };
     }
-    // PR-AUDIT-POSTING-GL-CONSTANTS-B1-EMPLOYEE — only the 'charge_employee'
-    // branch (which routes to the employee-receivable account) is centralized.
-    // The 'company_loss' branch keeps the '531' literal because that code is
-    // a COGS/shortage-loss code, not an employee code; it's deferred to a
-    // future B2 phase with a proper GL_SHORTAGE_LOSS / GL_COGS naming.
-    const debitCode = treatment === 'charge_employee' ? GL_EMPLOYEE_RECEIVABLE : '531';
+    // PR-AUDIT-GL-CODE-CONSTANTS (Sprint 3 / PR-9) — closes the B2-phase
+    // deferral noted in the prior PR-AUDIT-POSTING-GL-CONSTANTS-B1-EMPLOYEE
+    // comment. Both branches now centralized: GL_EMPLOYEE_RECEIVABLE for
+    // 'charge_employee' (the receivable absorbs the deficit pending payroll
+    // reclaim) and GL_SHIFT_DEFICIT for 'company_loss' (the deficit hits the
+    // shift-deficit expense line directly). Rendered SQL byte-identical.
+    const debitCode = treatment === 'charge_employee' ? GL_EMPLOYEE_RECEIVABLE : GL_SHIFT_DEFICIT;
     return this.recordTransaction({
       kind: 'shift_variance',
       reference_type: 'shift_variance',
@@ -1682,7 +1689,8 @@ export class FinancialEngineService {
       });
     if (args.supplier_dues > 0)
       lines.push({
-        account_code: '211',
+        // PR-AUDIT-GL-CODE-CONSTANTS — opening-balance supplier payable
+        account_code: GL_SUPPLIER_PAYABLE,
         credit: args.supplier_dues,
         description: 'ذمم موردين افتتاحية',
       });

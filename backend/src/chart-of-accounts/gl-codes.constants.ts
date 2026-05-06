@@ -50,6 +50,65 @@ export const GL_EMPLOYEE_PAYABLE = '213';
 /** Supplier payable — الموردون والدائنون. */
 export const GL_SUPPLIER_PAYABLE = '211';
 
+/* ──────────────────────────────────────────────────────────────────
+ * Sensitive accounting control accounts — PR-AUDIT-GL-CODE-CONSTANTS
+ * (Sprint 3 / PR-9)
+ *
+ * Names below match the chart_of_accounts row text (verified
+ * against production at audit time, 2026-05-06). The user-facing PR
+ * spec proposed `GL_VAT_PAYABLE = '421'` and `GL_CASH_VARIANCE =
+ * '531'` — both names contradict the actual ledger:
+ *   · '421' is "فروق ورديات (زيادة) / Shift Surplus" (revenue)
+ *     — NOT VAT. The actual VAT/Tax payable account is '214'.
+ *   · '531' is specifically "فروق ورديات (عجز) / Shift Deficit"
+ *     (expense) — NOT a generic cash variance. Its companion is 421.
+ * The names below match the actual semantics so the constant is
+ * never misleading at the call site.
+ * ──────────────────────────────────────────────────────────────────*/
+
+/** Merchandise sales revenue — مبيعات السلع. */
+export const GL_SALES_REVENUE = '411';
+
+/** Tax payable (incl. VAT) — ضرائب مستحقة. Used on POS invoice tax credit. */
+export const GL_TAX_PAYABLE = '214';
+
+/**
+ * Suspense / temporary settlement account — حساب التسوية المؤقت.
+ * Credit side of a positive shift variance when the manager defers
+ * the classification (treatment === 'suspense'); the surplus parks
+ * here until reclassified.
+ */
+export const GL_VAT_SUSPENSE = '215';
+
+/**
+ * Shift surplus revenue — فروق ورديات (زيادة).
+ * Credit side of a positive shift variance when the manager treats
+ * the surplus as revenue (treatment === 'revenue').
+ */
+export const GL_SHIFT_SURPLUS = '421';
+
+/** Cost of goods sold (COGS) — تكلفة البضاعة المباعة (LEAF account). */
+export const GL_COGS = '51';
+
+/**
+ * Operating expenses parent — المصروفات التشغيلية (NON-LEAF).
+ * Concrete sub-accounts (521 salaries, 522 rent, 523 utilities, 524
+ * telecom, 525 shipping, 526 marketing, 529 misc) live under this
+ * prefix and are resolved by `CostAccountResolver.HINT_MAP`. Use
+ * this constant only when matching the prefix range, never as a
+ * direct posting target (it's not a leaf).
+ */
+export const GL_OPERATING_EXPENSES_PREFIX = '52';
+
+/**
+ * Shift deficit expense — فروق ورديات (عجز).
+ * Debit side of a negative shift variance when the manager treats
+ * the deficit as a company loss (treatment === 'company_loss'). The
+ * 'charge_employee' branch routes the debit to GL_EMPLOYEE_RECEIVABLE
+ * instead.
+ */
+export const GL_SHIFT_DEFICIT = '531';
+
 /**
  * The four liquid-asset GL codes in canonical sort order. Used by
  * Finance Dashboard, Analytics, and the FinancialEngine guard to
