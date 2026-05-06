@@ -85,6 +85,17 @@ export class PosController {
 
   @Post('invoices/:id/edit')
   @Permissions('invoices.edit')
+  // PR-FIX-IDEMPOTENCY-EXCHANGES-INVOICE-EDITS (Sprint 4 / PR-11C) —
+  // multi-stage write: replaces invoice_payments, INSERTs new
+  // stock_movements, refreshes the JE/CT via the engine, and (since
+  // PR #295) refreshes the closed-shift snapshot when the parent
+  // shift is closed. A duplicate POST during a network retry could
+  // partially apply some stages before the engine guard catches the
+  // JE leg, producing a tangled in-flight state. The Redis-backed
+  // interceptor's 60s lock + 24h replay is the cleaner outer
+  // defence. Without an Idempotency-Key header, behavior is exactly
+  // unchanged from today.
+  @UseInterceptors(IdempotencyInterceptor)
   editInvoice(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: EditInvoiceDto,
