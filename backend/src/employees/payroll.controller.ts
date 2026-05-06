@@ -10,6 +10,7 @@ import {
   Patch,
   Post,
   Query,
+  UseInterceptors,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { DataSource } from 'typeorm';
@@ -28,6 +29,10 @@ import {
   CurrentUser,
   JwtUser,
 } from '../common/decorators/current-user.decorator';
+// PR-FIX-IDEMPOTENCY-EMPLOYEE-PAYROLL-P0 (Sprint 4 / PR-11D) — opt-in
+// Idempotency-Key support on POST /payroll. Without the header,
+// behavior is exactly unchanged from today.
+import { IdempotencyInterceptor } from '../common/interceptors/idempotency.interceptor';
 import { EmployeesService } from './employees.service';
 import { GL_EMPLOYEE_RECEIVABLE } from '../chart-of-accounts/gl-codes.constants';
 
@@ -467,6 +472,16 @@ export class PayrollController {
   @Post()
   @Permissions('employee.deductions.manage')
   @ApiOperation({ summary: 'تسجيل حركة راتب / خصم / سلفة / مكافأة' })
+  // PR-FIX-IDEMPOTENCY-EMPLOYEE-PAYROLL-P0 (Sprint 4 / PR-11D) —
+  // dispatched create endpoint that delegates to addBonus /
+  // addDeduction / recordSettlement based on `dto.type`. All three
+  // delegate paths produce JEs with no application-level
+  // (reference_type, reference_id) idempotency anchor — duplicate
+  // POSTs create duplicate financial side effects. The wage path is
+  // rejected at the validator with a 400 redirect to the attendance
+  // workflow, so it has no idempotency concern. Without an
+  // Idempotency-Key header, behavior is exactly unchanged from today.
+  @UseInterceptors(IdempotencyInterceptor)
   async create(@Body() dto: CreatePayrollDto, @CurrentUser() user: JwtUser) {
     if (!(Number(dto.amount) > 0)) {
       throw new BadRequestException('المبلغ يجب أن يكون أكبر من صفر');
