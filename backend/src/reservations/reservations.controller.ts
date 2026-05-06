@@ -27,6 +27,9 @@ import {
 // PR-FIX-IDEMPOTENCY-DEFERRED-VOID-CANCEL-ROUTES (Sprint 4 / PR-11E-bis)
 // Opt-in Idempotency-Key support on POST /reservations/:id/cancel.
 // Without the header, behavior is exactly unchanged from today.
+// PR-FIX-IDEMPOTENCY-DEFERRED-APPROVE-FAMILY (Sprint 4 / PR-11F-bis)
+// Extended to also protect POST /reservations/:id/payments. Same
+// import; module providers already wired in PR-11E-bis.
 import { IdempotencyInterceptor } from '../common/interceptors/idempotency.interceptor';
 
 @ApiBearerAuth()
@@ -58,6 +61,14 @@ export class ReservationsController {
   @Post(':id/payments')
   @Roles('admin', 'manager', 'cashier')
   @ApiOperation({ summary: 'إضافة قسط/دفعة على الحجز' })
+  // PR-FIX-IDEMPOTENCY-DEFERRED-APPROVE-FAMILY (Sprint 4 / PR-11F-bis)
+  // Multi-stage installment: INSERTs `reservation_payments` row +
+  // posts JE + CT (cash/bank). Duplicate POST without retry-safety
+  // creates 2 payment rows + 2 JEs + 2 CTs (overcrediting customer's
+  // remaining balance and double-charging cash). Same risk profile
+  // as `POST /suppliers/:id/pay` (protected in PR-11F) and
+  // `POST /purchases/:id/pay` (protected in PR-11D).
+  @UseInterceptors(IdempotencyInterceptor)
   addPayment(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: AddReservationPaymentDto,
