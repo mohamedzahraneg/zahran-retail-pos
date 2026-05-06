@@ -1,40 +1,41 @@
 /**
- * cash-desk.controller.supplier-payments-idempotency.spec.ts
- * — PR-AUDIT-IDEMPOTENCY-CASH-DESK-SUPPLIER-PAYMENTS
+ * cash-desk.controller.deposit-idempotency.spec.ts
+ * — PR-FIX-IDEMPOTENCY-DIRECT-CT-WRITES (Sprint 4 / PR-11A)
  *
  * Pins the (already-shipped, generic) IdempotencyInterceptor on the
- * supplier-payment route:
+ * manual deposit / withdrawal route:
  *
- *   · POST /cash-desk/supplier-payments
+ *   · POST /cash-desk/deposit
+ *
+ * Why deposit specifically — the audit identified this as one of two
+ * P0 direct-CT writers. Unlike `transfer` / `receive` / `pay`,
+ * `deposit()` writes a `cashbox_transactions` row WITHOUT going
+ * through `FinancialEngine.recordTransaction`, so the engine-level
+ * (reference_type, reference_id) idempotency guard does NOT cover it.
+ * Operator double-clicks could produce 2 CT rows + 2× cashbox
+ * balance moves before this PR.
  *
  * Strategy:
  *   · Mount the real CashDeskController with a stubbed CashDeskService.
  *   · Mount the real IdempotencyInterceptor.
  *   · Mock the IdempotencyCacheService (NOT a real Redis) so each
- *     test can control acquire/replay/in_progress/unavailable
+ *     test can control acquire / replay / in_progress / unavailable
  *     branches deterministically.
  *   · Use Express request/response stubs to assert headers + status
  *     without booting Nest's HTTP layer.
  *
- * Scope of THIS PR: ONLY `pay()` is newly decorated. The wiring test
- * at the bottom asserts:
- *   · `pay` (this PR) carries the interceptor.
- *   · `receive` STILL carries it from PR #281.
- *   · `transfer` STILL carries it from PR #277.
- *   · The sibling `/suppliers/:id/pay` route lives in a DIFFERENT
- *     controller (suppliers.controller.ts) — out of scope; not even
- *     reachable from this CashDeskController.
+ * Scope of THIS PR (deposit specifically):
+ *   · `deposit` (newly decorated) MUST have the interceptor.
+ *   · `transfer` (PR #277), `receive` (PR #281), `pay` (PR #283)
+ *     STILL carry the interceptor — guards against regression.
  *   · All other cash-desk handlers (voids, reconciliation, cashbox
- *     CRUD) do NOT carry the interceptor. (`deposit` was undecorated
- *     when this spec shipped; PR-FIX-IDEMPOTENCY-DIRECT-CT-WRITES
- *     decorated it — this spec's regression assertion was updated
- *     accordingly.)
+ *     CRUD) do NOT carry the interceptor.
  *
- * Bodies in tests use a realistic supplier-payments shape including
- * the optional `allocations: [{invoice_id, amount}, ...]` array. Note
- * the DTO field is named `invoice_id` even though semantically (on
- * the supplier side) it stores `purchase_id` — that's a pre-existing
- * pattern; renaming is out of scope for this PR.
+ * Bodies in tests use a realistic deposit shape: a 1000 EGP top-up
+ * to the main cash drawer with the optional `category` + `notes`
+ * fields populated. The interceptor's canonicalizer hashes the shape
+ * correctly; tampering with `amount` or `direction` produces a
+ * different payload hash → 409 payload-mismatch.
  */
 
 import { Test } from '@nestjs/testing';
@@ -50,8 +51,8 @@ import {
   IDEMPOTENCY_TTL_SECONDS,
 } from '../common/cache/idempotency-cache.service';
 
-const VALID_KEY = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'; // 36 chars, fits 8-128 alnum/-/_
-const ROUTE_PATH = '/cash-desk/supplier-payments';
+const VALID_KEY = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'; // 36 chars
+const ROUTE_PATH = '/cash-desk/deposit';
 
 function makeMockReq(overrides: Partial<any> = {}) {
   return {
@@ -100,43 +101,31 @@ function makeNext(value: unknown): CallHandler {
 }
 
 function makeFailingNext(err: Error): CallHandler {
-  return {
-    handle: jest.fn(() => throwError(() => err)),
-  } as any;
+  return { handle: jest.fn(() => throwError(() => err)) } as any;
 }
 
-describe('IdempotencyInterceptor on POST /cash-desk/supplier-payments — PR-AUDIT-IDEMPOTENCY-CASH-DESK-SUPPLIER-PAYMENTS', () => {
+describe('IdempotencyInterceptor on POST /cash-desk/deposit — PR-FIX-IDEMPOTENCY-DIRECT-CT-WRITES', () => {
   let interceptor: IdempotencyInterceptor;
   let cache: jest.Mocked<IdempotencyCacheService>;
 
-  // Realistic supplier-payments body: cash payout of 1500 EGP to a
-  // supplier settling two purchases. The DTO reuses
-  // PaymentAllocationDto from the customer side, so the inner field
-  // is `invoice_id` even though the supplier service writes it to
-  // `supplier_payment_allocations.purchase_id` — pre-existing pattern.
+  // Realistic deposit body: 1000 EGP top-up to the main cash drawer.
   const sampleBody = {
-    supplier_id: '11111111-1111-1111-1111-111111111111',
     cashbox_id: '22222222-2222-2222-2222-222222222222',
-    payment_method: 'cash',
-    amount: 1500,
-    allocations: [
-      {
-        invoice_id: 'aaaaaaaa-1111-1111-1111-111111111111',
-        amount: 900,
-      },
-      {
-        invoice_id: 'bbbbbbbb-2222-2222-2222-222222222222',
-        amount: 600,
-      },
-    ],
-    notes: 'دفع نقدي',
+    direction: 'in' as const,
+    amount: 1000,
+    category: 'opening_balance',
+    notes: 'إيداع افتتاحي للخزينة الرئيسية',
   };
 
+  // Realistic service response: the engine writes a single CT row
+  // and returns it with the new cashbox balance.
   const sampleSuccess = {
-    id: 'sp-AAA',
-    payment_no: 'SP-2026-000456',
-    supplier_id: sampleBody.supplier_id,
-    amount: 1500,
+    txn_id: 'ct-AAA',
+    cashbox_id: sampleBody.cashbox_id,
+    direction: 'in',
+    amount: 1000,
+    new_balance: 35640,
+    created_at: '2026-05-06T12:00:00.000Z',
   };
 
   beforeEach(() => {
@@ -153,7 +142,7 @@ describe('IdempotencyInterceptor on POST /cash-desk/supplier-payments — PR-AUD
     interceptor = new IdempotencyInterceptor(cache);
   });
 
-  it('no Idempotency-Key header → handler called, X-Idempotent-Replay=false, cache untouched', async () => {
+  it('no Idempotency-Key header → handler called, X-Idempotent-Replay=false, cache untouched (today\'s behavior preserved)', async () => {
     const req = makeMockReq();
     const res = makeMockRes();
     const next = makeNext(sampleSuccess);
@@ -168,7 +157,7 @@ describe('IdempotencyInterceptor on POST /cash-desk/supplier-payments — PR-AUD
     expect(res.setHeader).toHaveBeenCalledWith('X-Idempotent-Replay', 'false');
   });
 
-  it('first keyed request → handler called, X-Idempotent-Replay=false, cacheResult invoked with 24h TTL', async () => {
+  it('first keyed request → handler called, cacheResult invoked with 24h TTL, X-Idempotent-Replay=false', async () => {
     const req = makeMockReq({
       headers: { 'idempotency-key': VALID_KEY },
       body: sampleBody,
@@ -186,7 +175,6 @@ describe('IdempotencyInterceptor on POST /cash-desk/supplier-payments — PR-AUD
     const result = await firstValueFrom(
       (await interceptor.intercept(ctx, next)) as any,
     );
-
     expect(result).toEqual(sampleSuccess);
     expect(next.handle).toHaveBeenCalledTimes(1);
     expect(cache.cacheResult).toHaveBeenCalledTimes(1);
@@ -200,7 +188,7 @@ describe('IdempotencyInterceptor on POST /cash-desk/supplier-payments — PR-AUD
     expect(IDEMPOTENCY_TTL_SECONDS).toBe(24 * 60 * 60);
   });
 
-  it('replay (same key + same payload) → returns cached body, X-Idempotent-Replay=true, handler NOT invoked', async () => {
+  it('replay (same key + same payload) → returns cached body, handler NOT invoked, X-Idempotent-Replay=true (no duplicate CT)', async () => {
     const req = makeMockReq({
       headers: { 'idempotency-key': VALID_KEY },
       body: sampleBody,
@@ -214,7 +202,7 @@ describe('IdempotencyInterceptor on POST /cash-desk/supplier-payments — PR-AUD
       status: 201,
       body: sampleSuccess,
       payload_hash: 'will-be-overridden-by-mock',
-      cached_at: '2026-05-05T12:00:00.000Z',
+      cached_at: '2026-05-06T12:00:00.000Z',
     };
     cache.tryAcquireOrReplay.mockResolvedValueOnce({
       kind: 'replay',
@@ -231,7 +219,7 @@ describe('IdempotencyInterceptor on POST /cash-desk/supplier-payments — PR-AUD
     expect(res.status).toHaveBeenCalledWith(201);
   });
 
-  it('payload mismatch (same key + different payload) → 409 conflict, handler NOT invoked', async () => {
+  it('payload mismatch (same key + tampered amount) → 409 conflict, handler NOT invoked', async () => {
     // Tampered amount → different body hash, same key.
     const req = makeMockReq({
       headers: { 'idempotency-key': VALID_KEY },
@@ -246,7 +234,7 @@ describe('IdempotencyInterceptor on POST /cash-desk/supplier-payments — PR-AUD
       status: 201,
       body: sampleSuccess,
       payload_hash: 'different-hash',
-      cached_at: '2026-05-05T12:00:00.000Z',
+      cached_at: '2026-05-06T12:00:00.000Z',
     };
     cache.tryAcquireOrReplay.mockResolvedValueOnce({
       kind: 'payload_mismatch',
@@ -266,6 +254,42 @@ describe('IdempotencyInterceptor on POST /cash-desk/supplier-payments — PR-AUD
     });
     expect(handler).not.toHaveBeenCalled();
     expect(cache.cacheResult).not.toHaveBeenCalled();
+  });
+
+  it('payload mismatch (same key + flipped direction in→out) → 409 conflict, handler NOT invoked', async () => {
+    // Flipping `direction` from 'in' to 'out' is a semantic-critical
+    // change for a deposit/withdrawal — must produce a DIFFERENT
+    // payload hash so the interceptor refuses the replay rather than
+    // returning the original "in" cached response for an "out" call.
+    const req = makeMockReq({
+      headers: { 'idempotency-key': VALID_KEY },
+      body: { ...sampleBody, direction: 'out' as const },
+    });
+    const res = makeMockRes();
+    const handler = jest.fn();
+    const next = { handle: handler } as any;
+    const ctx = makeExecutionContext(req, res);
+
+    cache.tryAcquireOrReplay.mockResolvedValueOnce({
+      kind: 'payload_mismatch',
+      cached: {
+        status: 201,
+        body: sampleSuccess,
+        payload_hash: 'original-in-direction-hash',
+        cached_at: '2026-05-06T12:00:00.000Z',
+      },
+    } as AcquireResult);
+
+    try {
+      await interceptor.intercept(ctx, next);
+      throw new Error('expected HttpException');
+    } catch (err: any) {
+      expect(err.getStatus()).toBe(409);
+      expect(err.getResponse()).toMatchObject({
+        code: 'IDEMPOTENCY_KEY_PAYLOAD_MISMATCH',
+      });
+    }
+    expect(handler).not.toHaveBeenCalled();
   });
 
   it('different key with same payload → handler invoked again (no cross-key dedupe)', async () => {
@@ -292,7 +316,7 @@ describe('IdempotencyInterceptor on POST /cash-desk/supplier-payments — PR-AUD
     expect(cache.tryAcquireOrReplay).toHaveBeenCalledTimes(1);
   });
 
-  it('concurrent same-key (lock held by another request) → 425 Too Early, handler NOT invoked', async () => {
+  it('concurrent same-key (lock held by another request) → 425 Too Early, handler NOT invoked (no double-click duplicate CT)', async () => {
     const req = makeMockReq({
       headers: { 'idempotency-key': VALID_KEY },
       body: sampleBody,
@@ -370,7 +394,7 @@ describe('IdempotencyInterceptor on POST /cash-desk/supplier-payments — PR-AUD
     expect(cache.tryAcquireOrReplay).not.toHaveBeenCalled();
   });
 
-  it('handler throws after lock acquired → lock released, error re-thrown, no cached result', async () => {
+  it('handler throws after lock acquired → lock released, error re-thrown, no cached result (deposit failure does not poison the key)', async () => {
     const req = makeMockReq({
       headers: { 'idempotency-key': VALID_KEY },
       body: sampleBody,
@@ -384,12 +408,12 @@ describe('IdempotencyInterceptor on POST /cash-desk/supplier-payments — PR-AUD
     } as AcquireResult);
 
     const next = makeFailingNext(
-      new Error('synthetic supplier-payment failure'),
+      new Error('synthetic deposit failure (e.g. cashbox not found)'),
     );
 
     await expect(
       firstValueFrom((await interceptor.intercept(ctx, next)) as any),
-    ).rejects.toThrow(/synthetic supplier-payment failure/);
+    ).rejects.toThrow(/synthetic deposit failure/);
 
     expect(cache.cacheResult).not.toHaveBeenCalled();
     expect(cache.releaseLock).toHaveBeenCalledTimes(1);
@@ -397,13 +421,14 @@ describe('IdempotencyInterceptor on POST /cash-desk/supplier-payments — PR-AUD
 });
 
 /**
- * Cache-namespace isolation: the new route must not collide with
- * any of the previously-protected routes. The interceptor forwards
- * `req.route.path`, so paths are structurally distinct in the cache.
- * Pin that for ALL SIX previously-protected routes plus the offline-
- * sync path the user explicitly listed.
+ * Cache-namespace isolation: confirm that POST /cash-desk/deposit's
+ * keyed cache namespace doesn't collide with the 5 previously
+ * protected cash-desk-or-related routes. Same Idempotency-Key sent
+ * to /cash-desk/deposit AND /cash-desk/transfer (or any other
+ * protected sibling) must invoke `tryAcquireOrReplay` with distinct
+ * paths so the cache keys are pairwise distinct.
  */
-describe('namespace isolation: /cash-desk/supplier-payments vs all previously protected routes', () => {
+describe('namespace isolation: /cash-desk/deposit vs all previously protected routes', () => {
   it('keyed calls invoke tryAcquireOrReplay with route-distinct paths', async () => {
     const cache = {
       tryAcquireOrReplay: jest.fn().mockResolvedValue({
@@ -421,13 +446,13 @@ describe('namespace isolation: /cash-desk/supplier-payments vs all previously pr
     const interceptor = new IdempotencyInterceptor(cache);
 
     const distinctPaths = [
-      '/cash-desk/supplier-payments', // this PR
-      '/cash-desk/customer-payments', // PR #281
-      '/cash-desk/transfer',          // PR #277
-      '/pos/invoices',                // PR #275
-      '/accounting/expenses',         // PR #279
-      '/accounting/expenses/daily',   // PR #279
-      '/sync/push',                   // offline-sync (FE-only, listed for completeness)
+      '/cash-desk/deposit',
+      '/cash-desk/customer-payments',
+      '/cash-desk/transfer',
+      '/cash-desk/supplier-payments',
+      '/pos/invoices',
+      '/accounting/expenses',
+      '/accounting/expenses/daily',
     ];
 
     for (const path of distinctPaths) {
@@ -456,58 +481,53 @@ describe('namespace isolation: /cash-desk/supplier-payments vs all previously pr
 });
 
 /**
- * Route-level wiring assertions.
+ * Route-level wiring assertions for THIS PR.
  *
- * In this PR:
- *   · `pay` (newly decorated) MUST have the interceptor.
- *   · `receive` (decorated by PR #281) MUST STILL have the
- *     interceptor — guards against regression.
- *   · `transfer` (decorated by PR #277) MUST STILL have the
- *     interceptor — guards against regression.
+ *   · `deposit` (newly decorated) MUST have the interceptor.
+ *   · `transfer` (PR #277), `receive` (PR #281), `pay` (PR #283)
+ *     MUST STILL carry the interceptor — guards against regression
+ *     of the cash-desk pilot routes.
  *   · All other cash-desk handlers (voids, reconciliation, cashbox
- *     CRUD) MUST NOT carry the interceptor. `deposit` was on this
- *     undecorated list when the spec shipped — PR-FIX-IDEMPOTENCY-
- *     DIRECT-CT-WRITES (Sprint 4 / PR-11A) decorated it; the
- *     assertion below is updated to a regression guard.
+ *     CRUD) MUST NOT carry the interceptor.
  */
-describe('CashDeskController route-level wiring — PR-AUDIT-IDEMPOTENCY-CASH-DESK-SUPPLIER-PAYMENTS', () => {
-  it('pay has IdempotencyInterceptor; receive + transfer retain it; siblings do NOT', async () => {
+describe('CashDeskController route-level wiring — PR-FIX-IDEMPOTENCY-DIRECT-CT-WRITES (deposit)', () => {
+  it('deposit has IdempotencyInterceptor; transfer/receive/pay retain it; siblings do NOT', async () => {
     const moduleRef = await Test.createTestingModule({
       controllers: [CashDeskController],
       providers: [
         {
           provide: CashDeskService,
           useValue: {
-            // Supplier payments (this PR's target)
-            payToSupplier: jest.fn(),
-            listSupplierPayments: jest.fn(),
-            voidSupplierPayment: jest.fn(),
-            // Customer payments (decorated by PR #281)
+            // This PR's target.
+            deposit: jest.fn(),
+            // Cash transfer (decorated by PR #277).
+            transferBetweenCashboxes: jest.fn(),
+            // Customer payments (decorated by PR #281).
             receiveFromCustomer: jest.fn(),
             listCustomerPayments: jest.fn(),
             voidCustomerPayment: jest.fn(),
-            // Cash transfer (decorated by PR #277)
-            transferBetweenCashboxes: jest.fn(),
-            // Cashbox CRUD
+            // Supplier payments (decorated by PR #283).
+            payToSupplier: jest.fn(),
+            listSupplierPayments: jest.fn(),
+            voidSupplierPayment: jest.fn(),
+            // Cashbox CRUD.
             listCashboxes: jest.fn(),
             listInstitutions: jest.fn(),
             createCashbox: jest.fn(),
             updateCashbox: jest.fn(),
             removeCashbox: jest.fn(),
-            // Reconciliation
+            // Reconciliation.
             listReconciliation: jest.fn(),
             markReconciled: jest.fn(),
             unmarkReconciled: jest.fn(),
             autoMatchReconciliation: jest.fn(),
-            // Reports / drift / movements
+            // Reports / drift / movements.
             cashflowToday: jest.fn(),
             getGlDrift: jest.fn(),
             getShiftVariances: jest.fn(),
             listMovements: jest.fn(),
             listCashboxMovementsUnified: jest.fn(),
             getCashboxDriftDetail: jest.fn(),
-            // Manual deposit
-            deposit: jest.fn(),
           },
         },
         { provide: IdempotencyCacheService, useValue: {} },
@@ -526,21 +546,13 @@ describe('CashDeskController route-level wiring — PR-AUDIT-IDEMPOTENCY-CASH-DE
       );
     };
 
-    // ── This PR's target: pay (supplier-payments).
-    expect(hasInterceptor((controller as any).pay)).toBe(true);
-
-    // ── receive retained from PR #281 — guards against regression.
-    expect(hasInterceptor(controller.receive)).toBe(true);
-
-    // ── Transfer retained from PR #277 — guards against regression.
-    expect(hasInterceptor(controller.transfer)).toBe(true);
-
-    // ── Deposit — was undecorated when this spec shipped;
-    //    PR-FIX-IDEMPOTENCY-DIRECT-CT-WRITES (Sprint 4 / PR-11A)
-    //    decorated it. The new spec
-    //    (cash-desk.controller.deposit-idempotency.spec.ts) owns
-    //    the positive assertion. Updated here to a regression guard.
+    // ── This PR's target: deposit.
     expect(hasInterceptor((controller as any).deposit)).toBe(true);
+
+    // ── Pilot routes from earlier PRs MUST still carry the interceptor.
+    expect(hasInterceptor(controller.transfer)).toBe(true);
+    expect(hasInterceptor(controller.receive)).toBe(true);
+    expect(hasInterceptor((controller as any).pay)).toBe(true);
 
     // ── All other cash-desk POST handlers MUST be undecorated.
     const undecoratedSiblings: Array<keyof CashDeskController> = [

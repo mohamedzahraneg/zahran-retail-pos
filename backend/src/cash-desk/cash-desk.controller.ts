@@ -402,6 +402,18 @@ export class CashDeskController {
   // ── Manual cashbox deposits / withdrawals (opening balance, top-ups) ──
   @Post('deposit')
   @Roles('admin', 'manager', 'accountant')
+  // PR-FIX-IDEMPOTENCY-DIRECT-CT-WRITES (Sprint 4 / PR-11A) — sixth
+  // protected cash-desk endpoint. The deposit path is one of TWO
+  // P0 direct-CT writers in the system (the other is
+  // POST /shifts/:id/adjust-count): unlike the rest of cash-desk.svc,
+  // `deposit()` writes a `cashbox_transactions` row WITHOUT going
+  // through `FinancialEngine.recordTransaction`, so the engine-level
+  // (reference_type, reference_id) idempotency guard does NOT cover
+  // it. Without an Idempotency-Key header the behavior is exactly
+  // unchanged (today's behavior — operator double-click creates 2 CT
+  // rows). With it, replays the cached 2xx response for 24h or 425/409
+  // for concurrent / payload-mismatch.
+  @UseInterceptors(IdempotencyInterceptor)
   deposit(@Body() dto: CashDepositDto, @CurrentUser() user: JwtUser) {
     return this.svc.deposit(dto, user.userId);
   }

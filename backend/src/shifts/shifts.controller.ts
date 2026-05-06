@@ -6,6 +6,7 @@ import {
   ParseUUIDPipe,
   Post,
   Query,
+  UseInterceptors,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { ShiftsService } from './shifts.service';
@@ -21,6 +22,10 @@ import {
 } from '../common/decorators/current-user.decorator';
 import { AggregateDetailDto } from './dto/aggregate-detail.dto';
 import { ListLiveSummaryDto } from './dto/list-live-summary.dto';
+// PR-FIX-IDEMPOTENCY-DIRECT-CT-WRITES (Sprint 4 / PR-11A) — opt-in
+// Idempotency-Key support on POST /shifts/:id/adjust-count. Without
+// the header, behavior is exactly unchanged from today.
+import { IdempotencyInterceptor } from '../common/interceptors/idempotency.interceptor';
 
 @ApiBearerAuth()
 @ApiTags('shifts')
@@ -176,6 +181,15 @@ export class ShiftsController {
   @Post(':id/adjust-count')
   @Permissions('shifts.close.adjust')
   @ApiOperation({ summary: 'تعديل مبلغ الإقفال للوردية (تصحيح العد)' })
+  // PR-FIX-IDEMPOTENCY-DIRECT-CT-WRITES (Sprint 4 / PR-11A) — second
+  // P0 direct-CT writer protected (the other is POST /cash-desk/deposit).
+  // `adjustCount` is hand-rolled and writes to cashbox_transactions
+  // outside the FinancialEngine path, so the engine-level
+  // (reference_type, reference_id) guard does NOT cover it.
+  // Operator double-clicks on the variance-adjustment button were the
+  // motivating risk. Without an Idempotency-Key header, behavior is
+  // exactly unchanged from today (no protection).
+  @UseInterceptors(IdempotencyInterceptor)
   adjustCount(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() body: { new_actual_closing: number; reason: string },
