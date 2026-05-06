@@ -7,6 +7,7 @@ import {
   Patch,
   Post,
   Query,
+  UseInterceptors,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import {
@@ -32,6 +33,15 @@ import {
   CurrentUser,
   JwtUser,
 } from '../common/decorators/current-user.decorator';
+// PR-FIX-IDEMPOTENCY-DEFERRED-APPROVE-FAMILY (Sprint 4 / PR-11F-bis)
+// Opt-in Idempotency-Key support on POST /recurring-expenses/:id/run
+// and POST /recurring-expenses/process-due. Both materialize expense
+// rows + (optionally) post JE/CT — duplicates without retry-safety
+// would double-charge. Without the header, behavior is exactly
+// unchanged. Deferred from PR-11F because this module needed new
+// IdempotencyCacheService + IdempotencyInterceptor providers (added
+// alongside in this same PR).
+import { IdempotencyInterceptor } from '../common/interceptors/idempotency.interceptor';
 
 class CreateDto implements CreateRecurringExpenseDto {
   // Code can be a short digit like "1" or "10" — keep it present but
@@ -160,6 +170,13 @@ export class RecurringExpensesController {
 
   @Post(':id/run')
   @ApiOperation({ summary: 'توليد المصروف المستحق من القالب' })
+  // PR-FIX-IDEMPOTENCY-DEFERRED-APPROVE-FAMILY (Sprint 4 / PR-11F-bis)
+  // Materializes one due expense from the template — INSERTs an
+  // `expenses` row + (when auto_post=true) posts JE + (when
+  // auto_paid=true) CT. Duplicate POST without retry-safety creates
+  // 2 expense rows + 2 JEs + 2 CTs. Same risk profile as
+  // `POST /expenses/:id/approve` (already protected in PR-11F).
+  @UseInterceptors(IdempotencyInterceptor)
   runOne(
     @Param('id') id: string,
     @Body() body: { dry_run?: boolean },
@@ -170,6 +187,13 @@ export class RecurringExpensesController {
 
   @Post('process-due')
   @ApiOperation({ summary: 'معالجة كل القوالب المستحقة الآن (cron/يدوي)' })
+  // PR-FIX-IDEMPOTENCY-DEFERRED-APPROVE-FAMILY (Sprint 4 / PR-11F-bis)
+  // Batch counterpart to `runOne`: iterates ALL due templates and
+  // materializes each. Duplicate POST without retry-safety could
+  // double-process the entire batch (potentially dozens of templates
+  // → dozens of duplicate JEs/CTs). Same retry-safety contract as
+  // `runOne`.
+  @UseInterceptors(IdempotencyInterceptor)
   processDue(
     @Body() body: { limit?: number },
     @CurrentUser() user: JwtUser,

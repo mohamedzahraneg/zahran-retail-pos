@@ -1,28 +1,29 @@
 /**
- * reservations.controller.cancel-idempotency.spec.ts
- * — PR-FIX-IDEMPOTENCY-DEFERRED-VOID-CANCEL-ROUTES (Sprint 4 / PR-11E-bis)
+ * inventory-counts.controller.finalize-idempotency.spec.ts
+ * — PR-FIX-IDEMPOTENCY-DEFERRED-APPROVE-FAMILY (Sprint 4 / PR-11F-bis)
  *
  * Pins the existing Redis-backed IdempotencyInterceptor on:
  *
- *   · POST /reservations/:id/cancel
+ *   · POST /inventory-counts/:id/finalize
  *
- * `cancel` is a multi-stage path: INSERTs a `reservation_refunds`
- * row (per refund policy) + UPDATEs the reservation status, which
- * triggers `stock.quantity_reserved` release. State-guarded by
- * `mustBeActive(id)`; HTTP interceptor adds outer race defence.
+ * `finalize` is multi-stage: applies stock variance adjustments
+ * (UPDATE stock + INSERT stock_movements per variance) + posts the
+ * adjustment JE for net P/L impact + transitions the count row to
+ * `finalized` status. State-guarded by status check; HTTP
+ * interceptor adds outer race defence on retry.
  *
- * Scope (audit-defined):
- *   · `cancel` (newly decorated) MUST have the interceptor.
- *   · ALL other ReservationsController POST/PATCH handlers (create,
- *     addPayment, convert, extend) MUST remain undecorated — out
- *     of scope for this PR.
+ * Scope:
+ *   · `finalize` (newly decorated) MUST have the interceptor.
+ *   · `start`, `submitEntries`, `cancel` MUST remain undecorated —
+ *     out of scope for PR-11F-bis. (`cancel` may be picked up in a
+ *     future void-cancel-family extension.)
  */
 
 import { Test } from '@nestjs/testing';
 import { firstValueFrom, of, throwError } from 'rxjs';
 import { CallHandler, ExecutionContext } from '@nestjs/common';
-import { ReservationsController } from './reservations.controller';
-import { ReservationsService } from './reservations.service';
+import { InventoryCountsController } from './inventory-counts.controller';
+import { InventoryCountsService } from './inventory-counts.service';
 import { IdempotencyInterceptor } from '../common/interceptors/idempotency.interceptor';
 import {
   AcquireResult,
@@ -32,16 +33,16 @@ import {
 } from '../common/cache/idempotency-cache.service';
 
 const VALID_KEY = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
-const RES_ID = 'rsrsrsrs-rsrs-rsrs-rsrs-rsrsrsrsrsrs';
-const ROUTE_PATH = '/reservations/:id/cancel';
+const COUNT_ID = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
+const ROUTE_PATH = '/inventory-counts/:id/finalize';
 
 const makeReq = (overrides: Partial<any> = {}) => ({
   method: 'POST',
-  url: `/reservations/${RES_ID}/cancel`,
-  originalUrl: `/reservations/${RES_ID}/cancel`,
+  url: `/inventory-counts/${COUNT_ID}/finalize`,
+  originalUrl: `/inventory-counts/${COUNT_ID}/finalize`,
   route: { path: ROUTE_PATH },
-  headers: {}, body: {}, params: { id: RES_ID },
-  user: { userId: 'user-AAA' },
+  headers: {}, body: {}, params: { id: COUNT_ID },
+  user: { userId: 'stockkeeper-AAA', id: 'stockkeeper-AAA' },
   ...overrides,
 });
 
@@ -65,17 +66,16 @@ const next = (v: unknown): CallHandler => ({ handle: jest.fn(() => of(v)) } as a
 const failNext = (e: Error): CallHandler => ({ handle: jest.fn(() => throwError(() => e)) } as any);
 
 const sampleBody = {
-  refund_policy: 'partial' as const,
-  refund_method: 'cash',
-  reason: 'العميل ألغى الحجز قبل 3 أيام من الموعد',
+  notes: 'تم اعتماد الجرد الشهري — فروقات تحت الحد المقبول',
 };
 const sampleSuccess = {
-  reservation_id: RES_ID,
-  status: 'cancelled',
-  refund: { gross: 200, fee: 30, net: 170 },
+  count_id: COUNT_ID,
+  status: 'finalized',
+  variances_applied: 12,
+  je_id: 'je-AAA',
 };
 
-describe('IdempotencyInterceptor on POST /reservations/:id/cancel — PR-FIX-IDEMPOTENCY-DEFERRED-VOID-CANCEL-ROUTES', () => {
+describe('IdempotencyInterceptor on POST /inventory-counts/:id/finalize — PR-FIX-IDEMPOTENCY-DEFERRED-APPROVE-FAMILY', () => {
   let interceptor: IdempotencyInterceptor;
   let cache: jest.Mocked<IdempotencyCacheService>;
 
@@ -115,7 +115,7 @@ describe('IdempotencyInterceptor on POST /reservations/:id/cancel — PR-FIX-IDE
     expect(IDEMPOTENCY_TTL_SECONDS).toBe(24 * 60 * 60);
   });
 
-  it('replay → cached body, handler NOT invoked (no duplicate refund row)', async () => {
+  it('replay → cached body, handler NOT invoked (no duplicate stock movements/JE)', async () => {
     const req = makeReq({ headers: { 'idempotency-key': VALID_KEY }, body: sampleBody });
     const res = makeRes();
     const handler = jest.fn();
@@ -131,10 +131,10 @@ describe('IdempotencyInterceptor on POST /reservations/:id/cancel — PR-FIX-IDE
     expect(res.setHeader).toHaveBeenCalledWith('X-Idempotent-Replay', 'true');
   });
 
-  it('payload mismatch (different refund_policy) → 409', async () => {
+  it('payload mismatch (different notes) → 409 IDEMPOTENCY_KEY_PAYLOAD_MISMATCH', async () => {
     const req = makeReq({
       headers: { 'idempotency-key': VALID_KEY },
-      body: { ...sampleBody, refund_policy: 'full' as const },
+      body: { ...sampleBody, notes: 'مختلف تماماً' },
     });
     const handler = jest.fn();
     cache.tryAcquireOrReplay.mockResolvedValueOnce({
@@ -157,49 +157,43 @@ describe('IdempotencyInterceptor on POST /reservations/:id/cancel — PR-FIX-IDE
     try {
       await interceptor.intercept(ctx(req, makeRes()), next(null));
       throw new Error('expected HttpException');
-    } catch (err: any) {
-      expect(err.getStatus()).toBe(425);
-    }
+    } catch (err: any) { expect(err.getStatus()).toBe(425); }
   });
 
-  it('Redis unavailable → 503', async () => {
+  it('Redis unavailable → 503 (fail-closed)', async () => {
     const req = makeReq({ headers: { 'idempotency-key': VALID_KEY }, body: sampleBody });
     cache.tryAcquireOrReplay.mockResolvedValueOnce({ kind: 'unavailable' } as AcquireResult);
     try {
       await interceptor.intercept(ctx(req, makeRes()), next(null));
       throw new Error('expected HttpException');
-    } catch (err: any) {
-      expect(err.getStatus()).toBe(503);
-    }
+    } catch (err: any) { expect(err.getStatus()).toBe(503); }
   });
 
-  it('invalid key → 400', async () => {
+  it('invalid key → 400 (no acquire attempted)', async () => {
     const req = makeReq({ headers: { 'idempotency-key': 'bad!' }, body: sampleBody });
     try {
       await interceptor.intercept(ctx(req, makeRes()), next(null));
       throw new Error('expected HttpException');
-    } catch (err: any) {
-      expect(err.getStatus()).toBe(400);
-    }
+    } catch (err: any) { expect(err.getStatus()).toBe(400); }
     expect(cache.tryAcquireOrReplay).not.toHaveBeenCalled();
   });
 
-  it('handler throws → lock released', async () => {
+  it('handler throws → lock released, NOT cached', async () => {
     const req = makeReq({ headers: { 'idempotency-key': VALID_KEY }, body: sampleBody });
     cache.tryAcquireOrReplay.mockResolvedValueOnce({ kind: 'acquired', cacheKey: 'k' } as AcquireResult);
     await expect(
       firstValueFrom(
         (await interceptor.intercept(
-          ctx(req, makeRes()), failNext(new Error('synthetic reservation cancel failure')),
+          ctx(req, makeRes()), failNext(new Error('synthetic inventory finalize failure')),
         )) as any,
       ),
-    ).rejects.toThrow(/synthetic reservation cancel failure/);
+    ).rejects.toThrow(/synthetic inventory finalize failure/);
     expect(cache.cacheResult).not.toHaveBeenCalled();
     expect(cache.releaseLock).toHaveBeenCalledTimes(1);
   });
 });
 
-describe('namespace isolation: reservation cancel vs other reservation routes', () => {
+describe('namespace isolation: inventory-counts finalize vs sibling routes', () => {
   it('keyed calls invoke tryAcquireOrReplay with route-distinct paths', async () => {
     const cache = {
       tryAcquireOrReplay: jest.fn().mockResolvedValue({ kind: 'acquired', cacheKey: 'k' } as AcquireResult),
@@ -214,10 +208,9 @@ describe('namespace isolation: reservation cancel vs other reservation routes', 
     const interceptor = new IdempotencyInterceptor(cache);
     const distinctPaths = [
       ROUTE_PATH,
-      '/reservations',
-      '/reservations/:id/payments',
-      '/reservations/:id/convert',
-      '/reservations/:id/extend',
+      '/inventory-counts/start',
+      '/inventory-counts/:id/entries',
+      '/inventory-counts/:id/cancel',
     ];
     for (const path of distinctPaths) {
       const req = { method: 'POST', url: path, originalUrl: path, route: { path }, headers: { 'idempotency-key': VALID_KEY }, body: { x: 1 } };
@@ -230,28 +223,27 @@ describe('namespace isolation: reservation cancel vs other reservation routes', 
   });
 });
 
-describe('ReservationsController route-level wiring — PR-FIX-IDEMPOTENCY-DEFERRED-VOID-CANCEL-ROUTES', () => {
-  it('cancel decorated (PR-11E-bis); addPayment decorated (PR-11F-bis); create + convert + extend NOT decorated', async () => {
+describe('InventoryCountsController route-level wiring — PR-FIX-IDEMPOTENCY-DEFERRED-APPROVE-FAMILY', () => {
+  it('finalize decorated; start + submitEntries + cancel NOT decorated', async () => {
     const moduleRef = await Test.createTestingModule({
-      controllers: [ReservationsController],
+      controllers: [InventoryCountsController],
       providers: [
         {
-          provide: ReservationsService,
+          provide: InventoryCountsService,
           useValue: {
+            start: jest.fn(),
+            submitEntries: jest.fn(),
+            finalize: jest.fn(),
             cancel: jest.fn(),
-            create: jest.fn(),
             list: jest.fn(),
             findOne: jest.fn(),
-            addPayment: jest.fn(),
-            convert: jest.fn(),
-            extend: jest.fn(),
           },
         },
         { provide: IdempotencyCacheService, useValue: {} },
         IdempotencyInterceptor,
       ],
     }).compile();
-    const controller = moduleRef.get(ReservationsController);
+    const controller = moduleRef.get(InventoryCountsController);
 
     const hasInterceptor = (handler: unknown): boolean => {
       const meta = Reflect.getMetadata('__interceptors__', handler as any);
@@ -261,26 +253,15 @@ describe('ReservationsController route-level wiring — PR-FIX-IDEMPOTENCY-DEFER
       );
     };
 
-    // ── PR-11E-bis target (still decorated; regression guard).
-    expect(hasInterceptor((controller as any).cancel)).toBe(true);
+    // ── This PR's target.
+    expect(hasInterceptor((controller as any).finalize)).toBe(true);
 
-    // ── PR-11F-bis added decoration on addPayment (multi-stage
-    //    installment with JE + CT — same risk profile as
-    //    suppliers/:id/pay and purchases/:id/pay). Track here so the
-    //    sibling-list test below stays in sync; the dedicated spec
-    //    `reservations.controller.payments-idempotency.spec.ts`
-    //    pins the full interceptor contract.
-    expect(hasInterceptor((controller as any).addPayment)).toBe(true);
-
-    // ── Remaining ReservationsController POST/PATCH handlers MUST
-    //    stay undecorated. `create`, `convert`, `extend` were
-    //    explicitly out of scope for both PR-11E-bis and PR-11F-bis
-    //    (no JE/CT writes on the synchronous path, or behind a state
-    //    transition that is itself idempotent at the DB layer).
-    const undecoratedSiblings: Array<keyof ReservationsController> = [
-      'create',
-      'convert',
-      'extend',
+    // ── Other POST handlers MUST remain undecorated. `start` is
+    //    a state-init transition (no JE/stock writes); `submitEntries`
+    //    only buffers count rows; `cancel` is a status flip — out of
+    //    scope for PR-11F-bis.
+    const undecoratedSiblings: Array<keyof InventoryCountsController> = [
+      'start', 'submitEntries', 'cancel',
     ];
     for (const name of undecoratedSiblings) {
       const target = (controller as any)[name];
