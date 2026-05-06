@@ -21,6 +21,13 @@ import {
   GL_EMPLOYEE_RECEIVABLE,
   GL_EMPLOYEE_PAYABLE,
   GL_SUPPLIER_PAYABLE,
+  GL_SALES_REVENUE,
+  GL_TAX_PAYABLE,
+  GL_VAT_SUSPENSE,
+  GL_SHIFT_SURPLUS,
+  GL_COGS,
+  GL_OPERATING_EXPENSES_PREFIX,
+  GL_SHIFT_DEFICIT,
   LIQUID_GL_CODES,
   LIQUID_CODES_SQL_LIST,
   CASHBOX_KIND_TO_GL_CODE,
@@ -94,6 +101,66 @@ describe('gl-codes.constants — PR-AUDIT-LIQUID-CODES-CONST', () => {
     });
     it('GL_SUPPLIER_PAYABLE is "211" (الموردون والدائنون)', () => {
       expect(GL_SUPPLIER_PAYABLE).toBe('211');
+    });
+  });
+
+  /* ──────────────────────────────────────────────────────────────────
+   * PR-AUDIT-GL-CODE-CONSTANTS (Sprint 3 / PR-9)
+   *
+   * Sensitive accounting control accounts for revenue / tax / suspense /
+   * COGS / shift variance. Names match the actual chart_of_accounts row
+   * text — note the user-facing PR spec proposed `GL_VAT_PAYABLE = '421'`
+   * and `GL_CASH_VARIANCE = '531'` but the production COA shows:
+   *   · '421' is "Shift Surplus" (revenue), not VAT
+   *   · '531' is "Shift Deficit" (expense), not generic cash variance
+   *   · '214' is the actual VAT/Tax payable account
+   * The constants below match the actual COA semantics so the call
+   * sites are never misleading.
+   * ──────────────────────────────────────────────────────────────────*/
+  describe('sensitive control account constants — PR-AUDIT-GL-CODE-CONSTANTS', () => {
+    it('GL_SALES_REVENUE is "411" (مبيعات السلع / Merchandise Sales)', () => {
+      expect(GL_SALES_REVENUE).toBe('411');
+    });
+    it('GL_TAX_PAYABLE is "214" (ضرائب مستحقة / Tax Payable — the actual VAT account)', () => {
+      expect(GL_TAX_PAYABLE).toBe('214');
+    });
+    it('GL_VAT_SUSPENSE is "215" (حساب التسوية المؤقت / Suspense Account)', () => {
+      expect(GL_VAT_SUSPENSE).toBe('215');
+    });
+    it('GL_SHIFT_SURPLUS is "421" (فروق ورديات (زيادة) / Shift Surplus — NOT VAT)', () => {
+      expect(GL_SHIFT_SURPLUS).toBe('421');
+      // Defensive: pin that this is NOT confused with VAT despite the
+      // user spec calling it 'GL_VAT_PAYABLE'. The production COA is
+      // unambiguous: 421 is shift-surplus revenue, 214 is VAT payable.
+      expect(GL_SHIFT_SURPLUS).not.toBe(GL_TAX_PAYABLE);
+    });
+    it('GL_COGS is "51" (تكلفة البضاعة المباعة / COGS — leaf account, used directly)', () => {
+      expect(GL_COGS).toBe('51');
+    });
+    it('GL_OPERATING_EXPENSES_PREFIX is "52" (المصروفات التشغيلية / non-leaf parent of 521-529)', () => {
+      expect(GL_OPERATING_EXPENSES_PREFIX).toBe('52');
+    });
+    it('GL_SHIFT_DEFICIT is "531" (فروق ورديات (عجز) / Shift Deficit — NOT generic cash variance)', () => {
+      expect(GL_SHIFT_DEFICIT).toBe('531');
+      // Pin the surplus/deficit pair semantics.
+      expect(GL_SHIFT_DEFICIT).not.toBe(GL_SHIFT_SURPLUS);
+    });
+    it('all 7 new constants are unique strings (no accidental duplicates)', () => {
+      const codes = [
+        GL_SALES_REVENUE,
+        GL_TAX_PAYABLE,
+        GL_VAT_SUSPENSE,
+        GL_SHIFT_SURPLUS,
+        GL_COGS,
+        GL_OPERATING_EXPENSES_PREFIX,
+        GL_SHIFT_DEFICIT,
+      ];
+      expect(new Set(codes).size).toBe(codes.length);
+      // Every code is a string of digits.
+      for (const c of codes) {
+        expect(typeof c).toBe('string');
+        expect(c).toMatch(/^\d+$/);
+      }
     });
   });
 

@@ -13,6 +13,10 @@ import {
   CASHBOX_KIND_TO_GL_CODE,
   CashboxKindForGl,
   GL_CASH,
+  GL_COGS,
+  GL_SALES_REVENUE,
+  GL_SUPPLIER_PAYABLE,
+  GL_TAX_PAYABLE,
   LIQUID_GL_CODES,
 } from './gl-codes.constants';
 
@@ -284,16 +288,18 @@ export class AccountingPostingService {
       });
     }
     // Revenue + tax split
+    // PR-AUDIT-GL-CODE-CONSTANTS — '411' / '214' / '51' centralized; output
+    // GL row strings are byte-identical (same code values).
     if (revenue > 0) {
       lines.push({
-        account_code: '411',
+        account_code: GL_SALES_REVENUE,
         credit: revenue,
         description: `إيراد ${inv.invoice_no}`,
       });
     }
     if (tax > 0) {
       lines.push({
-        account_code: '214',
+        account_code: GL_TAX_PAYABLE,
         credit: tax,
         description: `ضريبة ${inv.invoice_no}`,
       });
@@ -301,7 +307,7 @@ export class AccountingPostingService {
     // Cost side — only when cost data present
     if (cogs > 0) {
       lines.push({
-        account_code: '51',
+        account_code: GL_COGS,
         debit: cogs,
         description: `تكلفة ${inv.invoice_no}`,
       });
@@ -503,7 +509,8 @@ export class AccountingPostingService {
       const feeAcc =
         fee > 0 ? await this.accountIdByCode(q, '422') : null; // misc revenue
       const cogsAcc =
-        restockCost > 0 ? await this.accountIdByCode(q, '51') : null;
+        // PR-AUDIT-GL-CODE-CONSTANTS — COGS reversal on restock
+        restockCost > 0 ? await this.accountIdByCode(q, GL_COGS) : null;
       const invAcc =
         restockCost > 0 ? await this.accountIdByCode(q, '1131') : null;
 
@@ -595,8 +602,11 @@ export class AccountingPostingService {
 
       const entryDate = this.dateOnly(p.received_at || p.invoice_date);
       const invAcc = await this.accountIdByCode(q, '1131');
-      const vatAcc = tax > 0 ? await this.accountIdByCode(q, '214') : null;
-      const suppAcc = await this.accountIdByCode(q, '211');
+      // PR-AUDIT-GL-CODE-CONSTANTS — '214' tax payable + '211' supplier
+      // payable centralized. '1131' inventory deferred (not in this PR's
+      // target list).
+      const vatAcc = tax > 0 ? await this.accountIdByCode(q, GL_TAX_PAYABLE) : null;
+      const suppAcc = await this.accountIdByCode(q, GL_SUPPLIER_PAYABLE);
       // We don't know the cashbox here — PO model doesn't track it.
       // If fully paid at receive time, caller can post the supplier payment separately.
 
@@ -1113,7 +1123,8 @@ export class AccountingPostingService {
       const amt = Number(p.amount || 0);
       if (amt < 0.01) return null;
 
-      const suppAcc = await this.accountIdByCode(q, '211');
+      // PR-AUDIT-GL-CODE-CONSTANTS — supplier payable account
+      const suppAcc = await this.accountIdByCode(q, GL_SUPPLIER_PAYABLE);
       if (!suppAcc) return null;
 
       // PR-FIN-PAYACCT-4C — CR account resolution mirrors postInvoicePayment.
