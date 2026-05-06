@@ -70,6 +70,10 @@
  */
 
 import { Client } from 'pg';
+// PR-AUDIT-LIQUID-CODES-CONST (Sprint 3 / PR-7) — drop the one-off
+// '1111' literal in the per-cashbox GL drift CTE and use the
+// canonical constant. SQL output is byte-identical.
+import { GL_CASH } from '../gl-codes.constants';
 
 // ─── Constants — pinned to the historical row identifiers ─────────
 export const AL_RAISIA_CASHBOX_ID = '524646d5-7bd6-4d8d-a484-b1f562b039a4';
@@ -162,7 +166,7 @@ export async function readSnapshot(q: QueryFn): Promise<Snapshot> {
          FROM journal_lines jl
          JOIN journal_entries je ON je.id=jl.entry_id
          JOIN chart_of_accounts coa ON coa.id=jl.account_id
-        WHERE coa.code='1111' AND je.is_posted AND NOT je.is_void
+        WHERE coa.code='${GL_CASH}' AND je.is_posted AND NOT je.is_void
         GROUP BY jl.cashbox_id
      )
      SELECT
