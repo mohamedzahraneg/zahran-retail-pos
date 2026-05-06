@@ -94,3 +94,41 @@ export const CASHBOX_KIND_TO_GL_CODE = {
 } as const;
 
 export type CashboxKindForGl = keyof typeof CASHBOX_KIND_TO_GL_CODE;
+
+/**
+ * PR-AUDIT-CASHBOX-KIND-MAP-CENTRALIZE (Sprint 3 / PR-8)
+ *
+ * Strict resolver: maps a cashbox `kind` to its canonical liquid GL
+ * code, or returns `null` when the kind is missing or not one of the
+ * four supported values.
+ *
+ *   cashboxKindToGlCode('cash')     → '1111'
+ *   cashboxKindToGlCode('bank')     → '1113'
+ *   cashboxKindToGlCode('ewallet')  → '1114'
+ *   cashboxKindToGlCode('check')    → '1115'
+ *   cashboxKindToGlCode(null)       → null
+ *   cashboxKindToGlCode(undefined)  → null
+ *   cashboxKindToGlCode('unknown')  → null
+ *
+ * When to use this helper vs the raw `CASHBOX_KIND_TO_GL_CODE` map:
+ *
+ *   · Use `cashboxKindToGlCode(kind)` when the caller can SAFELY
+ *     handle a null result — typically read paths / reporting code
+ *     that wants to skip rather than guess for unrecognised rows.
+ *
+ *   · Use `CASHBOX_KIND_TO_GL_CODE[...] || GL_CASH` (the existing
+ *     pattern in `financial-engine.service.ts` /
+ *     `posting.service.ts`) when the caller MUST resolve to a real
+ *     account id and falling back to the cash drawer is the
+ *     canonical safety net (the GL `accountIdByCode` lookup
+ *     downstream cannot accept a null code). This PR intentionally
+ *     leaves those 2 sites unchanged — the `|| GL_CASH` fallback
+ *     there is load-bearing engine behavior, not a duplicated map.
+ */
+export function cashboxKindToGlCode(
+  kind: string | null | undefined,
+): LiquidGlCode | null {
+  if (kind == null) return null;
+  if (!(kind in CASHBOX_KIND_TO_GL_CODE)) return null;
+  return CASHBOX_KIND_TO_GL_CODE[kind as CashboxKindForGl];
+}
