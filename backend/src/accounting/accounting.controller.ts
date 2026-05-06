@@ -147,6 +147,14 @@ export class AccountingController {
 
   @Post('approvals/:id/approve')
   @Permissions('accounts.approval.decide')
+  // PR-FIX-IDEMPOTENCY-APPROVE-FAMILY (Sprint 4 / PR-11F) — multi-
+  // level approval terminal. Each approve flips one
+  // expense_approvals row from pending → approved; when the LAST
+  // pending row flips, `decide()` walks into engine.recordExpense
+  // (JE + CT). PR-10A added `assertExpenseInvariants` guard before
+  // the engine call. The HTTP interceptor adds outer race defence
+  // against double-clicks on the approve button.
+  @UseInterceptors(IdempotencyInterceptor)
   approve(
     @Param('id') id: string,
     @Body() body: { note?: string },
@@ -267,6 +275,13 @@ export class AccountingController {
   @Post('expenses/:id/approve')
   @Roles('admin', 'manager')
   @ApiOperation({ summary: 'Approve an expense (posts to cashbox if cash)' })
+  // PR-FIX-IDEMPOTENCY-APPROVE-FAMILY (Sprint 4 / PR-11F) —
+  // `approveExpense` flips `is_approved=TRUE` and routes through
+  // `postViaEngine` (JE + CT for cash/bank). Engine guard catches
+  // duplicate JE on `(reference_type='expense', reference_id)`;
+  // PR-10A added `assertExpenseInvariants` at the entry. The HTTP
+  // interceptor adds outer race defence on the approve button.
+  @UseInterceptors(IdempotencyInterceptor)
   approveExpense(
     @Param('id', ParseUUIDPipe) id: string,
     @Req() req: any,
@@ -338,6 +353,13 @@ export class AccountingController {
   @Post('expenses/edit-requests/:id/approve')
   @Permissions('expenses.daily.edit.approve')
   @ApiOperation({ summary: 'الموافقة على طلب تعديل + ترحيل التصحيح' })
+  // PR-FIX-IDEMPOTENCY-APPROVE-FAMILY (Sprint 4 / PR-11F) —
+  // multi-stage write: voids old JE + reverses old CT + INSERTs
+  // corrected expense state + posts new JE + new CT. PR-10A added
+  // `assertExpenseInvariants` guard before the engine repost.
+  // Engine guard catches dup JE on `(reference_type, reference_id)`,
+  // but the multi-stage nature makes a duplicate POST race-prone.
+  @UseInterceptors(IdempotencyInterceptor)
   approveEditRequest(
     @Param('id', ParseUUIDPipe) id: string,
     @Req() req: any,

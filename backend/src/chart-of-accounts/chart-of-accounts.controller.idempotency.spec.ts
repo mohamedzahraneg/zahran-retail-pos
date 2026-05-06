@@ -627,9 +627,17 @@ describe('ChartOfAccountsController route-level wiring — PR-AUDIT-IDEMPOTENCY-
     //    guard.
     expect(hasInterceptor((controller as any).voidJournal)).toBe(true);
 
+    // ── closeYear + runDepreciation — were undecorated when this
+    //    spec shipped; PR-FIX-IDEMPOTENCY-APPROVE-FAMILY (PR-11F)
+    //    decorated both (catastrophic-on-duplicate annual/monthly
+    //    one-shots). Their dedicated spec
+    //    (chart-of-accounts.controller.year-close-depreciation-idempotency.spec.ts)
+    //    owns the positive assertions; regression-guarded here.
+    expect(hasInterceptor((controller as any).closeYear)).toBe(true);
+    expect(hasInterceptor((controller as any).runDepreciation)).toBe(true);
+
     // ── All other handlers in the controller MUST be undecorated.
-    //    Includes backfill (engine-protected), closeYear /
-    //    runDepreciation (status-guarded), and every read-only /
+    //    Includes backfill (engine-protected) + every read-only /
     //    metadata route.
     const undecoratedSiblings = [
       // Chart of Accounts CRUD
@@ -650,9 +658,6 @@ describe('ChartOfAccountsController route-level wiring — PR-AUDIT-IDEMPOTENCY-
       'aging',
       'customerLedger',
       'supplierLedger',
-      // One-shot bootstrap actions
-      'closeYear',
-      'runDepreciation',
       // Fixed assets CRUD
       'listFixedAssets',
       'createFixedAsset',

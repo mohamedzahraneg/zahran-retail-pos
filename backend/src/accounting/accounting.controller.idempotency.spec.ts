@@ -547,6 +547,16 @@ describe('AccountingController route-level wiring', () => {
     expect(hasInterceptor(controller.createExpense)).toBe(true);
     expect(hasInterceptor(controller.createDailyExpense)).toBe(true);
 
+    // ── Approve-family routes were undecorated when this spec
+    //    shipped; PR-FIX-IDEMPOTENCY-APPROVE-FAMILY (PR-11F)
+    //    decorated all 3. Their dedicated spec
+    //    (accounting.controller.approve-family-idempotency.spec.ts)
+    //    owns the positive assertions; updated here to regression
+    //    guards.
+    expect(hasInterceptor(controller.approve)).toBe(true);
+    expect(hasInterceptor(controller.approveExpense)).toBe(true);
+    expect(hasInterceptor(controller.approveEditRequest)).toBe(true);
+
     // ── Sibling handlers MUST NOT carry the interceptor in this PR.
     const siblings: Array<keyof AccountingController> = [
       // Cost reconciliation
@@ -555,8 +565,7 @@ describe('AccountingController route-level wiring', () => {
       'createApprovalRule',
       'updateApprovalRule',
       'removeApprovalRule',
-      // Approvals workflow
-      'approve',
+      // Approvals workflow — reject is P2 (state-only)
       'reject',
       // Categories
       'createCategory',
@@ -564,11 +573,9 @@ describe('AccountingController route-level wiring', () => {
       'deleteCategory',
       // Expense lifecycle (mutations OTHER than create)
       'updateExpense',
-      'approveExpense',
       'deleteExpense',
-      // Expense edit-request workflow
+      // Expense edit-request workflow — reject + cancel are P2
       'requestExpenseEdit',
-      'approveEditRequest',
       'rejectEditRequest',
       'cancelEditRequest',
     ];

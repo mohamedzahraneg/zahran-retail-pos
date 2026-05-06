@@ -297,13 +297,19 @@ describe('PurchasesController route-level wiring — PR-FIX-IDEMPOTENCY-STOCK-IN
     expect(hasInterceptor((controller as any).cancel)).toBe(true);
     expect(hasInterceptor((controller as any).cancelReturn)).toBe(true);
 
+    // ── pay — undecorated when this spec shipped;
+    //    PR-FIX-IDEMPOTENCY-APPROVE-FAMILY (PR-11F) decorated it.
+    //    Dedicated spec
+    //    (purchases.controller.pay-idempotency.spec.ts) owns the
+    //    positive assertion; regression-guarded here.
+    expect(hasInterceptor((controller as any).pay)).toBe(true);
+
     // All other PurchasesController POST handlers MUST be undecorated
-    // in this PR. The PR-11 audit defers them to phased follow-ups.
+    // in this PR.
     const undecoratedSiblings: Array<keyof PurchasesController> = [
       'list',
       'getOne',
       'create',
-      'pay',
       'edit',
       'createReturn',
       'listReturns',

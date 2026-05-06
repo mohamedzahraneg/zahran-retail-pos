@@ -172,6 +172,13 @@ export class AttendanceController {
 
   @Post('admin/approve-wage/:attendance_id')
   @Permissions('employee.attendance.manage')
+  // PR-FIX-IDEMPOTENCY-APPROVE-FAMILY (Sprint 4 / PR-11F) — calls
+  // `fn_post_employee_wage_accrual` which posts a JE for the wage
+  // accrual. plpgsql function is idempotent on (user_id, work_date)
+  // — duplicate POST returns the existing accrual id rather than
+  // double-posting — but the HTTP interceptor adds outer race
+  // defence + cleaner UX on retry.
+  @UseInterceptors(IdempotencyInterceptor)
   adminApproveWage(
     @Param('attendance_id', ParseUUIDPipe) attendanceId: string,
     @CurrentUser() user: JwtUser,
@@ -208,6 +215,13 @@ export class AttendanceController {
    */
   @Post('admin/approve-wage-override')
   @Permissions('employee.attendance.manage')
+  // PR-FIX-IDEMPOTENCY-APPROVE-FAMILY (Sprint 4 / PR-11F) — multi-
+  // stage write inside a single transaction: voids any existing
+  // live accrual for (user_id, work_date) and posts a new accrual
+  // with the chosen override_type/approved_amount/approval_reason.
+  // The void+repost pattern is race-prone if a duplicate POST hits
+  // mid-transaction.
+  @UseInterceptors(IdempotencyInterceptor)
   adminApproveWageOverride(
     @CurrentUser() user: JwtUser,
     @Body()
@@ -230,6 +244,14 @@ export class AttendanceController {
 
   @Post('admin/pay-wage')
   @Permissions('employee.ledger.view')
+  // PR-FIX-IDEMPOTENCY-APPROVE-FAMILY (Sprint 4 / PR-11F) — calls
+  // `EmployeesService.recordSettlement` (settlement row + JE + CT)
+  // plus optional `createDailyExpense` for advance excess and
+  // `addBonus` for bonus excess. Same BIGSERIAL bypass risk as
+  // PR-11D's `POST /employees/:id/settlements` — duplicate POSTs
+  // produce 2 settlement rows with different bigint ids → engine
+  // sees 2 distinct reference_ids → 2 JEs + 2 CTs.
+  @UseInterceptors(IdempotencyInterceptor)
   payWage(
     @CurrentUser() user: JwtUser,
     @Body()

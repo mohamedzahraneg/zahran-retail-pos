@@ -374,12 +374,18 @@ describe('PosController route-level wiring — PR-FIX-IDEMPOTENCY-EXCHANGES-INVO
     //    positive assertion. Updated here to a regression guard.
     expect(hasInterceptor((controller as any).voidInvoice)).toBe(true);
 
+    // ── approveEditRequest — undecorated when this spec shipped;
+    //    PR-FIX-IDEMPOTENCY-APPROVE-FAMILY (PR-11F) decorated it.
+    //    Dedicated spec
+    //    (pos.controller.approve-edit-request-idempotency.spec.ts)
+    //    owns the positive assertion; regression-guarded here.
+    expect(hasInterceptor((controller as any).approveEditRequest)).toBe(true);
+
     // ── All other PosController POST handlers MUST NOT carry it
-    //    in this PR. The PR-11 audit defers them to phased follow-ups
-    //    (PR-11F for approve family).
+    //    in this PR. submitEditRequest is the request-only entry
+    //    (P1 — pending row only); rejectEditRequest is P2.
     const undecoratedSiblings: Array<keyof PosController> = [
       'submitEditRequest',
-      'approveEditRequest',
       'rejectEditRequest',
     ];
     for (const name of undecoratedSiblings) {

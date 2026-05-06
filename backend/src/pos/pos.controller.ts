@@ -152,6 +152,12 @@ export class PosController {
 
   @Post('edit-requests/:id/approve')
   @Permissions('invoices.edit_approve')
+  // PR-FIX-IDEMPOTENCY-APPROVE-FAMILY (Sprint 4 / PR-11F) — multi-
+  // stage write: voids the old invoice JE + reverses cashbox + posts
+  // a corrected invoice JE + replays stock_movements per the
+  // edit-request payload. Engine guard catches the JE leg's dup,
+  // but the multi-stage nature makes a duplicate POST race-prone.
+  @UseInterceptors(IdempotencyInterceptor)
   approveEditRequest(
     @Param('id') id: string,
     @Body() dto: { note?: string },

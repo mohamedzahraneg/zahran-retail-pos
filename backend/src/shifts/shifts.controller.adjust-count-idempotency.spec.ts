@@ -499,12 +499,19 @@ describe('ShiftsController route-level wiring — PR-FIX-IDEMPOTENCY-DIRECT-CT-W
     // ── This PR's target.
     expect(hasInterceptor((controller as any).adjustCount)).toBe(true);
 
+    // ── close + approveClose — were undecorated when this spec
+    //    shipped; PR-FIX-IDEMPOTENCY-APPROVE-FAMILY (PR-11F)
+    //    decorated both. Their dedicated spec
+    //    (shifts.controller.close-family-idempotency.spec.ts)
+    //    owns the positive assertions; regression-guarded here.
+    expect(hasInterceptor((controller as any).close)).toBe(true);
+    expect(hasInterceptor((controller as any).approveClose)).toBe(true);
+
     // ── All other shifts handlers MUST be undecorated in this PR.
+    //    requestClose + rejectClose are P2 (state-only).
     const undecoratedSiblings: Array<keyof ShiftsController> = [
       'open',
-      'close',
       'requestClose',
-      'approveClose',
       'rejectClose',
       'pendingCloses',
       'list',
