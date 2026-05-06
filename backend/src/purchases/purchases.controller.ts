@@ -8,6 +8,7 @@ import {
   Post,
   Query,
   Req,
+  UseInterceptors,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { PurchasesService } from './purchases.service';
@@ -17,6 +18,10 @@ import {
   ListPurchasesDto,
 } from './dto/purchase.dto';
 import { Permissions, Roles } from '../common/decorators/roles.decorator';
+// PR-FIX-IDEMPOTENCY-STOCK-INVENTORY-PATHS (Sprint 4 / PR-11B) —
+// opt-in Idempotency-Key support on POST /purchases/:id/receive.
+// Without the header, behavior is exactly unchanged from today.
+import { IdempotencyInterceptor } from '../common/interceptors/idempotency.interceptor';
 
 @ApiBearerAuth()
 @ApiTags('purchases')
@@ -65,6 +70,14 @@ export class PurchasesController {
 
   @Post(':id/receive')
   @Roles('admin', 'manager', 'stock_keeper')
+  // PR-FIX-IDEMPOTENCY-STOCK-INVENTORY-PATHS (Sprint 4 / PR-11B) —
+  // `receive` writes stock_movements (one per item) + a JE for the
+  // inventory side. Engine-level (reference_type='purchase',
+  // reference_id) guard exists, but a duplicate POST during a
+  // network retry could race the engine guard and create double
+  // stock movements. Without an Idempotency-Key header, behavior
+  // is exactly unchanged.
+  @UseInterceptors(IdempotencyInterceptor)
   receive(@Param('id', ParseUUIDPipe) id: string, @Req() req: any) {
     return this.purchases.receive(id, req.user?.id);
   }

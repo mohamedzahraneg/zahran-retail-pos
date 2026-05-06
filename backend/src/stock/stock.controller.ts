@@ -1,4 +1,12 @@
-import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  Post,
+  Query,
+  UseInterceptors,
+} from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import {
   IsNumber,
@@ -13,6 +21,10 @@ import {
   CurrentUser,
   JwtUser,
 } from '../common/decorators/current-user.decorator';
+// PR-FIX-IDEMPOTENCY-STOCK-INVENTORY-PATHS (Sprint 4 / PR-11B) —
+// opt-in Idempotency-Key support on POST /stock/adjust. Without the
+// header, behavior is exactly unchanged from today.
+import { IdempotencyInterceptor } from '../common/interceptors/idempotency.interceptor';
 
 class AdjustStockDto {
   @IsUUID() variant_id: string;
@@ -49,6 +61,13 @@ export class StockController {
 
   @Post('adjust')
   @Roles('admin', 'manager', 'stock_keeper')
+  // PR-FIX-IDEMPOTENCY-STOCK-INVENTORY-PATHS (Sprint 4 / PR-11B) —
+  // `adjust` writes a stock_movements row + a JE for the inventory
+  // adjustment. Engine-level (reference_type, reference_id) guard
+  // exists, but a duplicate POST with a fresh `adjustment_id` per
+  // call would race the engine guard. Without an Idempotency-Key
+  // header, behavior is exactly unchanged.
+  @UseInterceptors(IdempotencyInterceptor)
   adjust(@Body() dto: AdjustStockDto, @CurrentUser() user: JwtUser) {
     return this.stock.adjust({ ...dto, user_id: user?.userId });
   }
