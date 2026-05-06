@@ -7,6 +7,7 @@ import {
 import { DataSource } from 'typeorm';
 import { AccountingPostingService } from '../chart-of-accounts/posting.service';
 import { FinancialEngineService } from '../chart-of-accounts/financial-engine.service';
+import { assertExpenseInvariants } from '../accounting/expense-invariants';
 
 export type Frequency =
   | 'daily'
@@ -243,6 +244,28 @@ export class RecurringExpensesService {
     if (opts.dryRun) {
       return { generated: false, reason: 'dry-run', would_generate_for: tpl.next_run_date };
     }
+
+    // PR-FIX-EXPENSES-APP-LEVEL-CASHBOX-GUARD — recurring template
+    // path. Validate the TEMPLATE's `payment_method` + `cashbox_id`
+    // BEFORE inserting a child expense or hitting the auto-post
+    // engine call below. A template configured with cash + no
+    // cashbox would otherwise:
+    //   · INSERT an `expenses` row that bypasses the createExpense
+    //     guard (this code path doesn't go through createExpense at
+    //     all — it INSERTs directly), AND
+    //   · either land in the approval inbox where the new
+    //     approval.service guard would catch it, OR
+    //   · hit the engine via the auto_post branch and silently post
+    //     the cash leg to AP (the historical bug).
+    // Failing the run BEFORE the transaction means no orphaned
+    // expense row is ever created and the template's
+    // `next_run_date` is not advanced — the operator can fix the
+    // template and try again.
+    assertExpenseInvariants(
+      tpl.payment_method,
+      tpl.cashbox_id,
+      'recurring',
+    );
 
     // Single transaction: create expense + run log + advance next_run_date
     const result = await this.ds.transaction(async (em) => {

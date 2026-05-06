@@ -19,6 +19,7 @@ import { AccountingPostingService } from '../chart-of-accounts/posting.service';
 import { FinancialEngineService } from '../chart-of-accounts/financial-engine.service';
 import { ExpenseApprovalService } from './approval.service';
 import { CostAccountResolver } from './cost-account-resolver.service';
+import { assertExpenseInvariants } from './expense-invariants';
 
 @Injectable()
 export class AccountingService {
@@ -255,12 +256,12 @@ export class AccountingService {
       // the core financial contract of the system. Reject at create
       // time so the user gets a clear, fixable error instead of a
       // phantom expense downstream.
-      const paymentMethod = dto.payment_method ?? 'cash';
-      if (paymentMethod === 'cash' && !cashboxId) {
-        throw new BadRequestException(
-          'مصروف نقدي يتطلب خزنة مفتوحة — افتح وردية أو حدد خزنة',
-        );
-      }
+      // PR-FIX-EXPENSES-APP-LEVEL-CASHBOX-GUARD: this site is now
+      // ONE of five enforced sites; the same `assertExpenseInvariants`
+      // helper guards updateExpense / approveExpense / approveEditRequest
+      // / approval.service.decide / recurring-expenses runOne so the
+      // invariant cannot be bypassed via any expense write path.
+      assertExpenseInvariants(dto.payment_method, cashboxId, 'create');
       // Employee link:
       //   1. Explicit `employee_user_id` on the DTO (Daily Expenses
       //      screen, migration 060) wins — always.
@@ -646,6 +647,39 @@ export class AccountingService {
       params.push(v);
     }
     if (!fields.length) throw new BadRequestException('No fields to update');
+
+    // PR-FIX-EXPENSES-APP-LEVEL-CASHBOX-GUARD — when the DTO touches
+    // either `payment_method` or `cashbox_id`, validate the MERGED
+    // combo against the stored row before issuing the UPDATE. This
+    // prevents the gap where a non-cash expense gets converted to cash
+    // (or has its cashbox cleared) without re-checking the invariant.
+    // We fetch only when one of the two relevant columns is in the DTO
+    // — otherwise the post-update row keeps the same combo and the
+    // invariant is unchanged.
+    const dtoTouchesInvariant =
+      'payment_method' in dto || 'cashbox_id' in dto;
+    if (dtoTouchesInvariant) {
+      const [stored] = await this.ds.query(
+        `SELECT payment_method, cashbox_id FROM expenses WHERE id = $1`,
+        [id],
+      );
+      if (stored) {
+        const mergedPaymentMethod =
+          'payment_method' in dto
+            ? (dto as any).payment_method
+            : stored.payment_method;
+        const mergedCashboxId =
+          'cashbox_id' in dto
+            ? (dto as any).cashbox_id
+            : stored.cashbox_id;
+        assertExpenseInvariants(
+          mergedPaymentMethod,
+          mergedCashboxId,
+          'update',
+        );
+      }
+    }
+
     fields.push(`updated_at = NOW()`);
     params.push(id);
     const [row] = await this.ds.query(
@@ -670,6 +704,14 @@ export class AccountingService {
       if (!exp) throw new NotFoundException('المصروف غير موجود');
       if (exp.is_approved)
         throw new BadRequestException('تم اعتماد هذا المصروف من قبل');
+
+      // PR-FIX-EXPENSES-APP-LEVEL-CASHBOX-GUARD — single-step approval
+      // path. Validate the stored row BEFORE flipping is_approved /
+      // calling the engine. Catches legacy rows that were inserted
+      // pre-guard with payment_method='cash' AND cashbox_id=NULL — the
+      // engine would otherwise silently route the credit side to AP
+      // and produce a phantom approved expense.
+      assertExpenseInvariants(exp.payment_method, exp.cashbox_id, 'approve');
 
       const [row] = await em.query(
         `UPDATE expenses SET is_approved = TRUE, approved_by = $1, updated_at = NOW()
@@ -1683,6 +1725,19 @@ export class AccountingService {
       for (const k of this.EDITABLE_FIELDS) {
         if (k in newV) merged[k] = (newV as any)[k];
       }
+
+      // PR-FIX-EXPENSES-APP-LEVEL-CASHBOX-GUARD — edit-approval path.
+      // Validate the MERGED combo (post-edit values overlaid on the
+      // stored row) BEFORE the UPDATE. An edit that swaps `cashbox_id`
+      // to NULL on a cash expense, or flips `payment_method` to 'cash'
+      // while `cashbox_id` is null, would otherwise pass through and
+      // hit the engine's silent AP fallback on the repost below.
+      assertExpenseInvariants(
+        merged.payment_method,
+        merged.cashbox_id,
+        'edit_approve',
+      );
+
       await em.query(
         `UPDATE expenses
             SET category_id      = $1,
