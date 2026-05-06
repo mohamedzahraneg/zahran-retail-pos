@@ -11,13 +11,7 @@
  * forces them to import from gl-codes.constants.ts instead of
  * sprinkling a new literal.
  *
- * Allowlist (sites the audit deliberately deferred):
- *   · payments/payments.service.ts  — SQL CASE in unattached_balances CTE
- *                                    (payment_method→GL, not cb.kind→GL;
- *                                     PR-271 audit deferred this as a
- *                                     larger refactor)
- *   · chart-of-accounts/cash-recon-execute/cash-recon-execute.ts
- *                                  — one-off historical maintenance
+ * Allowlist (intentional keeps after centralization):
  *   · chart-of-accounts/gl-codes.constants.ts
  *                                  — canonical source itself
  *   · *.spec.ts / *.test.ts         — test fixtures / mock data are
@@ -37,6 +31,16 @@
  * guarded by this spec):
  *   · cash-desk/cash-desk.service.ts
  *   · settings/settings.service.ts
+ *
+ * Removed from allowlist by PR-AUDIT-LIQUID-CODES-CONST (Sprint 3 / PR-7)
+ * (now interpolate GL_CASH/GL_BANK/GL_WALLET/GL_CHECKS from the
+ * canonical constants and are actively guarded by this spec):
+ *   · payments/payments.service.ts
+ *     (unattached_balances CTE: 4× payment_method→GL CASE branches +
+ *      ELSE fallback all switched to ${GL_*} interpolations)
+ *   · chart-of-accounts/cash-recon-execute/cash-recon-execute.ts
+ *     (one-off historical-maintenance CTE switched the WHERE
+ *      coa.code='1111' literal to ${GL_CASH})
  */
 
 import { readdirSync, readFileSync, statSync } from 'fs';
@@ -46,11 +50,9 @@ const REPO_BACKEND_SRC = resolve(__dirname, '..');
 
 const ALLOWED_FILES: ReadonlySet<string> = new Set([
   'chart-of-accounts/gl-codes.constants.ts',
-  'payments/payments.service.ts',
   'payments/dto/payment-account.dto.ts',
   'employees/employees.controller.ts',
   'chart-of-accounts/posting.service.ts',
-  'chart-of-accounts/cash-recon-execute/cash-recon-execute.ts',
 ]);
 
 function* walkTs(dir: string): Generator<string> {
@@ -100,7 +102,17 @@ describe('PR-AUDIT-LIQUID-CODES-CONST — forward-prevention', () => {
         // pattern below catches both bare 4-digit-codes AND the
         // common shape "WHEN '1114'" / "code: '1114'" if string-strip
         // somehow misses them due to escaped quotes.
-        const m = lines[i].match(/(?:^|[^\d])(1111|1113|1114|1115)(?!\d)/);
+        //
+        // PR-AUDIT-LIQUID-CODES-CONST (Sprint 3 / PR-7) — switched
+        // boundary class from [^\d] to [^\w]. The old regex falsely
+        // caught TS identifier suffixes like `gl_1111_net`,
+        // `tagged_gl_1111`, etc. (where `_` is non-digit but is
+        // word-char). With `[^\w]` boundaries the regex only fires
+        // when the 4-digit code stands alone, which is the actual
+        // regression we care about. (After string-stripping, a real
+        // `'1111'` literal becomes `''` and never trips here anyway —
+        // this regex is for genuinely bare numeric literals.)
+        const m = lines[i].match(/(?:^|[^\w])(1111|1113|1114|1115)(?![\w])/);
         if (m) {
           offenders.push({ file: rel, line: i + 1, text: lines[i].trim() });
         }

@@ -12,6 +12,15 @@ import {
 } from './dto/payment-account.dto';
 import { PAYMENT_PROVIDERS } from './providers.catalog';
 import { sanitizeUuidInput } from '../common/uuid-or-null';
+// PR-AUDIT-LIQUID-CODES-CONST (Sprint 3 / PR-7) — drop the 4 hard-coded
+// liquid-asset GL literals from the unattached_balances CTE and import
+// the canonical constants instead. Output SQL is byte-identical.
+import {
+  GL_CASH,
+  GL_BANK,
+  GL_WALLET,
+  GL_CHECKS,
+} from '../chart-of-accounts/gl-codes.constants';
 
 /**
  * PR-PAY-1 — payment_accounts CRUD + provider catalog facade.
@@ -294,14 +303,18 @@ export class PaymentsService {
           'غير مرتبط بحساب دفع'                    AS display_name,
           NULL::text                               AS identifier,
           -- Method-default GL — same mapping the FE uses for new accounts.
+          -- PR-AUDIT-LIQUID-CODES-CONST: literals interpolated from the
+          -- canonical gl-codes.constants module. Output SQL is byte-
+          -- identical (the spec at payments.service.spec.ts:1060-1063
+          -- still asserts THEN '1111' / '1113' / '1114' / '1115').
           CASE
-            WHEN ip.payment_method::text = 'cash'                              THEN '1111'
+            WHEN ip.payment_method::text = 'cash'                              THEN '${GL_CASH}'
             WHEN ip.payment_method::text IN ('card_visa','card_mastercard','card_meeza','bank_transfer')
-                                                                               THEN '1113'
+                                                                               THEN '${GL_BANK}'
             WHEN ip.payment_method::text IN ('instapay','wallet','vodafone_cash','orange_cash')
-                                                                               THEN '1114'
-            WHEN ip.payment_method::text = 'check'                             THEN '1115'
-            ELSE '1111'
+                                                                               THEN '${GL_WALLET}'
+            WHEN ip.payment_method::text = 'check'                             THEN '${GL_CHECKS}'
+            ELSE '${GL_CASH}'
           END                                      AS gl_account_code,
           NULL::text                               AS cashbox_id,
           FALSE                                    AS is_default,
