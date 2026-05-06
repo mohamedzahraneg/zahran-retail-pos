@@ -299,8 +299,11 @@ describe('PayrollController route-level wiring — PR-FIX-IDEMPOTENCY-EMPLOYEE-P
     // ── update — narrative-only PATCH; naturally idempotent.
     expect(hasInterceptor((controller as any).update)).toBe(false);
 
-    // ── voidTxn (DELETE) — out of scope (PR-11E will handle the
-    //    void/cancel family across controllers).
-    expect(hasInterceptor((controller as any).voidTxn)).toBe(false);
+    // ── voidTxn (DELETE) — was undecorated when this spec shipped
+    //    (PR-11D scope); PR-FIX-IDEMPOTENCY-VOID-CANCEL-REFUND-FAMILY
+    //    (PR-11E) decorated it. The new dedicated spec
+    //    (payroll.controller.void-idempotency.spec.ts) owns the
+    //    positive assertion. Updated here to a regression guard.
+    expect(hasInterceptor((controller as any).voidTxn)).toBe(true);
   });
 });

@@ -367,11 +367,17 @@ describe('PosController route-level wiring — PR-FIX-IDEMPOTENCY-EXCHANGES-INVO
     // ── PR #275 pilot — MUST STILL carry the interceptor.
     expect(hasInterceptor((controller as any).create)).toBe(true);
 
+    // ── voidInvoice — was undecorated when this spec shipped;
+    //    PR-FIX-IDEMPOTENCY-VOID-CANCEL-REFUND-FAMILY (PR-11E)
+    //    decorated it. The new spec
+    //    (pos.controller.void-idempotency.spec.ts) owns the
+    //    positive assertion. Updated here to a regression guard.
+    expect(hasInterceptor((controller as any).voidInvoice)).toBe(true);
+
     // ── All other PosController POST handlers MUST NOT carry it
     //    in this PR. The PR-11 audit defers them to phased follow-ups
-    //    (PR-11E for void/cancel family, PR-11F for approve family).
+    //    (PR-11F for approve family).
     const undecoratedSiblings: Array<keyof PosController> = [
-      'voidInvoice',
       'submitEditRequest',
       'approveEditRequest',
       'rejectEditRequest',

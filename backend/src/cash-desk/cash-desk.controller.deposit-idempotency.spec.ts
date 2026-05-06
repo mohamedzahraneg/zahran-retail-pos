@@ -554,6 +554,11 @@ describe('CashDeskController route-level wiring — PR-FIX-IDEMPOTENCY-DIRECT-CT
     expect(hasInterceptor(controller.receive)).toBe(true);
     expect(hasInterceptor((controller as any).pay)).toBe(true);
 
+    // ── voidCustomer + voidSupplier — decorated by
+    //    PR-FIX-IDEMPOTENCY-VOID-CANCEL-REFUND-FAMILY (PR-11E).
+    expect(hasInterceptor((controller as any).voidCustomer)).toBe(true);
+    expect(hasInterceptor((controller as any).voidSupplier)).toBe(true);
+
     // ── All other cash-desk POST handlers MUST be undecorated.
     const undecoratedSiblings: Array<keyof CashDeskController> = [
       'cashboxes',
@@ -561,8 +566,6 @@ describe('CashDeskController route-level wiring — PR-FIX-IDEMPOTENCY-DIRECT-CT
       'createCashbox',
       'updateCashbox',
       'removeCashbox',
-      'voidCustomer',
-      'voidSupplier',
       'listReconciliation',
       'markReconciled',
       'unmarkReconciled',

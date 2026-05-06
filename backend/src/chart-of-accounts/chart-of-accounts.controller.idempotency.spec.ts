@@ -619,10 +619,18 @@ describe('ChartOfAccountsController route-level wiring — PR-AUDIT-IDEMPOTENCY-
     // ── This PR's target: createJournal.
     expect(hasInterceptor((controller as any).createJournal)).toBe(true);
 
+    // ── voidJournal — was undecorated when this spec shipped;
+    //    PR-FIX-IDEMPOTENCY-VOID-CANCEL-REFUND-FAMILY (PR-11E)
+    //    decorated it. The new dedicated spec
+    //    (chart-of-accounts.controller.journal-void-idempotency.spec.ts)
+    //    owns the positive assertion. Updated here to a regression
+    //    guard.
+    expect(hasInterceptor((controller as any).voidJournal)).toBe(true);
+
     // ── All other handlers in the controller MUST be undecorated.
-    //    Includes voidJournal (naturally idempotent), backfill (engine-
-    //    protected), closeYear / runDepreciation (status-guarded), and
-    //    every read-only / metadata route.
+    //    Includes backfill (engine-protected), closeYear /
+    //    runDepreciation (status-guarded), and every read-only /
+    //    metadata route.
     const undecoratedSiblings = [
       // Chart of Accounts CRUD
       'list',
@@ -631,10 +639,9 @@ describe('ChartOfAccountsController route-level wiring — PR-AUDIT-IDEMPOTENCY-
       'create',
       'update',
       'remove',
-      // Journal entries (other than createJournal)
+      // Journal entries (other than createJournal + voidJournal)
       'listJournal',
       'getJournal',
-      'voidJournal',
       'backfill',
       // Ledger / reports
       'accountLedger',

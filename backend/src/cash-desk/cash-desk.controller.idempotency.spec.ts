@@ -482,14 +482,18 @@ describe('CashDeskController route-level wiring', () => {
       // (cash-desk.controller.customer-payments-idempotency.spec.ts).
       // Removed here so this PR-#277 wiring assertion stays scoped
       // to the transfer-only contract that PR established.
-      'voidCustomer',
       // 'pay' was undecorated when PR #277 shipped; PR-AUDIT-
       // IDEMPOTENCY-CASH-DESK-SUPPLIER-PAYMENTS now decorates it
       // and re-asserts its decoration in its own dedicated spec
       // (cash-desk.controller.supplier-payments-idempotency.spec.ts).
       // Removed here so this PR-#277 wiring assertion stays scoped
       // to the transfer-only contract that PR established.
-      'voidSupplier',
+      // 'voidCustomer' + 'voidSupplier' were undecorated when PR #277
+      // shipped; PR-FIX-IDEMPOTENCY-VOID-CANCEL-REFUND-FAMILY (PR-11E)
+      // decorated them. Their dedicated spec
+      // (cash-desk.controller.voids-idempotency.spec.ts) owns the
+      // positive assertions; removed here so this PR-#277 wiring
+      // assertion stays scoped to the transfer-only contract.
       'listReconciliation',
       'markReconciled',
       'unmarkReconciled',

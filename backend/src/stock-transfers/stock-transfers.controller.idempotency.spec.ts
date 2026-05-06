@@ -35,8 +35,12 @@
  * Scope of THIS PR (stock-transfers contribution):
  *   · `create`, `ship`, `receive` (all newly decorated) MUST have
  *     the interceptor.
- *   · `cancel` MUST NOT carry the interceptor in this PR (the
- *     audit's plan defers cancel/void family to PR-11E).
+ *   · `cancel` was undecorated when this PR shipped; PR-FIX-
+ *     IDEMPOTENCY-VOID-CANCEL-REFUND-FAMILY (PR-11E) later
+ *     decorated it (the dedicated spec
+ *     `stock-transfers.controller.cancel-idempotency.spec.ts`
+ *     owns the positive assertion now). The wiring assertion
+ *     below was updated to a regression guard.
  */
 
 import { Test } from '@nestjs/testing';
@@ -355,11 +359,12 @@ describe('namespace isolation across stock-transfer lifecycle (create / ship / r
 
 /* ────────────────────────────────────────────────────────────────────
  * Wiring assertions — all 3 lifecycle handlers carry the
- * interceptor; `cancel` does NOT (deferred to PR-11E).
+ * interceptor; `cancel` was undecorated at PR-11B time, decorated
+ * later by PR-11E (regression guard below).
  * ──────────────────────────────────────────────────────────────────── */
 
 describe('StockTransfersController route-level wiring — PR-FIX-IDEMPOTENCY-STOCK-INVENTORY-PATHS', () => {
-  it('create + ship + receive have IdempotencyInterceptor; cancel + GETs do NOT', async () => {
+  it('create + ship + receive + cancel have IdempotencyInterceptor; GETs do NOT', async () => {
     const moduleRef = await Test.createTestingModule({
       controllers: [StockTransfersController],
       providers: [
@@ -393,7 +398,11 @@ describe('StockTransfersController route-level wiring — PR-FIX-IDEMPOTENCY-STO
     expect(hasInterceptor((controller as any).ship)).toBe(true);
     expect(hasInterceptor((controller as any).receive)).toBe(true);
 
-    // ── Cancel — deferred to PR-11E (void/cancel family).
-    expect(hasInterceptor((controller as any).cancel)).toBe(false);
+    // ── Cancel — was undecorated at PR-11B time; PR-11E
+    //    (PR-FIX-IDEMPOTENCY-VOID-CANCEL-REFUND-FAMILY) decorated it.
+    //    The new dedicated spec
+    //    (stock-transfers.controller.cancel-idempotency.spec.ts) owns
+    //    the positive assertion. Updated here to a regression guard.
+    expect(hasInterceptor((controller as any).cancel)).toBe(true);
   });
 });

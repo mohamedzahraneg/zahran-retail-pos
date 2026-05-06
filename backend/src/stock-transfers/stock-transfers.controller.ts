@@ -89,6 +89,13 @@ export class StockTransfersController {
   @Post(':id/cancel')
   @Roles('admin', 'manager', 'stock_keeper')
   @ApiOperation({ summary: 'إلغاء التحويل (rollback إن كان in_transit)' })
+  // PR-FIX-IDEMPOTENCY-VOID-CANCEL-REFUND-FAMILY (Sprint 4 / PR-11E) —
+  // rollback path: when status='in_transit', INSERTs a reversing
+  // stock_movement (returns inventory to source warehouse) +
+  // UPDATEs status='cancelled'. State-guarded; HTTP interceptor
+  // adds outer race defence on retry. Without an Idempotency-Key
+  // header, behavior is exactly unchanged.
+  @UseInterceptors(IdempotencyInterceptor)
   cancel(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user: JwtUser,

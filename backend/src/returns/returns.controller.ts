@@ -79,6 +79,16 @@ export class ReturnsController {
   @Post('returns/:id/refund')
   @Roles('admin', 'manager')
   @ApiOperation({ summary: 'صرف قيمة المرتجع للعميل' })
+  // PR-FIX-IDEMPOTENCY-VOID-CANCEL-REFUND-FAMILY (Sprint 4 / PR-11E) —
+  // P0 in this PR. `refund` writes a FRESH JE + CT per call (cash
+  // path uses engine.recordCashOnlyMovement; non-cash uses standard
+  // recordTransaction). Engine guard exists on (reference_type=
+  // 'return_refund', reference_id) but the state guard `status=
+  // 'approved'` doesn't fully serialize concurrent retries. The
+  // Redis-backed interceptor's 60s lock + 24h replay is the cleaner
+  // outer defence. Without an Idempotency-Key header, behavior is
+  // exactly unchanged from today.
+  @UseInterceptors(IdempotencyInterceptor)
   refund(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: RefundReturnDto,
@@ -111,6 +121,13 @@ export class ReturnsController {
     summary:
       'إلغاء مرتجع — أدمن فقط (يعكس النقد والمخزون والقيد المحاسبي)',
   })
+  // PR-FIX-IDEMPOTENCY-VOID-CANCEL-REFUND-FAMILY (Sprint 4 / PR-11E) —
+  // multi-stage reversal: voids JE via reverseByReference + reverses
+  // paired cashbox transactions + INSERTs reversing stock_movements
+  // for back_to_stock items. Engine guard catches the JE leg; stock
+  // writes are cancellation-linkage-guarded; HTTP interceptor adds
+  // outer defence + cleaner UX on retry.
+  @UseInterceptors(IdempotencyInterceptor)
   cancel(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: CancelReturnDto,

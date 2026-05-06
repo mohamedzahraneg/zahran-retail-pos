@@ -369,14 +369,21 @@ describe('ReturnsController route-level wiring — PR-FIX-IDEMPOTENCY-EXCHANGES-
     // ── This PR's target.
     expect(hasInterceptor((controller as any).exchange)).toBe(true);
 
+    // ── refund + cancel — were undecorated when this spec shipped;
+    //    PR-FIX-IDEMPOTENCY-VOID-CANCEL-REFUND-FAMILY (PR-11E)
+    //    decorated them. Their dedicated spec
+    //    (returns.controller.refund-cancel-idempotency.spec.ts)
+    //    owns the positive assertions. Updated here to regression
+    //    guards.
+    expect(hasInterceptor((controller as any).refund)).toBe(true);
+    expect(hasInterceptor((controller as any).cancel)).toBe(true);
+
     // ── All other ReturnsController POST handlers MUST NOT carry
-    //    the interceptor in this PR.
+    //    the interceptor in this PR. (P2: reject is state-only.)
     const undecoratedSiblings: Array<keyof ReturnsController> = [
       'create',
       'approve',
-      'refund',
       'reject',
-      'cancel',
     ];
     for (const name of undecoratedSiblings) {
       const target = (controller as any)[name];
