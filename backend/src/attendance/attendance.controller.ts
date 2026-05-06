@@ -8,12 +8,17 @@ import {
   Post,
   Query,
   Req,
+  UseInterceptors,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import type { Request } from 'express';
 import { AttendanceService, ClockCtx } from './attendance.service';
 import { CurrentUser, JwtUser } from '../common/decorators/current-user.decorator';
 import { Permissions, Roles } from '../common/decorators/roles.decorator';
+// PR-FIX-IDEMPOTENCY-DEFERRED-VOID-CANCEL-ROUTES (Sprint 4 / PR-11E-bis)
+// Opt-in Idempotency-Key support on POST /attendance/admin/void-accrual.
+// Without the header, behavior is exactly unchanged from today.
+import { IdempotencyInterceptor } from '../common/interceptors/idempotency.interceptor';
 
 function ctxFrom(req: Request): ClockCtx {
   const xff = (req.headers['x-forwarded-for'] as string | undefined)?.split(
@@ -176,6 +181,17 @@ export class AttendanceController {
 
   @Post('admin/void-accrual/:payable_day_id')
   @Permissions('employee.attendance.manage')
+  // PR-FIX-IDEMPOTENCY-DEFERRED-VOID-CANCEL-ROUTES (Sprint 4 /
+  // PR-11E-bis) — calls plpgsql `fn_void_employee_wage_accrual` which
+  // voids the accrual + posts a reversal JE inside the function. The
+  // function is presumed idempotent on `payable_day_id` state, but a
+  // duplicate POST during a network retry could race the state check.
+  // The Redis-backed interceptor's 60s lock + 24h replay is the
+  // cleaner outer defence. Without an Idempotency-Key header,
+  // behavior is exactly unchanged. Deferred from PR-11E because this
+  // module needed new IdempotencyCacheService + IdempotencyInterceptor
+  // providers (added alongside in this same PR).
+  @UseInterceptors(IdempotencyInterceptor)
   adminVoidAccrual(
     @Param('payable_day_id', ParseUUIDPipe) payableDayId: string,
     @CurrentUser() user: JwtUser,
