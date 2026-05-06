@@ -44,6 +44,12 @@ export class ShiftsController {
   @Post(':id/close')
   @Roles('admin', 'manager', 'cashier')
   @ApiOperation({ summary: 'إغلاق الوردية + احتساب الفروقات' })
+  // PR-FIX-IDEMPOTENCY-APPROVE-FAMILY (Sprint 4 / PR-11F) — direct
+  // close (cashier path). Posts a shift_variance JE + paired CT
+  // when variance ≠ 0. State guard `status='open'`. Engine guard on
+  // `(reference_type='shift_variance', reference_id)` catches dup,
+  // but the close button is double-click-prone in stress.
+  @UseInterceptors(IdempotencyInterceptor)
   close(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: CloseShiftDto,
@@ -85,6 +91,11 @@ export class ShiftsController {
   // trivially passes anyway.
   @Permissions('shifts.variance.approve')
   @ApiOperation({ summary: 'اعتماد طلب إقفال وردية + اختيار معالجة الفروقات' })
+  // PR-FIX-IDEMPOTENCY-APPROVE-FAMILY (Sprint 4 / PR-11F) — terminal
+  // close (manager-approval path). Same JE/CT side effects as
+  // `close` above but on a request_close → approved transition.
+  // State guard `status='pending_close'`.
+  @UseInterceptors(IdempotencyInterceptor)
   approveClose(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: ApproveCloseDto,

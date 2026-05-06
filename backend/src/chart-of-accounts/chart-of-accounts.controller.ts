@@ -338,6 +338,12 @@ export class ChartOfAccountsController {
   @Post('close-year')
   @Permissions('accounts.close_year')
   @ApiOperation({ summary: 'إقفال السنة المالية' })
+  // PR-FIX-IDEMPOTENCY-APPROVE-FAMILY (Sprint 4 / PR-11F) — annual
+  // one-shot that posts year-end closing JEs (large batch). A
+  // duplicate POST during a network retry could double-post the
+  // entire closing entry set — catastrophic. The HTTP interceptor
+  // is the cleanest defence.
+  @UseInterceptors(IdempotencyInterceptor)
   closeYear(
     @Body() body: { fiscal_year_end: string },
     @CurrentUser() user: JwtUser,
@@ -348,6 +354,11 @@ export class ChartOfAccountsController {
   @Post('depreciation/run')
   @Permissions('accounts.depreciation')
   @ApiOperation({ summary: 'تشغيل ترحيل الإهلاك الشهري يدوياً' })
+  // PR-FIX-IDEMPOTENCY-APPROVE-FAMILY (Sprint 4 / PR-11F) — monthly
+  // batch that posts depreciation JEs for all fixed assets. A
+  // duplicate POST doubles the depreciation expense for the month
+  // — catastrophic if the admin double-clicks the run button.
+  @UseInterceptors(IdempotencyInterceptor)
   runDepreciation(@CurrentUser() user: JwtUser) {
     return this.posting.postMonthlyDepreciation(user.userId);
   }

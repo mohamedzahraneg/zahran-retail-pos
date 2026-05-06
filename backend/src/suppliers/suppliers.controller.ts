@@ -8,6 +8,7 @@ import {
   Patch,
   Post,
   Query,
+  UseInterceptors,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import {
@@ -21,6 +22,11 @@ import { SuppliersService } from './suppliers.service';
 import { Roles, Permissions } from '../common/decorators/roles.decorator';
 import { Req } from '@nestjs/common';
 import { CreateSupplierDto, UpdateSupplierDto } from './dto/supplier.dto';
+// PR-FIX-IDEMPOTENCY-APPROVE-FAMILY (Sprint 4 / PR-11F) — opt-in
+// Idempotency-Key support on POST /suppliers/:id/pay (general supplier
+// payment, not invoice-tied). Without the header, behavior is exactly
+// unchanged from today.
+import { IdempotencyInterceptor } from '../common/interceptors/idempotency.interceptor';
 
 class PaySupplierDto {
   @IsNumber() @Min(0.01) amount: number;
@@ -100,6 +106,14 @@ export class SuppliersController {
 
   @Post(':id/pay')
   @Roles('admin', 'manager', 'accountant')
+  // PR-FIX-IDEMPOTENCY-APPROVE-FAMILY (Sprint 4 / PR-11F) — general
+  // supplier payment (not tied to a specific invoice). INSERTs a
+  // `supplier_payments` row + posts JE + CT (cash/bank). Multi-stage
+  // write — duplicate POST creates 2 payment rows + 2 JEs + 2 CTs.
+  // Same risk profile as `POST /purchases/:id/pay` and
+  // `POST /cash-desk/supplier-payments` (the latter already
+  // protected since PR #283).
+  @UseInterceptors(IdempotencyInterceptor)
   pay(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: PaySupplierDto,

@@ -91,6 +91,11 @@ export class PurchasesController {
 
   @Post(':id/pay')
   @Roles('admin', 'manager', 'accountant')
+  // PR-FIX-IDEMPOTENCY-APPROVE-FAMILY (Sprint 4 / PR-11F) — INSERTs
+  // a `supplier_payment` row + posts JE + CT (cash/bank). Multi-
+  // stage write — duplicate POST creates 2 payment rows + 2 JEs +
+  // 2 CTs + double-decrements the cashbox.
+  @UseInterceptors(IdempotencyInterceptor)
   pay(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: AddPurchasePaymentDto,

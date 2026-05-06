@@ -68,6 +68,14 @@ export class ReturnsController {
   @Post('returns/:id/approve')
   @Roles('admin', 'manager')
   @ApiOperation({ summary: 'اعتماد المرتجع (يُعيد المخزون)' })
+  // PR-FIX-IDEMPOTENCY-APPROVE-FAMILY (Sprint 4 / PR-11F) —
+  // `approve` calls `fn_adjust_stock` for each resellable item
+  // (positive delta = stock-in to source warehouse). State guard
+  // `status='pending'` exists, but a duplicate POST during a
+  // network retry could race the state check and double-restore
+  // stock. Refund posts JE/CT in a separate route — this approve
+  // path is stock-only.
+  @UseInterceptors(IdempotencyInterceptor)
   approve(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: ApproveReturnDto,
