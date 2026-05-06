@@ -610,6 +610,13 @@ export class PayrollController {
     summary:
       'إلغاء أثر حركة (void — ليس حذف نهائي). يتطلب permission payroll.void (admin فقط).',
   })
+  // PR-FIX-IDEMPOTENCY-VOID-CANCEL-REFUND-FAMILY (Sprint 4 / PR-11E) —
+  // dispatched void by id-prefix (bon/ded/set/wage). Each branch
+  // flips `is_void=true` on the source row → cascade triggers void
+  // the matching JE + reverse paired cashbox_transactions. State-
+  // guarded by `WHERE NOT is_void` so duplicates are caught, but the
+  // HTTP interceptor adds outer defence + cleaner UX on retry.
+  @UseInterceptors(IdempotencyInterceptor)
   async voidTxn(
     @Param('id') id: string,
     @CurrentUser() user: JwtUser,

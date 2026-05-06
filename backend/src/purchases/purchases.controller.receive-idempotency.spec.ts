@@ -289,6 +289,14 @@ describe('PurchasesController route-level wiring — PR-FIX-IDEMPOTENCY-STOCK-IN
 
     expect(hasInterceptor((controller as any).receive)).toBe(true);
 
+    // ── cancel + cancelReturn — undecorated when this spec shipped;
+    //    PR-FIX-IDEMPOTENCY-VOID-CANCEL-REFUND-FAMILY (PR-11E)
+    //    decorated them. Their dedicated spec
+    //    (purchases.controller.cancel-idempotency.spec.ts) owns the
+    //    positive assertions. Updated here to regression guards.
+    expect(hasInterceptor((controller as any).cancel)).toBe(true);
+    expect(hasInterceptor((controller as any).cancelReturn)).toBe(true);
+
     // All other PurchasesController POST handlers MUST be undecorated
     // in this PR. The PR-11 audit defers them to phased follow-ups.
     const undecoratedSiblings: Array<keyof PurchasesController> = [
@@ -296,10 +304,8 @@ describe('PurchasesController route-level wiring — PR-FIX-IDEMPOTENCY-STOCK-IN
       'getOne',
       'create',
       'pay',
-      'cancel',
       'edit',
       'createReturn',
-      'cancelReturn',
       'listReturns',
       'getReturn',
     ];

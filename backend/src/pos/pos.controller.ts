@@ -75,6 +75,15 @@ export class PosController {
 
   @Post('invoices/:id/void')
   @Permissions('invoices.void')
+  // PR-FIX-IDEMPOTENCY-VOID-CANCEL-REFUND-FAMILY (Sprint 4 / PR-11E) —
+  // `voidInvoice` flips the invoice's `is_void=true` and calls
+  // `posting.reverseByReference('invoice', id)`. Engine-level
+  // idempotency on `(reference_type='invoice_reversal', reference_id)`
+  // catches duplicate JE writes, but the state-flip + engine call
+  // are not atomic from the HTTP perspective — a duplicate POST
+  // during a retry exposes a noisy 409/500 race. Without an
+  // Idempotency-Key header, behavior is exactly unchanged.
+  @UseInterceptors(IdempotencyInterceptor)
   voidInvoice(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: VoidInvoiceDto,

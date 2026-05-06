@@ -244,6 +244,12 @@ export class ChartOfAccountsController {
 
   @Post('journal/:id/void')
   @Permissions('accounts.journal.void')
+  // PR-FIX-IDEMPOTENCY-VOID-CANCEL-REFUND-FAMILY (Sprint 4 / PR-11E) —
+  // calls `posting.reverseByReference('manual', id)` which writes one
+  // reversing JE via the engine. Engine guard catches dup; HTTP
+  // interceptor adds the outer cleaner UX on retry. Without an
+  // Idempotency-Key header, behavior is exactly unchanged.
+  @UseInterceptors(IdempotencyInterceptor)
   voidJournal(
     @Param('id') id: string,
     @Body() dto: VoidJournalDtoIn,

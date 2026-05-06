@@ -547,6 +547,14 @@ describe('CashDeskController route-level wiring — PR-AUDIT-IDEMPOTENCY-CASH-DE
     //    the positive assertion. Updated here to a regression guard.
     expect(hasInterceptor((controller as any).deposit)).toBe(true);
 
+    // ── voidCustomer + voidSupplier — both undecorated when this
+    //    spec shipped; PR-FIX-IDEMPOTENCY-VOID-CANCEL-REFUND-FAMILY
+    //    (Sprint 4 / PR-11E) decorated them. The new spec
+    //    (cash-desk.controller.voids-idempotency.spec.ts) owns the
+    //    positive assertions. Updated here to regression guards.
+    expect(hasInterceptor((controller as any).voidCustomer)).toBe(true);
+    expect(hasInterceptor((controller as any).voidSupplier)).toBe(true);
+
     // ── All other cash-desk POST handlers MUST be undecorated.
     const undecoratedSiblings: Array<keyof CashDeskController> = [
       'cashboxes',
@@ -554,8 +562,6 @@ describe('CashDeskController route-level wiring — PR-AUDIT-IDEMPOTENCY-CASH-DE
       'createCashbox',
       'updateCashbox',
       'removeCashbox',
-      'voidCustomer',
-      'voidSupplier',
       'listReconciliation',
       'markReconciled',
       'unmarkReconciled',

@@ -53,6 +53,13 @@ export class PurchasesController {
 
   @Patch('returns/:id/cancel')
   @Roles('admin', 'manager')
+  // PR-FIX-IDEMPOTENCY-VOID-CANCEL-REFUND-FAMILY (Sprint 4 / PR-11E) —
+  // P0 in this PR. Multi-stage reversal: rebuilds stock + INSERTs
+  // reversing stock_movements + UPDATE purchase_returns is_void +
+  // engine reverseByReference for JE. Stock writes have no engine
+  // guard — duplicate POST during retry could double-reverse.
+  // Without an Idempotency-Key header, behavior is exactly unchanged.
+  @UseInterceptors(IdempotencyInterceptor)
   cancelReturn(@Param('id', ParseUUIDPipe) id: string, @Req() req: any) {
     return this.purchases.cancelReturn(id, req.user?.id);
   }
@@ -94,6 +101,11 @@ export class PurchasesController {
 
   @Patch(':id/cancel')
   @Permissions('purchases.cancel')
+  // PR-FIX-IDEMPOTENCY-VOID-CANCEL-REFUND-FAMILY (Sprint 4 / PR-11E) —
+  // UPDATE purchases status='cancelled' + reverseByReference(
+  // 'purchase_payment', id) for cash payments. Engine guard catches
+  // dup JE; HTTP interceptor adds outer race defence.
+  @UseInterceptors(IdempotencyInterceptor)
   cancel(@Param('id', ParseUUIDPipe) id: string, @Req() req: any) {
     return this.purchases.cancel(id, req.user?.userId);
   }

@@ -356,6 +356,12 @@ export class CashDeskController {
 
   @Post('customer-payments/:id/void')
   @Roles('admin', 'manager')
+  // PR-FIX-IDEMPOTENCY-VOID-CANCEL-REFUND-FAMILY (Sprint 4 / PR-11E) —
+  // `voidCustomerPayment` flips `is_void=true` on customer_payments
+  // then calls `posting.reverseByReference('customer_payment', id)`
+  // for the JE/CT reversal. Engine guard catches dup JE; HTTP
+  // interceptor adds the outer race defence + cleaner UX on retry.
+  @UseInterceptors(IdempotencyInterceptor)
   voidCustomer(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: VoidPaymentDto,
@@ -366,6 +372,10 @@ export class CashDeskController {
 
   @Post('supplier-payments/:id/void')
   @Roles('admin', 'manager', 'accountant')
+  // PR-FIX-IDEMPOTENCY-VOID-CANCEL-REFUND-FAMILY (Sprint 4 / PR-11E) —
+  // same pattern as voidCustomer — UPDATE supplier_payments
+  // is_void=true + reverseByReference('supplier_payment', id).
+  @UseInterceptors(IdempotencyInterceptor)
   voidSupplier(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: VoidPaymentDto,
