@@ -24,6 +24,7 @@ import {
   LIQUID_GL_CODES,
   LIQUID_CODES_SQL_LIST,
   CASHBOX_KIND_TO_GL_CODE,
+  cashboxKindToGlCode,
 } from './gl-codes.constants';
 
 describe('gl-codes.constants — PR-AUDIT-LIQUID-CODES-CONST', () => {
@@ -116,6 +117,66 @@ describe('gl-codes.constants — PR-AUDIT-LIQUID-CODES-CONST', () => {
         'check',
         'ewallet',
       ]);
+    });
+  });
+
+  /* ──────────────────────────────────────────────────────────────────
+   * PR-AUDIT-CASHBOX-KIND-MAP-CENTRALIZE (Sprint 3 / PR-8)
+   *
+   * The strict resolver `cashboxKindToGlCode(kind)` returns the
+   * canonical liquid GL code for the four supported cashbox kinds,
+   * or null when the input is null / undefined / not one of the
+   * four. Pinning this contract here so any future change to the
+   * resolver semantics surfaces in CI immediately.
+   *
+   * Use-site policy (documented in the helper's docblock):
+   *   · Read paths / reporting code → use `cashboxKindToGlCode(kind)`
+   *     and treat null as "skip this row".
+   *   · Engine / posting paths that downstream-call
+   *     `accountIdByCode(code)` (which cannot accept null) →
+   *     keep the existing `CASHBOX_KIND_TO_GL_CODE[...] || GL_CASH`
+   *     fallback. This PR intentionally does NOT refactor those 2
+   *     call sites (`financial-engine.service.ts:997`,
+   *     `posting.service.ts:1688`).
+   * ──────────────────────────────────────────────────────────────────*/
+  describe('cashboxKindToGlCode resolver — PR-AUDIT-CASHBOX-KIND-MAP-CENTRALIZE', () => {
+    it("'cash' → '1111'", () => {
+      expect(cashboxKindToGlCode('cash')).toBe(GL_CASH);
+      expect(cashboxKindToGlCode('cash')).toBe('1111');
+    });
+    it("'bank' → '1113'", () => {
+      expect(cashboxKindToGlCode('bank')).toBe(GL_BANK);
+      expect(cashboxKindToGlCode('bank')).toBe('1113');
+    });
+    it("'ewallet' → '1114'", () => {
+      expect(cashboxKindToGlCode('ewallet')).toBe(GL_WALLET);
+      expect(cashboxKindToGlCode('ewallet')).toBe('1114');
+    });
+    it("'check' → '1115'", () => {
+      expect(cashboxKindToGlCode('check')).toBe(GL_CHECKS);
+      expect(cashboxKindToGlCode('check')).toBe('1115');
+    });
+    it('null → null (strict — no cash fallback in this resolver)', () => {
+      expect(cashboxKindToGlCode(null)).toBeNull();
+    });
+    it('undefined → null', () => {
+      expect(cashboxKindToGlCode(undefined)).toBeNull();
+    });
+    it("'unknown' → null (any value not in the 4 supported kinds returns null)", () => {
+      expect(cashboxKindToGlCode('unknown')).toBeNull();
+      expect(cashboxKindToGlCode('')).toBeNull();
+      expect(cashboxKindToGlCode('CASH')).toBeNull(); // case-sensitive
+      expect(cashboxKindToGlCode('wallet')).toBeNull(); // 'wallet' is not 'ewallet'
+    });
+    it("does NOT default unknowns to GL_CASH (that's the engine's || GL_CASH job, not this resolver)", () => {
+      // This pins the difference between the strict resolver (this PR)
+      // and the engine/posting fallback pattern. The two engine call
+      // sites at financial-engine.service.ts:997 and
+      // posting.service.ts:1688 keep their own `|| GL_CASH` because
+      // accountIdByCode(null) would crash. The strict resolver here
+      // is for read paths that can safely skip on null.
+      expect(cashboxKindToGlCode('unknown')).not.toBe(GL_CASH);
+      expect(cashboxKindToGlCode(null)).not.toBe(GL_CASH);
     });
   });
 });
