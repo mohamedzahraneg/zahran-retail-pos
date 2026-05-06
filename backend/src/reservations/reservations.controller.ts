@@ -30,6 +30,10 @@ import {
 // PR-FIX-IDEMPOTENCY-DEFERRED-APPROVE-FAMILY (Sprint 4 / PR-11F-bis)
 // Extended to also protect POST /reservations/:id/payments. Same
 // import; module providers already wired in PR-11E-bis.
+// PR-FIX-IDEMPOTENCY-RESERVATION-CONVERT (Sprint 4 / PR-11G)
+// Closes the final true financial/stock idempotency gap from the
+// rollup audit by extending coverage to POST /reservations/:id/convert.
+// Same import + module providers already in place.
 import { IdempotencyInterceptor } from '../common/interceptors/idempotency.interceptor';
 
 @ApiBearerAuth()
@@ -83,6 +87,18 @@ export class ReservationsController {
     summary:
       'تحويل الحجز إلى فاتورة بيع كاملة (العميل استلم البضاعة ودفع الباقي)',
   })
+  // PR-FIX-IDEMPOTENCY-RESERVATION-CONVERT (Sprint 4 / PR-11G) —
+  // closes the final true financial/stock idempotency gap from the
+  // Sprint 4 rollup audit. Multi-stage convert: INSERTs `invoices` +
+  // `invoice_lines` + `invoice_payments` + `reservation_payments`,
+  // posts JE + CT (final-payment cashbox/ledger writes) + triggers
+  // stock on_hand decrement / stock_movements. Service-guarded by
+  // `mustBeActive(id)` state check; HTTP interceptor adds outer race
+  // defence on simultaneous retries before the status flip commits.
+  // Same risk profile as `:id/payments` (PR-11F-bis) and `:id/cancel`
+  // (PR-11E-bis). Without an Idempotency-Key header, behavior is
+  // exactly unchanged.
+  @UseInterceptors(IdempotencyInterceptor)
   convert(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: ConvertReservationDto,

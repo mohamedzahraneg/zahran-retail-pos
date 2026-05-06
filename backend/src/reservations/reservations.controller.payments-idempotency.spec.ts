@@ -232,7 +232,7 @@ describe('namespace isolation: reservation payments vs other reservation routes'
 });
 
 describe('ReservationsController route-level wiring — PR-FIX-IDEMPOTENCY-DEFERRED-APPROVE-FAMILY', () => {
-  it('addPayment decorated (this PR); cancel decorated (PR-11E-bis regression guard); create + convert + extend NOT decorated', async () => {
+  it('addPayment decorated (PR-11F-bis); cancel decorated (PR-11E-bis regression guard); convert decorated (PR-11G); create + extend NOT decorated', async () => {
     const moduleRef = await Test.createTestingModule({
       controllers: [ReservationsController],
       providers: [
@@ -262,19 +262,26 @@ describe('ReservationsController route-level wiring — PR-FIX-IDEMPOTENCY-DEFER
       );
     };
 
-    // ── This PR's target.
+    // ── PR-11F-bis target.
     expect(hasInterceptor((controller as any).addPayment)).toBe(true);
 
     // ── Regression guard: cancel was decorated in PR-11E-bis and
     //    must remain decorated.
     expect(hasInterceptor((controller as any).cancel)).toBe(true);
 
-    // ── Out-of-scope siblings stay undecorated. `create` is one-shot
-    //    (the deposit flows through but is bundled into the same
-    //    transaction as reservation creation); `convert` and `extend`
-    //    are state transitions guarded at the DB layer.
+    // ── PR-11G added decoration on convert (final true financial/
+    //    stock idempotency gap closer per Sprint 4 rollup audit).
+    //    Track here so this sibling-list test stays in sync; the
+    //    dedicated convert spec pins the full interceptor contract.
+    expect(hasInterceptor((controller as any).convert)).toBe(true);
+
+    // ── Out-of-scope siblings stay undecorated. `create` only
+    //    INSERTs reservation + items + deposit row without posting
+    //    JE/CT (the deposit becomes JE/CT only at the now-protected
+    //    `:id/payments` or `:id/convert` paths). `extend` is a
+    //    date-field UPDATE only.
     const undecoratedSiblings: Array<keyof ReservationsController> = [
-      'create', 'convert', 'extend',
+      'create', 'extend',
     ];
     for (const name of undecoratedSiblings) {
       const target = (controller as any)[name];
