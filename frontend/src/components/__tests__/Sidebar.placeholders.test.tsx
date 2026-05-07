@@ -1,22 +1,26 @@
 /**
  * Sidebar.placeholders.test.tsx — PR-FIN-SIDEBAR-1
  *
- * Pins the placeholder UX for the four upcoming financial PRs:
- *   · التقارير (PR-FIN-7)
- *   · كشف الحسابات (PR-FIN-3)
- *   · الزكاة (PR-FIN-8)
+ * Pins the placeholder UX for the upcoming financial PRs that have
+ * NOT shipped yet:
+ *   · التقارير المالية (PR-FIN-7)
  *   · تتبع الحركات المالية (PR-FIN-4)
  *
- * Each appears in the sidebar AFTER the existing 9 active items in
+ * Each appears in the sidebar AFTER the existing active items in
  * the "الحسابات والمالية" group, renders as a non-clickable element
  * (NOT an `<a>` tag), shows a "قريبًا" pill, and carries
  * `aria-disabled="true"`.
  *
+ * History:
+ *   · PR-FIN-3 flipped "كشف الحسابات" from placeholder to active
+ *   · PR-FE-ACCOUNTING-ZAKAT-FRAMING flipped "الزكاة" from placeholder
+ *     to active (framing/planning shell — see pages/Zakat.tsx)
+ *
  * Existing active items (الحسابات / فتح الحسابات / التحليلات الذكية /
  * الصندوق اليومي / الخزائن والبنوك / المصاريف الدورية / المصروفات
- * اليومية / برج المراقبة المالية / لوحة التحكم) must remain rendered
- * as router links — regression guard against accidentally flipping
- * an active item into a placeholder.
+ * اليومية / برج المراقبة المالية / لوحة التحكم / كشف الحسابات /
+ * الزكاة) must remain rendered as router links — regression guard
+ * against accidentally flipping an active item into a placeholder.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
@@ -61,13 +65,14 @@ describe('<Sidebar /> — PR-FIN-SIDEBAR-1 placeholders', () => {
 
   const PLACEHOLDERS = [
     // PR-FIN-3 flipped "كشف الحسابات" from placeholder to active link
-    // (/finance/statements). The remaining 3 stay as placeholders
-    // until their respective PRs (FIN-7 / FIN-8 / FIN-4) ship.
+    // (/finance/statements). PR-FE-ACCOUNTING-ZAKAT-FRAMING flipped
+    // "الزكاة" from placeholder to active link (/finance/zakat —
+    // framing/planning shell). The remaining 2 stay as placeholders
+    // until their respective PRs (FIN-7 / FIN-4) ship.
     // PR-FIN-SIDEBAR-2 renamed the /finance/reports placeholder from
     // "التقارير" to "التقارير المالية" to disambiguate from the
     // global /reports item in the top-level reports sidebar group.
     { label: 'التقارير المالية', to: '/finance/reports' },
-    { label: 'الزكاة', to: '/finance/zakat' },
     { label: 'تتبع الحركات المالية', to: '/audit/financial-movements' },
   ];
 
@@ -122,6 +127,9 @@ describe('<Sidebar /> — PR-FIN-SIDEBAR-1 placeholders', () => {
       'برج المراقبة المالية',
       // PR-FIN-3 — "كشف الحسابات" is now active too (route added).
       'كشف الحسابات',
+      // PR-FE-ACCOUNTING-ZAKAT-FRAMING — "الزكاة" is now active too
+      // (framing/planning shell at /finance/zakat).
+      'الزكاة',
     ];
     for (const label of active) {
       const els = screen.getAllByText(label);

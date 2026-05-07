@@ -138,7 +138,9 @@ describe('<Sidebar /> — PR-FIN-SIDEBAR-2 sub-groups', () => {
       subheaderKey: 'subhdr:fin:advanced',
       itemSelectors: [
         { kind: 'href', key: '/opening-balance', visibleLabel: 'فتح الحسابات' },
-        { kind: 'placeholder', key: '/finance/zakat', visibleLabel: 'الزكاة' },
+        // PR-FE-ACCOUNTING-ZAKAT-FRAMING — flipped from placeholder to
+        // active link (/finance/zakat — framing/planning shell).
+        { kind: 'href', key: '/finance/zakat', visibleLabel: 'الزكاة' },
       ],
     },
   ];
@@ -188,6 +190,8 @@ describe('<Sidebar /> — PR-FIN-SIDEBAR-2 sub-groups', () => {
       'برج المراقبة المالية',
       'التحليلات الذكية',
       'فتح الحسابات',
+      // PR-FE-ACCOUNTING-ZAKAT-FRAMING — explicitly active.
+      'الزكاة',
     ];
     for (const label of active) {
       const els = screen.getAllByText(label);
@@ -200,7 +204,10 @@ describe('<Sidebar /> — PR-FIN-SIDEBAR-2 sub-groups', () => {
     renderSidebar();
     const placeholders: Array<{ label: string; to: string }> = [
       { label: 'التقارير المالية', to: '/finance/reports' },
-      { label: 'الزكاة', to: '/finance/zakat' },
+      // PR-FE-ACCOUNTING-ZAKAT-FRAMING — "الزكاة" removed from this
+      // list because it is now an active NavLink (see the
+      // ' /finance/zakat → href' entry under the "advanced" sub-header
+      // PLACEMENTS above).
       { label: 'تتبع الحركات المالية', to: '/audit/financial-movements' },
     ];
     for (const { label, to } of placeholders) {

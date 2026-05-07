@@ -161,7 +161,12 @@ const groups: NavGroup[] = [
       // ─── 6. عمليات متقدمة ─────────────────────────────────
       { kind: 'subheader', to: 'subhdr:fin:advanced', label: 'عمليات متقدمة', icon: Calculator, roles: ['admin', 'accountant'], permission: 'accounts.journal.post' },
       { to: '/opening-balance', label: 'فتح الحسابات', icon: BookOpen, roles: ['admin', 'accountant'], permission: 'accounts.journal.post' },
-      { to: '/finance/zakat', label: 'الزكاة', icon: HandCoins, roles: ['admin', 'manager', 'accountant'], permission: 'finance.dashboard.view', placeholder: true },
+      // PR-FE-ACCOUNTING-ZAKAT-FRAMING — flipped from placeholder to
+      // active. Page is a framing/planning shell — no JE/CT writes,
+      // no engine calls, no fake numbers (the page renders empty
+      // states instead). Permission gate stays the same as the
+      // placeholder.
+      { to: '/finance/zakat', label: 'الزكاة', icon: HandCoins, roles: ['admin', 'manager', 'accountant'], permission: 'finance.dashboard.view' },
 
       // /accounting (legacy), /budgets, /financial-controls,
       // /bank-reconciliation, /accounts-audit — all routes still work
