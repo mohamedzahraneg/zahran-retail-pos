@@ -59,6 +59,14 @@ import { attachReturnsIdempotencyKeyIfApplicable } from '@/lib/returns-idempoten
 // Disjoint from the existing checkout helper (POST /pos/invoices
 // create) and explicitly rejects /edit-request and /reject siblings.
 import { attachPosInvoiceIdempotencyKeyIfApplicable } from '@/lib/pos-invoice-idempotency';
+// PR-FE-IDEM-PAYROLL-FAMILY (Sprint 5 / FE-IDEM PR 6) — tenth
+// sibling (7 routes, 1 helper module). Gates via regex on:
+//   · POST /attendance/admin/{approve-wage/:id, void-accrual/:id,
+//                              approve-wage-override, pay-wage}
+//   · POST /employees/:id/{bonuses, deductions, settlements}
+// Excludes attendance clock-in/out/mark-payable-day, employee
+// requests/tasks, and any non-financial state endpoint.
+import { attachPayrollIdempotencyKeyIfApplicable } from '@/lib/payroll-idempotency';
 
 const envApiUrl = import.meta.env.VITE_API_URL as string | undefined;
 const baseURL = envApiUrl ?? 'http://localhost:3000';
@@ -111,6 +119,11 @@ api.interceptors.request.use((config) => {
   // Three independent keys. Disjoint from the checkout helper which
   // decorates POST /pos/invoices (create) only.
   attachPosInvoiceIdempotencyKeyIfApplicable(config);
+  // PR-FE-IDEM-PAYROLL-FAMILY — no-op on every route except POST on
+  // attendance admin {approve-wage/:id, void-accrual/:id,
+  // approve-wage-override, pay-wage} and employees/:id/{bonuses,
+  // deductions, settlements}. Seven independent keys.
+  attachPayrollIdempotencyKeyIfApplicable(config);
   return config;
 });
 

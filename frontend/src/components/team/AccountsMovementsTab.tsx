@@ -68,6 +68,19 @@ import { TeamRow } from '@/api/employees.api';
 // second caller of POST /accounting/expenses/daily (with is_advance=true);
 // shares the same key module as AddExpenseModal in DailyExpenses.tsx.
 import { resetExpenseIdempotencyKey } from '@/lib/expense-idempotency';
+// PR-FE-IDEM-PAYROLL-FAMILY (Sprint 5 / FE-IDEM PR 6) — per-modal
+// reset hooks for the three employee-financial modals hosted here:
+//   · BonusModal     → /employees/:id/bonuses
+//   · DeductionModal → /employees/:id/deductions
+//   · AdvanceModal   → /employees/:id/settlements (the in-scope leg
+//                      of this dual-purpose modal; the advance leg
+//                      goes to /employees/me/requests/advance which
+//                      is out of scope, state-only)
+import {
+  resetPayrollBonusIdempotencyKey,
+  resetPayrollDeductionIdempotencyKey,
+  resetPayrollSettlementIdempotencyKey,
+} from '@/lib/payroll-idempotency';
 import { EmployeeCashClassifierGuard } from './EmployeeCashClassifierGuard';
 import {
   CashSourceSelector,
@@ -631,9 +644,20 @@ export function AdvanceModal({
   // mount, defensive reset on unmount. Field changes within the
   // open modal do NOT reset the key — body-tamper safety is BE-side
   // via 409 IDEMPOTENCY_KEY_PAYLOAD_MISMATCH.
+  // PR-FE-IDEM-PAYROLL-FAMILY — this modal also dispatches the
+  // settlement leg (POST /employees/:id/settlements) when the
+  // operator picks "صرف مستحقات" inside the guard dialog. Reset
+  // the settlement key on the same mount/unmount lifecycle so the
+  // settlementMut path also gets one-key-per-modal-session
+  // semantics. The advance leg (POST /employees/me/requests/advance)
+  // is state-only and out of scope (no key attached).
   useEffect(() => {
     resetExpenseIdempotencyKey();
-    return () => resetExpenseIdempotencyKey();
+    resetPayrollSettlementIdempotencyKey();
+    return () => {
+      resetExpenseIdempotencyKey();
+      resetPayrollSettlementIdempotencyKey();
+    };
   }, []);
 
   const [amount, setAmount] = useState('');
@@ -989,6 +1013,14 @@ export function BonusModal({
   const [note, setNote] = useState('');
   const [bonusDate, setBonusDate] = useState(today);
 
+  // PR-FE-IDEM-PAYROLL-FAMILY — clean slate on mount, defensive
+  // reset on unmount. The same `bonusKey` is also reset per-click
+  // in the EmployeeProfile HistoryCard "صرف يومية كاملة" button.
+  useEffect(() => {
+    resetPayrollBonusIdempotencyKey();
+    return () => resetPayrollBonusIdempotencyKey();
+  }, []);
+
   const mut = useMutation({
     mutationFn: () =>
       employeesApi.addBonus(employee.id, {
@@ -1085,6 +1117,13 @@ export function DeductionModal({
   const [amount, setAmount] = useState('');
   const [reason, setReason] = useState('');
   const [deductionDate, setDeductionDate] = useState(today);
+
+  // PR-FE-IDEM-PAYROLL-FAMILY — clean slate on mount, defensive
+  // reset on unmount. Independent key from bonus/settlement.
+  useEffect(() => {
+    resetPayrollDeductionIdempotencyKey();
+    return () => resetPayrollDeductionIdempotencyKey();
+  }, []);
 
   const mut = useMutation({
     mutationFn: () =>

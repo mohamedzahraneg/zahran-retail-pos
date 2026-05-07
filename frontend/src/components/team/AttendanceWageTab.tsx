@@ -34,9 +34,20 @@
  *     deferred to PR-T3.
  */
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
+// PR-FE-IDEM-PAYROLL-FAMILY (Sprint 5 / FE-IDEM PR 6) — per-action
+// Idempotency-Key reset hooks. Void-accrual is wired per-click in
+// the row button (each row is a distinct payable_day_id intent).
+// Approve-wage-override is wired in the WageApprovalModal mount/
+// unmount useEffect. Independent keys keep the two flows from
+// colliding even when the operator approves day A and voids day B
+// in quick succession.
+import {
+  resetPayrollVoidAccrualIdempotencyKey,
+  resetPayrollApproveWageOverrideIdempotencyKey,
+} from '@/lib/payroll-idempotency';
 import {
   CalendarCheck,
   Clock,
@@ -599,6 +610,14 @@ function DailyWageCard({
                                   'سبب إلغاء الاعتماد (مطلوب):',
                                 );
                                 if (!reason || !reason.trim()) return;
+                                // PR-FE-IDEM-PAYROLL-FAMILY — reset
+                                // per-click so each row's void gets a
+                                // fresh key. The mutation's pending
+                                // state disables further clicks; a 425
+                                // IN_PROGRESS auto-retry from PR #315
+                                // reuses the same axios config = same
+                                // key.
+                                resetPayrollVoidAccrualIdempotencyKey();
                                 voidMut.mutate({
                                   id: r.id,
                                   reason: reason.trim(),
@@ -647,6 +666,17 @@ export function WageApprovalModal({
   const qc = useQueryClient();
   const isEdit = !!existing;
   const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Africa/Cairo' });
+
+  // PR-FE-IDEM-PAYROLL-FAMILY — clean slate on mount, defensive
+  // reset on unmount. Approve-wage-override creates an accrual JE
+  // (DR 521 / CR 213), or atomically void+repost on edit. Each
+  // open of this modal is one intent; field tweaks within the
+  // modal do NOT reset — body-tamper safety lives BE-side via 409
+  // IDEMPOTENCY_KEY_PAYLOAD_MISMATCH.
+  useEffect(() => {
+    resetPayrollApproveWageOverrideIdempotencyKey();
+    return () => resetPayrollApproveWageOverrideIdempotencyKey();
+  }, []);
 
   const [workDate, setWorkDate] = useState<string>(existing?.work_date || today);
   const [overrideType, setOverrideType] = useState<
