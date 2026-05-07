@@ -42,6 +42,15 @@ import { attachCashDeskDepositIdempotencyKeyIfApplicable } from '@/lib/cash-desk
 //   · POST /reservations/:id/convert
 // Excludes POST /reservations (create) and PATCH /reservations/:id/extend.
 import { attachReservationIdempotencyKeyIfApplicable } from '@/lib/reservation-idempotency';
+// PR-FE-IDEM-RETURNS (Sprint 5 / FE-IDEM PR 4) — eighth sibling
+// (4 routes, 1 helper module). Gates via regex on:
+//   · POST /returns/:id/approve
+//   · POST /returns/:id/refund
+//   · POST /returns/:id/cancel
+//   · POST /exchanges
+// Excludes POST /returns (create), POST /returns/:id/reject, and
+// any GET on the returns/exchanges read paths.
+import { attachReturnsIdempotencyKeyIfApplicable } from '@/lib/returns-idempotency';
 
 const envApiUrl = import.meta.env.VITE_API_URL as string | undefined;
 const baseURL = envApiUrl ?? 'http://localhost:3000';
@@ -84,6 +93,11 @@ api.interceptors.request.use((config) => {
   // /reservations/:id/{cancel,payments,convert}. Three independent
   // keys (one per action type) — see reservation-idempotency.ts.
   attachReservationIdempotencyKeyIfApplicable(config);
+  // PR-FE-IDEM-RETURNS — no-op on every route except POST on
+  // /returns/:id/{approve,refund,cancel} and POST /exchanges.
+  // Four independent keys (one per action type). Reject is
+  // intentionally NOT decorated.
+  attachReturnsIdempotencyKeyIfApplicable(config);
   return config;
 });
 
