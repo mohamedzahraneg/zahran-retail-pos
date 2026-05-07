@@ -89,6 +89,17 @@ import { attachShiftsIdempotencyKeyIfApplicable } from '@/lib/shifts-idempotency
 // /accounting/{approvals/rules,categories} CRUD, /accounts/{chart,
 // fixed-assets,budgets,cost-centers,fx,audit,journal/backfill} CRUD/admin.
 import { attachAccountingOpsIdempotencyKeyIfApplicable } from '@/lib/accounting-ops-idempotency';
+// PR-FE-IDEM-STOCK-PURCHASES-OPS (Sprint 5 / FE-IDEM PR 7C) —
+// thirteenth sibling (8 routes, 1 helper module). Method-aware
+// gates (POST + PATCH per actual BE controller declarations):
+//   · POST  /stock-transfers
+//   · POST  /stock-transfers/:id/{ship,receive,cancel}
+//   · POST  /purchases/:id/{receive,pay}
+//   · PATCH /purchases/:id/cancel
+//   · PATCH /purchases/returns/:id/cancel  (no current FE caller)
+// Excludes /purchases (create), /purchases/:id/edit (state),
+// /purchases/returns (createReturn state), all GETs.
+import { attachStockPurchasesIdempotencyKeyIfApplicable } from '@/lib/stock-purchases-idempotency';
 
 const envApiUrl = import.meta.env.VITE_API_URL as string | undefined;
 const baseURL = envApiUrl ?? 'http://localhost:3000';
@@ -154,6 +165,9 @@ api.interceptors.request.use((config) => {
   // accounting/accounts mutation routes. Disjoint from
   // expense-idempotency which owns /accounting/expenses + daily.
   attachAccountingOpsIdempotencyKeyIfApplicable(config);
+  // PR-FE-IDEM-STOCK-PURCHASES-OPS — method-aware (POST + PATCH).
+  // Eight independent keys.
+  attachStockPurchasesIdempotencyKeyIfApplicable(config);
   return config;
 });
 
