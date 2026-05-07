@@ -769,7 +769,45 @@ export class PosService {
         );
       }
 
-      // ── 2) Reverse cashbox for original CASH payments ─────────────
+      // ── 2) [REMOVED — PR-FIX-POS-EDIT-CASH-GL-ALIGNMENT] ──────────
+      // The cashbox CT side used to be reversed here via
+      // `recordCashOnlyMovement('edit_reversal')` and re-written below
+      // via `recordCashOnlyMovement('edit_replay')`. The GL side was
+      // owned by `posting.postInvoiceEdit` which called `postInvoice`
+      // with `skipCashMovements: true` to avoid double-writing CTs.
+      //
+      // After PR-FIN-CASHBOX-GL-PREVENTION-GUARDS landed, the engine's
+      // Guard B started rejecting that posting because the GL cash
+      // leg had no in-memory paired `cash_movements` entry — even
+      // though the database CT was correctly written via the side
+      // channel. Production error:
+      //   "فشل ترحيل القيد بعد تعديل الفاتورة: cash GL line on 1111
+      //    has no paired cashbox_transactions movement"
+      //
+      // The fix routes BOTH layers through the engine in
+      // `postInvoiceEdit`:
+      //   1. `reverseByReference('invoice', id)` — engine voids the
+      //      old JE atomically with the inverse cash CTs (category
+      //      `reversal_sale`).
+      //   2. `postInvoice(id)` (without `skipCashMovements`) — engine
+      //      posts the new JE with paired `sale` cash CTs.
+      // Net cashbox effect: original `sale` (+old) + `reversal_sale`
+      // (-old) + new `sale` (+new) = +new. Correct, and each engine
+      // call now satisfies Guards A + B + C.
+      //
+      // Audit-trail note: cashUnchanged edits (item-only edits with
+      // identical cash totals) used to short-circuit and emit zero CT
+      // rows. Under the new flow they emit one offsetting pair
+      // (reversal_sale -old + sale +old = 0). The math is correct;
+      // the audit feed just shows two extra rows per such edit. The
+      // alternative — keeping the dual-ownership pattern — required
+      // either `accounting_only=true` (which the project policy bans
+      // when actual cash moved) or extending the engine with a new
+      // "cash owned externally" flag (out of scope for this fix).
+      // The `cashboxId` lookup below is still useful because some
+      // downstream code paths in this method reference an invoice's
+      // resolved cashbox; we keep the lookup but no longer gate
+      // anything on `cashUnchanged`.
       const [cbRef] = await em.query(
         `SELECT cashbox_id FROM cashbox_transactions
           WHERE reference_type = 'invoice' AND reference_id = $1
@@ -777,54 +815,7 @@ export class PosService {
         [id],
       );
       const cashboxId = cbRef?.cashbox_id ?? null;
-
-      // PR-DRIFT-3E — Skip CT reverse/replay when the cash effect is
-      // unchanged. Item/category/product-only edits with the same cash
-      // total used to emit a wasted IN+OUT pair (PR-DRIFT-3E case
-      // INV-016) — the cash never physically moved, but the engine
-      // touched the cashbox anyway. We compare the old and new cash
-      // payment totals up-front and short-circuit when they match.
-      const newPaymentsArg = (dto.payments || []) as Array<{
-        payment_method: 'cash' | 'card' | 'instapay' | 'bank_transfer';
-        amount: number;
-      }>;
-      const oldCashTotal = origPayments
-        .filter((p: any) => p.payment_method === 'cash')
-        .reduce((s: number, p: any) => s + Number(p.amount || 0), 0);
-      const newCashTotal = newPaymentsArg
-        .filter((p) => p.payment_method === 'cash')
-        .reduce((s, p) => s + Number(p.amount || 0), 0);
-      const cashUnchanged = Math.abs(oldCashTotal - newCashTotal) < 0.005;
-
-      if (cashboxId && !cashUnchanged) {
-        // Phase 2.5: cash-side reversal now routes through the engine's
-        // sanctioned cash-only primitive. No direct fn_record_cashbox_txn
-        // call; no engine_bypass_alerts row.
-        if (!this.engine) {
-          throw new BadRequestException(
-            'FinancialEngineService غير متاح — لا يمكن تعديل الفاتورة',
-          );
-        }
-        for (const p of origPayments) {
-          if (p.payment_method !== 'cash') continue;
-          const res = await this.engine.recordCashOnlyMovement({
-            cashbox_id: cashboxId,
-            direction: 'out',
-            amount: Number(p.amount),
-            category: 'edit_reversal',
-            reference_type: 'invoice',
-            reference_id: id,
-            user_id: userId,
-            notes: 'تعديل فاتورة — عكس دفع سابق',
-            em,
-          });
-          if (!res.ok) {
-            throw new BadRequestException(
-              `فشل عكس دفع الفاتورة: ${res.error}`,
-            );
-          }
-        }
-      }
+      void cashboxId;
 
       // ── 3) Persist the snapshot to edit history ───────────────────
       const [historyRow] = await em.query(
@@ -1004,39 +995,12 @@ export class PosService {
             snapshot,
           ],
         );
-        if (
-          p.payment_method === 'cash' &&
-          cashboxId &&
-          Number(p.amount) > 0 &&
-          !cashUnchanged
-        ) {
-          // PR-DRIFT-3E — Symmetric short-circuit with step 2: if the
-          // cash effect didn't change we already skipped the OUT leg,
-          // so we must skip the matching IN leg too. The CTs from the
-          // pre-edit invoice stay as-is; the GL side is refreshed by
-          // postInvoiceEdit below.
-          if (!this.engine) {
-            throw new BadRequestException(
-              'FinancialEngineService غير متاح — لا يمكن تعديل الفاتورة',
-            );
-          }
-          const res = await this.engine.recordCashOnlyMovement({
-            cashbox_id: cashboxId,
-            direction: 'in',
-            amount: Number(p.amount),
-            category: 'edit_replay',
-            reference_type: 'invoice',
-            reference_id: id,
-            user_id: userId,
-            notes: 'تعديل فاتورة — دفع جديد',
-            em,
-          });
-          if (!res.ok) {
-            throw new BadRequestException(
-              `فشل تسجيل الدفع الجديد: ${res.error}`,
-            );
-          }
-        }
+        // [REMOVED — PR-FIX-POS-EDIT-CASH-GL-ALIGNMENT]
+        // The matching `edit_replay` recordCashOnlyMovement call used
+        // to live here. See the long-form comment in step 2 above for
+        // the full rationale. Both legs are now owned by the engine
+        // via `posting.postInvoiceEdit` → `reverseByReference` +
+        // `postInvoice` (no `skipCashMovements`).
       }
 
       // ── 8) Update invoice totals + edit marker ────────────────────

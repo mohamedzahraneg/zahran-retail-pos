@@ -423,32 +423,60 @@ export class AccountingPostingService {
     const runner = em ?? this.ds.manager;
     const ctx = `engine:postInvoiceEdit`;
     await runner.query(`SELECT set_config('app.engine_context', $1, true)`, [ctx]);
-    await runner.query(
-      `UPDATE journal_entries
-          SET is_void = TRUE,
-              voided_by = $2,
-              voided_at = NOW(),
-              void_reason = COALESCE(void_reason, '')
-                         || CASE WHEN void_reason IS NULL THEN ''
-                                 ELSE E'\n' END
-                         || 'PR-DRIFT-3E — superseded by postInvoiceEdit '
-                         || 'after invoice edit. The fresh JE on the same '
-                         || 'reference_id holds the corrected GL state.'
-        WHERE reference_type = 'invoice'
-          AND reference_id   = $1
-          AND is_void = FALSE`,
-      [invoiceId, userId],
+
+    // PR-FIX-POS-EDIT-CASH-GL-ALIGNMENT — replace the manual
+    // UPDATE-is_void + skipCashMovements pair with engine-owned
+    // reverse-then-repost. The previous flow had the GL side here
+    // and the CT side in pos.service.editInvoice (edit_reversal +
+    // edit_replay), which broke after the engine added Guard B
+    // (every cash GL line must have a paired in-memory
+    // cash_movement). The fresh post emitted a cash GL leg with no
+    // matching movement → engine rejected with:
+    //   "فشل ترحيل القيد بعد تعديل الفاتورة: cash GL line on 1111
+    //    ... has no paired cashbox_transactions movement"
+    //
+    // The unified flow:
+    //   1. reverseByReference — engine atomically voids any active
+    //      'invoice' JE for this id AND emits inverse CTs
+    //      (category `reversal_sale` for an original `sale`). This
+    //      is idempotent per-original-JE: if called twice, the
+    //      second call no-ops because the original is already void
+    //      (the engine's `reversal_of` mode short-circuits).
+    //   2. postInvoice (without skipCashMovements) — posts the new
+    //      sale JE WITH paired cash_movements, satisfying Guards
+    //      A + B + C.
+    //
+    // Net cashbox effect across both calls:
+    //     original sale CT (+oldCash, IN, untouched)
+    //   + reversal_sale  (-oldCash, OUT)         — from step 1
+    //   + sale           (+newCash, IN)          — from step 2
+    //   = +newCash                               — matches new GL ✓
+    //
+    // For cashUnchanged edits (oldCash === newCash) the two added
+    // CTs offset to zero — visible in the cashbox audit feed as
+    // one extra OUT/IN pair per edit, but the math is exact and
+    // engine guards always pass.
+    //
+    // Idempotency: the route-level IdempotencyInterceptor on
+    // /pos/invoices/:id/edit and /pos/edit-requests/:id/approve
+    // (PR #319) handles replay protection at the API boundary.
+    // Inside the transaction, the engine's per-reference idempotency
+    // (kind+reference_type+reference_id) covers any inner retry.
+    const reverseRes = await this.reverseByReference(
+      'invoice',
+      invoiceId,
+      'PR-FIX-POS-EDIT-CASH-GL-ALIGNMENT — superseded by post-edit repost',
+      userId,
+      em,
     );
-    // PR-FIN-PAYACCT-4D-DRIFT-ROOT-FIX-1: skip cash_movements on the
-    // repost. The cashbox side is already owned by `editInvoice`
-    // (pos.service) which wrote `edit_reversal` + `edit_replay` CT
-    // rows. Without this flag, the engine would emit a fresh `sale`
-    // CT row on top of those, inflating CT vs JE by the new cash
-    // amount on every edit (the bug repro'd on INV-2026-000147 +700
-    // and INV-2026-000116 +200).
-    return this.postInvoice(invoiceId, userId, em, {
-      skipCashMovements: true,
-    });
+    // `reverseByReference` returns null when no active JE exists yet
+    // (e.g., editing an invoice that was never posted, or replay).
+    // Both are safe — fall through to the fresh postInvoice below.
+    if (reverseRes && (reverseRes as any).error) {
+      return { error: (reverseRes as any).error };
+    }
+
+    return this.postInvoice(invoiceId, userId, em);
   }
 
   /**
