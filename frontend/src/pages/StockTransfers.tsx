@@ -1,5 +1,15 @@
-import { useState, useMemo } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+// PR-FE-IDEM-STOCK-PURCHASES-OPS (Sprint 5 / FE-IDEM PR 7C) —
+// per-action reset hooks. Create + receive use modal mount/unmount
+// useEffect (CreateTransferModal, TransferDetailModal). Ship +
+// cancel are page-level row buttons → per-click reset.
+import {
+  resetStockTransferCreateIdempotencyKey,
+  resetStockTransferShipIdempotencyKey,
+  resetStockTransferReceiveIdempotencyKey,
+  resetStockTransferCancelIdempotencyKey,
+} from '@/lib/stock-purchases-idempotency';
 import toast from 'react-hot-toast';
 import {
   Shuffle,
@@ -201,7 +211,14 @@ export default function StockTransfers() {
                           <button
                             className="p-1.5 rounded-lg hover:bg-amber-100 text-amber-700"
                             title="شحن"
-                            onClick={() => shipM.mutate(t.id)}
+                            onClick={() => {
+                              // PR-FE-IDEM-STOCK-PURCHASES-OPS — reset
+                              // per-click so each transfer's ship gets
+                              // a fresh key. Button is disabled while
+                              // shipM.isPending.
+                              resetStockTransferShipIdempotencyKey();
+                              shipM.mutate(t.id);
+                            }}
                             disabled={shipM.isPending}
                           >
                             <Truck size={16} />
@@ -223,6 +240,10 @@ export default function StockTransfers() {
                             title="إلغاء"
                             onClick={() => {
                               if (confirm('تأكيد إلغاء التحويل؟')) {
+                                // PR-FE-IDEM-STOCK-PURCHASES-OPS —
+                                // reset per-click so each transfer's
+                                // cancel gets a fresh key.
+                                resetStockTransferCancelIdempotencyKey();
                                 cancelM.mutate(t.id);
                               }
                             }}
@@ -262,6 +283,15 @@ function CreateTransferModal({ onClose }: { onClose: () => void }) {
   >([]);
   const [searchTerm, setSearchTerm] = useState('');
   const qc = useQueryClient();
+
+  // PR-FE-IDEM-STOCK-PURCHASES-OPS — clean slate on mount, defensive
+  // reset on unmount. Create stock-transfer INSERTs the transfer
+  // header + items rows; duplicate POST without retry-safety creates
+  // 2 transfer headers. Independent key from ship/receive/cancel.
+  useEffect(() => {
+    resetStockTransferCreateIdempotencyKey();
+    return () => resetStockTransferCreateIdempotencyKey();
+  }, []);
 
   const { data: warehouses = [] } = useQuery({
     queryKey: ['warehouses'],
@@ -493,6 +523,14 @@ function TransferDetailModal({
 
   const [receipts, setReceipts] = useState<Record<string, number>>({});
   const [notes, setNotes] = useState('');
+
+  // PR-FE-IDEM-STOCK-PURCHASES-OPS — clean slate on mount, defensive
+  // reset on unmount. Receive writes stock_movements + transfer
+  // status flip. Independent key from create/ship/cancel.
+  useEffect(() => {
+    resetStockTransferReceiveIdempotencyKey();
+    return () => resetStockTransferReceiveIdempotencyKey();
+  }, []);
 
   const receiveM = useMutation({
     mutationFn: (payload: any) =>

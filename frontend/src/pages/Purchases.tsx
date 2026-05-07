@@ -27,6 +27,16 @@ import { settingsApi } from '@/api/settings.api';
 import { productsApi } from '@/api/products.api';
 import { useAuthStore } from '@/stores/auth.store';
 import { useTableSort } from '@/lib/useTableSort';
+// PR-FE-IDEM-STOCK-PURCHASES-OPS (Sprint 5 / FE-IDEM PR 7C) —
+// per-action reset hooks. Receive + cancel are page-level row
+// buttons → per-click reset. Pay uses modal mount/unmount
+// (PayPurchaseModal). cancelReturn route is BE-protected but has
+// no current FE caller — helper gates the URL only.
+import {
+  resetPurchaseReceiveIdempotencyKey,
+  resetPurchaseCancelIdempotencyKey,
+  resetPurchasePayIdempotencyKey,
+} from '@/lib/stock-purchases-idempotency';
 
 const EGP = (n: number | string) =>
   `${Number(n || 0).toLocaleString('en-US', {
@@ -270,6 +280,10 @@ export default function PurchasesPage() {
                                     `هل تريد استلام الفاتورة ${p.purchase_no}؟ سيتم تحديث المخزون تلقائياً`,
                                   )
                                 ) {
+                                  // PR-FE-IDEM-STOCK-PURCHASES-OPS —
+                                  // reset per-click so each purchase's
+                                  // receive gets a fresh key.
+                                  resetPurchaseReceiveIdempotencyKey();
                                   receiveMut.mutate(p.id);
                                 }
                               }}
@@ -308,6 +322,10 @@ export default function PurchasesPage() {
                                       : `إلغاء الفاتورة ${p.purchase_no} سيعكس المخزون والدفعات. المتابعة؟`,
                                   )
                                 ) {
+                                  // PR-FE-IDEM-STOCK-PURCHASES-OPS —
+                                  // reset per-click so each purchase's
+                                  // cancel gets a fresh key.
+                                  resetPurchaseCancelIdempotencyKey();
                                   cancelMut.mutate(p.id);
                                 }
                               }}
@@ -953,6 +971,14 @@ function PayPurchaseModal({
     reference_number: '',
     notes: '',
   });
+
+  // PR-FE-IDEM-STOCK-PURCHASES-OPS — clean slate on mount, defensive
+  // reset on unmount. Pay posts JE + CT (cash/bank), updates
+  // purchase paid_amount. Independent key from receive/cancel.
+  useEffect(() => {
+    resetPurchasePayIdempotencyKey();
+    return () => resetPurchasePayIdempotencyKey();
+  }, []);
 
   const remaining = purchase
     ? Number(purchase.grand_total) - Number(purchase.paid_amount)
