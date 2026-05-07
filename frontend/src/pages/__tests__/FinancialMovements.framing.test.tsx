@@ -1,255 +1,397 @@
 /**
- * FinancialMovements.framing.test.tsx —
- *   PR-FE-ACCOUNTING-FINANCIAL-MOVEMENTS-FRAMING
+ * FinancialMovements.framing.test.tsx
+ * ────────────────────────────────────────────────────────────────────
  *
- * Pins the framing/planning shell behavior of the Financial Movements
- * tracking page:
+ * History:
+ *   · PR-FE-ACCOUNTING-FINANCIAL-MOVEMENTS-FRAMING (#327) introduced
+ *     this page as a framing/planning shell.
+ *   · PR-FE-ACCOUNTING-FINANCIAL-MOVEMENTS-TRACE wires it to the new
+ *     read-only `GET /audit/financial-movements/trace` endpoint.
  *
- *   1. Page renders the title "تتبع الحركات المالية" + "مرحلة التوطير" badge.
- *   2. Renders the framing notice that no movements are created /
- *      modified / reversed from this page.
- *   3. All 5 KPI cards render with their Arabic labels — and EVERY
- *      monetary slot is the em-dash placeholder ("—"); zero numeric
- *      content anywhere on the page.
- *   4. مسارات التتبع section renders the 5 tracking paths with the
- *      "مخطط — غير منفّذ" badge and per-row disabled drilldowns.
- *   5. مصادر الحركة section renders the 7 source families with
- *      per-row disabled drilldowns.
- *   6. حالة الربط matrix renders 7 rows × 4 status columns; every
- *      status cell is the literal "غير مفعل".
- *   7. All 4 page-level CTAs are disabled buttons with "قريبًا"
- *      pills — negative regression guard against any executive
- *      action accidentally going live (trace / open log / export /
- *      view exceptions).
- *   8. Page does NOT import any API client (no network calls), no
- *      `useQuery` / `useMutation`, no FinancialEngine / engineApi /
- *      journalApi / postJournal references in actual code, AND no
- *      executive verbs (reverse / approve / postJournal as actual
- *      function calls — checked with word-boundary regex against
- *      comment-stripped source).
+ * Tests pin the read-only contract:
+ *   1. Title + "قراءة فقط" badge.
+ *   2. Read-only notice present.
+ *   3. Search form has 4 inputs (reference type, q, UUID, idem-key)
+ *      and a submit button.
+ *   4. Default state: empty-hint visible, no result panels.
+ *   5. After submit + mocked successful response: source / summary /
+ *      flags / journal-entries / journal-lines / cashbox-txns /
+ *      stock-movements panels all render.
+ *   6. Permission-denied state on 403.
+ *   7. Empty result on SOURCE_NOT_FOUND.
+ *   8. NO mutation surface — no `useMutation`, no `mutationFn`,
+ *      no `.mutate(`, no executive-verb function calls.
+ *   9. NO repair / fix / approve / void / post buttons in the DOM.
+ *  10. Source-link in the result summary points to a real route.
  */
-import { describe, expect, it } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { readFileSync } from 'node:fs';
 import FinancialMovements from '@/pages/FinancialMovements';
 
+vi.mock('@/api/audit-trace.api', () => ({
+  auditTraceApi: {
+    trace: vi.fn(),
+  },
+}));
+
+import { auditTraceApi } from '@/api/audit-trace.api';
+
 function renderPage() {
+  const qc = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
   return render(
-    <MemoryRouter initialEntries={['/audit/financial-movements']}>
-      <FinancialMovements />
-    </MemoryRouter>,
+    <QueryClientProvider client={qc}>
+      <MemoryRouter initialEntries={['/audit/financial-movements']}>
+        <FinancialMovements />
+      </MemoryRouter>
+    </QueryClientProvider>,
   );
 }
 
-describe('<FinancialMovements /> — PR-FE-ACCOUNTING-FINANCIAL-MOVEMENTS-FRAMING', () => {
-  // ─── 1. Title + stage badge ───────────────────────────────────
-  it('renders the page title "تتبع الحركات المالية" and the "مرحلة التوطير" badge', () => {
-    renderPage();
-    const header = screen.getByTestId('financial-movements-header');
-    expect(within(header).getByText('تتبع الحركات المالية')).toBeInTheDocument();
-    const badge = screen.getByTestId('financial-movements-stage-badge');
-    expect(badge).toBeInTheDocument();
-    expect(badge.textContent).toBe('مرحلة التوطير');
+const HEALTHY_INVOICE_RESPONSE = {
+  source: {
+    type: 'invoice',
+    id: 'inv-1',
+    number: 'INV-2026-000001',
+    date: '2026-04-30T10:00:00Z',
+    user_id: 'u-1',
+    user_name: 'كاشير',
+    customer_id: 'c-1',
+    customer_name: 'عميل تجريبي',
+    supplier_id: null,
+    supplier_name: null,
+    total: '100.00',
+    paid: '100.00',
+    status: 'paid',
+    warehouse_id: 'w-1',
+    cashbox_id: null,
+    notes: null,
+  },
+  journalEntries: [
+    {
+      id: 'je-1',
+      entry_no: 'JV-2026-000001',
+      entry_date: '2026-04-30',
+      description: 'فاتورة مبيعات',
+      reference_type: 'invoice',
+      reference_id: 'inv-1',
+      is_posted: true,
+      is_void: false,
+      void_reason: null,
+      reversal_of: null,
+      posted_by_name: 'كاشير',
+      voided_by_name: null,
+      total_debit: '100.00',
+      total_credit: '100.00',
+      is_balanced: true,
+    },
+  ],
+  journalLines: [
+    {
+      id: 'jl-1',
+      entry_id: 'je-1',
+      line_no: 1,
+      account_id: 'acc-1111',
+      account_code: '1111',
+      account_name: 'الخزينة الرئيسية',
+      debit: '100.00',
+      credit: '0.00',
+      description: 'كاش',
+      cashbox_id: 'cb-1',
+      cashbox_name_ar: 'الخزينة الرئيسية',
+      warehouse_id: null,
+    },
+    {
+      id: 'jl-2',
+      entry_id: 'je-1',
+      line_no: 2,
+      account_id: 'acc-411',
+      account_code: '411',
+      account_name: 'إيرادات المبيعات',
+      debit: '0.00',
+      credit: '100.00',
+      description: 'إيراد',
+      cashbox_id: null,
+      cashbox_name_ar: null,
+      warehouse_id: null,
+    },
+  ],
+  cashboxTransactions: [
+    {
+      id: 12345,
+      cashbox_id: 'cb-1',
+      cashbox_name_ar: 'الخزينة الرئيسية',
+      direction: 'in',
+      amount: '100.00',
+      category: 'sale',
+      reference_type: 'invoice',
+      reference_id: 'inv-1',
+      balance_after: '500.00',
+      notes: 'بيع',
+      user_id: 'u-1',
+      user_name: 'كاشير',
+      created_at: '2026-04-30T10:00:00Z',
+    },
+  ],
+  stockMovements: [
+    {
+      id: 22222,
+      variant_id: 'v-1',
+      variant_sku: 'SKU-1',
+      product_name_ar: 'منتج تجريبي',
+      warehouse_id: 'w-1',
+      warehouse_name_ar: 'المخزن الرئيسي',
+      movement_type: 'sale',
+      direction: 'out',
+      quantity: 1,
+      unit_cost: '60.00',
+      reference_type: 'invoice',
+      reference_id: 'inv-1',
+      notes: null,
+      user_id: 'u-1',
+      user_name: 'كاشير',
+      created_at: '2026-04-30T10:00:00Z',
+    },
+  ],
+  idempotency: [],
+  flags: [],
+  summary: {
+    hasJournal: true,
+    hasCashboxTransaction: true,
+    hasStockMovement: true,
+    journalBalanced: true,
+    cashMatched: true,
+    stockMatched: true,
+    source_total: '100.00',
+    journal_cash_total: '100.00',
+    cashbox_signed_total: '100.00',
+  },
+};
+
+describe('<FinancialMovements /> — read-only trace', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
   });
 
-  // ─── 2. Framing notice ────────────────────────────────────────
-  it('renders the read-only framing notice (no create / no edit / no reverse)', () => {
+  // ─── 1. Title + read-only badge ───────────────────────────────
+  it('renders the page title "تتبع حركة مالية" and the "قراءة فقط" badge', () => {
     renderPage();
-    const notice = screen.getByTestId('financial-movements-framing-notice');
-    expect(notice).toBeInTheDocument();
-    expect(notice.textContent).toMatch(/للتأطير والمراجعة فقط/);
+    expect(
+      screen.getByTestId('financial-movements-header').textContent,
+    ).toMatch(/تتبع حركة مالية/);
+    expect(
+      screen.getByTestId('financial-movements-readonly-badge').textContent,
+    ).toBe('قراءة فقط');
+  });
+
+  // ─── 2. Read-only notice ──────────────────────────────────────
+  it('renders the read-only notice (no create / edit / reverse)', () => {
+    renderPage();
+    const notice = screen.getByTestId('financial-movements-readonly-notice');
+    expect(notice.textContent).toMatch(/للمراجعة فقط/);
     expect(notice.textContent).toMatch(/لا يتم إنشاء أو تعديل أو عكس/);
+    expect(notice.textContent).toMatch(/تشخيص/);
   });
 
-  // ─── 3. KPI cards — all 5 present, ZERO digits anywhere ───────
-  it('renders all 5 KPI cards with Arabic labels', () => {
+  // ─── 3. Search form inputs ────────────────────────────────────
+  it('renders the 4 search inputs and a submit button', () => {
     renderPage();
-    const kpis = screen.getByTestId('financial-movements-kpis');
-    for (const label of [
-      'حركات اليوم',
-      'حركات بحاجة لمراجعة',
-      'قيود مرتبطة',
-      'حركات خزينة مرتبطة',
-      'حركات مخزون مرتبطة',
-    ]) {
-      expect(within(kpis).getByText(label)).toBeInTheDocument();
-    }
+    expect(
+      screen.getByTestId('financial-movements-reference-type'),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTestId('financial-movements-q-input'),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTestId('financial-movements-reference-id-input'),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTestId('financial-movements-idempotency-key-input'),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTestId('financial-movements-search-submit'),
+    ).toBeInTheDocument();
   });
 
-  it.each([
-    'today',
-    'needs-review',
-    'linked-journals',
-    'linked-cashbox',
-    'linked-inventory',
-  ])('KPI card "%s" renders the em-dash placeholder and ZERO digits', (key) => {
+  // ─── 4. Default empty state ───────────────────────────────────
+  it('shows the empty hint by default; no result panels mounted', () => {
     renderPage();
-    const card = screen.getByTestId(`financial-movements-kpi-${key}`);
-    expect(card.textContent).toMatch(/—/);
-    // Defense-in-depth — no digit-bearing content (catches accidental
-    // "0" or "0.00" placeholder that would imply a real computation).
-    expect(card.textContent).not.toMatch(/\d/);
+    expect(
+      screen.getByTestId('financial-movements-empty-hint'),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByTestId('financial-movements-result'),
+    ).toBeNull();
+    expect(
+      screen.queryByTestId('financial-movements-loading'),
+    ).toBeNull();
   });
 
-  // ─── 4. مسارات التتبع section ────────────────────────────────
-  it('renders مسارات التتبع section with 5 tracking paths + "مخطط — غير منفّذ"', () => {
+  // ─── 5. Successful trace renders all panels ───────────────────
+  it('renders the full trace result for a healthy invoice', async () => {
+    (auditTraceApi.trace as any).mockResolvedValueOnce(HEALTHY_INVOICE_RESPONSE);
     renderPage();
-    const section = screen.getByTestId('financial-movements-paths');
-    expect(within(section).getByText('مسارات التتبع')).toBeInTheDocument();
-    expect(within(section).getByText('مخطط — غير منفّذ')).toBeInTheDocument();
-    for (const key of [
-      'invoice-to-journal',
-      'payment-to-cashbox',
-      'return-to-reverse',
-      'count-to-stock-movement',
-      'payroll-to-employee-entry',
-    ]) {
+    fireEvent.change(
+      screen.getByTestId('financial-movements-q-input') as HTMLInputElement,
+      { target: { value: 'INV-2026-000001' } },
+    );
+    fireEvent.click(screen.getByTestId('financial-movements-search-submit'));
+
+    await waitFor(() =>
       expect(
-        screen.getByTestId(`financial-movements-path-${key}`),
-      ).toBeInTheDocument();
-    }
+        screen.getByTestId('financial-movements-result'),
+      ).toBeInTheDocument(),
+    );
+
+    // Source card with the invoice number.
+    expect(
+      screen.getByTestId('financial-movements-source-card').textContent,
+    ).toMatch(/INV-2026-000001/);
+    // Summary card.
+    expect(
+      screen.getByTestId('financial-movements-summary-card'),
+    ).toBeInTheDocument();
+    // Journal entries / lines / cashbox txns / stock movements panels.
+    expect(
+      screen.getByTestId('financial-movements-journal-entries'),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTestId('financial-movements-journal-lines'),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTestId('financial-movements-cashbox-transactions'),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTestId('financial-movements-stock-movements'),
+    ).toBeInTheDocument();
+    // Healthy invoice → flags-empty panel, NOT a populated flags panel.
+    expect(
+      screen.getByTestId('financial-movements-flags-empty'),
+    ).toBeInTheDocument();
   });
 
-  it.each([
-    'invoice-to-journal',
-    'payment-to-cashbox',
-    'return-to-reverse',
-    'count-to-stock-movement',
-    'payroll-to-employee-entry',
-  ])('tracking path drilldown "%s" is a disabled button (not a link)', (key) => {
+  // ─── 6. Permission-denied state on 403 ────────────────────────
+  it('renders the permission-denied state when API returns 403', async () => {
+    const err: any = new Error('Forbidden');
+    err.response = { status: 403, data: { message: 'forbidden' } };
+    (auditTraceApi.trace as any).mockRejectedValueOnce(err);
     renderPage();
-    const btn = screen.getByTestId(`financial-movements-path-drilldown-${key}`);
-    expect(btn.tagName.toLowerCase()).toBe('button');
-    expect(btn).toBeDisabled();
-    expect(btn.getAttribute('aria-disabled')).toBe('true');
-    expect(btn.getAttribute('title')).toBe('متاح في تحديث لاحق');
-    expect(btn.textContent).toMatch(/قريبًا/);
+    fireEvent.change(
+      screen.getByTestId('financial-movements-q-input') as HTMLInputElement,
+      { target: { value: 'INV-X' } },
+    );
+    fireEvent.click(screen.getByTestId('financial-movements-search-submit'));
+
+    await waitFor(() =>
+      expect(
+        screen.getByTestId('financial-movements-permission-denied'),
+      ).toBeInTheDocument(),
+    );
+    expect(
+      screen.getByTestId('financial-movements-permission-denied').textContent,
+    ).toMatch(/audit\.view/);
   });
 
-  // ─── 5. مصادر الحركة section ────────────────────────────────
-  it('renders مصادر الحركة section with 7 source families', () => {
+  // ─── 7. SOURCE_NOT_FOUND empty result ─────────────────────────
+  it('renders the no-result state when the BE finds no matching source', async () => {
+    (auditTraceApi.trace as any).mockResolvedValueOnce({
+      source: null,
+      journalEntries: [],
+      journalLines: [],
+      cashboxTransactions: [],
+      stockMovements: [],
+      idempotency: [],
+      flags: [
+        {
+          code: 'SOURCE_NOT_FOUND',
+          severity: 'warning',
+          message_ar: 'لم يتم العثور على حركة مرتبطة بهذا المرجع.',
+        },
+      ],
+      summary: {
+        hasJournal: false,
+        hasCashboxTransaction: false,
+        hasStockMovement: false,
+        journalBalanced: null,
+        cashMatched: null,
+        stockMatched: null,
+        source_total: null,
+        journal_cash_total: null,
+        cashbox_signed_total: null,
+      },
+    });
     renderPage();
-    const section = screen.getByTestId('financial-movements-sources');
-    expect(within(section).getByText('مصادر الحركة')).toBeInTheDocument();
-    for (const label of [
-      'المبيعات',
-      'المرتجعات',
-      'المصروفات',
-      'المشتريات',
-      'الخزائن',
-      'المخزون',
-      'الموظفين والرواتب',
-    ]) {
-      expect(within(section).getByText(label)).toBeInTheDocument();
-    }
+    fireEvent.change(
+      screen.getByTestId('financial-movements-q-input') as HTMLInputElement,
+      { target: { value: 'NOPE' } },
+    );
+    fireEvent.click(screen.getByTestId('financial-movements-search-submit'));
+
+    await waitFor(() =>
+      expect(
+        screen.getByTestId('financial-movements-no-result'),
+      ).toBeInTheDocument(),
+    );
+    expect(
+      screen.getByTestId('financial-movements-no-result').textContent,
+    ).toMatch(/لا توجد نتيجة/);
   });
 
-  it.each([
-    'sales',
-    'returns',
-    'expenses',
-    'purchases',
-    'cashboxes',
-    'inventory',
-    'payroll',
-  ])('source-family drilldown "%s" is a disabled button (not a link)', (key) => {
-    renderPage();
-    const btn = screen.getByTestId(`financial-movements-source-drilldown-${key}`);
-    expect(btn.tagName.toLowerCase()).toBe('button');
-    expect(btn).toBeDisabled();
-    expect(btn.getAttribute('aria-disabled')).toBe('true');
-    expect(btn.getAttribute('title')).toBe('متاح في تحديث لاحق');
-    expect(btn.textContent).toMatch(/قريبًا/);
-  });
-
-  // ─── 6. حالة الربط matrix — every status is "غير مفعل" ───────
-  it('renders حالة الربط matrix with 7 rows + 4 status columns', () => {
-    renderPage();
-    const section = screen.getByTestId('financial-movements-link-status');
-    expect(within(section).getByText('حالة الربط')).toBeInTheDocument();
-    // Column headers — scope to the <thead> because two header
-    // labels ("الخزينة" and "المخزون") happen to match row labels
-    // that ARE legitimate Arabic terms for the same domain. Using
-    // a <thead> scope keeps the assertion specific to the column
-    // header without an ambiguity error.
-    const thead = section.querySelector('thead') as HTMLElement | null;
-    expect(thead).not.toBeNull();
-    for (const header of ['المصدر', 'القيد', 'الخزينة', 'المخزون', 'حالة المراجعة']) {
-      expect(within(thead as HTMLElement).getByText(header)).toBeInTheDocument();
-    }
-  });
-
-  it.each([
-    'sales',
-    'returns',
-    'expenses',
-    'purchases',
-    'cashboxes',
-    'inventory',
-    'payroll',
-  ])('link-status row "%s" shows "غير مفعل" in all 4 status columns', (key) => {
-    renderPage();
-    const row = screen.getByTestId(`financial-movements-link-status-${key}`);
-    expect(row).toBeInTheDocument();
-    for (const col of ['journal', 'cashbox', 'inventory', 'review']) {
-      const chip = within(row).getByTestId(
-        `financial-movements-link-${col}-${key}`,
-      );
-      expect(chip.textContent).toBe('غير مفعل');
-    }
-  });
-
-  // ─── 7. CTAs are disabled — NEGATIVE REGRESSION ──────────────
-  it.each([
-    { key: 'trace-movement', label: 'تتبع حركة' },
-    { key: 'open-review-log', label: 'فتح سجل المراجعة' },
-    { key: 'export-trace', label: 'تصدير أثر الحركة' },
-    { key: 'view-exceptions', label: 'عرض الاستثناءات' },
-  ])('CTA "$label" is rendered DISABLED with a "قريبًا" pill', ({ key, label }) => {
-    renderPage();
-    const cta = screen.getByTestId(`financial-movements-cta-${key}`);
-    expect(cta.tagName.toLowerCase()).toBe('button');
-    expect(cta).toBeDisabled();
-    expect(cta.getAttribute('aria-disabled')).toBe('true');
-    expect(cta.getAttribute('title')).toBe('متاح في تحديث لاحق');
-    expect(cta.textContent).toMatch(label);
-    expect(cta.textContent).toMatch(/قريبًا/);
-  });
-
-  // ─── 8. Page source has zero API imports + zero executive verbs ─
-  it('page source imports zero API clients (no network in framing phase)', () => {
-    // Same pattern as Zakat.framing + FinancialReports.framing —
-    // strip /* ... */ and // ... line comments before scanning so
-    // the page's own negative-control header (which legitimately
-    // MENTIONS strings like "FinancialEngine" / "reverse" / "void"
-    // / "approve" / "post" to document what the page intentionally
-    // does NOT do) doesn't false-trigger these regex guards. Only
-    // actual code paths are checked.
+  // ─── 8/9. NO mutation surface + NO repair buttons ─────────────
+  it('page source has no mutation surface, no executive-verb calls', () => {
     const src = readFileSync('src/pages/FinancialMovements.tsx', 'utf-8');
     const code = src
       .replace(/\/\*[\s\S]*?\*\//g, '')
       .replace(/^\s*\/\/.*$/gm, '');
 
-    // No `import ... from '@/api/...'` and no react-query data hooks.
-    expect(code).not.toMatch(/from ['"]@\/api\//);
-    expect(code).not.toMatch(/\buseQuery\b|\buseMutation\b/);
+    // No react-query mutation hooks.
+    expect(code).not.toMatch(/\buseMutation\b/);
+    expect(code).not.toMatch(/\bmutationFn\b/);
+    expect(code).not.toMatch(/\.mutate\(/);
 
-    // No FinancialEngine / engineApi / journal-API / postJournal.
+    // No FinancialEngine / engineApi / journalApi / postJournal in code.
     expect(code).not.toMatch(/\bFinancialEngine\b/);
     expect(code).not.toMatch(/\bengineApi\.\w+/);
     expect(code).not.toMatch(/\bjournalApi\.\w+/);
     expect(code).not.toMatch(/\bpostJournal\b/);
 
-    // No executive verbs as actual function calls. The regex looks
-    // for the verb followed by `(`, which catches `reverse(...)`,
-    // `voidThing(...)`, `approve(...)`, `postSomething(...)` while
-    // letting English nouns inside string literals or identifiers
-    // pass — the page intentionally uses words like "reverse" /
-    // "void" inside Arabic copy and JSX labels.
+    // Executive-verb function calls forbidden.
+    expect(code).not.toMatch(/\bapprove\(/);
+    expect(code).not.toMatch(/\bpay\(/);
     expect(code).not.toMatch(/\breverse\(/);
     expect(code).not.toMatch(/\bvoid[A-Z]\w*\(/);
-    expect(code).not.toMatch(/\bapprove\(/);
     expect(code).not.toMatch(/\bpost[A-Z]\w*\(/);
+    expect(code).not.toMatch(/\brepair\(/);
+
+    // No mutation HTTP verbs are even imported as helpers.
+    expect(code).not.toMatch(/api\.post\(/);
+    expect(code).not.toMatch(/api\.put\(/);
+    expect(code).not.toMatch(/api\.patch\(/);
+    expect(code).not.toMatch(/api\.delete\(/);
+  });
+
+  // ─── 10. Source-link in summary points to an existing route ──
+  it('source-link routes to an existing operational page (invoice → /invoices)', async () => {
+    (auditTraceApi.trace as any).mockResolvedValueOnce(HEALTHY_INVOICE_RESPONSE);
+    renderPage();
+    fireEvent.change(
+      screen.getByTestId('financial-movements-q-input') as HTMLInputElement,
+      { target: { value: 'INV-2026-000001' } },
+    );
+    fireEvent.click(screen.getByTestId('financial-movements-search-submit'));
+
+    await waitFor(() =>
+      expect(
+        screen.getByTestId('financial-movements-source-link'),
+      ).toBeInTheDocument(),
+    );
+    const link = screen.getByTestId(
+      'financial-movements-source-link',
+    ) as HTMLAnchorElement;
+    expect(link.getAttribute('href')).toBe('/invoices');
   });
 });

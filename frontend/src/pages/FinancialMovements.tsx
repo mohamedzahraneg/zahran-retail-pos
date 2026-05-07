@@ -1,322 +1,194 @@
 /**
- * FinancialMovements — PR-FE-ACCOUNTING-FINANCIAL-MOVEMENTS-FRAMING
+ * FinancialMovements — read-only financial-movement trace tool
  * ────────────────────────────────────────────────────────────────────
  *
- * Framing / planning shell for the upcoming Financial Movements
- * tracking workspace. Renders an empty-state version of the future
- * page (KPI cards, tracking paths, source families, link-status
- * matrix, CTAs) so the operator can see the structure before any
- * of the audit-trail logic ships.
+ * History:
+ *   · PR-FE-ACCOUNTING-FINANCIAL-MOVEMENTS-FRAMING (#327) introduced
+ *     this page as a framing/planning shell.
+ *   · PR-FE-ACCOUNTING-FINANCIAL-MOVEMENTS-TRACE (this PR) wires it
+ *     to the new read-only `GET /audit/financial-movements/trace`
+ *     endpoint and surfaces the full cross-table trace (source +
+ *     journal entries + journal lines + cashbox transactions +
+ *     stock movements + diagnostic flags).
  *
- * Strict guarantees (mirrored from PR #325 Zakat / PR #326
- * FinancialReports framing):
- *   · ZERO writes — no JE, no CT, no migrations, no engine touches
- *   · ZERO reverse / void / approve / post actions
- *   · ZERO API calls — page imports zero @/api clients
- *   · ZERO formula changes — no calculations performed
- *   · ZERO fake numbers — every monetary slot is "—"; every status
- *     cell is the literal Arabic string "غير مفعل"
- *   · CTAs render disabled with "قريبًا" pills
+ * Strict guarantees:
+ *   · ZERO mutations — only `useQuery` (GET) is used; no
+ *     `useMutation`, no `mutationFn`, no `.mutate(`
+ *   · ZERO repair / fix / approve / void / post buttons — every
+ *     action button on the page is either a search trigger or a
+ *     read-only "open source page" link
+ *   · ZERO computed financial totals — totals shown are exactly the
+ *     values returned by the BE service
+ *   · Permission errors (403) are caught and rendered as a clear
+ *     "no permission" message instead of a console exception
  *
- * Permission gate (handled at the route level):
- *   `finance.dashboard.view` — admin gets it via the `*` wildcard;
- *   manager / accountant inherit per the existing sidebar entry.
+ * Permission gate (route-level):
+ *   `finance.dashboard.view` (existing, mirrors the original framing
+ *   page; the BE endpoint itself enforces `audit.view`).
  */
 
-import { useMemo } from 'react';
+import { useState, useMemo } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import {
   AlertTriangle,
-  ArrowRightLeft,
+  ArrowLeftRight,
   BookOpen,
+  CheckCircle2,
   ClipboardList,
   Coins,
-  FileSearch,
-  FileSpreadsheet,
+  ExternalLink,
   History,
+  Info,
   Layers,
   Receipt,
-  ReceiptText,
+  Search,
   ShieldAlert,
   Sparkles,
-  Truck,
-  Undo2,
-  Users,
   Wallet,
+  X,
 } from 'lucide-react';
+import {
+  auditTraceApi,
+  type TraceFlagSeverity,
+  type TraceParams,
+  type TraceReferenceType,
+  type TraceResult,
+} from '@/api/audit-trace.api';
 
-/** Visual placeholder for any monetary / numeric KPI. */
-const EMPTY = '—';
-
-/** Status literal used in the link-status matrix. Pure string — never
- *  rendered as a computed value. */
-const STATUS_NOT_WIRED = 'غير مفعل';
-
-interface KpiCardSpec {
-  key: string;
+interface ReferenceTypeOption {
+  value: '' | TraceReferenceType;
   label: string;
-  icon: typeof History;
-  tone: 'brand' | 'emerald' | 'rose' | 'amber' | 'indigo';
-  hint: string;
 }
 
-interface TrackingPathSpec {
-  key: string;
-  from_label: string;
-  to_label: string;
-  description_ar: string;
-  icon: typeof ArrowRightLeft;
-}
-
-interface SourceFamilySpec {
-  key: string;
-  label: string;
-  source_ar: string;
-  icon: typeof Wallet;
-}
-
-interface LinkStatusRowSpec {
-  key: string;
-  source_label: string;
-  journal_status_ar: string;
-  cashbox_status_ar: string;
-  inventory_status_ar: string;
-  review_status_ar: string;
-}
-
-interface CtaSpec {
-  key: string;
-  label: string;
-  icon: typeof FileSearch;
-  description: string;
-}
-
-const KPI_CARDS: KpiCardSpec[] = [
-  {
-    key: 'today',
-    label: 'حركات اليوم',
-    icon: History,
-    tone: 'brand',
-    hint: 'إجمالي الحركات المالية المسجلة في اليوم الحالي',
-  },
-  {
-    key: 'needs-review',
-    label: 'حركات بحاجة لمراجعة',
-    icon: ShieldAlert,
-    tone: 'amber',
-    hint: 'حركات معلّقة أو فيها استثناءات تحتاج فحصًا يدويًا',
-  },
-  {
-    key: 'linked-journals',
-    label: 'قيود مرتبطة',
-    icon: BookOpen,
-    tone: 'indigo',
-    hint: 'القيود المحاسبية المرتبطة بهذه الحركات',
-  },
-  {
-    key: 'linked-cashbox',
-    label: 'حركات خزينة مرتبطة',
-    icon: Wallet,
-    tone: 'emerald',
-    hint: 'حركات الخزائن والبنوك المرتبطة بنفس المصدر',
-  },
-  {
-    key: 'linked-inventory',
-    label: 'حركات مخزون مرتبطة',
-    icon: Layers,
-    tone: 'rose',
-    hint: 'حركات المخزون الناتجة عن الفواتير والمرتجعات والجرد',
-  },
+const REFERENCE_TYPE_OPTIONS: ReferenceTypeOption[] = [
+  { value: '', label: 'تخمين تلقائي' },
+  { value: 'invoice', label: 'فاتورة مبيعات' },
+  { value: 'return', label: 'مرتجع' },
+  { value: 'purchase', label: 'فاتورة مشتريات' },
+  { value: 'expense', label: 'مصروف' },
+  { value: 'shift', label: 'وردية' },
+  { value: 'customer_payment', label: 'دفعة عميل' },
+  { value: 'supplier_payment', label: 'دفعة مورد' },
+  { value: 'journal_entry', label: 'قيد محاسبي' },
 ];
 
-const TRACKING_PATHS: TrackingPathSpec[] = [
-  {
-    key: 'invoice-to-journal',
-    from_label: 'الفاتورة',
-    to_label: 'القيد',
-    description_ar:
-      'تحقق أن كل فاتورة مبيعات أنتجت قيدًا محاسبيًا متوازنًا',
-    icon: ReceiptText,
-  },
-  {
-    key: 'payment-to-cashbox',
-    from_label: 'الدفعة',
-    to_label: 'الخزينة',
-    description_ar:
-      'تحقق أن كل دفعة عميل/مورد ولّدت حركة خزينة مقابلة',
-    icon: Wallet,
-  },
-  {
-    key: 'return-to-reverse',
-    from_label: 'المرتجع',
-    to_label: 'العكس المحاسبي',
-    description_ar:
-      'تحقق أن كل مرتجع أنتج قيدًا عكسيًا وسحبًا/إعادة للمخزون',
-    icon: Undo2,
-  },
-  {
-    key: 'count-to-stock-movement',
-    from_label: 'الجرد',
-    to_label: 'حركة المخزون',
-    description_ar:
-      'تحقق أن فروقات الجرد الفعلي ولّدت حركات تسوية مرئية',
-    icon: Layers,
-  },
-  {
-    key: 'payroll-to-employee-entry',
-    from_label: 'الرواتب',
-    to_label: 'قيد الموظف',
-    description_ar:
-      'تحقق أن قيد الراتب وصل إلى أرصدة الموظف ودفتره',
-    icon: Users,
-  },
-];
+const REFERENCE_TYPE_LABEL: Record<TraceReferenceType, string> = {
+  invoice: 'فاتورة مبيعات',
+  return: 'مرتجع',
+  purchase: 'فاتورة مشتريات',
+  expense: 'مصروف',
+  shift: 'وردية',
+  customer_payment: 'دفعة عميل',
+  supplier_payment: 'دفعة مورد',
+  journal_entry: 'قيد محاسبي',
+};
 
-const SOURCE_FAMILIES: SourceFamilySpec[] = [
-  {
-    key: 'sales',
-    label: 'المبيعات',
-    source_ar: 'مصدر مقترح: فواتير POS وفواتير المبيعات',
-    icon: ReceiptText,
+const SEVERITY_PILL: Record<
+  TraceFlagSeverity,
+  { label: string; className: string }
+> = {
+  info: {
+    label: 'ملاحظة',
+    className: 'bg-slate-50 text-slate-700 border border-slate-200',
   },
-  {
-    key: 'returns',
-    label: 'المرتجعات',
-    source_ar: 'مصدر مقترح: مرتجعات العملاء ومرتجعات المشتريات',
-    icon: Undo2,
+  warning: {
+    label: 'تنبيه',
+    className: 'bg-amber-50 text-amber-700 border border-amber-200',
   },
-  {
-    key: 'expenses',
-    label: 'المصروفات',
-    source_ar: 'مصدر مقترح: المصروفات اليومية والمصاريف الدورية',
-    icon: Receipt,
+  error: {
+    label: 'خلل',
+    className: 'bg-rose-50 text-rose-700 border border-rose-200',
   },
-  {
-    key: 'purchases',
-    label: 'المشتريات',
-    source_ar: 'مصدر مقترح: فواتير الموردين ودفعاتها',
-    icon: Truck,
-  },
-  {
-    key: 'cashboxes',
-    label: 'الخزائن',
-    source_ar: 'مصدر مقترح: حركات الخزائن والبنوك والمحافظ',
-    icon: Wallet,
-  },
-  {
-    key: 'inventory',
-    label: 'المخزون',
-    source_ar: 'مصدر مقترح: تسويات المخزون وتحويلاته والجرد',
-    icon: Layers,
-  },
-  {
-    key: 'payroll',
-    label: 'الموظفين والرواتب',
-    source_ar: 'مصدر مقترح: حضور وأجور وعلاوات وخصومات الموظفين',
-    icon: Users,
-  },
-];
+};
 
-const LINK_STATUS_ROWS: LinkStatusRowSpec[] = [
-  {
-    key: 'sales',
-    source_label: 'المبيعات',
-    journal_status_ar: STATUS_NOT_WIRED,
-    cashbox_status_ar: STATUS_NOT_WIRED,
-    inventory_status_ar: STATUS_NOT_WIRED,
-    review_status_ar: STATUS_NOT_WIRED,
-  },
-  {
-    key: 'returns',
-    source_label: 'المرتجعات',
-    journal_status_ar: STATUS_NOT_WIRED,
-    cashbox_status_ar: STATUS_NOT_WIRED,
-    inventory_status_ar: STATUS_NOT_WIRED,
-    review_status_ar: STATUS_NOT_WIRED,
-  },
-  {
-    key: 'expenses',
-    source_label: 'المصروفات',
-    journal_status_ar: STATUS_NOT_WIRED,
-    cashbox_status_ar: STATUS_NOT_WIRED,
-    inventory_status_ar: STATUS_NOT_WIRED,
-    review_status_ar: STATUS_NOT_WIRED,
-  },
-  {
-    key: 'purchases',
-    source_label: 'المشتريات',
-    journal_status_ar: STATUS_NOT_WIRED,
-    cashbox_status_ar: STATUS_NOT_WIRED,
-    inventory_status_ar: STATUS_NOT_WIRED,
-    review_status_ar: STATUS_NOT_WIRED,
-  },
-  {
-    key: 'cashboxes',
-    source_label: 'الخزائن',
-    journal_status_ar: STATUS_NOT_WIRED,
-    cashbox_status_ar: STATUS_NOT_WIRED,
-    inventory_status_ar: STATUS_NOT_WIRED,
-    review_status_ar: STATUS_NOT_WIRED,
-  },
-  {
-    key: 'inventory',
-    source_label: 'المخزون',
-    journal_status_ar: STATUS_NOT_WIRED,
-    cashbox_status_ar: STATUS_NOT_WIRED,
-    inventory_status_ar: STATUS_NOT_WIRED,
-    review_status_ar: STATUS_NOT_WIRED,
-  },
-  {
-    key: 'payroll',
-    source_label: 'الموظفين والرواتب',
-    journal_status_ar: STATUS_NOT_WIRED,
-    cashbox_status_ar: STATUS_NOT_WIRED,
-    inventory_status_ar: STATUS_NOT_WIRED,
-    review_status_ar: STATUS_NOT_WIRED,
-  },
-];
+const EGP = (n: string | number | null | undefined) => {
+  if (n === null || n === undefined || n === '') return '—';
+  const v = Number(n);
+  if (!Number.isFinite(v)) return '—';
+  return `${v.toLocaleString('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })} ج.م`;
+};
 
-const CTAS: CtaSpec[] = [
-  {
-    key: 'trace-movement',
-    label: 'تتبع حركة',
-    icon: FileSearch,
-    description: 'عرض شجرة الحركة من المصدر حتى القيد والخزينة والمخزون.',
-  },
-  {
-    key: 'open-review-log',
-    label: 'فتح سجل المراجعة',
-    icon: ClipboardList,
-    description: 'استعراض سجل التغييرات والمراجعات الخاصة بالحركة.',
-  },
-  {
-    key: 'export-trace',
-    label: 'تصدير أثر الحركة',
-    icon: FileSpreadsheet,
-    description: 'تنزيل تقرير مفصّل بأثر الحركة عبر الأنظمة المرتبطة.',
-  },
-  {
-    key: 'view-exceptions',
-    label: 'عرض الاستثناءات',
-    icon: ShieldAlert,
-    description: 'حركات بدون قيد مقابل أو فروقات في الربط.',
-  },
-];
-
-const TONE_BG: Record<KpiCardSpec['tone'], string> = {
-  brand: 'bg-brand-50 text-brand-700',
-  emerald: 'bg-emerald-50 text-emerald-700',
-  rose: 'bg-rose-50 text-rose-700',
-  amber: 'bg-amber-50 text-amber-700',
-  indigo: 'bg-indigo-50 text-indigo-700',
+const fmtDate = (s: string | null | undefined) => {
+  if (!s) return '—';
+  try {
+    return new Date(s).toLocaleString('en-US', {
+      dateStyle: 'short',
+      timeStyle: 'short',
+    });
+  } catch {
+    return s;
+  }
 };
 
 export function FinancialMovements() {
-  // Stable references — same pattern used in Zakat.tsx /
-  // FinancialReports.tsx.
-  const kpis = useMemo(() => KPI_CARDS, []);
-  const paths = useMemo(() => TRACKING_PATHS, []);
-  const sources = useMemo(() => SOURCE_FAMILIES, []);
-  const links = useMemo(() => LINK_STATUS_ROWS, []);
+  const [draftReferenceType, setDraftReferenceType] = useState<
+    '' | TraceReferenceType
+  >('');
+  const [draftQuery, setDraftQuery] = useState('');
+  const [draftReferenceId, setDraftReferenceId] = useState('');
+  const [draftIdemKey, setDraftIdemKey] = useState('');
+
+  const [submitted, setSubmitted] = useState<TraceParams | null>(null);
+
+  const { data, isFetching, error } = useQuery<TraceResult, any>({
+    queryKey: ['audit-trace', submitted],
+    queryFn: () => auditTraceApi.trace(submitted as TraceParams),
+    enabled: !!submitted,
+    staleTime: 30_000,
+    retry: false,
+  });
+
+  const isPermissionError = useMemo(() => {
+    if (!error) return false;
+    const status = error?.response?.status;
+    return status === 401 || status === 403;
+  }, [error]);
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const q = draftQuery.trim();
+    const refId = draftReferenceId.trim();
+    if (!q && !refId) return;
+    setSubmitted({
+      reference_type: draftReferenceType || undefined,
+      reference_id: refId || undefined,
+      q: q || undefined,
+      idempotency_key: draftIdemKey.trim() || undefined,
+    });
+  };
+
+  const handleClear = () => {
+    setDraftReferenceType('');
+    setDraftQuery('');
+    setDraftReferenceId('');
+    setDraftIdemKey('');
+    setSubmitted(null);
+  };
+
+  const sourceLink = (() => {
+    const src = data?.source;
+    if (!src) return null;
+    switch (src.type) {
+      case 'invoice':
+        return { href: '/invoices', label: 'فتح صفحة الفواتير' };
+      case 'return':
+        return { href: '/returns', label: 'فتح صفحة المرتجعات' };
+      case 'purchase':
+        return { href: '/purchases', label: 'فتح صفحة المشتريات' };
+      case 'expense':
+        return { href: '/daily-expenses', label: 'فتح المصروفات' };
+      case 'shift':
+        return { href: '/shifts', label: 'فتح الورديات' };
+      case 'journal_entry':
+        return { href: '/accounts', label: 'فتح القيود اليومية' };
+      case 'customer_payment':
+      case 'supplier_payment':
+        return { href: '/cashboxes', label: 'فتح الخزائن' };
+    }
+  })();
 
   return (
     <div
@@ -336,16 +208,16 @@ export function FinancialMovements() {
           <div className="text-right">
             <div className="flex items-center gap-2 flex-wrap">
               <h1 className="text-xl lg:text-2xl font-black text-slate-900">
-                تتبع الحركات المالية
+                تتبع حركة مالية
               </h1>
               <span
-                className="text-[10px] font-bold rounded-full bg-amber-100 text-amber-800 border border-amber-200 px-2 py-0.5"
-                data-testid="financial-movements-stage-badge"
+                className="text-[10px] font-bold rounded-full bg-emerald-100 text-emerald-800 border border-emerald-200 px-2 py-0.5"
+                data-testid="financial-movements-readonly-badge"
               >
-                مرحلة التوطير
+                قراءة فقط
               </span>
             </div>
-            <p className="text-xs text-slate-500 mt-1 max-w-xl">
+            <p className="text-xs text-slate-500 mt-1 max-w-2xl">
               مراجعة مسار الحركة المالية من المصدر التشغيلي حتى القيد
               والخزينة والمخزون.
             </p>
@@ -353,287 +225,714 @@ export function FinancialMovements() {
         </div>
       </header>
 
-      {/* ── Framing notice (page is read-only) ─────────────────────── */}
+      {/* ── Read-only notice ───────────────────────────────────────── */}
       <div
         className="rounded-2xl border border-amber-200 bg-amber-50/70 px-4 py-3 flex items-start gap-3"
-        data-testid="financial-movements-framing-notice"
+        data-testid="financial-movements-readonly-notice"
       >
         <AlertTriangle
           size={18}
           className="text-amber-600 shrink-0 mt-0.5"
         />
         <div className="text-[12px] text-amber-900 leading-relaxed">
-          هذه الصفحة للتأطير والمراجعة فقط. لا يتم إنشاء أو تعديل أو
-          عكس أي حركة مالية من هنا حاليًا.
+          هذه الصفحة للمراجعة فقط. لا يتم إنشاء أو تعديل أو عكس أي حركة
+          مالية من هنا. مؤشرات الخلل تُعرض للتشخيص فقط ولا تشغّل أي إصلاح
+          تلقائي.
         </div>
       </div>
 
-      {/* ── KPI cards (5) ──────────────────────────────────────────── */}
-      <section
-        className="grid grid-cols-2 lg:grid-cols-5 gap-3"
-        data-testid="financial-movements-kpis"
+      {/* ── Search form ────────────────────────────────────────────── */}
+      <form
+        onSubmit={handleSubmit}
+        className="rounded-2xl border border-slate-200 bg-white p-5 space-y-3"
+        data-testid="financial-movements-search-form"
       >
-        {kpis.map((c) => {
-          const Icon = c.icon;
-          return (
-            <div
-              key={c.key}
-              className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"
-              data-testid={`financial-movements-kpi-${c.key}`}
+        <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
+          <div className="md:col-span-3 flex flex-col gap-1">
+            <label className="text-[11px] font-bold text-slate-600">
+              نوع المرجع
+            </label>
+            <select
+              value={draftReferenceType}
+              onChange={(e) =>
+                setDraftReferenceType(e.target.value as '' | TraceReferenceType)
+              }
+              className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-[12px] text-slate-700 outline-none focus:bg-white focus:border-brand-300"
+              data-testid="financial-movements-reference-type"
             >
-              <div className="flex items-center justify-between gap-2">
-                <div
-                  className={`w-9 h-9 rounded-xl flex items-center justify-center ${TONE_BG[c.tone]}`}
-                >
-                  <Icon size={18} />
-                </div>
-              </div>
-              <div className="mt-3 text-[11px] font-bold text-slate-500">
-                {c.label}
-              </div>
-              <div className="mt-1 text-xl font-black text-slate-900 tabular-nums">
-                {EMPTY}
-              </div>
-              <div className="mt-1 text-[10px] text-slate-400 leading-snug">
-                {c.hint}
-              </div>
-            </div>
-          );
-        })}
-      </section>
-
-      {/* ── Tracking paths ─────────────────────────────────────────── */}
-      <section
-        className="rounded-2xl border border-slate-200 bg-white p-5 space-y-3"
-        data-testid="financial-movements-paths"
-      >
-        <div className="flex items-center gap-2">
-          <ArrowRightLeft size={18} className="text-slate-500" />
-          <h2 className="text-sm font-black text-slate-800">
-            مسارات التتبع
-          </h2>
-          <span className="text-[10px] font-bold rounded-full bg-slate-100 text-slate-500 px-1.5 py-0.5">
-            مخطط — غير منفّذ
-          </span>
-        </div>
-        <ul className="divide-y divide-slate-100">
-          {paths.map((p) => {
-            const Icon = p.icon;
-            return (
-              <li
-                key={p.key}
-                className="flex items-center justify-between gap-3 py-3"
-                data-testid={`financial-movements-path-${p.key}`}
-              >
-                <div className="flex items-center gap-3 min-w-0">
-                  <div className="w-8 h-8 rounded-lg bg-slate-50 text-slate-500 flex items-center justify-center shrink-0">
-                    <Icon size={16} />
-                  </div>
-                  <div className="min-w-0">
-                    <div className="text-[12px] font-bold text-slate-800 flex items-center gap-1">
-                      <span>من {p.from_label}</span>
-                      <ArrowRightLeft size={10} className="text-slate-400" />
-                      <span>إلى {p.to_label}</span>
-                    </div>
-                    <div className="text-[10px] text-slate-400">
-                      {p.description_ar}
-                    </div>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  disabled
-                  aria-disabled="true"
-                  title="متاح في تحديث لاحق"
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-white text-slate-400 border border-dashed border-slate-200 px-2.5 py-1.5 text-[10px] font-bold cursor-not-allowed shrink-0"
-                  data-testid={`financial-movements-path-drilldown-${p.key}`}
-                >
-                  استعراض
-                  <span className="text-[8px] font-bold rounded-full bg-slate-100 text-slate-500 px-1.5 py-0.5 leading-none">
-                    قريبًا
-                  </span>
-                </button>
-              </li>
-            );
-          })}
-        </ul>
-      </section>
-
-      {/* ── Source families ────────────────────────────────────────── */}
-      <section
-        className="rounded-2xl border border-slate-200 bg-white p-5 space-y-3"
-        data-testid="financial-movements-sources"
-      >
-        <div className="flex items-center gap-2">
-          <Coins size={18} className="text-slate-500" />
-          <h2 className="text-sm font-black text-slate-800">
-            مصادر الحركة
-          </h2>
-          <span className="text-[10px] font-bold rounded-full bg-slate-100 text-slate-500 px-1.5 py-0.5">
-            مخطط — غير منفّذ
-          </span>
-        </div>
-        <ul className="divide-y divide-slate-100">
-          {sources.map((s) => {
-            const Icon = s.icon;
-            return (
-              <li
-                key={s.key}
-                className="flex items-center justify-between gap-3 py-3"
-                data-testid={`financial-movements-source-${s.key}`}
-              >
-                <div className="flex items-center gap-3 min-w-0">
-                  <div className="w-8 h-8 rounded-lg bg-slate-50 text-slate-500 flex items-center justify-center shrink-0">
-                    <Icon size={16} />
-                  </div>
-                  <div className="min-w-0">
-                    <div className="text-[12px] font-bold text-slate-800">
-                      {s.label}
-                    </div>
-                    <div className="text-[10px] text-slate-400">
-                      {s.source_ar}
-                    </div>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  disabled
-                  aria-disabled="true"
-                  title="متاح في تحديث لاحق"
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-white text-slate-400 border border-dashed border-slate-200 px-2.5 py-1.5 text-[10px] font-bold cursor-not-allowed shrink-0"
-                  data-testid={`financial-movements-source-drilldown-${s.key}`}
-                >
-                  استعراض
-                  <span className="text-[8px] font-bold rounded-full bg-slate-100 text-slate-500 px-1.5 py-0.5 leading-none">
-                    قريبًا
-                  </span>
-                </button>
-              </li>
-            );
-          })}
-        </ul>
-      </section>
-
-      {/* ── Link status matrix ─────────────────────────────────────── */}
-      <section
-        className="rounded-2xl border border-slate-200 bg-white p-5 space-y-3"
-        data-testid="financial-movements-link-status"
-      >
-        <div className="flex items-center gap-2">
-          <Sparkles size={18} className="text-slate-500" />
-          <h2 className="text-sm font-black text-slate-800">
-            حالة الربط
-          </h2>
-          <span className="text-[10px] font-bold rounded-full bg-slate-100 text-slate-500 px-1.5 py-0.5">
-            قريبًا
-          </span>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-[11px]" dir="rtl">
-            <thead className="bg-slate-50 text-slate-500">
-              <tr>
-                <th className="text-right p-2 font-bold">المصدر</th>
-                <th className="text-right p-2 font-bold">القيد</th>
-                <th className="text-right p-2 font-bold">الخزينة</th>
-                <th className="text-right p-2 font-bold">المخزون</th>
-                <th className="text-right p-2 font-bold">حالة المراجعة</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {links.map((r) => (
-                <tr
-                  key={r.key}
-                  data-testid={`financial-movements-link-status-${r.key}`}
-                >
-                  <td className="p-2 font-bold text-slate-800 whitespace-nowrap">
-                    {r.source_label}
-                  </td>
-                  <td className="p-2">
-                    <StatusChip
-                      label={r.journal_status_ar}
-                      testid={`financial-movements-link-journal-${r.key}`}
-                    />
-                  </td>
-                  <td className="p-2">
-                    <StatusChip
-                      label={r.cashbox_status_ar}
-                      testid={`financial-movements-link-cashbox-${r.key}`}
-                    />
-                  </td>
-                  <td className="p-2">
-                    <StatusChip
-                      label={r.inventory_status_ar}
-                      testid={`financial-movements-link-inventory-${r.key}`}
-                    />
-                  </td>
-                  <td className="p-2">
-                    <StatusChip
-                      label={r.review_status_ar}
-                      testid={`financial-movements-link-review-${r.key}`}
-                    />
-                  </td>
-                </tr>
+              {REFERENCE_TYPE_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
               ))}
-            </tbody>
-          </table>
+            </select>
+          </div>
+          <div className="md:col-span-4 flex flex-col gap-1">
+            <label className="text-[11px] font-bold text-slate-600">
+              رقم المرجع
+            </label>
+            <div className="relative">
+              <Search
+                size={14}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400"
+              />
+              <input
+                type="text"
+                value={draftQuery}
+                onChange={(e) => setDraftQuery(e.target.value)}
+                placeholder="مثال: INV-2026-000123 أو RET-2026-000001"
+                className="w-full bg-slate-50 border border-slate-200 rounded-lg pr-9 pl-3 py-2 text-[12px] text-slate-700 outline-none focus:bg-white focus:border-brand-300"
+                data-testid="financial-movements-q-input"
+                dir="rtl"
+              />
+            </div>
+          </div>
+          <div className="md:col-span-3 flex flex-col gap-1">
+            <label className="text-[11px] font-bold text-slate-600">
+              UUID (اختياري)
+            </label>
+            <input
+              type="text"
+              value={draftReferenceId}
+              onChange={(e) => setDraftReferenceId(e.target.value)}
+              placeholder="UUID للحركة"
+              className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-[12px] text-slate-700 font-mono outline-none focus:bg-white focus:border-brand-300"
+              data-testid="financial-movements-reference-id-input"
+              dir="ltr"
+            />
+          </div>
+          <div className="md:col-span-2 flex flex-col gap-1">
+            <label className="text-[11px] font-bold text-slate-600">
+              مفتاح منع التكرار (اختياري)
+            </label>
+            <input
+              type="text"
+              value={draftIdemKey}
+              onChange={(e) => setDraftIdemKey(e.target.value)}
+              placeholder="Idempotency-Key"
+              className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-[12px] text-slate-700 font-mono outline-none focus:bg-white focus:border-brand-300"
+              data-testid="financial-movements-idempotency-key-input"
+              dir="ltr"
+            />
+          </div>
         </div>
-      </section>
-
-      {/* ── Non-executive CTAs ─────────────────────────────────────── */}
-      <section
-        className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3"
-        data-testid="financial-movements-ctas"
-      >
-        {CTAS.map((c) => {
-          const Icon = c.icon;
-          return (
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            type="submit"
+            className="inline-flex items-center gap-2 rounded-lg bg-brand-600 hover:bg-brand-700 text-white px-4 py-2 text-[12px] font-bold disabled:opacity-50"
+            disabled={isFetching || (!draftQuery.trim() && !draftReferenceId.trim())}
+            data-testid="financial-movements-search-submit"
+          >
+            <Search size={14} />
+            تتبع الحركة
+          </button>
+          {(submitted || draftQuery || draftReferenceId || draftReferenceType || draftIdemKey) && (
             <button
-              key={c.key}
               type="button"
-              disabled
-              aria-disabled="true"
-              title="متاح في تحديث لاحق"
-              className="rounded-2xl border border-dashed border-slate-200 bg-white p-4 text-right opacity-70 cursor-not-allowed flex items-start gap-3"
-              data-testid={`financial-movements-cta-${c.key}`}
+              onClick={handleClear}
+              className="inline-flex items-center gap-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-2 text-[11px] font-bold"
+              data-testid="financial-movements-clear"
             >
-              <div className="w-10 h-10 rounded-xl bg-slate-50 text-slate-500 flex items-center justify-center shrink-0">
-                <Icon size={18} />
-              </div>
-              <div className="min-w-0 text-right">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="text-[12px] font-black text-slate-700">
-                    {c.label}
-                  </span>
-                  <span className="text-[9px] font-bold rounded-full bg-slate-100 text-slate-500 px-1.5 py-0.5 leading-none">
-                    قريبًا
-                  </span>
-                </div>
-                <div className="text-[10px] text-slate-400 leading-snug mt-1">
-                  {c.description}
-                </div>
-              </div>
+              <X size={12} /> مسح
             </button>
-          );
-        })}
-      </section>
+          )}
+        </div>
+      </form>
+
+      {/* ── States ────────────────────────────────────────────────── */}
+      {!submitted && (
+        <EmptyHint />
+      )}
+
+      {submitted && isFetching && !data && (
+        <LoadingState />
+      )}
+
+      {submitted && error && isPermissionError && (
+        <PermissionDeniedState />
+      )}
+
+      {submitted && error && !isPermissionError && (
+        <ErrorState message={error?.response?.data?.message || error?.message} />
+      )}
+
+      {submitted && data && (
+        <TraceResultView data={data} sourceLink={sourceLink} />
+      )}
     </div>
   );
 }
 
-function StatusChip({
+function EmptyHint() {
+  return (
+    <div
+      className="rounded-2xl border border-dashed border-slate-300 bg-slate-50/40 p-8 text-center"
+      data-testid="financial-movements-empty-hint"
+    >
+      <ClipboardList size={28} className="mx-auto text-slate-400" />
+      <div className="mt-2 text-sm font-bold text-slate-700">
+        ابدأ بإدخال رقم المرجع
+      </div>
+      <div className="text-[11px] text-slate-500 mt-1 max-w-md mx-auto leading-relaxed">
+        يمكنك تتبع فاتورة مبيعات، مرتجع، فاتورة مشتريات، مصروف، وردية، دفعة
+        عميل أو مورد، أو قيد محاسبي.
+      </div>
+    </div>
+  );
+}
+
+function LoadingState() {
+  return (
+    <div
+      className="rounded-2xl border border-slate-200 bg-white p-8 text-center"
+      data-testid="financial-movements-loading"
+    >
+      <div className="mt-2 text-sm font-bold text-slate-700">
+        جارٍ تحميل بيانات التتبع…
+      </div>
+    </div>
+  );
+}
+
+function PermissionDeniedState() {
+  return (
+    <div
+      className="rounded-2xl border border-rose-200 bg-rose-50/60 p-6 flex items-start gap-3"
+      data-testid="financial-movements-permission-denied"
+    >
+      <ShieldAlert size={20} className="text-rose-600 shrink-0 mt-0.5" />
+      <div>
+        <div className="text-sm font-bold text-rose-800">لا توجد صلاحية</div>
+        <div className="text-[11px] text-rose-700 mt-1 leading-relaxed">
+          صلاحية <span className="font-mono font-bold">audit.view</span> مطلوبة لاستخدام تتبع الحركات المالية.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ErrorState({ message }: { message: string | undefined }) {
+  return (
+    <div
+      className="rounded-2xl border border-rose-200 bg-rose-50/60 p-6 flex items-start gap-3"
+      data-testid="financial-movements-error"
+    >
+      <AlertTriangle size={20} className="text-rose-600 shrink-0 mt-0.5" />
+      <div>
+        <div className="text-sm font-bold text-rose-800">تعذّر تحميل البيانات</div>
+        {message && (
+          <div className="text-[11px] text-rose-700 mt-1 leading-relaxed">
+            {message}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function TraceResultView({
+  data,
+  sourceLink,
+}: {
+  data: TraceResult;
+  sourceLink: { href: string; label: string } | null;
+}) {
+  if (!data.source) {
+    return (
+      <div
+        className="rounded-2xl border border-slate-200 bg-white p-8 text-center"
+        data-testid="financial-movements-no-result"
+      >
+        <Search size={28} className="mx-auto text-slate-400" />
+        <div className="mt-2 text-sm font-bold text-slate-700">لا توجد نتيجة</div>
+        <div className="text-[11px] text-slate-500 mt-1">
+          لم يتم العثور على حركة مرتبطة. تأكد من نوع المرجع ورقمه.
+        </div>
+        {data.flags.length > 0 && <FlagsPanel flags={data.flags} />}
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4" data-testid="financial-movements-result">
+      <SummaryCard data={data} sourceLink={sourceLink} />
+      <SourceCard data={data} />
+      <FlagsPanel flags={data.flags} />
+      {data.journalEntries.length > 0 && (
+        <JournalEntriesCard data={data} />
+      )}
+      {data.journalLines.length > 0 && <JournalLinesTable data={data} />}
+      {data.cashboxTransactions.length > 0 && (
+        <CashboxTransactionsTable data={data} />
+      )}
+      {data.stockMovements.length > 0 && <StockMovementsTable data={data} />}
+      {data.idempotency.length > 0 && (
+        <IdempotencyCard idem={data.idempotency} />
+      )}
+    </div>
+  );
+}
+
+function SummaryCard({
+  data,
+  sourceLink,
+}: {
+  data: TraceResult;
+  sourceLink: { href: string; label: string } | null;
+}) {
+  const s = data.summary;
+  const Pill = ({
+    label,
+    state,
+  }: {
+    label: string;
+    state: boolean | null;
+  }) => {
+    let cls = 'bg-slate-50 text-slate-500 border border-slate-200';
+    let txt = 'لا ينطبق';
+    if (state === true) {
+      cls = 'bg-emerald-50 text-emerald-700 border border-emerald-200';
+      txt = 'مكتمل';
+    } else if (state === false) {
+      cls = 'bg-rose-50 text-rose-700 border border-rose-200';
+      txt = 'يحتاج مراجعة';
+    }
+    return (
+      <div className="rounded-xl border border-slate-100 p-3 flex items-center justify-between gap-2 bg-slate-50/40">
+        <span className="text-[11px] font-bold text-slate-700">{label}</span>
+        <span className={`text-[10px] font-bold rounded-full px-2 py-0.5 ${cls}`}>
+          {txt}
+        </span>
+      </div>
+    );
+  };
+  return (
+    <section
+      className="rounded-2xl border border-slate-200 bg-white p-5 space-y-3"
+      data-testid="financial-movements-summary-card"
+    >
+      <div className="flex items-center gap-2 flex-wrap">
+        <CheckCircle2 size={18} className="text-slate-500" />
+        <h2 className="text-sm font-black text-slate-800">ملخص التتبع</h2>
+        {sourceLink && (
+          <a
+            href={sourceLink.href}
+            className="ms-auto inline-flex items-center gap-1 text-[11px] font-bold text-brand-700 hover:underline"
+            data-testid="financial-movements-source-link"
+          >
+            <ExternalLink size={12} /> {sourceLink.label}
+          </a>
+        )}
+      </div>
+      <div className="grid grid-cols-2 lg:grid-cols-3 gap-2">
+        <Pill label="القيد المحاسبي" state={s.hasJournal} />
+        <Pill label="حركة الخزينة" state={s.hasCashboxTransaction} />
+        <Pill label="حركة المخزون" state={s.hasStockMovement} />
+        <Pill label="توازن القيد" state={s.journalBalanced} />
+        <Pill label="مطابقة الكاش" state={s.cashMatched} />
+        <Pill label="مطابقة المخزون" state={s.stockMatched} />
+      </div>
+    </section>
+  );
+}
+
+function SourceCard({ data }: { data: TraceResult }) {
+  const s = data.source!;
+  return (
+    <section
+      className="rounded-2xl border border-slate-200 bg-white p-5 space-y-3"
+      data-testid="financial-movements-source-card"
+    >
+      <div className="flex items-center gap-2">
+        <Sparkles size={18} className="text-slate-500" />
+        <h2 className="text-sm font-black text-slate-800">الحدث الأصلي</h2>
+        <span className="text-[10px] font-bold rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200 px-2 py-0.5">
+          {REFERENCE_TYPE_LABEL[s.type]}
+        </span>
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 text-[11px]">
+        <Field label="رقم المرجع" value={s.number || '—'} mono />
+        <Field label="UUID" value={s.id} mono ltr />
+        <Field label="التاريخ" value={fmtDate(s.date)} />
+        <Field label="الحالة" value={s.status || '—'} />
+        <Field label="الإجمالي" value={EGP(s.total)} />
+        <Field label="المدفوع" value={EGP(s.paid)} />
+        {s.user_name && <Field label="المستخدم" value={s.user_name} />}
+        {s.customer_name && <Field label="العميل" value={s.customer_name} />}
+        {s.supplier_name && <Field label="المورد" value={s.supplier_name} />}
+        {s.notes && <Field label="ملاحظات" value={s.notes} />}
+      </div>
+    </section>
+  );
+}
+
+function Field({
   label,
-  testid,
+  value,
+  mono = false,
+  ltr = false,
 }: {
   label: string;
-  testid: string;
+  value: string;
+  mono?: boolean;
+  ltr?: boolean;
 }) {
   return (
-    <span
-      className="inline-flex items-center gap-1 rounded-full bg-slate-100 text-slate-600 px-2 py-0.5 text-[10px] font-bold"
-      data-testid={testid}
+    <div className="rounded-xl border border-slate-100 p-2.5 bg-slate-50/40">
+      <div className="text-[10px] font-bold text-slate-500">{label}</div>
+      <div
+        className={`mt-1 text-[12px] text-slate-800 ${mono ? 'font-mono' : ''} ${ltr ? 'text-left' : ''}`}
+        dir={ltr ? 'ltr' : 'rtl'}
+      >
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function FlagsPanel({ flags }: { flags: TraceResult['flags'] }) {
+  if (flags.length === 0) {
+    return (
+      <section
+        className="rounded-2xl border border-emerald-200 bg-emerald-50/60 p-4 flex items-center gap-3"
+        data-testid="financial-movements-flags-empty"
+      >
+        <CheckCircle2 size={18} className="text-emerald-600" />
+        <div className="text-[12px] text-emerald-800 font-bold">
+          لا توجد مؤشرات خلل على هذه الحركة.
+        </div>
+      </section>
+    );
+  }
+  return (
+    <section
+      className="rounded-2xl border border-slate-200 bg-white p-5 space-y-2"
+      data-testid="financial-movements-flags"
     >
-      {label}
-    </span>
+      <div className="flex items-center gap-2">
+        <ShieldAlert size={18} className="text-slate-500" />
+        <h2 className="text-sm font-black text-slate-800">مؤشرات الخلل</h2>
+        <span className="text-[10px] font-bold rounded-full bg-slate-100 text-slate-500 px-1.5 py-0.5">
+          {flags.length}
+        </span>
+        <span className="text-[10px] text-slate-400">— تشخيصية فقط</span>
+      </div>
+      <ul className="space-y-1.5">
+        {flags.map((f, i) => {
+          const pill = SEVERITY_PILL[f.severity];
+          return (
+            <li
+              key={`${f.code}-${i}`}
+              className="flex items-start justify-between gap-3 py-2 border-b border-slate-100 last:border-0"
+              data-testid={`financial-movements-flag-${f.code}`}
+            >
+              <div className="flex items-start gap-2 min-w-0">
+                <Info size={14} className="text-slate-400 shrink-0 mt-0.5" />
+                <div className="min-w-0">
+                  <div className="text-[12px] font-bold text-slate-800">
+                    {f.message_ar}
+                  </div>
+                  <div className="text-[10px] text-slate-400 font-mono mt-0.5">
+                    {f.code}
+                  </div>
+                </div>
+              </div>
+              <span
+                className={`text-[10px] font-bold rounded-full px-2 py-0.5 shrink-0 ${pill.className}`}
+              >
+                {pill.label}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
+function JournalEntriesCard({ data }: { data: TraceResult }) {
+  return (
+    <section
+      className="rounded-2xl border border-slate-200 bg-white p-5 space-y-3"
+      data-testid="financial-movements-journal-entries"
+    >
+      <div className="flex items-center gap-2">
+        <BookOpen size={18} className="text-slate-500" />
+        <h2 className="text-sm font-black text-slate-800">القيد المحاسبي</h2>
+        <span className="text-[10px] font-bold rounded-full bg-slate-100 text-slate-500 px-1.5 py-0.5">
+          {data.journalEntries.length}
+        </span>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-[11px]" dir="rtl">
+          <thead className="bg-slate-50 text-slate-500">
+            <tr>
+              <th className="text-right p-2 font-bold">رقم القيد</th>
+              <th className="text-right p-2 font-bold">التاريخ</th>
+              <th className="text-right p-2 font-bold">الوصف</th>
+              <th className="text-right p-2 font-bold">إجمالي مدين</th>
+              <th className="text-right p-2 font-bold">إجمالي دائن</th>
+              <th className="text-right p-2 font-bold">التوازن</th>
+              <th className="text-right p-2 font-bold">الحالة</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {data.journalEntries.map((e) => (
+              <tr key={e.id}>
+                <td className="p-2 font-mono font-bold text-slate-800">
+                  {e.entry_no}
+                </td>
+                <td className="p-2 text-slate-600 whitespace-nowrap">
+                  {e.entry_date}
+                </td>
+                <td className="p-2 text-slate-600">{e.description || '—'}</td>
+                <td className="p-2 tabular-nums">{EGP(e.total_debit)}</td>
+                <td className="p-2 tabular-nums">{EGP(e.total_credit)}</td>
+                <td className="p-2">
+                  {e.is_balanced ? (
+                    <span className="text-[10px] font-bold rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 px-2 py-0.5">
+                      متوازن
+                    </span>
+                  ) : (
+                    <span className="text-[10px] font-bold rounded-full bg-rose-50 text-rose-700 border border-rose-200 px-2 py-0.5">
+                      غير متوازن
+                    </span>
+                  )}
+                </td>
+                <td className="p-2">
+                  {e.is_void ? (
+                    <span className="text-[10px] font-bold rounded-full bg-slate-50 text-slate-500 border border-slate-200 px-2 py-0.5">
+                      ملغى
+                    </span>
+                  ) : e.is_posted ? (
+                    <span className="text-[10px] font-bold rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 px-2 py-0.5">
+                      مرحّل
+                    </span>
+                  ) : (
+                    <span className="text-[10px] font-bold rounded-full bg-amber-50 text-amber-700 border border-amber-200 px-2 py-0.5">
+                      مسودة
+                    </span>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function JournalLinesTable({ data }: { data: TraceResult }) {
+  return (
+    <section
+      className="rounded-2xl border border-slate-200 bg-white p-5 space-y-3"
+      data-testid="financial-movements-journal-lines"
+    >
+      <div className="flex items-center gap-2">
+        <Layers size={18} className="text-slate-500" />
+        <h2 className="text-sm font-black text-slate-800">سطور القيد</h2>
+        <span className="text-[10px] font-bold rounded-full bg-slate-100 text-slate-500 px-1.5 py-0.5">
+          {data.journalLines.length}
+        </span>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-[11px]" dir="rtl">
+          <thead className="bg-slate-50 text-slate-500">
+            <tr>
+              <th className="text-right p-2 font-bold">الحساب</th>
+              <th className="text-right p-2 font-bold">الكود</th>
+              <th className="text-right p-2 font-bold">مدين</th>
+              <th className="text-right p-2 font-bold">دائن</th>
+              <th className="text-right p-2 font-bold">الخزينة</th>
+              <th className="text-right p-2 font-bold">الوصف</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {data.journalLines.map((l) => (
+              <tr key={l.id}>
+                <td className="p-2 font-bold text-slate-800">
+                  {l.account_name || '—'}
+                </td>
+                <td className="p-2 font-mono text-slate-600">
+                  {l.account_code || '—'}
+                </td>
+                <td className="p-2 tabular-nums">
+                  {Number(l.debit) > 0 ? EGP(l.debit) : '—'}
+                </td>
+                <td className="p-2 tabular-nums">
+                  {Number(l.credit) > 0 ? EGP(l.credit) : '—'}
+                </td>
+                <td className="p-2 text-slate-600">
+                  {l.cashbox_name_ar || '—'}
+                </td>
+                <td className="p-2 text-slate-600">{l.description || '—'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function CashboxTransactionsTable({ data }: { data: TraceResult }) {
+  return (
+    <section
+      className="rounded-2xl border border-slate-200 bg-white p-5 space-y-3"
+      data-testid="financial-movements-cashbox-transactions"
+    >
+      <div className="flex items-center gap-2">
+        <Wallet size={18} className="text-slate-500" />
+        <h2 className="text-sm font-black text-slate-800">حركة الخزينة</h2>
+        <span className="text-[10px] font-bold rounded-full bg-slate-100 text-slate-500 px-1.5 py-0.5">
+          {data.cashboxTransactions.length}
+        </span>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-[11px]" dir="rtl">
+          <thead className="bg-slate-50 text-slate-500">
+            <tr>
+              <th className="text-right p-2 font-bold">الخزينة</th>
+              <th className="text-right p-2 font-bold">الاتجاه</th>
+              <th className="text-right p-2 font-bold">المبلغ</th>
+              <th className="text-right p-2 font-bold">التصنيف</th>
+              <th className="text-right p-2 font-bold">الرصيد بعد</th>
+              <th className="text-right p-2 font-bold">التاريخ</th>
+              <th className="text-right p-2 font-bold">المستخدم</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {data.cashboxTransactions.map((t) => (
+              <tr key={t.id}>
+                <td className="p-2 font-bold text-slate-800">
+                  {t.cashbox_name_ar || '—'}
+                </td>
+                <td className="p-2">
+                  {t.direction === 'in' ? (
+                    <span className="text-[10px] font-bold rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 px-2 py-0.5">
+                      وارد
+                    </span>
+                  ) : (
+                    <span className="text-[10px] font-bold rounded-full bg-rose-50 text-rose-700 border border-rose-200 px-2 py-0.5">
+                      صادر
+                    </span>
+                  )}
+                </td>
+                <td className="p-2 tabular-nums">{EGP(t.amount)}</td>
+                <td className="p-2 font-mono text-slate-600">{t.category}</td>
+                <td className="p-2 tabular-nums text-slate-600">
+                  {EGP(t.balance_after)}
+                </td>
+                <td className="p-2 text-slate-600 whitespace-nowrap">
+                  {fmtDate(t.created_at)}
+                </td>
+                <td className="p-2 text-slate-600">{t.user_name || '—'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function StockMovementsTable({ data }: { data: TraceResult }) {
+  return (
+    <section
+      className="rounded-2xl border border-slate-200 bg-white p-5 space-y-3"
+      data-testid="financial-movements-stock-movements"
+    >
+      <div className="flex items-center gap-2">
+        <ArrowLeftRight size={18} className="text-slate-500" />
+        <h2 className="text-sm font-black text-slate-800">حركة المخزون</h2>
+        <span className="text-[10px] font-bold rounded-full bg-slate-100 text-slate-500 px-1.5 py-0.5">
+          {data.stockMovements.length}
+        </span>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-[11px]" dir="rtl">
+          <thead className="bg-slate-50 text-slate-500">
+            <tr>
+              <th className="text-right p-2 font-bold">المنتج</th>
+              <th className="text-right p-2 font-bold">SKU</th>
+              <th className="text-right p-2 font-bold">المخزن</th>
+              <th className="text-right p-2 font-bold">النوع</th>
+              <th className="text-right p-2 font-bold">الاتجاه</th>
+              <th className="text-right p-2 font-bold">الكمية</th>
+              <th className="text-right p-2 font-bold">التكلفة</th>
+              <th className="text-right p-2 font-bold">التاريخ</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {data.stockMovements.map((m) => (
+              <tr key={m.id}>
+                <td className="p-2 font-bold text-slate-800">
+                  {m.product_name_ar || '—'}
+                </td>
+                <td className="p-2 font-mono text-slate-600">
+                  {m.variant_sku || '—'}
+                </td>
+                <td className="p-2 text-slate-600">
+                  {m.warehouse_name_ar || '—'}
+                </td>
+                <td className="p-2 font-mono text-slate-600">
+                  {m.movement_type}
+                </td>
+                <td className="p-2">
+                  {m.direction === 'in' ? (
+                    <span className="text-[10px] font-bold rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 px-2 py-0.5">
+                      دخول
+                    </span>
+                  ) : (
+                    <span className="text-[10px] font-bold rounded-full bg-rose-50 text-rose-700 border border-rose-200 px-2 py-0.5">
+                      خروج
+                    </span>
+                  )}
+                </td>
+                <td className="p-2 tabular-nums">{m.quantity}</td>
+                <td className="p-2 tabular-nums">{EGP(m.unit_cost)}</td>
+                <td className="p-2 text-slate-600 whitespace-nowrap">
+                  {fmtDate(m.created_at)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function IdempotencyCard({
+  idem,
+}: {
+  idem: TraceResult['idempotency'];
+}) {
+  return (
+    <section
+      className="rounded-2xl border border-slate-200 bg-white p-5 space-y-3"
+      data-testid="financial-movements-idempotency"
+    >
+      <div className="flex items-center gap-2">
+        <Coins size={18} className="text-slate-500" />
+        <h2 className="text-sm font-black text-slate-800">بيانات منع التكرار</h2>
+      </div>
+      <ul className="space-y-2">
+        {idem.map((it) => (
+          <li
+            key={it.key}
+            className="rounded-xl border border-slate-100 p-3 bg-slate-50/40"
+          >
+            <div className="text-[10px] font-bold text-slate-500">المفتاح</div>
+            <div className="font-mono text-[12px] text-slate-800 break-all" dir="ltr">
+              {it.key}
+            </div>
+            <div className="text-[10px] text-slate-500 mt-2">{it.note_ar}</div>
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 
