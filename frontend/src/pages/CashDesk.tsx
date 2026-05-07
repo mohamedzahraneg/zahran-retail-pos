@@ -36,6 +36,13 @@ import { printVoucher } from '@/lib/printVoucher';
 // directory as the lifted modals so DepositModal (still defined
 // below) can re-use them.
 import { Modal, Field } from '@/components/cash-desk/Modal';
+// PR-FE-IDEM-CASHDESK-DEPOSIT (Sprint 5 / FE-IDEM PR 2) — reset the
+// per-DepositModal Idempotency-Key on mount + on unmount. Within an
+// open modal session the key is reused so a retry of the same
+// deposit/withdraw (network blip, manual retry, 425 IN_PROGRESS
+// auto-retry from PR #315) hits the BE replay path instead of
+// double-posting CT/JE.
+import { resetCashDeskDepositIdempotencyKey } from '@/lib/cash-desk-deposit-idempotency';
 
 const EGP = (n: number | string) =>
   `${Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ج.م`;
@@ -616,6 +623,19 @@ function DepositModal({
   const [cashboxId, setCashboxId] = useState(cashboxes[0]?.id ?? '');
   const [direction, setDirection] = useState<'in' | 'out'>('in');
   const [amount, setAmount] = useState('');
+
+  // PR-FE-IDEM-CASHDESK-DEPOSIT — clean slate on mount, defensive
+  // reset on unmount. Field tweaks (cashbox/direction/amount/notes)
+  // within the open modal do NOT reset — that's intentional, so a
+  // retry of the same submit reuses the key even if the cashier
+  // re-types a field. Body-tamper safety is enforced BE-side via
+  // 409 IDEMPOTENCY_KEY_PAYLOAD_MISMATCH, which the shared response
+  // interceptor (PR #315) surfaces with a dedicated Arabic toast.
+  useEffect(() => {
+    resetCashDeskDepositIdempotencyKey();
+    return () => resetCashDeskDepositIdempotencyKey();
+  }, []);
+
   const [txnDate, setTxnDate] = useState(() => {
     // today in Cairo
     const parts = new Intl.DateTimeFormat('en-CA', {

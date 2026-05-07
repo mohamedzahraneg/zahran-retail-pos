@@ -30,6 +30,11 @@ import { attachCustomerPaymentIdempotencyKeyIfApplicable } from '@/lib/customer-
 // helper. Gates strictly on POST /cash-desk/supplier-payments — does
 // NOT fire on /:id/void, on customer-payments, or on /suppliers/:id/pay.
 import { attachSupplierPaymentIdempotencyKeyIfApplicable } from '@/lib/supplier-payment-idempotency';
+// PR-FE-IDEM-CASHDESK-DEPOSIT (Sprint 5 / FE-IDEM PR 2) — sixth sibling
+// helper. Gates strictly on POST /cash-desk/deposit (which serves both
+// deposit `direction:'in'` and withdraw `direction:'out'` — single
+// route, single helper). Disjoint URL gate from the other 5 helpers.
+import { attachCashDeskDepositIdempotencyKeyIfApplicable } from '@/lib/cash-desk-deposit-idempotency';
 
 const envApiUrl = import.meta.env.VITE_API_URL as string | undefined;
 const baseURL = envApiUrl ?? 'http://localhost:3000';
@@ -64,6 +69,10 @@ api.interceptors.request.use((config) => {
   // every route except POST /cash-desk/supplier-payments, where it
   // adds the per-SupplierPayModal key.
   attachSupplierPaymentIdempotencyKeyIfApplicable(config);
+  // PR-FE-IDEM-CASHDESK-DEPOSIT — no-op on every route except POST
+  // /cash-desk/deposit, where it adds the per-DepositModal key.
+  // Same single endpoint serves both deposit and withdraw directions.
+  attachCashDeskDepositIdempotencyKeyIfApplicable(config);
   return config;
 });
 
