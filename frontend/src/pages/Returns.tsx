@@ -47,6 +47,19 @@ import {
 } from '@/components/CashSourceSelector';
 import { formatArabicDateTime } from '@/lib/format-arabic-date';
 import { useAuthStore } from '@/stores/auth.store';
+// PR-FE-IDEM-RETURNS (Sprint 5 / FE-IDEM PR 4) — per-modal
+// Idempotency-Key reset hooks. Four independent keys (one per
+// action type) so an Approve + Refund + Cancel + Exchange flow on
+// different returns doesn't collide. Within an open modal session
+// the key is reused so retries / 425 IN_PROGRESS auto-retries
+// (PR #315) hit the BE replay path instead of double-posting
+// stock_movements / JE / CT. Reject is intentionally NOT decorated.
+import {
+  resetReturnsApproveIdempotencyKey,
+  resetReturnsRefundIdempotencyKey,
+  resetReturnsCancelIdempotencyKey,
+  resetReturnsExchangeIdempotencyKey,
+} from '@/lib/returns-idempotency';
 
 const EGP = (n: number | string) => `${Number(n).toFixed(0)} ج.م`;
 
@@ -2054,6 +2067,15 @@ function CreateReturnModal({ onClose }: { onClose: () => void }) {
 // ============================================================================
 function CreateExchangeModal({ onClose }: { onClose: () => void }) {
   const qc = useQueryClient();
+  // PR-FE-IDEM-RETURNS — clean slate on mount, defensive reset on
+  // unmount. Exchange is the heaviest write of the four: creates a
+  // new returns row + new invoice row + invoice_lines + JE + CT for
+  // the cash leg + stock_movements for both returned and new items.
+  // Independent key from approve/refund/cancel.
+  useEffect(() => {
+    resetReturnsExchangeIdempotencyKey();
+    return () => resetReturnsExchangeIdempotencyKey();
+  }, []);
   const [invoiceNo, setInvoiceNo] = useState('');
   const [lookup, setLookup] = useState<InvoiceLookup | null>(null);
   const [returnedQtys, setReturnedQtys] = useState<Record<string, number>>({});
@@ -2633,6 +2655,13 @@ function ApproveModal({
   onSuccess: () => void;
 }) {
   const [notes, setNotes] = useState('');
+  // PR-FE-IDEM-RETURNS — clean slate on mount, defensive reset on
+  // unmount. Approve writes stock_movements (returns saleable items
+  // back to inventory). Independent key from refund/cancel/exchange.
+  useEffect(() => {
+    resetReturnsApproveIdempotencyKey();
+    return () => resetReturnsApproveIdempotencyKey();
+  }, []);
   const mut = useMutation({
     mutationFn: () => returnsApi.approve(returnId, notes || undefined),
     onSuccess: () => {
@@ -2683,6 +2712,13 @@ function RefundModal({
     ret.refund_method || 'cash',
   );
   const [reference, setReference] = useState('');
+  // PR-FE-IDEM-RETURNS — clean slate on mount, defensive reset on
+  // unmount. Refund posts JE + CT (cash refund out of cashbox).
+  // Independent key from approve/cancel/exchange.
+  useEffect(() => {
+    resetReturnsRefundIdempotencyKey();
+    return () => resetReturnsRefundIdempotencyKey();
+  }, []);
   // PR-R1 — explicit cash source. Default to 'unset'; CashSourceSelector
   // will pre-pick the user's open shift when there's exactly one.
   const [source, setSource] = useState<CashSource>({
@@ -4080,6 +4116,16 @@ function CancelReturnModal({
 }) {
   const [reason, setReason] = useState('');
   const [confirm, setConfirm] = useState('');
+  // PR-FE-IDEM-RETURNS — clean slate on mount, defensive reset on
+  // unmount. Cancel reverses an approved/refunded return: removes
+  // stock_movements + reverses JE + reverses CT. Existing in-flight
+  // guard already prevents double-submit on the same modal session;
+  // this adds the BE-side replay safety on top for HTTP races.
+  // Independent key from approve/refund/exchange.
+  useEffect(() => {
+    resetReturnsCancelIdempotencyKey();
+    return () => resetReturnsCancelIdempotencyKey();
+  }, []);
   const expectedToken = `CANCEL_RETURN_${ret.return_no}`;
   const reasonValid = reason.trim().length > 0;
   const confirmValid = confirm === expectedToken;
