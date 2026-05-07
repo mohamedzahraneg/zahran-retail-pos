@@ -224,7 +224,7 @@ const REPORTS: ReportSpec[] = [
     category: 'purchases', status: 'ready', href: '/purchases', icon: FileText },
   { key: 'purchase-returns', name: 'مرتجعات المشتريات', description: 'تتبع مرتجعات المشتريات وحالتها',
     category: 'purchases', status: 'ready', href: '/purchases', icon: Undo2 },
-  { key: 'supplier-balances', name: 'أرصدة الموردين', description: 'الأرصدة الحالية والمستحقة لكل مورد',
+  { key: 'supplier-balances', name: 'متابعة أرصدة الموردين', description: 'الأرصدة الحالية والمستحقة لكل مورد',
     category: 'purchases', status: 'ready', href: '/suppliers', icon: Briefcase },
   { key: 'purchases-vat', name: 'تقرير ضريبة المشتريات', description: 'ضريبة القيمة المضافة على المشتريات',
     category: 'purchases', status: 'needs_data', href: null, icon: PieChart },
