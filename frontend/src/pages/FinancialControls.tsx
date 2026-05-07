@@ -1,4 +1,8 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+// PR-FE-IDEM-ACCOUNTING-OPS (Sprint 5 / FE-IDEM PR 7B) — per-click
+// reset for InboxTab approve button + defensive useEffect cleanup.
+// Reject is intentionally NOT decorated.
+import { resetAccountingOpsApprovalApproveIdempotencyKey } from '@/lib/accounting-ops-idempotency';
 import {
   useMutation,
   useQuery,
@@ -121,6 +125,14 @@ function InboxTab() {
     refetchInterval: 30_000,
   });
 
+  // PR-FE-IDEM-ACCOUNTING-OPS — defensive reset on inbox unmount;
+  // primary boundary is the per-click reset in the approve button
+  // onApprove callback (line ~172) so each pending row's approval
+  // gets a fresh key.
+  useEffect(() => {
+    return () => resetAccountingOpsApprovalApproveIdempotencyKey();
+  }, []);
+
   const approveMut = useMutation({
     mutationFn: (id: string) => accountingApi.approveApproval(id),
     onSuccess: () => {
@@ -169,7 +181,12 @@ function InboxTab() {
           <ApprovalCard
             key={it.id}
             item={it}
-            onApprove={() => approveMut.mutate(it.id)}
+            onApprove={() => {
+              // PR-FE-IDEM-ACCOUNTING-OPS — reset per-click so each
+              // row's approval gets a fresh key.
+              resetAccountingOpsApprovalApproveIdempotencyKey();
+              approveMut.mutate(it.id);
+            }}
             onReject={() => {
               const r = prompt('سبب الرفض:');
               if (r && r.trim().length >= 3) {

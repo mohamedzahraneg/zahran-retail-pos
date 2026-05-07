@@ -42,6 +42,10 @@ import { cashDeskApi } from '@/api/cash-desk.api';
 import { usersApi } from '@/api/users.api';
 import { useAuthStore } from '@/stores/auth.store';
 import { exportToExcel } from '@/lib/exportExcel';
+// PR-FE-IDEM-ACCOUNTING-OPS (Sprint 5 / FE-IDEM PR 7B) — reset on
+// EditRequestApproveModal mount/unmount. Reject + Cancel are
+// intentionally NOT decorated (state-only).
+import { resetAccountingOpsEditRequestApproveIdempotencyKey } from '@/lib/accounting-ops-idempotency';
 
 const EGP = (n: number | string | null | undefined) =>
   `${Number(n || 0).toLocaleString('en-US', {
@@ -535,6 +539,15 @@ export function EditRequestApproveModal({
   const qc = useQueryClient();
   const [rejectReason, setRejectReason] = useState('');
   const [showReject, setShowReject] = useState(false);
+
+  // PR-FE-IDEM-ACCOUNTING-OPS — clean slate on mount, defensive
+  // reset on unmount. Approve writes a corrective JE when the
+  // edit changes amount/account; reject is state-only and does
+  // NOT receive a key.
+  useEffect(() => {
+    resetAccountingOpsEditRequestApproveIdempotencyKey();
+    return () => resetAccountingOpsEditRequestApproveIdempotencyKey();
+  }, []);
 
   const approve = useMutation({
     mutationFn: () => accountingApi.approveEditRequest(request.id),

@@ -33,6 +33,17 @@ import { exportToExcel } from '@/lib/exportExcel';
 import { Download } from 'lucide-react';
 import { cashDeskApi } from '@/api/cash-desk.api';
 import { useAuthStore } from '@/stores/auth.store';
+// PR-FE-IDEM-ACCOUNTING-OPS (Sprint 5 / FE-IDEM PR 7B) — per-action
+// reset hooks for journal create/void modals + close-year +
+// depreciation-run buttons. Out-of-scope routes (chart CRUD,
+// fixed-assets CRUD, budgets, cost-centers, fx, audit/*, journal/
+// backfill) are intentionally NOT decorated.
+import {
+  resetAccountingOpsJournalCreateIdempotencyKey,
+  resetAccountingOpsJournalVoidIdempotencyKey,
+  resetAccountingOpsCloseYearIdempotencyKey,
+  resetAccountingOpsRunDepreciationIdempotencyKey,
+} from '@/lib/accounting-ops-idempotency';
 
 const EGP = (n: number | string) =>
   `${Number(n || 0).toLocaleString('en-US', {
@@ -931,6 +942,16 @@ function JournalCreateModal({ onClose }: { onClose: () => void }) {
     post_immediately: true,
   });
 
+  // PR-FE-IDEM-ACCOUNTING-OPS — clean slate on mount, defensive
+  // reset on unmount. Manual journal create posts a JE (DR/CR
+  // pairs) directly to the GL — duplicate POST without retry-safety
+  // creates a doubled JE that the backfill cleanup can't easily
+  // undo. Independent key from void/close-year/depreciation.
+  useEffect(() => {
+    resetAccountingOpsJournalCreateIdempotencyKey();
+    return () => resetAccountingOpsJournalCreateIdempotencyKey();
+  }, []);
+
   const { data: accounts = [] } = useQuery({
     queryKey: ['coa', false],
     queryFn: () => accountsApi.list(false),
@@ -1159,6 +1180,14 @@ function JournalViewModal({
     queryKey: ['journal', entry.id],
     queryFn: () => accountsApi.getJournal(entry.id),
   });
+
+  // PR-FE-IDEM-ACCOUNTING-OPS — clean slate on mount, defensive
+  // reset on unmount. Void posts the reverse JE for an existing
+  // entry. Independent key from create/close-year/depreciation.
+  useEffect(() => {
+    resetAccountingOpsJournalVoidIdempotencyKey();
+    return () => resetAccountingOpsJournalVoidIdempotencyKey();
+  }, []);
 
   const voidMut = useMutation({
     mutationFn: (reason: string) => accountsApi.voidJournal(entry.id, reason),
@@ -2109,8 +2138,15 @@ function FixedAssetsTab() {
             <button
               className="btn-secondary"
               onClick={() => {
-                if (confirm('تشغيل ترحيل الإهلاك لهذا الشهر يدوياً؟'))
+                if (confirm('تشغيل ترحيل الإهلاك لهذا الشهر يدوياً؟')) {
+                  // PR-FE-IDEM-ACCOUNTING-OPS — reset per-click so each
+                  // depreciation run gets a fresh key. Button is
+                  // disabled while runMut.isPending so concurrent
+                  // clicks are blocked; a 425 IN_PROGRESS auto-retry
+                  // from PR #315 reuses the same axios config = same key.
+                  resetAccountingOpsRunDepreciationIdempotencyKey();
                   runMut.mutate();
+                }
               }}
               disabled={runMut.isPending}
             >
@@ -2461,8 +2497,14 @@ function ClosingTab() {
             confirm(
               `تأكيد إقفال السنة المنتهية في ${fye}؟\n\nسيتم ترحيل صافي النتيجة إلى الأرباح المحتجزة.`,
             )
-          )
+          ) {
+            // PR-FE-IDEM-ACCOUNTING-OPS — reset per-click so each
+            // close-year action gets a fresh key. The BE is already
+            // engine-idempotent per (fiscal_year_end), but the HTTP
+            // layer adds outer race defence.
+            resetAccountingOpsCloseYearIdempotencyKey();
             mut.mutate();
+          }
         }}
       >
         {mut.isPending ? '⏳ جاري الإقفال...' : '🔒 تأكيد إقفال السنة'}
