@@ -29,6 +29,15 @@ import { settingsApi } from '@/api/settings.api';
 import { useAuthStore } from '@/stores/auth.store';
 import { compressImage } from '@/utils/compressImage';
 import { useTableSort } from '@/lib/useTableSort';
+// PR-FE-IDEM-FINAL-OPS (Sprint 5 / FE-IDEM PR 8) — per-click reset
+// for the bulk variant-save flow. `saveAll.mutate()` calls
+// `stockApi.adjust()` once per newly-created variant in a loop; one
+// click = one user intent, so a single Idempotency-Key per click is
+// correct (the BE accepts replays of the same key with the same body
+// and rejects with 409 if any subsequent loop iteration uses the same
+// key with a different body — which would only happen on a true
+// double-click race, which is exactly what we want to block).
+import { resetStockAdjustIdempotencyKey } from '@/lib/final-ops-idempotency';
 
 const EGP = (n: number | string) => `${Number(n || 0).toFixed(0)} EGP`;
 
@@ -1235,6 +1244,15 @@ function VariantsEditor({
           } as any);
           const qty = Number(v.stock_qty);
           if (qty > 0) {
+            // PR-FE-IDEM-FINAL-OPS — `saveAll` runs `stockApi.adjust`
+            // once per newly-created variant in a loop. Each iteration
+            // has a different body (different variant_id), so a single
+            // shared key across the loop would 409 PAYLOAD_MISMATCH on
+            // iteration 2+. Reset per iteration so each adjust gets a
+            // fresh key, then BE-side replay-safety still protects
+            // against a true double-click race that re-enters the
+            // mutation with the same body.
+            resetStockAdjustIdempotencyKey();
             await stockApi.adjust({
               variant_id: created.id,
               warehouse_id: wh.id,

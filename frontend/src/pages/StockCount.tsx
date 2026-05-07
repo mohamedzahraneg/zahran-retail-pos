@@ -1,6 +1,11 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
+// PR-FE-IDEM-FINAL-OPS (Sprint 5 / FE-IDEM PR 8) — per-modal reset
+// hook for CountDetailModal. The "إنهاء الجرد" (finalize) button
+// inside this modal triggers POST /inventory-counts/:id/finalize;
+// mounting/unmounting the modal mints a fresh key for each viewing.
+import { resetInventoryFinalizeIdempotencyKey } from '@/lib/final-ops-idempotency';
 import {
   ClipboardCheck,
   Plus,
@@ -278,6 +283,19 @@ function CountDetailModal({
   onClose: () => void;
 }) {
   const qc = useQueryClient();
+
+  // PR-FE-IDEM-FINAL-OPS — clean slate on mount, and clean up on
+  // unmount so the next time the modal opens, a brand-new
+  // Idempotency-Key is minted for the next finalize intent. Retries
+  // within a single mount lifecycle reuse the cached key
+  // (replay-safe by construction).
+  useEffect(() => {
+    resetInventoryFinalizeIdempotencyKey();
+    return () => {
+      resetInventoryFinalizeIdempotencyKey();
+    };
+  }, []);
+
   const { data: c, isLoading } = useQuery({
     queryKey: ['inventory-count', countId],
     queryFn: () => inventoryCountsApi.get(countId),

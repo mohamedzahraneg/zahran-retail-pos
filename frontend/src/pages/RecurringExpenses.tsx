@@ -1,6 +1,17 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
+// PR-FE-IDEM-FINAL-OPS (Sprint 5 / FE-IDEM PR 8) — per-click reset
+// hooks for the two recurring-expenses mutation routes:
+//   · runM        → POST /recurring-expenses/:id/run
+//   · processDueM → POST /recurring-expenses/process-due
+// Independent keys; each row-button click on "توليد الآن" mints a new
+// key for the run flow, and each click on the page-level "معالجة
+// المستحق" button mints a new key for the process-due flow.
+import {
+  resetRecurringRunIdempotencyKey,
+  resetRecurringProcessDueIdempotencyKey,
+} from '@/lib/final-ops-idempotency';
 import {
   Repeat,
   Plus,
@@ -111,7 +122,12 @@ export default function RecurringExpenses() {
           <button
             className="btn-secondary"
             disabled={processDueM.isPending}
-            onClick={() => processDueM.mutate()}
+            onClick={() => {
+              // PR-FE-IDEM-FINAL-OPS — fresh Idempotency-Key per click
+              // intent for the page-level "process all due" batch.
+              resetRecurringProcessDueIdempotencyKey();
+              processDueM.mutate();
+            }}
           >
             {processDueM.isPending ? (
               <RefreshCw size={16} className="animate-spin" />
@@ -221,7 +237,15 @@ export default function RecurringExpenses() {
                       <button
                         className="icon-btn"
                         title="توليد الآن"
-                        onClick={() => runM.mutate(r.id)}
+                        onClick={() => {
+                          // PR-FE-IDEM-FINAL-OPS — fresh
+                          // Idempotency-Key per click intent. Retries
+                          // (network blips / 425 IN_PROGRESS) within
+                          // the same click reuse the cached key; a
+                          // new click mints a new key.
+                          resetRecurringRunIdempotencyKey();
+                          runM.mutate(r.id);
+                        }}
                         disabled={r.status !== 'active' || runM.isPending}
                       >
                         <Zap size={14} />
