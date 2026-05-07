@@ -40,6 +40,7 @@ import DailyExpenses from '@/pages/DailyExpenses';
 import FinancialControlTower from '@/pages/FinancialControlTower';
 import FinanceDashboard from '@/pages/FinanceDashboard';
 import FinanceStatements from '@/pages/FinanceStatements';
+import Zakat from '@/pages/Zakat';
 import CustomerGroups from '@/pages/CustomerGroups';
 import Settings from '@/pages/Settings';
 import PaymentAccounts from '@/pages/PaymentAccounts';
@@ -268,6 +269,19 @@ export default function App() {
           element={
             <ProtectedRoute permissions={['finance.statements.view']}>
               <FinanceStatements />
+            </ProtectedRoute>
+          }
+        />
+        {/* PR-FE-ACCOUNTING-ZAKAT-FRAMING — Zakat framing/planning page
+            (read-only). No JE/CT writes, no engine calls, no migrations.
+            Permission mirrors the sidebar entry (finance.dashboard.view —
+            admin gets it via the `*` wildcard). Flips the sidebar
+            placeholder for "الزكاة" from disabled to active. */}
+        <Route
+          path="finance/zakat"
+          element={
+            <ProtectedRoute permissions={['finance.dashboard.view']}>
+              <Zakat />
             </ProtectedRoute>
           }
         />
