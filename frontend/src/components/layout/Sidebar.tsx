@@ -156,7 +156,13 @@ const groups: NavGroup[] = [
       { to: '/audit/financial-movements', label: 'تتبع الحركات المالية', icon: History, roles: ['admin', 'manager', 'accountant'], permission: 'finance.dashboard.view', placeholder: true },
       // PR-FIN-SIDEBAR-2 Q2B — renamed from "التقارير" to disambiguate
       // from the global /reports item in the top-level reports group.
-      { to: '/finance/reports', label: 'التقارير المالية', icon: PieChart, roles: ['admin', 'manager', 'accountant'], permission: 'finance.dashboard.view', placeholder: true },
+      // PR-FE-ACCOUNTING-FINANCIAL-REPORTS-FRAMING — flipped from
+      // placeholder to active. Page is a framing/planning shell —
+      // no API calls, no JE/CT writes, no engine touches, no fake
+      // numbers (every monetary cell renders the em-dash placeholder).
+      // Same icon (PieChart) and permission (finance.dashboard.view)
+      // as the placeholder version.
+      { to: '/finance/reports', label: 'التقارير المالية', icon: PieChart, roles: ['admin', 'manager', 'accountant'], permission: 'finance.dashboard.view' },
 
       // ─── 6. عمليات متقدمة ─────────────────────────────────
       { kind: 'subheader', to: 'subhdr:fin:advanced', label: 'عمليات متقدمة', icon: Calculator, roles: ['admin', 'accountant'], permission: 'accounts.journal.post' },

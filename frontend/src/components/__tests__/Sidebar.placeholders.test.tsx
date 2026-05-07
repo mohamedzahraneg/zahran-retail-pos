@@ -3,7 +3,6 @@
  *
  * Pins the placeholder UX for the upcoming financial PRs that have
  * NOT shipped yet:
- *   · التقارير المالية (PR-FIN-7)
  *   · تتبع الحركات المالية (PR-FIN-4)
  *
  * Each appears in the sidebar AFTER the existing active items in
@@ -15,12 +14,16 @@
  *   · PR-FIN-3 flipped "كشف الحسابات" from placeholder to active
  *   · PR-FE-ACCOUNTING-ZAKAT-FRAMING flipped "الزكاة" from placeholder
  *     to active (framing/planning shell — see pages/Zakat.tsx)
+ *   · PR-FE-ACCOUNTING-FINANCIAL-REPORTS-FRAMING flipped
+ *     "التقارير المالية" from placeholder to active
+ *     (framing/planning shell — see pages/FinancialReports.tsx)
  *
  * Existing active items (الحسابات / فتح الحسابات / التحليلات الذكية /
  * الصندوق اليومي / الخزائن والبنوك / المصاريف الدورية / المصروفات
  * اليومية / برج المراقبة المالية / لوحة التحكم / كشف الحسابات /
- * الزكاة) must remain rendered as router links — regression guard
- * against accidentally flipping an active item into a placeholder.
+ * الزكاة / التقارير المالية) must remain rendered as router links —
+ * regression guard against accidentally flipping an active item
+ * into a placeholder.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
@@ -66,13 +69,10 @@ describe('<Sidebar /> — PR-FIN-SIDEBAR-1 placeholders', () => {
   const PLACEHOLDERS = [
     // PR-FIN-3 flipped "كشف الحسابات" from placeholder to active link
     // (/finance/statements). PR-FE-ACCOUNTING-ZAKAT-FRAMING flipped
-    // "الزكاة" from placeholder to active link (/finance/zakat —
-    // framing/planning shell). The remaining 2 stay as placeholders
-    // until their respective PRs (FIN-7 / FIN-4) ship.
-    // PR-FIN-SIDEBAR-2 renamed the /finance/reports placeholder from
-    // "التقارير" to "التقارير المالية" to disambiguate from the
-    // global /reports item in the top-level reports sidebar group.
-    { label: 'التقارير المالية', to: '/finance/reports' },
+    // "الزكاة" → /finance/zakat. PR-FE-ACCOUNTING-FINANCIAL-REPORTS-
+    // FRAMING flipped "التقارير المالية" → /finance/reports
+    // (framing/planning shell — see pages/FinancialReports.tsx).
+    // Only "تتبع الحركات المالية" (PR-FIN-4) remains as a placeholder.
     { label: 'تتبع الحركات المالية', to: '/audit/financial-movements' },
   ];
 
@@ -130,6 +130,9 @@ describe('<Sidebar /> — PR-FIN-SIDEBAR-1 placeholders', () => {
       // PR-FE-ACCOUNTING-ZAKAT-FRAMING — "الزكاة" is now active too
       // (framing/planning shell at /finance/zakat).
       'الزكاة',
+      // PR-FE-ACCOUNTING-FINANCIAL-REPORTS-FRAMING — "التقارير المالية"
+      // is now active too (framing/planning shell at /finance/reports).
+      'التقارير المالية',
     ];
     for (const label of active) {
       const els = screen.getAllByText(label);
@@ -141,15 +144,18 @@ describe('<Sidebar /> — PR-FIN-SIDEBAR-1 placeholders', () => {
 
   it('placeholders appear AFTER active items inside the financial group', () => {
     renderSidebar();
-    // Find the "برج المراقبة المالية" item (last active in the group)
-    // and the first placeholder — assert placeholder DOM index is
-    // greater than the active item's.
+    // Find the "برج المراقبة المالية" item (last active in the
+    // monitoring sub-group) and the remaining placeholder — assert
+    // placeholder DOM index is greater than the active item's.
+    // After PR-FE-ACCOUNTING-FINANCIAL-REPORTS-FRAMING flipped
+    // "/finance/reports" to active, the only remaining placeholder
+    // in this group is "/audit/financial-movements" (PR-FIN-4).
     const activeAnchor = screen.getByText('برج المراقبة المالية');
-    const firstPlaceholder = screen.getByTestId(
-      'sidebar-placeholder-/finance/reports',
+    const remainingPlaceholder = screen.getByTestId(
+      'sidebar-placeholder-/audit/financial-movements',
     );
     expect(
-      activeAnchor.compareDocumentPosition(firstPlaceholder) &
+      activeAnchor.compareDocumentPosition(remainingPlaceholder) &
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
   });
