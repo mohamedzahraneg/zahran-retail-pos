@@ -75,6 +75,20 @@ import { attachPayrollIdempotencyKeyIfApplicable } from '@/lib/payroll-idempoten
 // Excludes /shifts/:id/{request-close,reject-close} (state-only),
 // /shifts/open, /shifts read paths, and /shifts/reports/* aggregates.
 import { attachShiftsIdempotencyKeyIfApplicable } from '@/lib/shifts-idempotency';
+// PR-FE-IDEM-ACCOUNTING-OPS (Sprint 5 / FE-IDEM PR 7B) — twelfth
+// sibling (7 routes, 1 helper module). Gates via regex on:
+//   · POST /accounting/approvals/:id/approve
+//   · POST /accounting/expenses/:id/approve
+//   · POST /accounting/expenses/edit-requests/:id/approve
+//   · POST /accounts/journal             (BE controller is @Controller('accounts'))
+//   · POST /accounts/journal/:id/void
+//   · POST /accounts/close-year
+//   · POST /accounts/depreciation/run
+// Excludes /accounting/expenses + /accounting/expenses/daily (owned by
+// expense-idempotency), /accounting/{approvals,expenses}/.../reject,
+// /accounting/{approvals/rules,categories} CRUD, /accounts/{chart,
+// fixed-assets,budgets,cost-centers,fx,audit,journal/backfill} CRUD/admin.
+import { attachAccountingOpsIdempotencyKeyIfApplicable } from '@/lib/accounting-ops-idempotency';
 
 const envApiUrl = import.meta.env.VITE_API_URL as string | undefined;
 const baseURL = envApiUrl ?? 'http://localhost:3000';
@@ -136,6 +150,10 @@ api.interceptors.request.use((config) => {
   // /shifts/:id/{close, approve-close, adjust-count}. Three
   // independent keys. request-close/reject-close (state) excluded.
   attachShiftsIdempotencyKeyIfApplicable(config);
+  // PR-FE-IDEM-ACCOUNTING-OPS — no-op on every route except the 7
+  // accounting/accounts mutation routes. Disjoint from
+  // expense-idempotency which owns /accounting/expenses + daily.
+  attachAccountingOpsIdempotencyKeyIfApplicable(config);
   return config;
 });
 
