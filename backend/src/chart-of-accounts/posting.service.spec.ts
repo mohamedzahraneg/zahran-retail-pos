@@ -530,15 +530,23 @@ describe('AccountingPostingService — PR-FIN-PAYACCT-4D-DRIFT-ROOT-FIX-1', () =
     });
 
     /**
-     * postInvoiceEdit must reach postInvoice with the skip flag — and
-     * void any active JE first. We spy on the service's own
-     * postInvoice method so the assertion is pinned to the contract,
-     * not the inner SQL.
+     * PR-FIX-POS-EDIT-CASH-GL-ALIGNMENT — the contract for
+     * postInvoiceEdit is now "delegate to reverseByReference, then to
+     * postInvoice (without skipCashMovements)". We spy on both inner
+     * methods to pin the new contract.
+     *
+     * The previous contract ("manual UPDATE journal_entries SET
+     * is_void = TRUE; then postInvoice with skipCashMovements: true")
+     * caused the engine's Guard B to reject the post because the
+     * cash GL leg had no in-memory paired cash_movement (the CT side
+     * had been written separately by pos.service.editInvoice). The
+     * unified flow puts both layers under the engine's control.
      */
-    it('postInvoiceEdit voids the active JE then calls postInvoice with skipCashMovements: true', async () => {
+    it('postInvoiceEdit delegates to reverseByReference + postInvoice (no skipCashMovements)', async () => {
       const { svc } = makeServiceWithEngineSpy({ dsResults: [] });
       const dsManagerCalls: Array<{ sql: string; params: any[] }> = [];
-      // Replace the SQL recorder so we see the void-update.
+      // Track SQL so we can confirm the manual UPDATE is_void path
+      // is GONE.
       (svc as any).ds = {
         manager: {
           query: async (sql: string, params: any[]) => {
@@ -547,24 +555,111 @@ describe('AccountingPostingService — PR-FIN-PAYACCT-4D-DRIFT-ROOT-FIX-1', () =
           },
         },
       };
+      const reverseSpy = jest
+        .spyOn(svc, 'reverseByReference')
+        .mockResolvedValue(null as any);
       const postInvoiceSpy = jest
         .spyOn(svc, 'postInvoice')
         .mockResolvedValue({ entry_id: 'je-edit' } as any);
 
       await (svc as any).postInvoiceEdit('inv-1', 'user-1');
 
-      // The void update fired before postInvoice.
-      const voidCall = dsManagerCalls.find((c) =>
+      // The legacy manual UPDATE journal_entries SET is_void path is
+      // GONE — only the engine_context SELECT remains as the prelude.
+      const legacyVoidCall = dsManagerCalls.find((c) =>
         /UPDATE journal_entries[\s\S]+SET is_void = TRUE/.test(c.sql),
       );
-      expect(voidCall).toBeDefined();
-      expect(voidCall!.params).toEqual(['inv-1', 'user-1']);
-      // postInvoice was invoked with the skip flag.
+      expect(legacyVoidCall).toBeUndefined();
+
+      // reverseByReference was called for ('invoice', 'inv-1', ...).
+      expect(reverseSpy).toHaveBeenCalledTimes(1);
+      const reverseArgs = reverseSpy.mock.calls[0];
+      expect(reverseArgs[0]).toBe('invoice');
+      expect(reverseArgs[1]).toBe('inv-1');
+      expect(reverseArgs[3]).toBe('user-1');
+
+      // postInvoice was invoked WITHOUT skipCashMovements — the engine
+      // now writes the paired cash CTs alongside the JE on the new
+      // post, satisfying Guard B.
       expect(postInvoiceSpy).toHaveBeenCalledTimes(1);
       const args = postInvoiceSpy.mock.calls[0];
-      expect(args[0]).toBe('inv-1');                 // invoiceId
-      expect(args[1]).toBe('user-1');                // userId
-      expect(args[3]).toEqual({ skipCashMovements: true });
+      expect(args[0]).toBe('inv-1'); // invoiceId
+      expect(args[1]).toBe('user-1'); // userId
+      // args[2] is the optional EntityManager; args[3] is the opts arg.
+      // It must be undefined (no skipCashMovements) for Guard B to be
+      // satisfied by the engine's own cash_movements emission.
+      expect(args[3]).toBeUndefined();
+    });
+
+    /**
+     * PR-FIX-POS-EDIT-CASH-GL-ALIGNMENT — regression test pinning the
+     * exact production error. Before the fix, postInvoiceEdit called
+     * postInvoice with skipCashMovements: true, which built a cash GL
+     * leg (DR 1111 with cashbox_id) but emitted cash_movements: []
+     * to the engine. The engine's Guard B then rejected with:
+     *
+     *   "cash GL line on 1111 ... has no paired cashbox_transactions
+     *    movement (cashbox_id=..., signed=150.00). Add cash_movements:
+     *    { cashbox_id, direction:'in', amount:150, ... } or set
+     *    accounting_only=true if no physical cash moved."
+     *
+     * Production incident: invoice 1263e8c4-..., cashbox
+     * 524646d5-..., signed=150.00 — toast surfaced "فشل ترحيل القيد
+     * بعد تعديل الفاتورة".
+     *
+     * After the fix, postInvoice (called by postInvoiceEdit) emits a
+     * cash_movement matching every cash GL line, so Guard B passes.
+     */
+    it('REGRESSION — postInvoiceEdit does NOT crash with "no paired cashbox_transactions movement" on cash invoice', async () => {
+      const { svc, engineCalls } = makeServiceWithEngineSpy({
+        dsResults: [
+          // 1: SELECT set_config('app.engine_context', ...) — fires
+          //    at the top of postInvoiceEdit.
+          [],
+          // 2: SELECT invoice (with cashbox_id)
+          [{ id: 'inv-prod', invoice_no: 'INV-PROD',
+             grand_total: 150, paid_amount: 150, tax_amount: 0,
+             status: 'paid', customer_id: 'c-1',
+             cashbox_id: '524646d5-7bd6-4d8d-a484-b1f562b039a4',
+             completed_at: '2026-04-30' }],
+          // 3: SELECT cogs
+          [{ cogs: 0 }],
+          // 4: SELECT payments — single cash payment
+          [{ payment_method: 'cash', amount: '150',
+             payment_account_id: null, payment_account_snapshot: null }],
+        ],
+      });
+      // Mock reverseByReference so we don't need to populate the
+      // origLines/origCashRows queries — its behavior is covered by
+      // its own unit tests.
+      jest.spyOn(svc, 'reverseByReference').mockResolvedValue(null as any);
+
+      await (svc as any).postInvoiceEdit('inv-prod', 'user-1');
+
+      // The engine call MUST carry a cash_movement matching the cash
+      // GL leg — exactly the shape Guard B expects.
+      expect(engineCalls).toHaveLength(1);
+      const spec = engineCalls[0];
+      const cashLine = (spec.gl_lines as any[]).find(
+        (l) => l.cashbox_id === '524646d5-7bd6-4d8d-a484-b1f562b039a4',
+      );
+      expect(cashLine).toBeDefined();
+      // The line carries DR = 150 on this cashbox (signed = +150).
+      expect(cashLine.debit).toBe(150);
+      // ... and a paired cash_movement is present.
+      const cashMv = (spec.cash_movements as any[]).find(
+        (m) => m.cashbox_id === '524646d5-7bd6-4d8d-a484-b1f562b039a4',
+      );
+      expect(cashMv).toBeDefined();
+      expect(cashMv).toMatchObject({
+        cashbox_id: '524646d5-7bd6-4d8d-a484-b1f562b039a4',
+        direction: 'in',
+        amount: 150,
+        category: 'sale',
+      });
+      // Guard B's signed-amount check: cashLine.debit === movement.amount
+      // (both +150 in signed form) — the exact check the engine performs.
+      expect(cashLine.debit).toBe(cashMv.amount);
     });
   });
 
