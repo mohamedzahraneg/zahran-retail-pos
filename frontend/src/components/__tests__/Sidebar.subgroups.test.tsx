@@ -17,7 +17,9 @@
  *   · Active items remain `<NavLink>` (an `<a>` in the DOM)
  *   · Placeholders remain non-clickable (`role="link" aria-disabled="true"`)
  *   · "كشف الحسابات" stays an active link (PR-FIN-3 contract)
- *   · "التقارير المالية" is rendered as a placeholder (renamed from "التقارير")
+ *   · "الزكاة" is an active link (PR-FE-ACCOUNTING-ZAKAT-FRAMING)
+ *   · "التقارير المالية" is an active link
+ *     (PR-FE-ACCOUNTING-FINANCIAL-REPORTS-FRAMING)
  *   · Collapsed mode renders sub-headers as divider only — no text
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -131,7 +133,10 @@ describe('<Sidebar /> — PR-FIN-SIDEBAR-2 sub-groups', () => {
         { kind: 'href', key: '/dashboard/financial', visibleLabel: 'برج المراقبة المالية' },
         { kind: 'href', key: '/analytics', visibleLabel: 'التحليلات الذكية' },
         { kind: 'placeholder', key: '/audit/financial-movements', visibleLabel: 'تتبع الحركات المالية' },
-        { kind: 'placeholder', key: '/finance/reports', visibleLabel: 'التقارير المالية' },
+        // PR-FE-ACCOUNTING-FINANCIAL-REPORTS-FRAMING — flipped from
+        // placeholder to active link (/finance/reports —
+        // framing/planning shell).
+        { kind: 'href', key: '/finance/reports', visibleLabel: 'التقارير المالية' },
       ],
     },
     {
@@ -192,6 +197,8 @@ describe('<Sidebar /> — PR-FIN-SIDEBAR-2 sub-groups', () => {
       'فتح الحسابات',
       // PR-FE-ACCOUNTING-ZAKAT-FRAMING — explicitly active.
       'الزكاة',
+      // PR-FE-ACCOUNTING-FINANCIAL-REPORTS-FRAMING — explicitly active.
+      'التقارير المالية',
     ];
     for (const label of active) {
       const els = screen.getAllByText(label);
@@ -203,11 +210,11 @@ describe('<Sidebar /> — PR-FIN-SIDEBAR-2 sub-groups', () => {
   it('placeholders remain non-clickable (role="link" aria-disabled="true")', () => {
     renderSidebar();
     const placeholders: Array<{ label: string; to: string }> = [
-      { label: 'التقارير المالية', to: '/finance/reports' },
-      // PR-FE-ACCOUNTING-ZAKAT-FRAMING — "الزكاة" removed from this
-      // list because it is now an active NavLink (see the
-      // ' /finance/zakat → href' entry under the "advanced" sub-header
-      // PLACEMENTS above).
+      // PR-FE-ACCOUNTING-FINANCIAL-REPORTS-FRAMING — "التقارير المالية"
+      // removed from this list because it is now an active NavLink
+      // (see the '/finance/reports → href' entry under the
+      // "monitoring" sub-header PLACEMENTS above).
+      // PR-FE-ACCOUNTING-ZAKAT-FRAMING — "الزكاة" similarly removed.
       { label: 'تتبع الحركات المالية', to: '/audit/financial-movements' },
     ];
     for (const { label, to } of placeholders) {
@@ -218,16 +225,23 @@ describe('<Sidebar /> — PR-FIN-SIDEBAR-2 sub-groups', () => {
     }
   });
 
-  it('"التقارير المالية" placeholder uses the renamed label, not the old "التقارير"', () => {
+  it('"التقارير المالية" renders as an active link with the renamed label, not the old "التقارير"', () => {
+    // PR-FE-ACCOUNTING-FINANCIAL-REPORTS-FRAMING — the previous
+    // assertion targeted a placeholder element. Now that the entry
+    // is an active NavLink, we look up the anchor by href and assert
+    // the renamed label is present (and the legacy bare "التقارير"
+    // label belongs to the global /reports item, not this one).
     renderSidebar();
-    // The new label exists.
-    const el = screen.getByTestId('sidebar-placeholder-/finance/reports');
-    expect(within(el).getByText('التقارير المالية')).toBeInTheDocument();
-    // The old plain "التقارير" must not appear inside this specific
-    // placeholder element (the global /reports item in the top-level
-    // "التقارير" group still uses the plain label, but that's a
-    // different element).
-    expect(within(el).queryByText('التقارير')).toBeNull();
+    const a = document.querySelector(
+      'a[href="/finance/reports"]',
+    ) as HTMLAnchorElement | null;
+    expect(a).not.toBeNull();
+    expect(within(a as HTMLElement).getByText('التقارير المالية')).toBeInTheDocument();
+    // The /finance/reports anchor itself must not also expose the
+    // bare "التقارير" label (that legacy text now exists only on
+    // the top-level /reports item, which is a different anchor).
+    const within$ = within(a as HTMLElement);
+    expect(within$.queryByText('التقارير', { exact: true })).toBeNull();
   });
 
   // ─── 4. Collapsed mode ───────────────────────────────────────

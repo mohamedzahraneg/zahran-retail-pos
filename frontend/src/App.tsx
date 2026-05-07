@@ -41,6 +41,7 @@ import FinancialControlTower from '@/pages/FinancialControlTower';
 import FinanceDashboard from '@/pages/FinanceDashboard';
 import FinanceStatements from '@/pages/FinanceStatements';
 import Zakat from '@/pages/Zakat';
+import FinancialReports from '@/pages/FinancialReports';
 import CustomerGroups from '@/pages/CustomerGroups';
 import Settings from '@/pages/Settings';
 import PaymentAccounts from '@/pages/PaymentAccounts';
@@ -282,6 +283,21 @@ export default function App() {
           element={
             <ProtectedRoute permissions={['finance.dashboard.view']}>
               <Zakat />
+            </ProtectedRoute>
+          }
+        />
+        {/* PR-FE-ACCOUNTING-FINANCIAL-REPORTS-FRAMING — Financial
+            Reports framing/planning page (read-only). No API calls,
+            no JE/CT writes, no engine calls, no migrations.
+            Permission mirrors the sidebar entry
+            (finance.dashboard.view — admin gets it via the `*`
+            wildcard). Flips the sidebar placeholder for "التقارير
+            المالية" from disabled to active. */}
+        <Route
+          path="finance/reports"
+          element={
+            <ProtectedRoute permissions={['finance.dashboard.view']}>
+              <FinancialReports />
             </ProtectedRoute>
           }
         />
