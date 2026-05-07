@@ -15,11 +15,13 @@
  *   · Sub-headers render in the documented order
  *   · Each item appears under the correct sub-header (DOM order)
  *   · Active items remain `<NavLink>` (an `<a>` in the DOM)
- *   · Placeholders remain non-clickable (`role="link" aria-disabled="true"`)
  *   · "كشف الحسابات" stays an active link (PR-FIN-3 contract)
  *   · "الزكاة" is an active link (PR-FE-ACCOUNTING-ZAKAT-FRAMING)
  *   · "التقارير المالية" is an active link
  *     (PR-FE-ACCOUNTING-FINANCIAL-REPORTS-FRAMING)
+ *   · "تتبع الحركات المالية" is an active link
+ *     (PR-FE-ACCOUNTING-FINANCIAL-MOVEMENTS-FRAMING)
+ *   · No placeholder items remain in the financial group
  *   · Collapsed mode renders sub-headers as divider only — no text
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -132,7 +134,10 @@ describe('<Sidebar /> — PR-FIN-SIDEBAR-2 sub-groups', () => {
       itemSelectors: [
         { kind: 'href', key: '/dashboard/financial', visibleLabel: 'برج المراقبة المالية' },
         { kind: 'href', key: '/analytics', visibleLabel: 'التحليلات الذكية' },
-        { kind: 'placeholder', key: '/audit/financial-movements', visibleLabel: 'تتبع الحركات المالية' },
+        // PR-FE-ACCOUNTING-FINANCIAL-MOVEMENTS-FRAMING — flipped from
+        // placeholder to active link (/audit/financial-movements —
+        // framing/planning shell).
+        { kind: 'href', key: '/audit/financial-movements', visibleLabel: 'تتبع الحركات المالية' },
         // PR-FE-ACCOUNTING-FINANCIAL-REPORTS-FRAMING — flipped from
         // placeholder to active link (/finance/reports —
         // framing/planning shell).
@@ -199,6 +204,8 @@ describe('<Sidebar /> — PR-FIN-SIDEBAR-2 sub-groups', () => {
       'الزكاة',
       // PR-FE-ACCOUNTING-FINANCIAL-REPORTS-FRAMING — explicitly active.
       'التقارير المالية',
+      // PR-FE-ACCOUNTING-FINANCIAL-MOVEMENTS-FRAMING — explicitly active.
+      'تتبع الحركات المالية',
     ];
     for (const label of active) {
       const els = screen.getAllByText(label);
@@ -207,21 +214,26 @@ describe('<Sidebar /> — PR-FIN-SIDEBAR-2 sub-groups', () => {
     }
   });
 
-  it('placeholders remain non-clickable (role="link" aria-disabled="true")', () => {
+  it('no placeholder items remain in the financial group (regression guard)', () => {
+    // PR-FE-ACCOUNTING-FINANCIAL-MOVEMENTS-FRAMING — the previous
+    // assertion iterated over a placeholders list that has now been
+    // emptied (every historical placeholder in the financial group
+    // has been activated as a framing/planning shell). The
+    // assertion intent is preserved by checking that NONE of the
+    // four historical placeholder routes still render as a
+    // `sidebar-placeholder-*` element.
     renderSidebar();
-    const placeholders: Array<{ label: string; to: string }> = [
-      // PR-FE-ACCOUNTING-FINANCIAL-REPORTS-FRAMING — "التقارير المالية"
-      // removed from this list because it is now an active NavLink
-      // (see the '/finance/reports → href' entry under the
-      // "monitoring" sub-header PLACEMENTS above).
-      // PR-FE-ACCOUNTING-ZAKAT-FRAMING — "الزكاة" similarly removed.
-      { label: 'تتبع الحركات المالية', to: '/audit/financial-movements' },
+    const HISTORICAL_PLACEHOLDER_ROUTES = [
+      '/finance/statements', // flipped by PR-FIN-3
+      '/finance/zakat',      // flipped by PR-FE-ACCOUNTING-ZAKAT-FRAMING
+      '/finance/reports',    // flipped by PR-FE-ACCOUNTING-FINANCIAL-REPORTS-FRAMING
+      '/audit/financial-movements', // flipped by THIS PR
     ];
-    for (const { label, to } of placeholders) {
-      const el = screen.getByTestId(`sidebar-placeholder-${to}`);
-      expect(el.tagName.toLowerCase()).not.toBe('a');
-      expect(el.getAttribute('aria-disabled')).toBe('true');
-      expect(within(el).getByText(label)).toBeInTheDocument();
+    for (const to of HISTORICAL_PLACEHOLDER_ROUTES) {
+      expect(
+        screen.queryByTestId(`sidebar-placeholder-${to}`),
+        `route ${to} must not render as a placeholder`,
+      ).toBeNull();
     }
   });
 

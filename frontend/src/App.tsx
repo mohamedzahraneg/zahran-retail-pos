@@ -42,6 +42,7 @@ import FinanceDashboard from '@/pages/FinanceDashboard';
 import FinanceStatements from '@/pages/FinanceStatements';
 import Zakat from '@/pages/Zakat';
 import FinancialReports from '@/pages/FinancialReports';
+import FinancialMovements from '@/pages/FinancialMovements';
 import CustomerGroups from '@/pages/CustomerGroups';
 import Settings from '@/pages/Settings';
 import PaymentAccounts from '@/pages/PaymentAccounts';
@@ -298,6 +299,22 @@ export default function App() {
           element={
             <ProtectedRoute permissions={['finance.dashboard.view']}>
               <FinancialReports />
+            </ProtectedRoute>
+          }
+        />
+        {/* PR-FE-ACCOUNTING-FINANCIAL-MOVEMENTS-FRAMING — Financial
+            Movements tracking framing/planning page (read-only).
+            No API calls, no JE/CT writes, no engine calls, no
+            migrations, no reverse/void/approve actions. Permission
+            mirrors the sidebar entry (finance.dashboard.view —
+            admin gets it via the `*` wildcard). Flips the sidebar
+            placeholder for "تتبع الحركات المالية" from disabled to
+            active. */}
+        <Route
+          path="audit/financial-movements"
+          element={
+            <ProtectedRoute permissions={['finance.dashboard.view']}>
+              <FinancialMovements />
             </ProtectedRoute>
           }
         />
