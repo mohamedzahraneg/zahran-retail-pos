@@ -27,6 +27,15 @@ import { attendanceApi } from '@/api/attendance.api';
 import { useAuthStore } from '@/stores/auth.store';
 import { invalidateMonthly } from '@/utils/employee-cache';
 import { CashSourceSelector, CashSource } from '@/components/CashSourceSelector';
+// PR-FE-IDEM-PAYROLL-FAMILY (Sprint 5 / FE-IDEM PR 6) — per-action
+// Idempotency-Key reset hooks. Pay-wage uses the modal mount/unmount
+// pattern. Bonus has TWO callers in this file: the AccountsMovementsTab
+// BonusModal (wired separately in that file) and a per-row HistoryCard
+// "صرف يومية كاملة" button (per-click reset below).
+import {
+  resetPayrollPayWageIdempotencyKey,
+  resetPayrollBonusIdempotencyKey,
+} from '@/lib/payroll-idempotency';
 
 // ═══ Month picker helpers ═════════════════════════════════════════════
 // Single place for YYYY-MM parsing / default / bounds so the page and
@@ -748,6 +757,15 @@ export function PayWageModal({
   const cashboxId = cashSource.cashbox_id || '';
   const [excessHandling, setExcessHandling] = useState<'advance' | 'bonus' | ''>('');
   const [notes, setNotes] = useState<string>('');
+
+  // PR-FE-IDEM-PAYROLL-FAMILY — clean slate on mount, defensive
+  // reset on unmount. Pay-wage is a multi-leg payout: settlement JE
+  // + cashbox CT + (optional) advance/bonus JE for excess. Each
+  // open of this modal is one intent.
+  useEffect(() => {
+    resetPayrollPayWageIdempotencyKey();
+    return () => resetPayrollPayWageIdempotencyKey();
+  }, []);
 
   const amtNum = Number(amount || 0);
   const r2 = (n: number) => Math.round(n * 100) / 100;
@@ -1637,7 +1655,18 @@ function HistoryCard({ userId }: { userId?: string }) {
                         <button
                           className="px-2 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[10px]"
                           disabled={payFullDay.isPending}
-                          onClick={() => payFullDay.mutate(d)}
+                          onClick={() => {
+                            // PR-FE-IDEM-PAYROLL-FAMILY — reset
+                            // per-click so each row's bonus posts a
+                            // fresh key. Button is disabled while
+                            // mut.isPending → concurrent clicks
+                            // blocked. The same `bonusKey` is also
+                            // reset on BonusModal mount/unmount in
+                            // AccountsMovementsTab so cross-context
+                            // double-clicks are independent intents.
+                            resetPayrollBonusIdempotencyKey();
+                            payFullDay.mutate(d);
+                          }}
                           title="إضافة مكافأة بمقدار الفرق لصرف اليومية كاملة"
                         >
                           صرف يومية كاملة
