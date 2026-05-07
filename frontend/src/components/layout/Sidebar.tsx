@@ -152,8 +152,14 @@ const groups: NavGroup[] = [
       { kind: 'subheader', to: 'subhdr:fin:monitoring', label: 'المراقبة والتقارير', icon: Activity, roles: ['admin', 'manager', 'accountant'], permission: 'dashboard.financial.view' },
       { to: '/dashboard/financial', label: 'برج المراقبة المالية', icon: Activity, roles: ['admin', 'manager', 'accountant'], permission: 'dashboard.financial.view' },
       { to: '/analytics', label: 'التحليلات الذكية', icon: Sparkles, roles: ['admin', 'manager', 'accountant'], permission: 'accounts.chart.view' },
-      // Placeholders for upcoming PRs — never navigate.
-      { to: '/audit/financial-movements', label: 'تتبع الحركات المالية', icon: History, roles: ['admin', 'manager', 'accountant'], permission: 'finance.dashboard.view', placeholder: true },
+      // PR-FE-ACCOUNTING-FINANCIAL-MOVEMENTS-FRAMING — flipped from
+      // placeholder to active. Page is a framing/planning shell —
+      // no API calls, no JE/CT writes, no engine touches, no fake
+      // numbers (every monetary cell renders the em-dash placeholder
+      // and every status renders the literal "غير مفعل"). Same icon
+      // (History) and permission (finance.dashboard.view) as the
+      // placeholder version.
+      { to: '/audit/financial-movements', label: 'تتبع الحركات المالية', icon: History, roles: ['admin', 'manager', 'accountant'], permission: 'finance.dashboard.view' },
       // PR-FIN-SIDEBAR-2 Q2B — renamed from "التقارير" to disambiguate
       // from the global /reports item in the top-level reports group.
       // PR-FE-ACCOUNTING-FINANCIAL-REPORTS-FRAMING — flipped from

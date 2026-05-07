@@ -1,32 +1,34 @@
 /**
  * Sidebar.placeholders.test.tsx — PR-FIN-SIDEBAR-1
  *
- * Pins the placeholder UX for the upcoming financial PRs that have
- * NOT shipped yet:
- *   · تتبع الحركات المالية (PR-FIN-4)
- *
- * Each appears in the sidebar AFTER the existing active items in
- * the "الحسابات والمالية" group, renders as a non-clickable element
- * (NOT an `<a>` tag), shows a "قريبًا" pill, and carries
- * `aria-disabled="true"`.
- *
- * History:
- *   · PR-FIN-3 flipped "كشف الحسابات" from placeholder to active
- *   · PR-FE-ACCOUNTING-ZAKAT-FRAMING flipped "الزكاة" from placeholder
- *     to active (framing/planning shell — see pages/Zakat.tsx)
+ * History — every placeholder originally tracked by this file has
+ * been activated:
+ *   · PR-FIN-3 flipped "كشف الحسابات" → /finance/statements
+ *   · PR-FE-ACCOUNTING-ZAKAT-FRAMING flipped "الزكاة"
+ *     → /finance/zakat (framing/planning shell — pages/Zakat.tsx)
  *   · PR-FE-ACCOUNTING-FINANCIAL-REPORTS-FRAMING flipped
- *     "التقارير المالية" from placeholder to active
- *     (framing/planning shell — see pages/FinancialReports.tsx)
+ *     "التقارير المالية" → /finance/reports
+ *     (framing/planning shell — pages/FinancialReports.tsx)
+ *   · PR-FE-ACCOUNTING-FINANCIAL-MOVEMENTS-FRAMING flipped
+ *     "تتبع الحركات المالية" → /audit/financial-movements
+ *     (framing/planning shell — pages/FinancialMovements.tsx)
  *
- * Existing active items (الحسابات / فتح الحسابات / التحليلات الذكية /
- * الصندوق اليومي / الخزائن والبنوك / المصاريف الدورية / المصروفات
- * اليومية / برج المراقبة المالية / لوحة التحكم / كشف الحسابات /
- * الزكاة / التقارير المالية) must remain rendered as router links —
- * regression guard against accidentally flipping an active item
- * into a placeholder.
+ * After PR-FE-ACCOUNTING-FINANCIAL-MOVEMENTS-FRAMING the financial
+ * group has ZERO remaining placeholder items. This file is now a
+ * **regression guard**:
+ *   · Every previously-flipped item must still render as a router
+ *     `<a>` (catches accidental flips back to placeholder)
+ *   · No `sidebar-placeholder-*` element exists for any of the
+ *     four historical placeholder routes (catches accidental
+ *     reintroduction)
+ *
+ * The placeholder rendering branch in Sidebar.tsx (`placeholder: true`
+ * → "قريبًا" pill + tooltip + aria-disabled) is still exercised by
+ * any future placeholder added in another sidebar group; the branch
+ * itself is unchanged by this PR.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Sidebar } from '../layout/Sidebar';
@@ -51,9 +53,10 @@ function renderSidebar() {
   );
 }
 
-describe('<Sidebar /> — PR-FIN-SIDEBAR-1 placeholders', () => {
+describe('<Sidebar /> — financial group placeholders (post-flip regression guard)', () => {
   beforeEach(() => {
-    // Admin has wildcard `*` → sees every item including placeholders.
+    // Admin has wildcard `*` → sees every item, so any placeholder
+    // that accidentally regresses would show up under this user.
     useAuthStore.setState({
       accessToken: 'tok',
       refreshToken: 'tok',
@@ -66,97 +69,59 @@ describe('<Sidebar /> — PR-FIN-SIDEBAR-1 placeholders', () => {
     });
   });
 
-  const PLACEHOLDERS = [
-    // PR-FIN-3 flipped "كشف الحسابات" from placeholder to active link
-    // (/finance/statements). PR-FE-ACCOUNTING-ZAKAT-FRAMING flipped
-    // "الزكاة" → /finance/zakat. PR-FE-ACCOUNTING-FINANCIAL-REPORTS-
-    // FRAMING flipped "التقارير المالية" → /finance/reports
-    // (framing/planning shell — see pages/FinancialReports.tsx).
-    // Only "تتبع الحركات المالية" (PR-FIN-4) remains as a placeholder.
+  // The four historical placeholder routes — each MUST now render
+  // as a router `<a>` and must NOT have a corresponding
+  // `sidebar-placeholder-*` element in the DOM.
+  const HISTORICAL_PLACEHOLDERS_NOW_ACTIVE = [
+    { label: 'كشف الحسابات', to: '/finance/statements' },
+    { label: 'الزكاة', to: '/finance/zakat' },
+    { label: 'التقارير المالية', to: '/finance/reports' },
     { label: 'تتبع الحركات المالية', to: '/audit/financial-movements' },
   ];
 
-  it.each(PLACEHOLDERS)(
-    '$label renders as a disabled placeholder (not a router link)',
-    ({ label, to }) => {
+  it.each(HISTORICAL_PLACEHOLDERS_NOW_ACTIVE)(
+    '$label renders as a router link <a> (not a placeholder element)',
+    ({ to }) => {
       renderSidebar();
-      const el = screen.getByTestId(`sidebar-placeholder-${to}`);
-      expect(el).toBeInTheDocument();
-      // It's the new role="link" + aria-disabled element — NOT an <a>.
-      expect(el.tagName.toLowerCase()).not.toBe('a');
-      expect(el.getAttribute('aria-disabled')).toBe('true');
-      // Label is rendered inside.
-      expect(within(el).getByText(label)).toBeInTheDocument();
-      // Cursor + opacity styling derived from the placeholder branch.
-      expect(el.className).toMatch(/cursor-not-allowed/);
-      expect(el.className).toMatch(/opacity-60/);
+      // The active link MUST exist…
+      const anchor = document.querySelector(
+        `a[href="${to}"]`,
+      ) as HTMLAnchorElement | null;
+      expect(anchor).not.toBeNull();
+      // …and the placeholder element MUST NOT exist for the same
+      // route. If a future regression flips one back to placeholder,
+      // this assertion fails immediately.
+      expect(
+        screen.queryByTestId(`sidebar-placeholder-${to}`),
+      ).toBeNull();
     },
   );
 
-  it('every placeholder shows the "قريبًا" pill', () => {
+  it('all 12 active items in the financial group render as <a> (regression guard)', () => {
     renderSidebar();
-    for (const { to } of PLACEHOLDERS) {
-      const el = screen.getByTestId(`sidebar-placeholder-${to}`);
-      const pill = within(el).getByTestId('sidebar-coming-soon-pill');
-      expect(pill).toBeInTheDocument();
-      expect(pill.textContent).toBe('قريبًا');
-    }
-  });
-
-  it('every placeholder carries the tooltip "متاح في تحديث لاحق"', () => {
-    renderSidebar();
-    for (const { to } of PLACEHOLDERS) {
-      const el = screen.getByTestId(`sidebar-placeholder-${to}`);
-      expect(el.getAttribute('title')).toBe('متاح في تحديث لاحق');
-    }
-  });
-
-  it('existing active items in the financial group still render as <a> (regression guard)', () => {
-    renderSidebar();
-    // A representative subset — if any of these flips to a placeholder
-    // by accident, this test fails immediately.
+    // The complete set of active items in the "الحسابات والمالية"
+    // top-level group after the four flips above. If ANY of these
+    // accidentally flips into a placeholder, the test fails.
     const active = [
       'لوحة التحكم',
       'الحسابات',
-      'فتح الحسابات',
-      'التحليلات الذكية',
+      'كشف الحسابات',
       'الصندوق اليومي',
       'الخزائن والبنوك',
-      'المصاريف الدورية',
       'المصروفات اليومية',
+      'المصاريف الدورية',
       'برج المراقبة المالية',
-      // PR-FIN-3 — "كشف الحسابات" is now active too (route added).
-      'كشف الحسابات',
-      // PR-FE-ACCOUNTING-ZAKAT-FRAMING — "الزكاة" is now active too
-      // (framing/planning shell at /finance/zakat).
+      'التحليلات الذكية',
+      'فتح الحسابات',
       'الزكاة',
-      // PR-FE-ACCOUNTING-FINANCIAL-REPORTS-FRAMING — "التقارير المالية"
-      // is now active too (framing/planning shell at /finance/reports).
       'التقارير المالية',
+      // PR-FE-ACCOUNTING-FINANCIAL-MOVEMENTS-FRAMING — also active.
+      'تتبع الحركات المالية',
     ];
     for (const label of active) {
       const els = screen.getAllByText(label);
-      // At least one element with this label must be an <a> (NavLink).
       const link = els.find((el) => el.closest('a'));
-      expect(link).toBeDefined();
+      expect(link, `expected "${label}" to be a router link`).toBeDefined();
     }
-  });
-
-  it('placeholders appear AFTER active items inside the financial group', () => {
-    renderSidebar();
-    // Find the "برج المراقبة المالية" item (last active in the
-    // monitoring sub-group) and the remaining placeholder — assert
-    // placeholder DOM index is greater than the active item's.
-    // After PR-FE-ACCOUNTING-FINANCIAL-REPORTS-FRAMING flipped
-    // "/finance/reports" to active, the only remaining placeholder
-    // in this group is "/audit/financial-movements" (PR-FIN-4).
-    const activeAnchor = screen.getByText('برج المراقبة المالية');
-    const remainingPlaceholder = screen.getByTestId(
-      'sidebar-placeholder-/audit/financial-movements',
-    );
-    expect(
-      activeAnchor.compareDocumentPosition(remainingPlaceholder) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
   });
 });
