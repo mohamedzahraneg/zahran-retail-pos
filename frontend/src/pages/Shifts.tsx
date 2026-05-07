@@ -36,6 +36,16 @@ import { PaymentProviderLogo } from '@/components/payments/PaymentProviderLogo';
 import { cashDeskApi } from '@/api/cash-desk.api';
 import { usersApi } from '@/api/users.api';
 import { exportMultiSheet, printReport } from '@/lib/exportExcel';
+// PR-FE-IDEM-SHIFTS-OPS (Sprint 5 / FE-IDEM PR 7A) — per-action
+// Idempotency-Key reset hooks. close + adjust-count use the modal
+// mount/unmount pattern; approve-close uses per-click reset on the
+// PendingCloseInbox row buttons + ApproveVarianceDialog confirm.
+// request-close + reject-close are intentionally out of scope.
+import {
+  resetShiftsCloseIdempotencyKey,
+  resetShiftsApproveCloseIdempotencyKey,
+  resetShiftsAdjustCountIdempotencyKey,
+} from '@/lib/shifts-idempotency';
 import {
   buildShiftReportHtml,
   buildShiftReportSheets,
@@ -674,6 +684,18 @@ function CloseShiftModal({
   const [denom, setDenom] = useState<Record<number, number>>({});
   // Toggle between typing the total manually or using the denomination counter.
   const [useCounter, setUseCounter] = useState(true);
+
+  // PR-FE-IDEM-SHIFTS-OPS — clean slate on mount, defensive reset
+  // on unmount. The mutation can call either `shiftsApi.close`
+  // (admin direct close — in scope, key attached) or
+  // `shiftsApi.requestClose` (non-admin pending request — out of
+  // scope, helper URL gate refuses, no key attached). Resetting
+  // the close key on this lifecycle is correct: the in-scope path
+  // is exactly the modal session boundary.
+  useEffect(() => {
+    resetShiftsCloseIdempotencyKey();
+    return () => resetShiftsCloseIdempotencyKey();
+  }, []);
 
   // Fetch the freshest summary right now so the cashier sees the exact
   // expected number.
@@ -1728,6 +1750,15 @@ function PendingCloseInbox() {
   // we POST /approve-close.
   const [approveTarget, setApproveTarget] = useState<Shift | null>(null);
 
+  // PR-FE-IDEM-SHIFTS-OPS — defensive reset on inbox unmount. The
+  // primary boundary is the per-click `reset()` calls before each
+  // `approve.mutate(...)` invocation below (one for the direct
+  // zero-variance approve button, one for the ApproveVarianceDialog
+  // confirm callback). Reject is intentionally NOT decorated.
+  useEffect(() => {
+    return () => resetShiftsApproveCloseIdempotencyKey();
+  }, []);
+
   const { data: pending = [] } = useQuery({
     queryKey: ['shifts-pending-close'],
     queryFn: () => shiftsApi.pendingCloses(),
@@ -1829,6 +1860,11 @@ function PendingCloseInbox() {
                   );
                   if (Math.abs(variance) < 0.01) {
                     // No variance → no treatment needed, approve straight.
+                    // PR-FE-IDEM-SHIFTS-OPS — reset per-click so each
+                    // pending shift's approval gets a fresh key. Button
+                    // is disabled while approve.isPending → concurrent
+                    // clicks blocked.
+                    resetShiftsApproveCloseIdempotencyKey();
                     approve.mutate({ id: s.id, payload: {} });
                   } else {
                     setApproveTarget(s);
@@ -1916,9 +1952,14 @@ function PendingCloseInbox() {
         <ApproveVarianceDialog
           shift={approveTarget}
           onCancel={() => setApproveTarget(null)}
-          onConfirm={(payload) =>
-            approve.mutate({ id: approveTarget.id, payload })
-          }
+          onConfirm={(payload) => {
+            // PR-FE-IDEM-SHIFTS-OPS — reset per-confirm so each
+            // variance-treatment approval gets a fresh key. The
+            // ApproveVarianceDialog stays mounted only for one
+            // approval intent.
+            resetShiftsApproveCloseIdempotencyKey();
+            approve.mutate({ id: approveTarget.id, payload });
+          }}
           pending={approve.isPending}
         />
       )}
@@ -2288,6 +2329,15 @@ function AdjustCountModal({
     currentActual ? String(currentActual) : '',
   );
   const [reason, setReason] = useState('');
+
+  // PR-FE-IDEM-SHIFTS-OPS — clean slate on mount, defensive reset
+  // on unmount. Adjust-count writes a CT diff (admin tweaks the
+  // actual closing amount post-close). Independent key from
+  // close/approve-close.
+  useEffect(() => {
+    resetShiftsAdjustCountIdempotencyKey();
+    return () => resetShiftsAdjustCountIdempotencyKey();
+  }, []);
 
   const newActualNum = Number(newActual || 0);
   const newDiff = newActualNum - currentExpected;

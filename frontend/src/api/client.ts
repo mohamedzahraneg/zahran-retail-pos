@@ -67,6 +67,14 @@ import { attachPosInvoiceIdempotencyKeyIfApplicable } from '@/lib/pos-invoice-id
 // Excludes attendance clock-in/out/mark-payable-day, employee
 // requests/tasks, and any non-financial state endpoint.
 import { attachPayrollIdempotencyKeyIfApplicable } from '@/lib/payroll-idempotency';
+// PR-FE-IDEM-SHIFTS-OPS (Sprint 5 / FE-IDEM PR 7A) — eleventh
+// sibling (3 routes, 1 helper module). Gates via regex on:
+//   · POST /shifts/:id/close
+//   · POST /shifts/:id/approve-close
+//   · POST /shifts/:id/adjust-count
+// Excludes /shifts/:id/{request-close,reject-close} (state-only),
+// /shifts/open, /shifts read paths, and /shifts/reports/* aggregates.
+import { attachShiftsIdempotencyKeyIfApplicable } from '@/lib/shifts-idempotency';
 
 const envApiUrl = import.meta.env.VITE_API_URL as string | undefined;
 const baseURL = envApiUrl ?? 'http://localhost:3000';
@@ -124,6 +132,10 @@ api.interceptors.request.use((config) => {
   // approve-wage-override, pay-wage} and employees/:id/{bonuses,
   // deductions, settlements}. Seven independent keys.
   attachPayrollIdempotencyKeyIfApplicable(config);
+  // PR-FE-IDEM-SHIFTS-OPS — no-op on every route except POST on
+  // /shifts/:id/{close, approve-close, adjust-count}. Three
+  // independent keys. request-close/reject-close (state) excluded.
+  attachShiftsIdempotencyKeyIfApplicable(config);
   return config;
 });
 
