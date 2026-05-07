@@ -51,6 +51,14 @@ import { attachReservationIdempotencyKeyIfApplicable } from '@/lib/reservation-i
 // Excludes POST /returns (create), POST /returns/:id/reject, and
 // any GET on the returns/exchanges read paths.
 import { attachReturnsIdempotencyKeyIfApplicable } from '@/lib/returns-idempotency';
+// PR-FE-IDEM-POS-VOID-EDIT (Sprint 5 / FE-IDEM PR 5) — ninth
+// sibling (3 routes, 1 helper module). Gates via regex on:
+//   · POST /pos/invoices/:id/void
+//   · POST /pos/invoices/:id/edit
+//   · POST /pos/edit-requests/:id/approve
+// Disjoint from the existing checkout helper (POST /pos/invoices
+// create) and explicitly rejects /edit-request and /reject siblings.
+import { attachPosInvoiceIdempotencyKeyIfApplicable } from '@/lib/pos-invoice-idempotency';
 
 const envApiUrl = import.meta.env.VITE_API_URL as string | undefined;
 const baseURL = envApiUrl ?? 'http://localhost:3000';
@@ -98,6 +106,11 @@ api.interceptors.request.use((config) => {
   // Four independent keys (one per action type). Reject is
   // intentionally NOT decorated.
   attachReturnsIdempotencyKeyIfApplicable(config);
+  // PR-FE-IDEM-POS-VOID-EDIT — no-op on every route except POST on
+  // /pos/invoices/:id/{void,edit} and /pos/edit-requests/:id/approve.
+  // Three independent keys. Disjoint from the checkout helper which
+  // decorates POST /pos/invoices (create) only.
+  attachPosInvoiceIdempotencyKeyIfApplicable(config);
   return config;
 });
 

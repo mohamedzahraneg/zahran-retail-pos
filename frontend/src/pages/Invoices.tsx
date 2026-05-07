@@ -43,6 +43,20 @@ import {
   resolvePeriod,
   type PeriodRange,
 } from '@/components/common/PeriodSelector';
+// PR-FE-IDEM-POS-VOID-EDIT (Sprint 5 / FE-IDEM PR 5) — per-action
+// Idempotency-Key reset hooks. Three independent keys (one per
+// action type) so a Void + Edit + Approve-edit-request flow on
+// different invoices doesn't collide. Within an open modal session
+// the key is reused so retries / 425 IN_PROGRESS auto-retries
+// (PR #315) hit the BE replay path instead of double-posting JE/CT/
+// stock_movements. The existing checkout helper (POST /pos/invoices
+// create) is untouched. Reject-edit-request is intentionally NOT
+// decorated.
+import {
+  resetPosInvoiceVoidIdempotencyKey,
+  resetPosInvoiceEditIdempotencyKey,
+  resetPosEditRequestApproveIdempotencyKey,
+} from '@/lib/pos-invoice-idempotency';
 
 const EGP = (n: number | string) =>
   `${Number(n || 0).toLocaleString('en-US', {
@@ -856,6 +870,15 @@ function EditHistoryTab({
   const [rejectTarget, setRejectTarget] = useState<any | null>(null);
   const [rejectReason, setRejectReason] = useState('');
 
+  // PR-FE-IDEM-POS-VOID-EDIT — defensive reset on tab unmount. The
+  // per-click reset (in the approve button onClick handler below)
+  // is the primary boundary; this just guards against stale keys
+  // surviving a tab teardown. Reject is intentionally NOT decorated
+  // (status flip only — no JE/CT/stock side effects).
+  useEffect(() => {
+    return () => resetPosEditRequestApproveIdempotencyKey();
+  }, []);
+
   const approve = useMutation({
     mutationFn: (id: number | string) => posApi.approveEditRequest(id),
     onSuccess: () => {
@@ -935,7 +958,15 @@ function EditHistoryTab({
                   <button
                     type="button"
                     className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[11px]"
-                    onClick={() => approve.mutate(r.id)}
+                    onClick={() => {
+                      // PR-FE-IDEM-POS-VOID-EDIT — reset per-click so
+                      // each row's approve gets a fresh key. Concurrent
+                      // clicks are blocked by the disabled state below;
+                      // a 425 IN_PROGRESS auto-retry from PR #315 reuses
+                      // the same axios config = same key.
+                      resetPosEditRequestApproveIdempotencyKey();
+                      approve.mutate(r.id);
+                    }}
                     disabled={approve.isPending || reject.isPending}
                   >
                     {approve.isPending && approve.variables === r.id
@@ -1158,6 +1189,14 @@ function VoidConfirmModal({
   const qc = useQueryClient();
   const [reason, setReason] = useState('');
 
+  // PR-FE-IDEM-POS-VOID-EDIT — clean slate on mount, defensive reset
+  // on unmount. Void reverses the invoice: removes stock_movements,
+  // reverses JE, reverses CT. Independent key from edit/approve.
+  useEffect(() => {
+    resetPosInvoiceVoidIdempotencyKey();
+    return () => resetPosInvoiceVoidIdempotencyKey();
+  }, []);
+
   const mutation = useMutation({
     mutationFn: () => posApi.void(invoice.id, reason),
     onSuccess: () => {
@@ -1260,6 +1299,18 @@ export function InvoiceEditModal({
   const qc = useQueryClient();
   const [reason, setReason] = useState('');
   const [lines, setLines] = useState<EditLine[]>([]);
+
+  // PR-FE-IDEM-POS-VOID-EDIT — clean slate on mount, defensive reset
+  // on unmount. Edit replays the invoice: rebuilds invoice_lines,
+  // re-posts JE, re-posts CT. The same modal can also call
+  // submitEditRequest (state-only, out of scope) when the user
+  // lacks direct-edit permission — the helper's URL gate only
+  // attaches the key on /edit, not /edit-request, so the request-
+  // queue path is unaffected. Independent key from void/approve.
+  useEffect(() => {
+    resetPosInvoiceEditIdempotencyKey();
+    return () => resetPosInvoiceEditIdempotencyKey();
+  }, []);
   // PR-POS-PAY-2 — Multi-row split-payments state (replaces the
   // PR-PAY-3 single-method/single-account tuple). Each row carries
   // its own method, amount, and (for non-cash) payment_account_id.
