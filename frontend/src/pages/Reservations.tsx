@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Plus,
@@ -23,6 +23,17 @@ import {
   RefundPolicy,
 } from '@/api/reservations.api';
 import { customersApi } from '@/api/customers.api';
+// PR-FE-IDEM-RESERVATIONS (Sprint 5 / FE-IDEM PR 3) — per-modal
+// Idempotency-Key reset hooks. Three independent keys (one per
+// action type) so a Cancel + Pay + Convert flow on different
+// reservations doesn't collide. Within an open modal session the
+// key is reused so retries / 425 IN_PROGRESS auto-retries (PR #315)
+// hit the BE replay path instead of double-posting JE/CT/stock.
+import {
+  resetReservationCancelIdempotencyKey,
+  resetReservationPaymentIdempotencyKey,
+  resetReservationConvertIdempotencyKey,
+} from '@/lib/reservation-idempotency';
 import { productsApi } from '@/api/products.api';
 import { printReservationReceipt } from '@/lib/printReservationReceipt';
 
@@ -1066,6 +1077,17 @@ function AddPaymentModal({
   );
   const [note, setNote] = useState('');
 
+  // PR-FE-IDEM-RESERVATIONS — clean slate on mount, defensive reset
+  // on unmount. Field tweaks (amount/method/kind/note) within the
+  // open modal do NOT reset — body-tamper safety lives BE-side as
+  // 409 IDEMPOTENCY_KEY_PAYLOAD_MISMATCH (handled by the shared
+  // response interceptor from PR #315 with its dedicated Arabic
+  // toast). The action key is independent from cancel/convert.
+  useEffect(() => {
+    resetReservationPaymentIdempotencyKey();
+    return () => resetReservationPaymentIdempotencyKey();
+  }, []);
+
   const mut = useMutation({
     mutationFn: () =>
       reservationsApi.addPayment(reservation.id, {
@@ -1168,6 +1190,16 @@ function ConvertModal({
   const [amount, setAmount] = useState(remaining);
   const [method, setMethod] = useState<PaymentMethod>('cash');
 
+  // PR-FE-IDEM-RESERVATIONS — clean slate on mount, defensive reset
+  // on unmount. Convert is multi-stage (new invoice + invoice_lines
+  // + invoice_payments + JE + CT + stock_movements) — duplicate
+  // submit without retry-safety doubles every write. The action key
+  // is independent from cancel/payment.
+  useEffect(() => {
+    resetReservationConvertIdempotencyKey();
+    return () => resetReservationConvertIdempotencyKey();
+  }, []);
+
   const mut = useMutation({
     mutationFn: () =>
       reservationsApi.convert(reservation.id, {
@@ -1269,6 +1301,15 @@ function CancelModal({
     reservation.refund_policy,
   );
   const [method, setMethod] = useState<PaymentMethod>('cash');
+
+  // PR-FE-IDEM-RESERVATIONS — clean slate on mount, defensive reset
+  // on unmount. Cancel is multi-stage (reservation_refunds row +
+  // status flip + stock release trigger). The action key is
+  // independent from payment/convert.
+  useEffect(() => {
+    resetReservationCancelIdempotencyKey();
+    return () => resetReservationCancelIdempotencyKey();
+  }, []);
 
   const paid = Number(reservation.paid_amount);
   const feePct = Number(reservation.cancellation_fee_pct);

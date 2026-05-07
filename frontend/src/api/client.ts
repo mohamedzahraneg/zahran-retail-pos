@@ -35,6 +35,13 @@ import { attachSupplierPaymentIdempotencyKeyIfApplicable } from '@/lib/supplier-
 // deposit `direction:'in'` and withdraw `direction:'out'` — single
 // route, single helper). Disjoint URL gate from the other 5 helpers.
 import { attachCashDeskDepositIdempotencyKeyIfApplicable } from '@/lib/cash-desk-deposit-idempotency';
+// PR-FE-IDEM-RESERVATIONS (Sprint 5 / FE-IDEM PR 3) — seventh sibling
+// (3 routes, 1 helper module). Gates via regex on:
+//   · POST /reservations/:id/cancel
+//   · POST /reservations/:id/payments
+//   · POST /reservations/:id/convert
+// Excludes POST /reservations (create) and PATCH /reservations/:id/extend.
+import { attachReservationIdempotencyKeyIfApplicable } from '@/lib/reservation-idempotency';
 
 const envApiUrl = import.meta.env.VITE_API_URL as string | undefined;
 const baseURL = envApiUrl ?? 'http://localhost:3000';
@@ -73,6 +80,10 @@ api.interceptors.request.use((config) => {
   // /cash-desk/deposit, where it adds the per-DepositModal key.
   // Same single endpoint serves both deposit and withdraw directions.
   attachCashDeskDepositIdempotencyKeyIfApplicable(config);
+  // PR-FE-IDEM-RESERVATIONS — no-op on every route except POST on
+  // /reservations/:id/{cancel,payments,convert}. Three independent
+  // keys (one per action type) — see reservation-idempotency.ts.
+  attachReservationIdempotencyKeyIfApplicable(config);
   return config;
 });
 
