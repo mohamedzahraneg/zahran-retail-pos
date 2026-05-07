@@ -100,6 +100,19 @@ import { attachAccountingOpsIdempotencyKeyIfApplicable } from '@/lib/accounting-
 // Excludes /purchases (create), /purchases/:id/edit (state),
 // /purchases/returns (createReturn state), all GETs.
 import { attachStockPurchasesIdempotencyKeyIfApplicable } from '@/lib/stock-purchases-idempotency';
+// PR-FE-IDEM-FINAL-OPS (Sprint 5 / FE-IDEM PR 8) — fourteenth and
+// FINAL FE-IDEM sibling (5 routes, 1 helper module). Method-aware
+// gates — first helper to gate a DELETE route:
+//   · POST   /recurring-expenses/:id/run
+//   · POST   /recurring-expenses/process-due
+//   · POST   /stock/adjust
+//   · POST   /inventory-counts/:id/finalize
+//   · DELETE /payroll/:id
+// Excludes recurring-expenses CRUD/pause/resume, stock read/list/sync,
+// inventory-counts start/entries/cancel, payroll POST (create — dead
+// FE), all GETs. /employees/:id/{bonuses,deductions,settlements} stay
+// with payroll-idempotency, NOT this helper.
+import { attachFinalOpsIdempotencyKeyIfApplicable } from '@/lib/final-ops-idempotency';
 
 const envApiUrl = import.meta.env.VITE_API_URL as string | undefined;
 const baseURL = envApiUrl ?? 'http://localhost:3000';
@@ -168,6 +181,11 @@ api.interceptors.request.use((config) => {
   // PR-FE-IDEM-STOCK-PURCHASES-OPS — method-aware (POST + PATCH).
   // Eight independent keys.
   attachStockPurchasesIdempotencyKeyIfApplicable(config);
+  // PR-FE-IDEM-FINAL-OPS — method-aware (POST + DELETE; first DELETE
+  // gate). Five independent keys covering the remaining 5 BE-protected
+  // routes with live FE callers (recurring run/process-due, stock
+  // adjust, inventory finalize, payroll void).
+  attachFinalOpsIdempotencyKeyIfApplicable(config);
   return config;
 });
 

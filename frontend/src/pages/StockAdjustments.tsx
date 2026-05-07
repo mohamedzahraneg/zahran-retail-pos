@@ -1,6 +1,11 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
+// PR-FE-IDEM-FINAL-OPS (Sprint 5 / FE-IDEM PR 8) — per-modal reset
+// hook for AdjustmentModal. The modal is the user-facing intent
+// boundary for POST /stock/adjust on this page; mounting/unmounting
+// the modal mints a fresh key for the new intent.
+import { resetStockAdjustIdempotencyKey } from '@/lib/final-ops-idempotency';
 import {
   PackagePlus,
   Plus,
@@ -236,6 +241,19 @@ function StatCard({
 
 function AdjustmentModal({ onClose }: { onClose: () => void }) {
   const qc = useQueryClient();
+
+  // PR-FE-IDEM-FINAL-OPS — clean slate on mount, and clean up on
+  // unmount so the next time the modal opens, a brand-new
+  // Idempotency-Key is minted for the next intent. Retries within a
+  // single mount lifecycle reuse the cached key (replay-safe by
+  // construction).
+  useEffect(() => {
+    resetStockAdjustIdempotencyKey();
+    return () => {
+      resetStockAdjustIdempotencyKey();
+    };
+  }, []);
+
   const { data: products } = useQuery({
     queryKey: ['products-for-adj'],
     queryFn: () => productsApi.list({ limit: 500 }),

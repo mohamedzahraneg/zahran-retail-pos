@@ -81,6 +81,12 @@ import {
   resetPayrollDeductionIdempotencyKey,
   resetPayrollSettlementIdempotencyKey,
 } from '@/lib/payroll-idempotency';
+// PR-FE-IDEM-FINAL-OPS (Sprint 5 / FE-IDEM PR 8) — per-click reset
+// for the row-level "إلغاء الحركة" void button. The mutation calls
+// `fetchDelete('/payroll/:id')` (DELETE), which is the FIRST DELETE-
+// gated route across all 14 idempotency helpers. One click = one
+// distinct void intent, so reset before each call.
+import { resetPayrollVoidIdempotencyKey } from '@/lib/final-ops-idempotency';
 import { EmployeeCashClassifierGuard } from './EmployeeCashClassifierGuard';
 import {
   CashSourceSelector,
@@ -605,6 +611,11 @@ function LedgerCard({
                               'إلغاء الحركة محاسبيًا؟ ستبقى ظاهرة في السجل بحالة "ملغاة".',
                             )
                           ) {
+                            // PR-FE-IDEM-FINAL-OPS — fresh
+                            // Idempotency-Key per click intent.
+                            // Retries within the click reuse the
+                            // cached key; a new click mints fresh.
+                            resetPayrollVoidIdempotencyKey();
                             voidMut.mutate(r.payroll_id ?? '');
                           }
                         }}
