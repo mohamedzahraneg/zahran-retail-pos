@@ -17,24 +17,34 @@
 -- ZERO behavior change to writes.  The triggers are AFTER triggers,
 -- so they cannot block a write — they observe and record.
 --
--- Idempotency: each `CREATE TRIGGER` uses `IF NOT EXISTS` so a re-run
--- is a no-op.
+-- Idempotency: PostgreSQL does NOT support `CREATE TRIGGER IF NOT
+-- EXISTS` (the `IF NOT EXISTS` clause is supported on
+-- CREATE TABLE/INDEX/TYPE but not on CREATE TRIGGER — confirmed
+-- against PG 17 in production).  Use the `DROP TRIGGER IF EXISTS …;
+-- CREATE TRIGGER …` idiom that is already the convention in this
+-- codebase (see e.g. 011_functions_and_triggers.sql for the original
+-- attachment of fn_audit_row to other tables).  Re-running this
+-- migration is a safe no-op.
 
-CREATE TRIGGER IF NOT EXISTS trg_audit_returns
-  AFTER INSERT OR UPDATE OR DELETE ON returns
-  FOR EACH ROW EXECUTE FUNCTION fn_audit_row();
+DROP TRIGGER IF EXISTS trg_audit_returns ON returns;
+CREATE TRIGGER trg_audit_returns
+AFTER INSERT OR UPDATE OR DELETE ON returns
+FOR EACH ROW EXECUTE FUNCTION fn_audit_row();
 
-CREATE TRIGGER IF NOT EXISTS trg_audit_return_items
-  AFTER INSERT OR UPDATE OR DELETE ON return_items
-  FOR EACH ROW EXECUTE FUNCTION fn_audit_row();
+DROP TRIGGER IF EXISTS trg_audit_return_items ON return_items;
+CREATE TRIGGER trg_audit_return_items
+AFTER INSERT OR UPDATE OR DELETE ON return_items
+FOR EACH ROW EXECUTE FUNCTION fn_audit_row();
 
-CREATE TRIGGER IF NOT EXISTS trg_audit_exchanges
-  AFTER INSERT OR UPDATE OR DELETE ON exchanges
-  FOR EACH ROW EXECUTE FUNCTION fn_audit_row();
+DROP TRIGGER IF EXISTS trg_audit_exchanges ON exchanges;
+CREATE TRIGGER trg_audit_exchanges
+AFTER INSERT OR UPDATE OR DELETE ON exchanges
+FOR EACH ROW EXECUTE FUNCTION fn_audit_row();
 
-CREATE TRIGGER IF NOT EXISTS trg_audit_exchange_items
-  AFTER INSERT OR UPDATE OR DELETE ON exchange_items
-  FOR EACH ROW EXECUTE FUNCTION fn_audit_row();
+DROP TRIGGER IF EXISTS trg_audit_exchange_items ON exchange_items;
+CREATE TRIGGER trg_audit_exchange_items
+AFTER INSERT OR UPDATE OR DELETE ON exchange_items
+FOR EACH ROW EXECUTE FUNCTION fn_audit_row();
 
 -- Rollback (manual, if ever needed):
 --   DROP TRIGGER IF EXISTS trg_audit_returns        ON returns;
