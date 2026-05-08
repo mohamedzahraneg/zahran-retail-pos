@@ -184,6 +184,15 @@ export class ReturnsService {
   /**
    * Step 2: Approve — manager confirms the return; stock is restored for
    * resellable items flagged `back_to_stock`.
+   *
+   * PR-FIX-RETURN-JE-AT-REFUND — historically `approve()` also posted
+   * the return GL via `posting.postReturn`, but `r.cashbox_id` is only
+   * populated by `refund()`. After PR #260's cashbox/GL alignment guard
+   * (2026-05-03), the cash leg's `cashbox_id=NULL` started failing the
+   * engine's invariant for blind returns (no `original_invoice_id`) and
+   * the failure was silently swallowed by a `.catch(() => undefined)`,
+   * leaving CT-without-JE state (observed: RET-2026-000005). The GL
+   * post has moved into `refund()` where `cashbox_id` is known.
    */
   async approve(id: string, dto: ApproveReturnDto, userId: string) {
     const ret = await this.mustBeStatus(id, ['pending']);
@@ -223,10 +232,7 @@ export class ReturnsService {
         [id, userId, dto.notes ? `\n[Approved] ${dto.notes}` : ''],
       );
 
-      // Auto-post the return to the GL (reverse sale + restore inventory).
-      await this.posting
-        ?.postReturn(id, userId, em)
-        .catch(() => undefined);
+      // GL posting moved to refund() — see header comment above.
 
       return this.findOne(id);
     });
@@ -312,7 +318,8 @@ export class ReturnsService {
     }
 
     return this.ds.transaction(async (em) => {
-      // Persist refund method + linkage on the return row
+      // Persist refund method + linkage on the return row FIRST so the
+      // GL post (next step) sees the cashbox_id on the row.
       await em.query(
         `
         UPDATE returns
@@ -327,14 +334,35 @@ export class ReturnsService {
         [id, userId, dto.refund_method, resolvedShiftId, resolvedCashboxId],
       );
 
+      // PR-FIX-RETURN-JE-AT-REFUND — post the GL inside this same
+      // transaction, AFTER cashbox_id is on the row but BEFORE the
+      // cashbox_transactions row is written. This way the cash leg
+      // carries the cashbox_id (the alignment guard added in PR #260
+      // requires it) and a JE failure rolls back the refund instead
+      // of leaving CT-without-JE. Idempotency: postReturn's `safe()`
+      // wrapper short-circuits on an existing live JE for the same
+      // (reference_type='return', reference_id) — retries do not
+      // double-post.
+      if (!this.posting) {
+        throw new BadRequestException(
+          'AccountingPostingService غير متاح — لا يمكن قيد المرتجع محاسبياً',
+        );
+      }
+      const postResult: any = await this.posting.postReturn(id, userId, em);
+      if (postResult && postResult.error) {
+        throw new BadRequestException(
+          `فشل قيد المرتجع محاسبياً: ${postResult.error}`,
+        );
+      }
+
       // Cash refund → deduct from the resolved cashbox via the engine.
       if (isCash && resolvedCashboxId) {
-        // The GL side (DR 49 Sales Returns · CR Cash, plus inventory/COGS
-        // reversal when back_to_stock) was posted at approval time by
-        // AccountingPostingService.postReturn. This call only writes the
-        // physical cashbox_transactions row + updates cashboxes.current_balance
-        // under the canonical `engine:cashOnlyMovement` context — no
-        // bypass alert, no direct fn_record_cashbox_txn call.
+        // This call writes the physical cashbox_transactions row +
+        // updates cashboxes.current_balance under the canonical
+        // `engine:cashOnlyMovement` context — no bypass alert, no
+        // direct fn_record_cashbox_txn call. The GL side (DR 49 Sales
+        // Returns · CR Cash, plus inventory/COGS reversal when
+        // back_to_stock) was already written above by `postReturn`.
         if (!this.engine) {
           throw new BadRequestException(
             'FinancialEngineService غير متاح — لا يمكن صرف المرتجع نقدياً',
@@ -359,14 +387,6 @@ export class ReturnsService {
           );
         }
       }
-
-      // NOTE: the old code wrote to a `general_ledger_entries` table
-      // that never existed in any migration — the `.catch(() => {})`
-      // above silently swallowed the error on every run. Removed as
-      // part of the financial-engine consolidation (audit finding C5).
-      // The real GL posting for returns happens via
-      // AccountingPostingService.postReturn() when the return is
-      // approved — see approve() earlier in this file.
 
       return this.findOne(id);
     });
