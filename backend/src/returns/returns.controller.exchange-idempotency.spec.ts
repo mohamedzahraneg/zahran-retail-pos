@@ -35,6 +35,7 @@ import { firstValueFrom, of, throwError } from 'rxjs';
 import { CallHandler, ExecutionContext } from '@nestjs/common';
 import { ReturnsController } from './returns.controller';
 import { ReturnsService } from './returns.service';
+import { ReturnsAuditService } from './returns-audit.service';
 import { IdempotencyInterceptor } from '../common/interceptors/idempotency.interceptor';
 import {
   AcquireResult,
@@ -350,6 +351,16 @@ describe('ReturnsController route-level wiring — PR-FIX-IDEMPOTENCY-EXCHANGES-
             createExchange: jest.fn(),
             listExchanges: jest.fn(),
             getExchange: jest.fn(),
+          },
+        },
+        // PR-FIN-RETURNS-EXCHANGES-AUDIT — controller now also takes
+        // ReturnsAuditService.  Stub it; this spec only inspects
+        // interceptor metadata, never invokes audit endpoints.
+        {
+          provide: ReturnsAuditService,
+          useValue: {
+            getReturnAudit: jest.fn(),
+            getExchangeAudit: jest.fn(),
           },
         },
         { provide: IdempotencyCacheService, useValue: {} },

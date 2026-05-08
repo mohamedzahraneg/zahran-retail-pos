@@ -10,6 +10,7 @@ import {
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { ReturnsService } from './returns.service';
+import { ReturnsAuditService } from './returns-audit.service';
 import {
   ApproveReturnDto,
   CancelReturnDto,
@@ -34,7 +35,10 @@ import { IdempotencyInterceptor } from '../common/interceptors/idempotency.inter
 @Permissions('returns.view')
 @Controller()
 export class ReturnsController {
-  constructor(private readonly svc: ReturnsService) {}
+  constructor(
+    private readonly svc: ReturnsService,
+    private readonly auditSvc: ReturnsAuditService,
+  ) {}
 
   // -------- Lookup invoice for return --------------------------------------
   @Get('returns/lookup/:invoice_no')
@@ -178,5 +182,24 @@ export class ReturnsController {
   @ApiOperation({ summary: 'تفاصيل عملية استبدال' })
   getExchange(@Param('id', ParseUUIDPipe) id: string) {
     return this.svc.getExchange(id);
+  }
+
+  // ─── Audit history (Phase 1 — read-only) ──────────────────────────
+  // PR-FIN-RETURNS-EXCHANGES-AUDIT — both endpoints inherit the
+  // class-level @Permissions('returns.view') gate.  Read-only
+  // composition of audit_logs (DB-trigger row diffs — coverage lands
+  // in migration 124) + activity_logs (high-level user actions) +
+  // a Phase-4 amendments placeholder.  No mutation endpoints in
+  // Phase 1.
+  @Get('returns/:id/audit')
+  @ApiOperation({ summary: 'سجل التعديلات على المرتجع' })
+  getReturnAudit(@Param('id', ParseUUIDPipe) id: string) {
+    return this.auditSvc.getReturnAudit(id);
+  }
+
+  @Get('exchanges/:id/audit')
+  @ApiOperation({ summary: 'سجل التعديلات على الاستبدال' })
+  getExchangeAudit(@Param('id', ParseUUIDPipe) id: string) {
+    return this.auditSvc.getExchangeAudit(id);
   }
 }
