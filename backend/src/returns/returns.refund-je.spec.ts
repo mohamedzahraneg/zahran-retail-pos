@@ -1,32 +1,39 @@
 /**
- * returns.refund-je.spec.ts — PR-FIX-RETURN-JE-AT-REFUND
+ * returns.refund-je.spec.ts — PR-FIX-RETURN-CASH-MOVEMENTS
  *
- * Pins the fix that moves return GL posting from `approve()` to
- * `refund()`. Background: PR #260's cashbox/GL alignment guard
- * (2026-05-03) made the engine reject any cash-leg with `cashbox_id`
- * NULL on liquid GL codes. `r.cashbox_id` is only set during
- * `refund()`, so blind returns approved post-guard silently lost their
- * JE through a `.catch(() => undefined)` in `approve()` (observed:
- * RET-2026-000005 — CT existed, JE missing).
+ * Pins the second-stage forward fix.  Stage 1 (PR-FIX-RETURN-JE-AT-
+ * REFUND, commit ca20d20) moved `postReturn` from `approve()` to
+ * `refund()` and added loud error propagation.  That tripped the
+ * engine's Guard B (every cash GL line must be paired with an
+ * in-spec `cash_movement`) because the CT was still being written
+ * separately via `engine.recordCashOnlyMovement` after the JE.
+ *
+ * Stage 2 — this fix:
+ *   · `postReturn` now builds `cash_movements` alongside its GL
+ *     lines and hands both to `FinancialEngineService.recordTransaction`
+ *     in a single call.  Phase 1 of the engine writes the
+ *     `cashbox_transactions` row; Phase 2 writes the JE.  Atomic.
+ *   · `refund()` no longer calls `engine.recordCashOnlyMovement` —
+ *     calling it would create a duplicate CT.
  *
  * What this spec pins:
- *   1. `approve()` no longer calls `posting.postReturn`.
- *   2. `refund()` calls `posting.postReturn` AFTER the UPDATE that
- *      writes `cashbox_id`, BEFORE the cashbox_transactions write.
- *   3. Blind cash refund → JE post sees the new cashbox_id.
+ *   1. `approve()` does not call `postReturn`.
+ *   2. `refund()` calls `posting.postReturn` exactly once, after the
+ *      UPDATE that writes `cashbox_id`.
+ *   3. `refund()` does NOT call `engine.recordCashOnlyMovement`.
  *   4. `postReturn` returning `{ error }` causes the refund
- *      transaction to throw + roll back (no CT created).
- *   5. `postReturn` returning `{ skipped: true }` (existing live JE
- *      → idempotent retry) does NOT throw; the refund continues
- *      normally.
- *   6. The fix uses the standard `postReturn` API — no
- *      `accounting_only` flag is passed and the cashbox_id requirement
- *      is not bypassed.
- *   7. Source-grep: `approve()` body has no `postReturn` call;
- *      `refund()` body has exactly one `postReturn` call.
+ *      transaction to throw + roll back.
+ *   5. `postReturn` throwing also fails the refund.
+ *   6. Missing AccountingPostingService throws (no silent skip).
+ *   7. `postReturn` returning `{ skipped: true }` (live JE exists)
+ *      does NOT throw; the refund continues.
+ *   8. `postReturn` returning `null` (no-op) does NOT throw.
+ *   9. Source-grep: `accounting_only` is never passed.  No raw
+ *      INSERT into journal_entries / journal_lines / cashbox_transactions
+ *      from this service.  `refund()` body contains zero
+ *      `recordCashOnlyMovement` calls.
  *
- * No DB. The DataSource and the AccountingPostingService /
- * FinancialEngineService dependencies are stubs.
+ * No DB.  DataSource / posting / engine are stubs.
  */
 
 import { Test } from '@nestjs/testing';
@@ -184,13 +191,13 @@ describe('ReturnsService.approve — GL posting moved out', () => {
 //  refund() now posts JE AFTER cashbox_id is set, BEFORE the CT
 // ─────────────────────────────────────────────────────────────────────
 
-describe('ReturnsService.refund — GL posted in refund txn', () => {
-  it('blind cash refund: postReturn runs after the UPDATE that writes cashbox_id, before the cashbox CT', async () => {
+describe('ReturnsService.refund — GL+CT posted atomically via postReturn', () => {
+  it('blind cash refund: postReturn runs after the UPDATE that writes cashbox_id, AND recordCashOnlyMovement is NOT called', async () => {
     const { ds, calls } = makeRouter(baseRoutes(approvedRetRow()));
-    const postReturn = jest.fn().mockResolvedValue({ ok: true, entry_id: 'je-1' });
-    const recordCashOnlyMovement = jest
+    const postReturn = jest
       .fn()
-      .mockResolvedValue({ ok: true, transaction_id: 1 });
+      .mockResolvedValue({ ok: true, entry_id: 'je-1' });
+    const recordCashOnlyMovement = jest.fn();
     const svc = await buildService({
       ds,
       retRow: approvedRetRow(),
@@ -205,24 +212,13 @@ describe('ReturnsService.refund — GL posted in refund txn', () => {
       [],
     );
 
-    // The UPDATE happens before postReturn, which happens before the CT.
     const updIdx = calls.findIndex((c) =>
       /UPDATE\s+returns\s+SET\s+status\s*=\s*'refunded'/i.test(c.sql),
     );
     expect(updIdx).toBeGreaterThanOrEqual(0);
-    const postCall = postReturn.mock.invocationCallOrder[0];
-    const ctCall = recordCashOnlyMovement.mock.invocationCallOrder[0];
-    expect(postCall).toBeLessThan(ctCall); // JE before CT
-
     expect(postReturn).toHaveBeenCalledTimes(1);
     expect(postReturn).toHaveBeenCalledWith(RETURN_ID, USER_ID, ds);
-    expect(recordCashOnlyMovement).toHaveBeenCalledTimes(1);
-    expect(recordCashOnlyMovement.mock.calls[0][0]).toMatchObject({
-      cashbox_id: CASHBOX_ID,
-      direction: 'out',
-      reference_type: 'return',
-      reference_id: RETURN_ID,
-    });
+    expect(recordCashOnlyMovement).not.toHaveBeenCalled();
   });
 
   it('postReturn receives the same EntityManager (transactional)', async () => {
@@ -242,7 +238,7 @@ describe('ReturnsService.refund — GL posted in refund txn', () => {
     expect(postReturn.mock.calls[0][2]).toBe(ds);
   });
 
-  it('non-cash refund still posts the JE (no CT side; engine cash-only is not called)', async () => {
+  it('non-cash refund posts the JE; engine cash-only is not called (CT path is owned by postReturn now)', async () => {
     const { ds } = makeRouter(baseRoutes(approvedRetRow()));
     const postReturn = jest.fn().mockResolvedValue({});
     const recordCashOnlyMovement = jest.fn();
@@ -268,12 +264,12 @@ describe('ReturnsService.refund — GL posted in refund txn', () => {
 // ─────────────────────────────────────────────────────────────────────
 
 describe('ReturnsService.refund — postReturn failures fail loudly', () => {
-  it('postReturn returning { error } makes refund() throw before the CT runs', async () => {
+  it('postReturn returning { error } makes refund() throw + rollback', async () => {
     const { ds } = makeRouter(baseRoutes(approvedRetRow()));
     const postReturn = jest.fn().mockResolvedValue({
       error: 'cash GL line on 1111 requires cashbox_id (return/x).',
     });
-    const recordCashOnlyMovement = jest.fn().mockResolvedValue({ ok: true });
+    const recordCashOnlyMovement = jest.fn();
     const svc = await buildService({
       ds,
       retRow: approvedRetRow(),
@@ -289,17 +285,15 @@ describe('ReturnsService.refund — postReturn failures fail loudly', () => {
         [],
       ),
     ).rejects.toBeInstanceOf(BadRequestException);
-
-    // No CT must have been written.
     expect(recordCashOnlyMovement).not.toHaveBeenCalled();
   });
 
-  it('postReturn throwing also fails the refund (no CT)', async () => {
+  it('postReturn throwing also fails the refund', async () => {
     const { ds } = makeRouter(baseRoutes(approvedRetRow()));
     const postReturn = jest
       .fn()
       .mockRejectedValue(new Error('engine guard tripped'));
-    const recordCashOnlyMovement = jest.fn().mockResolvedValue({ ok: true });
+    const recordCashOnlyMovement = jest.fn();
     const svc = await buildService({
       ds,
       retRow: approvedRetRow(),
@@ -358,12 +352,12 @@ describe('ReturnsService.refund — postReturn failures fail loudly', () => {
 // ─────────────────────────────────────────────────────────────────────
 
 describe('ReturnsService.refund — idempotency on retry', () => {
-  it('postReturn returning { skipped: true } (live JE exists) does NOT throw and the refund continues', async () => {
+  it('postReturn returning { skipped: true } (live JE exists) does NOT throw + does NOT trigger a duplicate CT path', async () => {
     const { ds } = makeRouter(baseRoutes(approvedRetRow()));
     const postReturn = jest
       .fn()
       .mockResolvedValue({ skipped: true, entry_id: 'je-existing' });
-    const recordCashOnlyMovement = jest.fn().mockResolvedValue({ ok: true });
+    const recordCashOnlyMovement = jest.fn();
     const svc = await buildService({
       ds,
       retRow: approvedRetRow(),
@@ -381,13 +375,15 @@ describe('ReturnsService.refund — idempotency on retry', () => {
     ).resolves.toBeDefined();
 
     expect(postReturn).toHaveBeenCalledTimes(1);
-    expect(recordCashOnlyMovement).toHaveBeenCalledTimes(1);
+    // Idempotent retry: the engine's JE-side short-circuit means no new
+    // CT is written.  refund() must NOT call recordCashOnlyMovement.
+    expect(recordCashOnlyMovement).not.toHaveBeenCalled();
   });
 
-  it('postReturn returning null (no-op) does NOT throw', async () => {
+  it('postReturn returning null (no-op) does NOT throw and does NOT touch the cash engine', async () => {
     const { ds } = makeRouter(baseRoutes(approvedRetRow()));
     const postReturn = jest.fn().mockResolvedValue(null);
-    const recordCashOnlyMovement = jest.fn().mockResolvedValue({ ok: true });
+    const recordCashOnlyMovement = jest.fn();
     const svc = await buildService({
       ds,
       retRow: approvedRetRow(),
@@ -400,7 +396,7 @@ describe('ReturnsService.refund — idempotency on retry', () => {
       USER_ID,
       [],
     );
-    expect(recordCashOnlyMovement).toHaveBeenCalledTimes(1);
+    expect(recordCashOnlyMovement).not.toHaveBeenCalled();
   });
 });
 
@@ -418,21 +414,18 @@ describe('ReturnsService — fix integrity (defense-in-depth source-grep)', () =
     expect(src).not.toMatch(/accounting_only\s*:/);
   });
 
-  it('refund() does NOT bypass the cashbox_id requirement', () => {
-    // The fix moves posting INTO refund — the only intended flow is
-    // the canonical postReturn call, no direct JE inserts.
+  it('returns.service does NOT write raw journal/cashbox rows', () => {
     expect(src).not.toMatch(/INSERT\s+INTO\s+journal_entries/i);
     expect(src).not.toMatch(/INSERT\s+INTO\s+journal_lines/i);
+    expect(src).not.toMatch(/INSERT\s+INTO\s+cashbox_transactions/i);
   });
 
   it('approve() body has zero `postReturn` calls', () => {
     const approveStart = src.indexOf('async approve(');
     expect(approveStart).toBeGreaterThan(-1);
-    // Slice up to the next top-level `async ` declaration.
     const tail = src.slice(approveStart);
     const nextMethod = tail.indexOf('\n  async ', 1);
-    const approveBody =
-      nextMethod > 0 ? tail.slice(0, nextMethod) : tail;
+    const approveBody = nextMethod > 0 ? tail.slice(0, nextMethod) : tail;
     expect(approveBody).not.toMatch(/postReturn\s*\(/);
   });
 
@@ -441,18 +434,26 @@ describe('ReturnsService — fix integrity (defense-in-depth source-grep)', () =
     expect(refundStart).toBeGreaterThan(-1);
     const tail = src.slice(refundStart);
     const nextMethod = tail.indexOf('\n  async ', 1);
-    const refundBody =
-      nextMethod > 0 ? tail.slice(0, nextMethod) : tail;
+    const refundBody = nextMethod > 0 ? tail.slice(0, nextMethod) : tail;
     const matches = refundBody.match(/postReturn\s*\(/g) ?? [];
     expect(matches).toHaveLength(1);
+  });
+
+  it('refund() body has zero `recordCashOnlyMovement` calls (CT now owned by postReturn)', () => {
+    const refundStart = src.indexOf('async refund(');
+    const tail = src.slice(refundStart);
+    const nextMethod = tail.indexOf('\n  async ', 1);
+    const refundBody = nextMethod > 0 ? tail.slice(0, nextMethod) : tail;
+    expect(refundBody).not.toMatch(/recordCashOnlyMovement\s*\(/);
   });
 
   it('the silent `.catch(() => undefined)` swallow is gone from approve()', () => {
     const approveStart = src.indexOf('async approve(');
     const tail = src.slice(approveStart);
     const nextMethod = tail.indexOf('\n  async ', 1);
-    const approveBody =
-      nextMethod > 0 ? tail.slice(0, nextMethod) : tail;
-    expect(approveBody).not.toMatch(/postReturn[\s\S]+\.catch\(\(\)\s*=>\s*undefined\)/);
+    const approveBody = nextMethod > 0 ? tail.slice(0, nextMethod) : tail;
+    expect(approveBody).not.toMatch(
+      /postReturn[\s\S]+\.catch\(\(\)\s*=>\s*undefined\)/,
+    );
   });
 });

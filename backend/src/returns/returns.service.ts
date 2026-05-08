@@ -334,15 +334,29 @@ export class ReturnsService {
         [id, userId, dto.refund_method, resolvedShiftId, resolvedCashboxId],
       );
 
-      // PR-FIX-RETURN-JE-AT-REFUND — post the GL inside this same
-      // transaction, AFTER cashbox_id is on the row but BEFORE the
-      // cashbox_transactions row is written. This way the cash leg
-      // carries the cashbox_id (the alignment guard added in PR #260
-      // requires it) and a JE failure rolls back the refund instead
-      // of leaving CT-without-JE. Idempotency: postReturn's `safe()`
-      // wrapper short-circuits on an existing live JE for the same
-      // (reference_type='return', reference_id) — retries do not
-      // double-post.
+      // PR-FIX-RETURN-CASH-MOVEMENTS — post the GL + cashbox CT in
+      // ONE engine call.  postReturn now builds `cash_movements`
+      // alongside the GL lines and passes both to
+      // FinancialEngineService.recordTransaction, which writes the
+      // physical cashbox_transactions row and the journal_entries +
+      // journal_lines rows atomically (Phase 1 cash → Phase 2 GL,
+      // both inside this same `em` transaction).
+      //
+      // Why this replaces the previous recordCashOnlyMovement call:
+      //   · The CT is now written by recordTransaction.  Calling
+      //     recordCashOnlyMovement separately would create a duplicate
+      //     CT.
+      //   · The engine's alignment guard (PR #260) requires every
+      //     cash GL line to have a paired cash_movement in the SAME
+      //     spec — splitting JE+CT across two calls (the old shape)
+      //     fails Guard B for blind cash refunds.
+      //
+      // Failure surface: if postReturn returns `{ error }` we throw,
+      // and the outer `ds.transaction` rolls back the status update +
+      // any half-written rows.  No `accounting_only`, no guard
+      // bypass.  Idempotency: a live JE on (reference_type='return',
+      // reference_id) short-circuits the engine before Phase 1, so
+      // retries do not write a duplicate JE or CT.
       if (!this.posting) {
         throw new BadRequestException(
           'AccountingPostingService غير متاح — لا يمكن قيد المرتجع محاسبياً',
@@ -353,39 +367,6 @@ export class ReturnsService {
         throw new BadRequestException(
           `فشل قيد المرتجع محاسبياً: ${postResult.error}`,
         );
-      }
-
-      // Cash refund → deduct from the resolved cashbox via the engine.
-      if (isCash && resolvedCashboxId) {
-        // This call writes the physical cashbox_transactions row +
-        // updates cashboxes.current_balance under the canonical
-        // `engine:cashOnlyMovement` context — no bypass alert, no
-        // direct fn_record_cashbox_txn call. The GL side (DR 49 Sales
-        // Returns · CR Cash, plus inventory/COGS reversal when
-        // back_to_stock) was already written above by `postReturn`.
-        if (!this.engine) {
-          throw new BadRequestException(
-            'FinancialEngineService غير متاح — لا يمكن صرف المرتجع نقدياً',
-          );
-        }
-        const res = await this.engine.recordCashOnlyMovement({
-          cashbox_id: resolvedCashboxId,
-          direction: 'out',
-          amount: Number(ret.net_refund),
-          category: 'refund',
-          reference_type: 'return',
-          reference_id: id,
-          user_id: userId,
-          notes: resolvedShiftId
-            ? `استرداد نقدي — مرتجع ${ret.return_no} (مرتبط بوردية)`
-            : `استرداد نقدي — مرتجع ${ret.return_no} (خزنة مباشرة)`,
-          em,
-        });
-        if (!res.ok) {
-          throw new BadRequestException(
-            `فشل صرف المرتجع نقدياً: ${res.error}`,
-          );
-        }
       }
 
       return this.findOne(id);

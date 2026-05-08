@@ -532,8 +532,101 @@ export class AccountingPostingService {
       const entryDate = this.dateOnly(
         r.refunded_at || r.approved_at || r.requested_at,
       );
-      const returnsAcc = await this.accountIdByCode(q, '49');  // مرتدات المبيعات
-      const cashAcc = await this.cashboxAccountId(q, r.cashbox_id);
+
+      // PR-FIX-RETURN-CASH-MOVEMENTS — resolve the refund leg target
+      // (account_id + cashbox_id + display name) BEFORE building lines,
+      // so the same cashbox tag flows into both the GL line and the
+      // paired cash_movement. Mirrors postInvoice's resolution pattern:
+      //   - cash refund            → cashboxAccountId(r.cashbox_id) +
+      //                              GL_CASH; the per-cashbox COA child
+      //                              (when present) keeps drift reports
+      //                              attributable.
+      //   - non-cash refund WITH   → walk the original invoice's payments
+      //     original_invoice_id      and resolve the matching
+      //                              payment_account (snapshot first,
+      //                              live fallback).  Same gl_code +
+      //                              cashbox_id thread used by
+      //                              postInvoice for non-cash legs.
+      //   - non-cash refund WITHOUT
+      //     original_invoice_id    → undefined at the data level
+      //                              (returns has no payment_account_id);
+      //                              throw a clear error rather than
+      //                              silently produce a Guard-A failure.
+      const isCashRefund = r.refund_method === 'cash';
+      let refundAccId: string | null = null;
+      let refundGlCodeFallback: string = GL_CASH;
+      let refundCashboxId: string | null = null;
+      let refundDisplayName: string | undefined;
+
+      if (isCashRefund) {
+        refundAccId = await this.cashboxAccountId(q, r.cashbox_id);
+        refundCashboxId = (r.cashbox_id ?? null) as string | null;
+        refundGlCodeFallback = GL_CASH;
+      } else if (r.original_invoice_id) {
+        const payments = await q(
+          `SELECT payment_method::text AS payment_method, amount,
+                  payment_account_id, payment_account_snapshot
+             FROM invoice_payments
+            WHERE invoice_id = $1
+              AND COALESCE(amount, 0) > 0
+            ORDER BY created_at ASC`,
+          [r.original_invoice_id],
+        );
+        const matching =
+          payments.find(
+            (p: any) => p.payment_method === r.refund_method,
+          ) ?? payments.find((p: any) => !isCashMethod(p.payment_method));
+        if (!matching) {
+          throw new Error(
+            `postReturn: cannot resolve refund target for ${r.return_no} ` +
+              `— refund_method='${r.refund_method}' but no matching ` +
+              `non-cash payment on invoice ${r.original_invoice_id}`,
+          );
+        }
+        let glCode: string | undefined =
+          matching.payment_account_snapshot?.gl_account_code ?? undefined;
+        let displayName: string | undefined =
+          matching.payment_account_snapshot?.display_name ?? undefined;
+        let paCashboxId: string | undefined =
+          matching.payment_account_snapshot?.cashbox_id ?? undefined;
+        if (
+          (!glCode || !paCashboxId) &&
+          matching.payment_account_id &&
+          this.payments
+        ) {
+          const live = await this.payments.resolveForPosting(
+            matching.payment_account_id,
+            (em ?? this.ds.manager) as any,
+          );
+          if (live) {
+            if (!glCode) glCode = live.gl_account_code;
+            if (!displayName) displayName = live.display_name ?? undefined;
+            if (!paCashboxId)
+              paCashboxId = live.cashbox_id ?? undefined;
+          }
+        }
+        if (!glCode) {
+          glCode = PAYMENT_METHOD_ACCOUNT_CODE[matching.payment_method];
+        }
+        if (!glCode) {
+          throw new Error(
+            `postReturn: cannot resolve gl_account_code for refund ` +
+              `${r.return_no} (refund_method='${r.refund_method}', ` +
+              `payment_method='${matching.payment_method}')`,
+          );
+        }
+        refundGlCodeFallback = glCode;
+        refundCashboxId = paCashboxId ?? null;
+        refundDisplayName = displayName;
+      } else {
+        throw new Error(
+          `postReturn: cannot resolve refund target for blind non-cash ` +
+            `return ${r.return_no} — refund_method='${r.refund_method}' ` +
+            `but no original_invoice_id to derive payment_account from`,
+        );
+      }
+
+      const returnsAcc = await this.accountIdByCode(q, '49'); // مرتدات المبيعات
       const feeAcc =
         fee > 0 ? await this.accountIdByCode(q, '422') : null; // misc revenue
       const cogsAcc =
@@ -560,19 +653,25 @@ export class AccountingPostingService {
           description: `رسوم إعادة جرد ${r.return_no}`,
         });
       }
-      if (cashAcc && net > 0) {
-        lines.push({
-          account_id: cashAcc,
+      // Refund leg — cash OR non-cash. Cash uses the pre-resolved
+      // account_id (cashboxAccountId path). Non-cash uses account_code
+      // resolution so the engine picks the same GL bucket postInvoice
+      // routed the original payment to.
+      if (net > 0 && (refundAccId || refundGlCodeFallback)) {
+        const refundLine: PostingLine = {
           debit: 0,
           credit: net,
-          // PR-DRIFT-3F — thread cashbox_id through to the cash leg
-          // so v_cashbox_drift_per_ref can pair this JE with the
-          // matching CT under the strict (cashbox, ref) join. The
-          // SELECT above already resolves r.cashbox_id via the original
-          // invoice's shift, so the attribution is unambiguous when set.
-          cashbox_id: r.cashbox_id ?? undefined,
-          description: `رد نقدي ${r.return_no}`,
-        });
+          cashbox_id: refundCashboxId ?? undefined,
+          description: refundDisplayName
+            ? `${refundDisplayName} — مرتجع ${r.return_no}`
+            : `رد نقدي ${r.return_no}`,
+        };
+        if (refundAccId) {
+          refundLine.account_id = refundAccId;
+        } else {
+          refundLine.account_code = refundGlCodeFallback;
+        }
+        lines.push(refundLine);
       }
       // Inventory side
       if (invAcc && cogsAcc && restockCost > 0) {
@@ -591,12 +690,44 @@ export class AccountingPostingService {
       }
       if (lines.length < 2) return null;
 
+      // PR-FIX-RETURN-CASH-MOVEMENTS — pair the refund cash leg with a
+      // cash_movement on the same cashbox. The engine writes the CT in
+      // the same recordTransaction call that writes the JE, satisfying
+      // Guard B (paired movement) without touching guards or using
+      // `accounting_only`. Idempotency: a live JE on
+      // (reference_type='return', reference_id) short-circuits
+      // recordTransaction BEFORE Phase 1, so retries do not write a
+      // duplicate CT either.
+      const cashMovements: Array<{
+        cashbox_id: string;
+        direction: 'in' | 'out';
+        amount: number;
+        category: string;
+        notes?: string;
+      }> = [];
+      if (
+        net > 0 &&
+        refundCashboxId &&
+        (LIQUID_GL_CODES as readonly string[]).includes(refundGlCodeFallback)
+      ) {
+        cashMovements.push({
+          cashbox_id: refundCashboxId,
+          direction: 'out',
+          amount: net,
+          category: 'refund',
+          notes: refundDisplayName
+            ? `${refundDisplayName} — مرتجع ${r.return_no}`
+            : `استرداد — مرتجع ${r.return_no}`,
+        });
+      }
+
       return this.createEntry(q, {
         entry_date: entryDate,
         description: `قيد مرتجع ${r.return_no}`,
         reference_type: 'return',
         reference_id: returnId,
         lines,
+        cash_movements: cashMovements,
         created_by: userId,
       });
     });

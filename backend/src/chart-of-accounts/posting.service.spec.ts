@@ -763,6 +763,246 @@ describe('AccountingPostingService — PR-FIN-PAYACCT-4D-DRIFT-ROOT-FIX-1', () =
     });
   });
 
+  /* ── Fix #3: postReturn cash_movements pairing (PR-FIX-RETURN-CASH-MOVEMENTS) */
+
+  describe('Fix #3 — postReturn cash_movements pairing', () => {
+    /**
+     * Cash refund — postReturn must build a cash_movement that pairs
+     * with the cash GL leg so the engine writes JE+CT atomically and
+     * Guard B is satisfied without `accounting_only` or new engine
+     * surface.
+     */
+    it('cash refund: spec includes a cash_movement matching the cash leg', async () => {
+      const { svc, engineCalls } = makeServiceWithEngineSpy({
+        coaIds: { '49': 'acc-49' },
+        dsResults: [
+          [{
+            id: 'ret-cash', return_no: 'RET-CASH-1', total_refund: '150',
+            restocking_fee: 0, net_refund: '150', status: 'refunded',
+            refunded_at: '2026-05-08', approved_at: null, requested_at: null,
+            refund_method: 'cash', original_invoice_id: null,
+            cashbox_id: 'cb-1',
+          }],
+          [{ cost: '85.50' }],
+        ],
+      });
+      (svc as any).safe = async (
+        _refType: string,
+        _refId: string,
+        _em: any,
+        body: (q: any) => Promise<any>,
+      ) => body((svc as any).ds.manager.query.bind((svc as any).ds.manager));
+
+      await svc.postReturn('ret-cash', 'user-1');
+
+      expect(engineCalls).toHaveLength(1);
+      const spec = engineCalls[0];
+
+      // Cash leg present with cashbox_id (Guard A).
+      const cashLine = spec.gl_lines.find(
+        (l: any) => l.account_id === 'acc-cashbox-cb-1',
+      );
+      expect(cashLine).toBeDefined();
+      expect(cashLine.cashbox_id).toBe('cb-1');
+      expect(cashLine.credit).toBe(150);
+
+      // Paired cash_movement (Guard B).
+      expect(spec.cash_movements).toBeDefined();
+      expect(spec.cash_movements).toHaveLength(1);
+      const mv = spec.cash_movements[0];
+      expect(mv).toMatchObject({
+        cashbox_id: 'cb-1',
+        direction: 'out',
+        amount: 150,
+        category: 'refund',
+      });
+
+      // No accounting_only escape hatch.
+      expect(spec.accounting_only).not.toBe(true);
+    });
+
+    /**
+     * Blind cash return (no original_invoice_id) — `r.cashbox_id` is
+     * already on the row by refund-time.  Spec must satisfy Guards A+B
+     * just like the regular cash case.
+     */
+    it('blind cash return: spec satisfies cashbox_id + paired movement', async () => {
+      const { svc, engineCalls } = makeServiceWithEngineSpy({
+        coaIds: { '49': 'acc-49' },
+        dsResults: [
+          [{
+            id: 'ret-blind', return_no: 'RET-BLIND-1', total_refund: '50',
+            restocking_fee: 0, net_refund: '50', status: 'refunded',
+            refunded_at: '2026-05-08', approved_at: null, requested_at: null,
+            refund_method: 'cash', original_invoice_id: null,
+            cashbox_id: 'cb-blind',
+          }],
+          [{ cost: 0 }],
+        ],
+      });
+      (svc as any).safe = async (
+        _refType: string,
+        _refId: string,
+        _em: any,
+        body: (q: any) => Promise<any>,
+      ) => body((svc as any).ds.manager.query.bind((svc as any).ds.manager));
+
+      await svc.postReturn('ret-blind', 'user-1');
+      const spec = engineCalls[0];
+      const cashLine = spec.gl_lines.find(
+        (l: any) => l.account_id === 'acc-cashbox-cb-blind',
+      );
+      expect(cashLine.cashbox_id).toBe('cb-blind');
+      expect(spec.cash_movements).toHaveLength(1);
+      expect(spec.cash_movements[0]).toMatchObject({
+        cashbox_id: 'cb-blind',
+        direction: 'out',
+        amount: 50,
+        category: 'refund',
+      });
+    });
+
+    /**
+     * Return with original_invoice_id — same shape, the COALESCE-picked
+     * cashbox flows through.
+     */
+    it('return with original_invoice_id: cash_movement uses the resolved cashbox', async () => {
+      const { svc, engineCalls } = makeServiceWithEngineSpy({
+        coaIds: { '49': 'acc-49' },
+        dsResults: [
+          [{
+            id: 'ret-orig', return_no: 'RET-ORIG-1', total_refund: '120',
+            restocking_fee: 0, net_refund: '120', status: 'refunded',
+            refunded_at: '2026-05-08', approved_at: null, requested_at: null,
+            refund_method: 'cash',
+            original_invoice_id: 'inv-99', cashbox_id: 'cb-2',
+          }],
+          [{ cost: 0 }],
+        ],
+      });
+      (svc as any).safe = async (
+        _refType: string,
+        _refId: string,
+        _em: any,
+        body: (q: any) => Promise<any>,
+      ) => body((svc as any).ds.manager.query.bind((svc as any).ds.manager));
+
+      await svc.postReturn('ret-orig', 'user-1');
+      const spec = engineCalls[0];
+      expect(spec.cash_movements).toHaveLength(1);
+      expect(spec.cash_movements[0]).toMatchObject({
+        cashbox_id: 'cb-2',
+        direction: 'out',
+        amount: 120,
+        category: 'refund',
+      });
+    });
+
+    /**
+     * Non-cash refund — postReturn walks the original invoice's
+     * payment_account snapshot (mirror of postInvoice) to resolve the
+     * GL code + cashbox_id so Guard B is satisfied on a non-1111
+     * liquid bucket (e.g. 1114 e-wallets).
+     */
+    it('non-cash refund (card): resolves payment_account from invoice and emits matching cash_movement', async () => {
+      const { svc, engineCalls } = makeServiceWithEngineSpy({
+        // 49 + the resolved card GL code (1114 in this fixture).
+        coaIds: { '49': 'acc-49', '1114': 'acc-1114' },
+        dsResults: [
+          // Return header SELECT.
+          [{
+            id: 'ret-card', return_no: 'RET-CARD-1', total_refund: '300',
+            restocking_fee: 0, net_refund: '300', status: 'refunded',
+            refunded_at: '2026-05-08', approved_at: null, requested_at: null,
+            refund_method: 'card', original_invoice_id: 'inv-100',
+            // refund() never sets cashbox_id for non-cash refunds
+            // → COALESCE picks s.cashbox_id (NULL here).
+            cashbox_id: null,
+          }],
+          // costRow.
+          [{ cost: 0 }],
+          // invoice_payments lookup — one card payment with snapshot.
+          [{
+            payment_method: 'card',
+            amount: '300',
+            payment_account_id: 'pa-card',
+            payment_account_snapshot: {
+              gl_account_code: '1114',
+              cashbox_id: 'cb-card',
+              display_name: 'فيزا',
+            },
+          }],
+        ],
+      });
+      (svc as any).safe = async (
+        _refType: string,
+        _refId: string,
+        _em: any,
+        body: (q: any) => Promise<any>,
+      ) => body((svc as any).ds.manager.query.bind((svc as any).ds.manager));
+
+      await svc.postReturn('ret-card', 'user-1');
+
+      const spec = engineCalls[0];
+      // Non-cash leg uses account_code (resolved by engine), tagged
+      // with cashbox_id from the payment_account.
+      const refundLeg = spec.gl_lines.find(
+        (l: any) => l.account_code === '1114' || l.account_id === 'acc-1114',
+      );
+      expect(refundLeg).toBeDefined();
+      expect(refundLeg.cashbox_id).toBe('cb-card');
+      expect(refundLeg.credit).toBe(300);
+
+      expect(spec.cash_movements).toHaveLength(1);
+      expect(spec.cash_movements[0]).toMatchObject({
+        cashbox_id: 'cb-card',
+        direction: 'out',
+        amount: 300,
+        category: 'refund',
+      });
+
+      // No bypass.
+      expect(spec.accounting_only).not.toBe(true);
+    });
+
+    /**
+     * Restocking fee + back_to_stock — full 5-line spec still pairs
+     * cleanly with one cash_movement on the cashbox.
+     */
+    it('cash refund with restocking fee + back-to-stock: full spec still has 1 cash_movement', async () => {
+      const { svc, engineCalls } = makeServiceWithEngineSpy({
+        coaIds: { '49': 'acc-49', '422': 'acc-422', '1131': 'acc-1131', '51': 'acc-51' },
+        dsResults: [
+          [{
+            id: 'ret-fee', return_no: 'RET-FEE-1', total_refund: '500',
+            restocking_fee: '50', net_refund: '450', status: 'refunded',
+            refunded_at: '2026-05-08', approved_at: null, requested_at: null,
+            refund_method: 'cash', original_invoice_id: null,
+            cashbox_id: 'cb-1',
+          }],
+          [{ cost: '300' }],
+        ],
+      });
+      (svc as any).safe = async (
+        _refType: string,
+        _refId: string,
+        _em: any,
+        body: (q: any) => Promise<any>,
+      ) => body((svc as any).ds.manager.query.bind((svc as any).ds.manager));
+
+      await svc.postReturn('ret-fee', 'user-1');
+      const spec = engineCalls[0];
+      // 5 GL lines: returns 500, fee 50 (CR), cash 450 (CR), inv 300 (DR), cogs 300 (CR).
+      expect(spec.gl_lines.length).toBeGreaterThanOrEqual(5);
+      const cashLeg = spec.gl_lines.find(
+        (l: any) => l.account_id === 'acc-cashbox-cb-1',
+      );
+      expect(cashLeg.credit).toBe(450);
+      expect(spec.cash_movements).toHaveLength(1);
+      expect(spec.cash_movements[0].amount).toBe(450);
+    });
+  });
+
   /* ── Read-only invariant for the whole forward-fix set ──────────── */
 
   it('forward-fix code paths emit zero DELETE/DROP/TRUNCATE/auto-settle SQL', async () => {
