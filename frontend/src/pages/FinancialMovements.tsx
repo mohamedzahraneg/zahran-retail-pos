@@ -5,17 +5,19 @@
  * History:
  *   · PR-FE-ACCOUNTING-FINANCIAL-MOVEMENTS-FRAMING (#327) introduced
  *     this page as a framing/planning shell.
- *   · PR-FE-ACCOUNTING-FINANCIAL-MOVEMENTS-TRACE (this PR) wires it
- *     to the new read-only `GET /audit/financial-movements/trace`
- *     endpoint and surfaces the full cross-table trace (source +
- *     journal entries + journal lines + cashbox transactions +
- *     stock movements + diagnostic flags).
+ *   · PR-FE-ACCOUNTING-FINANCIAL-MOVEMENTS-TRACE wired it to
+ *     `GET /audit/financial-movements/trace` for single-movement deep
+ *     trace.
+ *   · PR-FE-ACCOUNTING-FINANCIAL-MOVEMENTS-LIST (this change) adds a
+ *     browse-by-period panel powered by `GET /audit/financial-movements`
+ *     so users can scan real movements (today / yesterday / week /
+ *     month / custom) and click "عرض التتبع" to open the deep trace.
  *
  * Strict guarantees:
  *   · ZERO mutations — only `useQuery` (GET) is used; no
  *     `useMutation`, no `mutationFn`, no `.mutate(`
  *   · ZERO repair / fix / approve / void / post buttons — every
- *     action button on the page is either a search trigger or a
+ *     action button on the page is either a list/detail trigger or a
  *     read-only "open source page" link
  *   · ZERO computed financial totals — totals shown are exactly the
  *     values returned by the BE service
@@ -27,19 +29,22 @@
  *   page; the BE endpoint itself enforces `audit.view`).
  */
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
   AlertTriangle,
   ArrowLeftRight,
   BookOpen,
+  CalendarDays,
   CheckCircle2,
   ClipboardList,
   Coins,
   ExternalLink,
+  Eye,
   History,
   Info,
   Layers,
+  ListFilter,
   Receipt,
   Search,
   ShieldAlert,
@@ -49,6 +54,10 @@ import {
 } from 'lucide-react';
 import {
   auditTraceApi,
+  type ListParams,
+  type ListPeriod,
+  type ListResult,
+  type MovementSummary,
   type TraceFlagSeverity,
   type TraceParams,
   type TraceReferenceType,
@@ -81,6 +90,27 @@ const REFERENCE_TYPE_LABEL: Record<TraceReferenceType, string> = {
   customer_payment: 'دفعة عميل',
   supplier_payment: 'دفعة مورد',
   journal_entry: 'قيد محاسبي',
+};
+
+interface PeriodTab {
+  value: ListPeriod;
+  label: string;
+}
+
+const PERIOD_TABS: PeriodTab[] = [
+  { value: 'today', label: 'اليوم' },
+  { value: 'yesterday', label: 'أمس' },
+  { value: 'week', label: 'هذا الأسبوع' },
+  { value: 'month', label: 'هذا الشهر' },
+  { value: 'custom', label: 'مخصص' },
+];
+
+const todayISO = () => {
+  const d = new Date();
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(d.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
 };
 
 const SEVERITY_PILL: Record<
@@ -124,6 +154,19 @@ const fmtDate = (s: string | null | undefined) => {
 };
 
 export function FinancialMovements() {
+  // ── Browse-by-period state ──────────────────────────────────────
+  const [period, setPeriod] = useState<ListPeriod>('today');
+  const [draftFrom, setDraftFrom] = useState<string>(todayISO());
+  const [draftTo, setDraftTo] = useState<string>(todayISO());
+  const [appliedRange, setAppliedRange] = useState<{
+    from: string;
+    to: string;
+  } | null>(null);
+  const [listReferenceType, setListReferenceType] = useState<
+    '' | TraceReferenceType
+  >('');
+
+  // ── Detail (single-movement trace) state ────────────────────────
   const [draftReferenceType, setDraftReferenceType] = useState<
     '' | TraceReferenceType
   >('');
@@ -133,6 +176,42 @@ export function FinancialMovements() {
 
   const [submitted, setSubmitted] = useState<TraceParams | null>(null);
 
+  // ── List query (auto-fires on mount with period=today) ──────────
+  const listParams: ListParams = useMemo(() => {
+    if (period === 'custom' && appliedRange) {
+      return {
+        period: 'custom',
+        from: appliedRange.from,
+        to: appliedRange.to,
+        reference_type: listReferenceType || undefined,
+        limit: 100,
+      };
+    }
+    return {
+      period,
+      reference_type: listReferenceType || undefined,
+      limit: 100,
+    };
+  }, [period, appliedRange, listReferenceType]);
+
+  // For period=custom we wait for the user to apply a range before
+  // firing the query — otherwise an unconfigured "custom" tab would
+  // throw a BadRequest from the BE.
+  const listEnabled = period !== 'custom' || !!appliedRange;
+
+  const {
+    data: listData,
+    isFetching: listFetching,
+    error: listError,
+  } = useQuery<ListResult, any>({
+    queryKey: ['audit-financial-movements-list', listParams],
+    queryFn: () => auditTraceApi.list(listParams),
+    enabled: listEnabled,
+    staleTime: 15_000,
+    retry: false,
+  });
+
+  // ── Detail query ───────────────────────────────────────────────
   const { data, isFetching, error } = useQuery<TraceResult, any>({
     queryKey: ['audit-trace', submitted],
     queryFn: () => auditTraceApi.trace(submitted as TraceParams),
@@ -146,6 +225,18 @@ export function FinancialMovements() {
     const status = error?.response?.status;
     return status === 401 || status === 403;
   }, [error]);
+
+  const isListPermissionError = useMemo(() => {
+    if (!listError) return false;
+    const status = listError?.response?.status;
+    return status === 401 || status === 403;
+  }, [listError]);
+
+  // Reset custom-range applied state when leaving the custom tab so
+  // re-entering it doesn't auto-fire stale params.
+  useEffect(() => {
+    if (period !== 'custom') setAppliedRange(null);
+  }, [period]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -166,6 +257,28 @@ export function FinancialMovements() {
     setDraftReferenceId('');
     setDraftIdemKey('');
     setSubmitted(null);
+  };
+
+  const handleApplyCustomRange = () => {
+    if (!draftFrom || !draftTo) return;
+    if (draftFrom > draftTo) return;
+    setAppliedRange({ from: draftFrom, to: draftTo });
+  };
+
+  const handleOpenTrace = (row: MovementSummary) => {
+    setSubmitted({
+      reference_type: row.source_type,
+      reference_id: row.source_id,
+    });
+    if (typeof window !== 'undefined') {
+      // Surface the detail panel for users who scrolled down the list.
+      window.requestAnimationFrame(() => {
+        const el = document.getElementById('financial-movements-detail-anchor');
+        if (el && typeof el.scrollIntoView === 'function') {
+          el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+      });
+    }
   };
 
   const sourceLink = (() => {
@@ -240,6 +353,25 @@ export function FinancialMovements() {
           تلقائي.
         </div>
       </div>
+
+      {/* ── Browse-by-period panel ─────────────────────────────────── */}
+      <BrowsePanel
+        period={period}
+        onPeriodChange={setPeriod}
+        draftFrom={draftFrom}
+        draftTo={draftTo}
+        onDraftFromChange={setDraftFrom}
+        onDraftToChange={setDraftTo}
+        onApplyCustomRange={handleApplyCustomRange}
+        listReferenceType={listReferenceType}
+        onListReferenceTypeChange={setListReferenceType}
+        listData={listData}
+        listFetching={listFetching}
+        listError={listError}
+        listPermissionDenied={isListPermissionError}
+        listEnabled={listEnabled}
+        onOpenTrace={handleOpenTrace}
+      />
 
       {/* ── Search form ────────────────────────────────────────────── */}
       <form
@@ -339,10 +471,10 @@ export function FinancialMovements() {
         </div>
       </form>
 
-      {/* ── States ────────────────────────────────────────────────── */}
-      {!submitted && (
-        <EmptyHint />
-      )}
+      {/* ── Detail (deep-trace) states ────────────────────────────── */}
+      <div id="financial-movements-detail-anchor" />
+
+      {!submitted && <EmptyHint />}
 
       {submitted && isFetching && !data && (
         <LoadingState />
@@ -371,13 +503,409 @@ function EmptyHint() {
     >
       <ClipboardList size={28} className="mx-auto text-slate-400" />
       <div className="mt-2 text-sm font-bold text-slate-700">
-        ابدأ بإدخال رقم المرجع
+        اختر حركة من القائمة بالأعلى لعرض تتبعها التفصيلي
       </div>
       <div className="text-[11px] text-slate-500 mt-1 max-w-md mx-auto leading-relaxed">
-        يمكنك تتبع فاتورة مبيعات، مرتجع، فاتورة مشتريات، مصروف، وردية، دفعة
-        عميل أو مورد، أو قيد محاسبي.
+        أو ابحث برقم مرجع محدد (فاتورة، مرتجع، مشتريات، مصروف، وردية،
+        دفعة عميل أو مورد، أو قيد محاسبي).
       </div>
     </div>
+  );
+}
+
+// ─── Browse-by-period panel ─────────────────────────────────────────
+
+interface BrowsePanelProps {
+  period: ListPeriod;
+  onPeriodChange: (p: ListPeriod) => void;
+  draftFrom: string;
+  draftTo: string;
+  onDraftFromChange: (v: string) => void;
+  onDraftToChange: (v: string) => void;
+  onApplyCustomRange: () => void;
+  listReferenceType: '' | TraceReferenceType;
+  onListReferenceTypeChange: (v: '' | TraceReferenceType) => void;
+  listData: ListResult | undefined;
+  listFetching: boolean;
+  listError: any;
+  listPermissionDenied: boolean;
+  listEnabled: boolean;
+  onOpenTrace: (row: MovementSummary) => void;
+}
+
+function BrowsePanel(props: BrowsePanelProps) {
+  const {
+    period,
+    onPeriodChange,
+    draftFrom,
+    draftTo,
+    onDraftFromChange,
+    onDraftToChange,
+    onApplyCustomRange,
+    listReferenceType,
+    onListReferenceTypeChange,
+    listData,
+    listFetching,
+    listError,
+    listPermissionDenied,
+    listEnabled,
+    onOpenTrace,
+  } = props;
+
+  return (
+    <section
+      className="rounded-2xl border border-slate-200 bg-white p-5 space-y-4"
+      data-testid="financial-movements-browse-panel"
+    >
+      {/* Header: title + period tabs */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <ListFilter size={18} className="text-slate-500" />
+        <h2 className="text-sm font-black text-slate-800">
+          استعراض الحركات حسب الفترة
+        </h2>
+        <span className="text-[10px] text-slate-400">
+          — قراءة فقط، اضغط "عرض التتبع" لفتح التفاصيل
+        </span>
+      </div>
+
+      <div
+        className="flex items-center gap-1 flex-wrap"
+        role="tablist"
+        data-testid="financial-movements-period-tabs"
+      >
+        {PERIOD_TABS.map((t) => {
+          const active = period === t.value;
+          return (
+            <button
+              key={t.value}
+              type="button"
+              role="tab"
+              aria-selected={active}
+              onClick={() => onPeriodChange(t.value)}
+              className={`text-[12px] font-bold rounded-full px-3 py-1.5 transition-colors ${
+                active
+                  ? 'bg-brand-600 text-white'
+                  : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+              }`}
+              data-testid={`financial-movements-period-${t.value}`}
+            >
+              {t.label}
+            </button>
+          );
+        })}
+
+        <div className="ms-auto flex items-center gap-2">
+          <label className="text-[11px] font-bold text-slate-600">
+            النوع
+          </label>
+          <select
+            value={listReferenceType}
+            onChange={(e) =>
+              onListReferenceTypeChange(
+                e.target.value as '' | TraceReferenceType,
+              )
+            }
+            className="bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 text-[11px] text-slate-700 outline-none focus:bg-white focus:border-brand-300"
+            data-testid="financial-movements-list-reference-type"
+          >
+            <option value="">كل الأنواع</option>
+            {(Object.keys(REFERENCE_TYPE_LABEL) as TraceReferenceType[]).map(
+              (k) => (
+                <option key={k} value={k}>
+                  {REFERENCE_TYPE_LABEL[k]}
+                </option>
+              ),
+            )}
+          </select>
+        </div>
+      </div>
+
+      {/* Custom date range */}
+      {period === 'custom' && (
+        <div
+          className="rounded-xl border border-slate-100 bg-slate-50/50 p-3 flex flex-wrap items-end gap-3"
+          data-testid="financial-movements-custom-range"
+        >
+          <div className="flex flex-col gap-1">
+            <label className="text-[11px] font-bold text-slate-600">من</label>
+            <input
+              type="date"
+              value={draftFrom}
+              onChange={(e) => onDraftFromChange(e.target.value)}
+              className="bg-white border border-slate-200 rounded-lg px-3 py-1.5 text-[12px] text-slate-700 outline-none focus:border-brand-300"
+              data-testid="financial-movements-custom-from"
+              dir="ltr"
+            />
+          </div>
+          <div className="flex flex-col gap-1">
+            <label className="text-[11px] font-bold text-slate-600">إلى</label>
+            <input
+              type="date"
+              value={draftTo}
+              onChange={(e) => onDraftToChange(e.target.value)}
+              className="bg-white border border-slate-200 rounded-lg px-3 py-1.5 text-[12px] text-slate-700 outline-none focus:border-brand-300"
+              data-testid="financial-movements-custom-to"
+              dir="ltr"
+            />
+          </div>
+          <button
+            type="button"
+            onClick={onApplyCustomRange}
+            disabled={!draftFrom || !draftTo || draftFrom > draftTo}
+            className="inline-flex items-center gap-1 rounded-lg bg-brand-600 hover:bg-brand-700 disabled:opacity-50 text-white px-3 py-2 text-[12px] font-bold"
+            data-testid="financial-movements-custom-apply"
+          >
+            <CalendarDays size={14} /> تطبيق
+          </button>
+          {draftFrom && draftTo && draftFrom > draftTo && (
+            <div className="text-[11px] text-rose-700 font-bold">
+              "من" يجب أن يكون قبل أو يساوي "إلى".
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* States */}
+      {listPermissionDenied && (
+        <div
+          className="rounded-xl border border-rose-200 bg-rose-50/60 p-4 flex items-start gap-3"
+          data-testid="financial-movements-list-permission-denied"
+        >
+          <ShieldAlert size={18} className="text-rose-600 shrink-0 mt-0.5" />
+          <div className="text-[12px] text-rose-800">
+            صلاحية{' '}
+            <span className="font-mono font-bold">audit.view</span> مطلوبة
+            لاستعراض الحركات.
+          </div>
+        </div>
+      )}
+
+      {listError && !listPermissionDenied && (
+        <div
+          className="rounded-xl border border-rose-200 bg-rose-50/60 p-4 flex items-start gap-3"
+          data-testid="financial-movements-list-error"
+        >
+          <AlertTriangle size={18} className="text-rose-600 shrink-0 mt-0.5" />
+          <div className="text-[12px] text-rose-800">
+            تعذّر تحميل قائمة الحركات.
+            {listError?.response?.data?.message && (
+              <span className="block text-[11px] text-rose-700 mt-1">
+                {listError.response.data.message}
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
+      {!listEnabled && (
+        <div
+          className="rounded-xl border border-dashed border-slate-300 bg-slate-50/40 p-6 text-center text-[12px] text-slate-600"
+          data-testid="financial-movements-list-awaiting-range"
+        >
+          اختر تاريخين ثم اضغط "تطبيق" لعرض الحركات.
+        </div>
+      )}
+
+      {listEnabled && listFetching && !listData && (
+        <div
+          className="rounded-xl border border-slate-200 bg-slate-50/40 p-6 text-center text-[12px] text-slate-600"
+          data-testid="financial-movements-list-loading"
+        >
+          جارٍ تحميل الحركات…
+        </div>
+      )}
+
+      {listEnabled && listData && (
+        <>
+          <BrowseSummaryCards data={listData} />
+          {listData.items.length === 0 ? (
+            <div
+              className="rounded-xl border border-dashed border-slate-300 bg-slate-50/40 p-8 text-center"
+              data-testid="financial-movements-list-empty"
+            >
+              <ClipboardList size={24} className="mx-auto text-slate-400" />
+              <div className="mt-2 text-sm font-bold text-slate-700">
+                لا توجد حركات مالية في هذه الفترة
+              </div>
+              <div className="text-[11px] text-slate-500 mt-1 leading-relaxed">
+                جرّب فترة أوسع أو غيّر النوع.
+              </div>
+            </div>
+          ) : (
+            <BrowseListTable
+              data={listData}
+              onOpenTrace={onOpenTrace}
+            />
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
+function BrowseSummaryCards({ data }: { data: ListResult }) {
+  const cards = [
+    {
+      key: 'total',
+      label: 'إجمالي الحركات',
+      value: data.totals.total,
+      tone: 'text-slate-800',
+    },
+    {
+      key: 'with_journal',
+      label: 'بها قيود',
+      value: data.totals.with_journal,
+      tone: 'text-emerald-700',
+    },
+    {
+      key: 'with_cashbox',
+      label: 'بها خزينة',
+      value: data.totals.with_cashbox_transaction,
+      tone: 'text-sky-700',
+    },
+    {
+      key: 'with_stock',
+      label: 'بها مخزون',
+      value: data.totals.with_stock_movement,
+      tone: 'text-indigo-700',
+    },
+    {
+      key: 'with_flags',
+      label: 'بها مؤشرات',
+      value: data.totals.with_flags,
+      tone: 'text-amber-700',
+    },
+  ];
+  return (
+    <div
+      className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2"
+      data-testid="financial-movements-list-summary"
+    >
+      {cards.map((c) => (
+        <div
+          key={c.key}
+          className="rounded-xl border border-slate-100 bg-slate-50/40 p-3"
+          data-testid={`financial-movements-list-summary-${c.key}`}
+        >
+          <div className="text-[10px] font-bold text-slate-500">{c.label}</div>
+          <div className={`mt-1 text-lg font-black tabular-nums ${c.tone}`}>
+            {c.value}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function BrowseListTable({
+  data,
+  onOpenTrace,
+}: {
+  data: ListResult;
+  onOpenTrace: (row: MovementSummary) => void;
+}) {
+  return (
+    <div className="overflow-x-auto" data-testid="financial-movements-list-table">
+      <table className="w-full text-[11px]" dir="rtl">
+        <thead className="bg-slate-50 text-slate-500">
+          <tr>
+            <th className="text-right p-2 font-bold whitespace-nowrap">التاريخ</th>
+            <th className="text-right p-2 font-bold">النوع</th>
+            <th className="text-right p-2 font-bold">الرقم</th>
+            <th className="text-right p-2 font-bold">العميل/المورد</th>
+            <th className="text-right p-2 font-bold">الإجمالي</th>
+            <th className="text-right p-2 font-bold">الحالة</th>
+            <th className="text-center p-2 font-bold">قيد</th>
+            <th className="text-center p-2 font-bold">خزينة</th>
+            <th className="text-center p-2 font-bold">مخزون</th>
+            <th className="text-center p-2 font-bold">مؤشرات</th>
+            <th className="text-center p-2 font-bold"></th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-slate-100">
+          {data.items.map((row) => (
+            <tr
+              key={`${row.source_type}-${row.source_id}`}
+              data-testid={`financial-movements-list-row-${row.source_id}`}
+            >
+              <td className="p-2 text-slate-600 whitespace-nowrap">
+                {fmtDate(row.date)}
+              </td>
+              <td className="p-2">
+                <span className="text-[10px] font-bold rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200 px-2 py-0.5 whitespace-nowrap">
+                  {REFERENCE_TYPE_LABEL[row.source_type]}
+                </span>
+              </td>
+              <td className="p-2 font-mono font-bold text-slate-800 whitespace-nowrap">
+                {row.number || '—'}
+              </td>
+              <td className="p-2 text-slate-600">{row.party_name || '—'}</td>
+              <td className="p-2 tabular-nums whitespace-nowrap">
+                {EGP(row.total)}
+              </td>
+              <td className="p-2 text-slate-600 whitespace-nowrap">
+                {row.status || '—'}
+              </td>
+              <td className="p-2 text-center">
+                <IndicatorDot on={row.has_journal} />
+              </td>
+              <td className="p-2 text-center">
+                <IndicatorDot on={row.has_cashbox_transaction} />
+              </td>
+              <td className="p-2 text-center">
+                <IndicatorDot on={row.has_stock_movement} />
+              </td>
+              <td className="p-2 text-center">
+                {row.flags_count > 0 ? (
+                  <span
+                    className="text-[10px] font-bold rounded-full bg-amber-50 text-amber-700 border border-amber-200 px-2 py-0.5 tabular-nums"
+                    data-testid={`financial-movements-list-flags-${row.source_id}`}
+                  >
+                    {row.flags_count}
+                  </span>
+                ) : (
+                  <span className="text-[10px] text-slate-400">—</span>
+                )}
+              </td>
+              <td className="p-2 text-center">
+                <button
+                  type="button"
+                  onClick={() => onOpenTrace(row)}
+                  className="inline-flex items-center gap-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 px-2 py-1 text-[11px] font-bold whitespace-nowrap"
+                  data-testid={`financial-movements-list-trace-${row.source_id}`}
+                >
+                  <Eye size={12} /> عرض التتبع
+                </button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {data.truncated && (
+        <div
+          className="mt-2 text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2"
+          data-testid="financial-movements-list-truncated"
+        >
+          النتائج مقطوعة — جرّب فترة أضيق أو ارفع الحد الأقصى.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function IndicatorDot({ on }: { on: boolean }) {
+  return on ? (
+    <span
+      className="inline-block w-2 h-2 rounded-full bg-emerald-500"
+      aria-label="موجود"
+      data-on="1"
+    />
+  ) : (
+    <span
+      className="inline-block w-2 h-2 rounded-full bg-slate-300"
+      aria-label="غير موجود"
+      data-on="0"
+    />
   );
 }
 

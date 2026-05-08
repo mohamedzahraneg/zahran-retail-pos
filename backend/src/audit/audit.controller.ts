@@ -5,6 +5,10 @@ import {
   FinancialMovementsTraceService,
   TraceQuery,
 } from './financial-movements-trace.service';
+import {
+  FinancialMovementsListService,
+  ListQuery,
+} from './financial-movements-list.service';
 import { Permissions } from '../common/decorators/roles.decorator';
 
 @ApiBearerAuth()
@@ -15,7 +19,49 @@ export class AuditController {
   constructor(
     private readonly svc: AuditService,
     private readonly trace: FinancialMovementsTraceService,
+    private readonly movements: FinancialMovementsListService,
   ) {}
+
+  /**
+   * GET /audit/financial-movements
+   *
+   * Read-only flat list of financial movements across all source
+   * types (invoice / return / purchase / expense / shift /
+   * customer_payment / supplier_payment / journal_entry) within a
+   * date range.
+   *
+   * Strict guarantees:
+   *   · GET only. SELECT-only queries underneath.
+   *   · No mutations, no posting, no reconciliation, no repair.
+   *   · No new tables, no migrations.
+   *
+   * Query params:
+   *   · period: today|yesterday|week|month|custom (default today)
+   *   · from / to: required when period=custom (YYYY-MM-DD)
+   *   · reference_type: optional allowlisted single source filter
+   *   · limit: 1..200 (default 50)
+   *
+   * Performance: 8 source-table SELECTs (one per type, indexed,
+   * limited) + 3 bulk indicator SELECTs (`reference_id = ANY([...])`).
+   * Total query count is bounded — does not scale with result size.
+   */
+  @Get('financial-movements')
+  listFinancialMovements(
+    @Query('period') period?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('reference_type') reference_type?: string,
+    @Query('limit') limit?: string,
+  ) {
+    const q: ListQuery = {
+      period,
+      from,
+      to,
+      reference_type,
+      limit: limit ? Number(limit) : undefined,
+    };
+    return this.movements.list(q);
+  }
 
   /**
    * GET /audit/financial-movements/trace

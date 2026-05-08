@@ -146,6 +146,55 @@ export interface TraceParams {
   idempotency_key?: string;
 }
 
+// ─── List (browse-by-period) ─────────────────────────────────────────
+//
+// `GET /audit/financial-movements` — flat read-only list of movements
+// across all source types in a date range, with cheap indicator flags
+// per row.  Same permission gate (`audit.view`) as the trace endpoint.
+
+export type ListPeriod = 'today' | 'yesterday' | 'week' | 'month' | 'custom';
+
+export interface MovementSummary {
+  source_type: TraceReferenceType;
+  source_id: string;
+  number: string | null;
+  date: string;
+  party_id: string | null;
+  party_name: string | null;
+  total: string | null;
+  status: string | null;
+  has_journal: boolean;
+  has_cashbox_transaction: boolean;
+  has_stock_movement: boolean;
+  flags_count: number;
+}
+
+export interface ListTotals {
+  total: number;
+  with_journal: number;
+  with_cashbox_transaction: number;
+  with_stock_movement: number;
+  with_flags: number;
+}
+
+export interface ListResult {
+  period: ListPeriod;
+  from: string;
+  to: string;
+  limit: number;
+  items: MovementSummary[];
+  totals: ListTotals;
+  truncated: boolean;
+}
+
+export interface ListParams {
+  period?: ListPeriod;
+  from?: string;
+  to?: string;
+  reference_type?: TraceReferenceType | '';
+  limit?: number;
+}
+
 export const auditTraceApi = {
   /**
    * Fire a read-only trace query. The endpoint is GET so axios won't
@@ -160,6 +209,23 @@ export const auditTraceApi = {
           reference_id: params.reference_id || undefined,
           q: params.q || undefined,
           idempotency_key: params.idempotency_key || undefined,
+        },
+      }),
+    ),
+
+  /**
+   * Read-only list of movements within a date range. GET only — no
+   * idempotency-key handling (those interceptors gate on mutations).
+   */
+  list: (params: ListParams) =>
+    unwrap<ListResult>(
+      api.get('/audit/financial-movements', {
+        params: {
+          period: params.period || undefined,
+          from: params.from || undefined,
+          to: params.to || undefined,
+          reference_type: params.reference_type || undefined,
+          limit: params.limit ?? undefined,
         },
       }),
     ),

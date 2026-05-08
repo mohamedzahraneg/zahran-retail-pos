@@ -5,24 +5,31 @@
  * History:
  *   · PR-FE-ACCOUNTING-FINANCIAL-MOVEMENTS-FRAMING (#327) introduced
  *     this page as a framing/planning shell.
- *   · PR-FE-ACCOUNTING-FINANCIAL-MOVEMENTS-TRACE wires it to the new
+ *   · PR-FE-ACCOUNTING-FINANCIAL-MOVEMENTS-TRACE wired it to the
  *     read-only `GET /audit/financial-movements/trace` endpoint.
+ *   · PR-FE-ACCOUNTING-FINANCIAL-MOVEMENTS-LIST adds a browse-by-period
+ *     panel powered by `GET /audit/financial-movements`.
  *
- * Tests pin the read-only contract:
- *   1. Title + "قراءة فقط" badge.
- *   2. Read-only notice present.
- *   3. Search form has 4 inputs (reference type, q, UUID, idem-key)
- *      and a submit button.
- *   4. Default state: empty-hint visible, no result panels.
- *   5. After submit + mocked successful response: source / summary /
- *      flags / journal-entries / journal-lines / cashbox-txns /
- *      stock-movements panels all render.
- *   6. Permission-denied state on 403.
- *   7. Empty result on SOURCE_NOT_FOUND.
- *   8. NO mutation surface — no `useMutation`, no `mutationFn`,
- *      no `.mutate(`, no executive-verb function calls.
- *   9. NO repair / fix / approve / void / post buttons in the DOM.
- *  10. Source-link in the result summary points to a real route.
+ * Tests pin the read-only contract for both modes:
+ *   1.  Title + "قراءة فقط" badge.
+ *   2.  Read-only notice present.
+ *   3.  Search form has 4 inputs + a submit button.
+ *   4.  Default mount auto-fires list with period=today.
+ *   5.  Period tabs switch the list query.
+ *   6.  Custom range applies from/to to the list query.
+ *   7.  Browse list renders summary cards + rows.
+ *   8.  Empty list state when no movements in the range.
+ *   9.  Clicking "عرض التتبع" triggers the deep-trace useQuery.
+ *  10.  After submit + mocked successful response: source / summary /
+ *       flags / journal-entries / journal-lines / cashbox-txns /
+ *       stock-movements panels all render.
+ *  11.  Permission-denied state on 403 (deep trace).
+ *  12.  Empty result on SOURCE_NOT_FOUND.
+ *  13.  NO mutation surface — no `useMutation`, no `mutationFn`,
+ *       no `.mutate(`, no executive-verb function calls.
+ *  14.  Source-link in the result summary points to a real route.
+ *  15.  List API never receives mutation params and only the read-only
+ *       methods are called.
  */
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
@@ -34,10 +41,72 @@ import FinancialMovements from '@/pages/FinancialMovements';
 vi.mock('@/api/audit-trace.api', () => ({
   auditTraceApi: {
     trace: vi.fn(),
+    list: vi.fn(),
   },
 }));
 
 import { auditTraceApi } from '@/api/audit-trace.api';
+
+const EMPTY_LIST_RESULT = {
+  period: 'today' as const,
+  from: '2026-05-08',
+  to: '2026-05-08',
+  limit: 100,
+  items: [],
+  totals: {
+    total: 0,
+    with_journal: 0,
+    with_cashbox_transaction: 0,
+    with_stock_movement: 0,
+    with_flags: 0,
+  },
+  truncated: false,
+};
+
+const SAMPLE_LIST_RESULT = {
+  period: 'today' as const,
+  from: '2026-05-08',
+  to: '2026-05-08',
+  limit: 100,
+  items: [
+    {
+      source_type: 'invoice' as const,
+      source_id: 'inv-aaaa',
+      number: 'INV-2026-000010',
+      date: '2026-05-08T10:00:00Z',
+      party_id: 'cust-1',
+      party_name: 'عميل ١',
+      total: '250.00',
+      status: 'paid',
+      has_journal: true,
+      has_cashbox_transaction: true,
+      has_stock_movement: true,
+      flags_count: 0,
+    },
+    {
+      source_type: 'expense' as const,
+      source_id: 'exp-bbbb',
+      number: 'EXP-2026-000003',
+      date: '2026-05-08T08:00:00Z',
+      party_id: null,
+      party_name: 'كهرباء',
+      total: '40.00',
+      status: 'posted',
+      has_journal: true,
+      has_cashbox_transaction: true,
+      has_stock_movement: false,
+      flags_count: 0,
+    },
+  ],
+  totals: {
+    total: 2,
+    with_journal: 2,
+    with_cashbox_transaction: 2,
+    with_stock_movement: 1,
+    with_flags: 0,
+  },
+  truncated: false,
+};
 
 function renderPage() {
   const qc = new QueryClient({
@@ -172,9 +241,13 @@ const HEALTHY_INVOICE_RESPONSE = {
   },
 };
 
-describe('<FinancialMovements /> — read-only trace', () => {
+describe('<FinancialMovements /> — read-only browse + trace', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // Most tests don't care about the list result — let it settle to
+    // empty so the page is in a steady state.  Tests that need real
+    // list data override this with `mockResolvedValueOnce`.
+    (auditTraceApi.list as any).mockResolvedValue(EMPTY_LIST_RESULT);
   });
 
   // ─── 1. Title + read-only badge ───────────────────────────────
@@ -217,18 +290,164 @@ describe('<FinancialMovements /> — read-only trace', () => {
     ).toBeInTheDocument();
   });
 
-  // ─── 4. Default empty state ───────────────────────────────────
-  it('shows the empty hint by default; no result panels mounted', () => {
+  // ─── 4. Default mount auto-fires list with period=today ──────
+  it('auto-fires list query with period=today on mount', async () => {
     renderPage();
+    await waitFor(() =>
+      expect(auditTraceApi.list).toHaveBeenCalled(),
+    );
+    const firstCall = (auditTraceApi.list as any).mock.calls[0]?.[0];
+    expect(firstCall?.period).toBe('today');
+    // Empty hint (detail area) is still mounted — no row clicked yet.
     expect(
       screen.getByTestId('financial-movements-empty-hint'),
     ).toBeInTheDocument();
     expect(
       screen.queryByTestId('financial-movements-result'),
     ).toBeNull();
+    // Browse panel is mounted with default today tab active.
     expect(
-      screen.queryByTestId('financial-movements-loading'),
-    ).toBeNull();
+      screen.getByTestId('financial-movements-browse-panel'),
+    ).toBeInTheDocument();
+    const todayTab = screen.getByTestId(
+      'financial-movements-period-today',
+    ) as HTMLButtonElement;
+    expect(todayTab.getAttribute('aria-selected')).toBe('true');
+  });
+
+  // ─── 4b. Period switch fires list with new period ─────────────
+  it('switching period tab refires list with the new period', async () => {
+    renderPage();
+    await waitFor(() =>
+      expect(auditTraceApi.list).toHaveBeenCalled(),
+    );
+    fireEvent.click(screen.getByTestId('financial-movements-period-week'));
+    await waitFor(() => {
+      const periods = (auditTraceApi.list as any).mock.calls.map(
+        (c: any[]) => c[0]?.period,
+      );
+      expect(periods).toContain('week');
+    });
+  });
+
+  // ─── 4c. Custom range apply ───────────────────────────────────
+  it('custom range tab waits for apply, then fires list with from/to', async () => {
+    renderPage();
+    await waitFor(() =>
+      expect(auditTraceApi.list).toHaveBeenCalled(),
+    );
+    const callsBefore = (auditTraceApi.list as any).mock.calls.length;
+    fireEvent.click(screen.getByTestId('financial-movements-period-custom'));
+    // Custom inputs visible.
+    expect(
+      screen.getByTestId('financial-movements-custom-from'),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTestId('financial-movements-custom-to'),
+    ).toBeInTheDocument();
+    // No new list call until apply is pressed.
+    expect((auditTraceApi.list as any).mock.calls.length).toBe(callsBefore);
+
+    fireEvent.change(
+      screen.getByTestId('financial-movements-custom-from') as HTMLInputElement,
+      { target: { value: '2026-04-01' } },
+    );
+    fireEvent.change(
+      screen.getByTestId('financial-movements-custom-to') as HTMLInputElement,
+      { target: { value: '2026-04-30' } },
+    );
+    fireEvent.click(screen.getByTestId('financial-movements-custom-apply'));
+
+    await waitFor(() => {
+      const last = (auditTraceApi.list as any).mock.calls.at(-1)?.[0];
+      expect(last?.period).toBe('custom');
+      expect(last?.from).toBe('2026-04-01');
+      expect(last?.to).toBe('2026-04-30');
+    });
+  });
+
+  // ─── 4d. List renders summary cards + rows ────────────────────
+  it('renders summary cards and movement rows from list data', async () => {
+    (auditTraceApi.list as any).mockResolvedValueOnce(SAMPLE_LIST_RESULT);
+    renderPage();
+    await waitFor(() =>
+      expect(
+        screen.getByTestId('financial-movements-list-summary'),
+      ).toBeInTheDocument(),
+    );
+    // Five summary cards.
+    expect(
+      screen.getByTestId('financial-movements-list-summary-total').textContent,
+    ).toMatch(/2/);
+    expect(
+      screen.getByTestId('financial-movements-list-summary-with_journal')
+        .textContent,
+    ).toMatch(/2/);
+    expect(
+      screen.getByTestId('financial-movements-list-summary-with_cashbox')
+        .textContent,
+    ).toMatch(/2/);
+    expect(
+      screen.getByTestId('financial-movements-list-summary-with_stock')
+        .textContent,
+    ).toMatch(/1/);
+    expect(
+      screen.getByTestId('financial-movements-list-summary-with_flags')
+        .textContent,
+    ).toMatch(/0/);
+
+    // Both rows visible.
+    expect(
+      screen.getByTestId('financial-movements-list-row-inv-aaaa'),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTestId('financial-movements-list-row-exp-bbbb'),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTestId('financial-movements-list-table').textContent,
+    ).toMatch(/INV-2026-000010/);
+  });
+
+  // ─── 4e. Empty list state ─────────────────────────────────────
+  it('renders empty list state when no movements in the period', async () => {
+    renderPage();
+    await waitFor(() =>
+      expect(
+        screen.getByTestId('financial-movements-list-empty'),
+      ).toBeInTheDocument(),
+    );
+    expect(
+      screen.getByTestId('financial-movements-list-empty').textContent,
+    ).toMatch(/لا توجد حركات مالية في هذه الفترة/);
+  });
+
+  // ─── 4f. Click "عرض التتبع" loads deep trace ──────────────────
+  it('clicking row trace button fires the deep-trace query', async () => {
+    (auditTraceApi.list as any).mockResolvedValueOnce(SAMPLE_LIST_RESULT);
+    (auditTraceApi.trace as any).mockResolvedValueOnce(HEALTHY_INVOICE_RESPONSE);
+    renderPage();
+    await waitFor(() =>
+      expect(
+        screen.getByTestId('financial-movements-list-row-inv-aaaa'),
+      ).toBeInTheDocument(),
+    );
+
+    fireEvent.click(
+      screen.getByTestId('financial-movements-list-trace-inv-aaaa'),
+    );
+
+    await waitFor(() =>
+      expect(auditTraceApi.trace).toHaveBeenCalled(),
+    );
+    const traceCall = (auditTraceApi.trace as any).mock.calls[0][0];
+    expect(traceCall.reference_type).toBe('invoice');
+    expect(traceCall.reference_id).toBe('inv-aaaa');
+
+    await waitFor(() =>
+      expect(
+        screen.getByTestId('financial-movements-result'),
+      ).toBeInTheDocument(),
+    );
   });
 
   // ─── 5. Successful trace renders all panels ───────────────────
