@@ -205,6 +205,31 @@ describe('<ReturnsAuditPanel />', () => {
     expect(activityCard.textContent).toMatch(/تم إلغاء المرتجع/);
   });
 
+  it('renders the literal "تم بواسطة:" prefix on every entry kind', async () => {
+    (returnsApi.getReturnAudit as any).mockResolvedValueOnce(populated);
+    renderPanel('return');
+    await waitFor(() =>
+      expect(screen.getByTestId('audit-entries')).toBeInTheDocument(),
+    );
+
+    // ChangeEntry (audit_logs document row)
+    expect(
+      screen.getByTestId('audit-change-ad-1').textContent,
+    ).toMatch(/تم بواسطة:/);
+    // ChangeEntry (audit_logs item row)
+    expect(
+      screen.getByTestId('audit-change-ad-2').textContent,
+    ).toMatch(/تم بواسطة:/);
+    // ActivityEntry
+    expect(
+      screen.getByTestId('audit-activity-act-1').textContent,
+    ).toMatch(/تم بواسطة:/);
+    // AmendmentEntry
+    expect(
+      screen.getByTestId('audit-amendment-am-1').textContent,
+    ).toMatch(/تم بواسطة:/);
+  });
+
   it('renders amendments (Phase 4 forward-compatible)', async () => {
     (returnsApi.getReturnAudit as any).mockResolvedValueOnce(populated);
     renderPanel('return');

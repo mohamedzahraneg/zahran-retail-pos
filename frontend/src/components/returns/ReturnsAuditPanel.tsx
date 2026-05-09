@@ -235,6 +235,7 @@ function ChangeEntry({
         <span className="text-slate-600">{fmtDate(row.changed_at)}</span>
         <span className="text-slate-300">·</span>
         <User size={12} className="text-slate-400" />
+        <span className="font-bold text-slate-700">تم بواسطة:</span>
         <span className="text-slate-600">
           {row.changed_by_name || row.changed_by_username || '—'}
         </span>
@@ -271,6 +272,7 @@ function ActivityEntry({ row }: { row: AuditActivityRow }) {
         <span className="text-slate-600">{fmtDate(row.created_at)}</span>
         <span className="text-slate-300">·</span>
         <User size={12} className="text-slate-400" />
+        <span className="font-bold text-slate-700">تم بواسطة:</span>
         <span className="text-slate-600">
           {row.full_name || row.username || '—'}
         </span>
@@ -304,6 +306,7 @@ function AmendmentEntry({ row }: { row: AuditAmendmentRow }) {
         <span className="text-amber-700">{fmtDate(row.created_at)}</span>
         <span className="text-amber-300">·</span>
         <User size={12} className="text-amber-500" />
+        <span className="font-bold text-amber-800">تم بواسطة:</span>
         <span className="text-amber-700">{row.created_by_name || '—'}</span>
         <span className="ms-auto text-[10px] font-mono text-amber-500">
           {sourceLabel('amendment')}
