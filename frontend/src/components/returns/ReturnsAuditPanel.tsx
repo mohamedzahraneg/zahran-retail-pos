@@ -1,0 +1,428 @@
+/**
+ * ReturnsAuditPanel — read-only audit history for a single return /
+ * exchange document.  Phase 1 of PR-FIN-RETURNS-EXCHANGES-AUDIT.
+ *
+ * Renders the unified output of `GET /returns/:id/audit` /
+ * `GET /exchanges/:id/audit`:
+ *   · document_changes — `audit_logs` row-diffs on the document
+ *   · item_changes     — `audit_logs` row-diffs on the items
+ *   · activity         — `activity_logs` high-level user actions
+ *   · amendments       — Phase-4 placeholder, currently always []
+ *
+ * No mutation surface.  No edit buttons.  No modals.  No POST/PATCH/
+ * DELETE network calls.  Only `useQuery` against the read-only audit
+ * endpoint.  The "admin approval" copy below is an informational note
+ * only — it announces the FUTURE flow but does NOT enable it.
+ */
+import { useMemo } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import {
+  AlertTriangle,
+  History,
+  Info,
+  Layers,
+  ShieldAlert,
+  User,
+} from 'lucide-react';
+import {
+  returnsApi,
+  type AuditActivityRow,
+  type AuditAmendmentRow,
+  type AuditChangeRow,
+  type DocumentAuditResult,
+} from '@/api/returns.api';
+
+const NOISY_FIELDS = new Set(['updated_at', 'id', 'created_at']);
+
+const OP_LABEL: Record<'I' | 'U' | 'D', string> = {
+  I: 'إضافة',
+  U: 'تعديل',
+  D: 'حذف',
+};
+
+const fmtDate = (iso?: string | null) => {
+  if (!iso) return '—';
+  try {
+    return new Date(iso).toLocaleString('ar-EG', {
+      dateStyle: 'short',
+      timeStyle: 'short',
+    });
+  } catch {
+    return iso;
+  }
+};
+
+const sourceLabel = (source: 'audit' | 'activity' | 'amendment') =>
+  source === 'audit'
+    ? 'audit_logs'
+    : source === 'activity'
+    ? 'activity_logs'
+    : 'amendment';
+
+interface AuditPanelProps {
+  entity: 'return' | 'exchange';
+  id: string;
+}
+
+export function ReturnsAuditPanel({ entity, id }: AuditPanelProps) {
+  const { data, isLoading, error } = useQuery<DocumentAuditResult, any>({
+    queryKey: ['audit', entity, id],
+    queryFn: () =>
+      entity === 'return'
+        ? returnsApi.getReturnAudit(id)
+        : returnsApi.getExchangeAudit(id),
+    staleTime: 15_000,
+    retry: false,
+  });
+
+  const isPermissionError = useMemo(() => {
+    if (!error) return false;
+    const status = (error as any)?.response?.status;
+    return status === 401 || status === 403;
+  }, [error]);
+
+  const subtitle =
+    entity === 'return'
+      ? 'يعرض التغييرات المسجلة على المرتجع وبنوده'
+      : 'يعرض التغييرات المسجلة على الاستبدال وبنوده';
+
+  const isEmpty =
+    !!data &&
+    data.document_changes.length === 0 &&
+    data.item_changes.length === 0 &&
+    data.activity.length === 0 &&
+    data.amendments.length === 0;
+
+  return (
+    <section
+      className="rounded-2xl border border-slate-200 bg-white p-5 space-y-3"
+      data-testid={`audit-panel-${entity}`}
+      dir="rtl"
+    >
+      {/* Header */}
+      <div className="flex items-start gap-2 flex-wrap">
+        <History size={18} className="text-slate-500 mt-0.5 shrink-0" />
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <h3 className="text-sm font-black text-slate-800">
+              سجل التعديلات
+            </h3>
+            <span
+              className="text-[10px] font-bold rounded-full bg-emerald-100 text-emerald-800 border border-emerald-200 px-2 py-0.5"
+              data-testid="audit-readonly-badge"
+            >
+              قراءة فقط
+            </span>
+          </div>
+          <p className="text-[11px] text-slate-500 mt-1">{subtitle}</p>
+        </div>
+      </div>
+
+      {/* Admin-approval informational note (non-functional copy only) */}
+      <div
+        className="rounded-xl border border-indigo-200 bg-indigo-50/60 p-3 flex items-start gap-2"
+        data-testid="audit-admin-approval-note"
+      >
+        <Info size={14} className="text-indigo-600 mt-0.5 shrink-0" />
+        <div className="text-[11px] text-indigo-900 leading-relaxed">
+          أي تعديل على مرتجع أو استبدال بعد الاعتماد أو الترحيل المالي سيُرسل
+          كطلب تعديل وينتظر موافقة الأدمن.
+        </div>
+      </div>
+
+      {/* States */}
+      {isLoading && !data && (
+        <div
+          className="rounded-xl border border-slate-100 bg-slate-50/40 p-6 text-center text-[12px] text-slate-600"
+          data-testid="audit-loading"
+        >
+          جارٍ تحميل سجل التعديلات…
+        </div>
+      )}
+
+      {isPermissionError && (
+        <div
+          className="rounded-xl border border-rose-200 bg-rose-50/60 p-4 flex items-start gap-2"
+          data-testid="audit-permission-denied"
+        >
+          <ShieldAlert
+            size={16}
+            className="text-rose-600 mt-0.5 shrink-0"
+          />
+          <div className="text-[12px] text-rose-800">
+            لا توجد صلاحية لعرض سجل التعديلات
+          </div>
+        </div>
+      )}
+
+      {error && !isPermissionError && (
+        <div
+          className="rounded-xl border border-rose-200 bg-rose-50/60 p-4 flex items-start gap-2"
+          data-testid="audit-error"
+        >
+          <AlertTriangle
+            size={16}
+            className="text-rose-600 mt-0.5 shrink-0"
+          />
+          <div className="text-[12px] text-rose-800">
+            تعذّر تحميل سجل التعديلات
+          </div>
+        </div>
+      )}
+
+      {data && isEmpty && (
+        <div
+          className="rounded-xl border border-dashed border-slate-300 bg-slate-50/40 p-8 text-center"
+          data-testid="audit-empty"
+        >
+          <Layers size={20} className="mx-auto text-slate-400" />
+          <div className="mt-2 text-[12px] font-bold text-slate-700">
+            لا توجد تعديلات مسجلة حتى الآن
+          </div>
+        </div>
+      )}
+
+      {data && !isEmpty && (
+        <ul className="space-y-2" data-testid="audit-entries">
+          {/* Document changes (audit_logs) */}
+          {data.document_changes.map((c) => (
+            <ChangeEntry key={`doc-${c.id}`} row={c} kind="document" />
+          ))}
+          {/* Item changes (audit_logs) */}
+          {data.item_changes.map((c) => (
+            <ChangeEntry key={`item-${c.id}`} row={c} kind="item" />
+          ))}
+          {/* Activity (activity_logs) */}
+          {data.activity.map((a) => (
+            <ActivityEntry key={`act-${a.id}`} row={a} />
+          ))}
+          {/* Amendments (Phase-4 placeholder) */}
+          {data.amendments.map((am) => (
+            <AmendmentEntry key={`am-${am.id}`} row={am} />
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+// ─── change entry (audit_logs) ──────────────────────────────────────
+
+function ChangeEntry({
+  row,
+  kind,
+}: {
+  row: AuditChangeRow;
+  kind: 'document' | 'item';
+}) {
+  const opLabel = OP_LABEL[row.operation] ?? row.operation;
+  const recordKind = kind === 'document' ? 'مستند' : 'بند';
+  const reason = pickReason(row);
+
+  return (
+    <li
+      className="rounded-xl border border-slate-100 bg-slate-50/40 p-3 space-y-2"
+      data-testid={`audit-change-${row.id}`}
+    >
+      <div className="flex items-center gap-2 flex-wrap text-[11px]">
+        <span className="font-bold text-slate-700">نوع السجل:</span>
+        <span className="text-slate-600">{recordKind}</span>
+        <span className="text-slate-300">·</span>
+        <span className="font-bold text-slate-700">نوع العملية:</span>
+        <span className="text-slate-600">{opLabel}</span>
+        <span className="text-slate-300">·</span>
+        <span className="font-bold text-slate-700">تاريخ التعديل:</span>
+        <span className="text-slate-600">{fmtDate(row.changed_at)}</span>
+        <span className="text-slate-300">·</span>
+        <User size={12} className="text-slate-400" />
+        <span className="text-slate-600">
+          {row.changed_by_name || row.changed_by_username || '—'}
+        </span>
+        <span className="ms-auto text-[10px] font-mono text-slate-400">
+          {sourceLabel('audit')}
+        </span>
+      </div>
+      {reason && (
+        <div className="text-[11px] text-slate-700 bg-white rounded-lg px-2 py-1.5 border border-slate-100">
+          <span className="font-bold">سبب التعديل:</span> {reason}
+        </div>
+      )}
+      <DiffGrid old={row.old_data} now={row.new_data} />
+    </li>
+  );
+}
+
+// ─── activity entry (activity_logs) ─────────────────────────────────
+
+function ActivityEntry({ row }: { row: AuditActivityRow }) {
+  return (
+    <li
+      className="rounded-xl border border-slate-100 bg-slate-50/40 p-3 space-y-2"
+      data-testid={`audit-activity-${row.id}`}
+    >
+      <div className="flex items-center gap-2 flex-wrap text-[11px]">
+        <span className="font-bold text-slate-700">نوع السجل:</span>
+        <span className="text-slate-600">نشاط</span>
+        <span className="text-slate-300">·</span>
+        <span className="font-bold text-slate-700">نوع العملية:</span>
+        <span className="text-slate-600">{row.action}</span>
+        <span className="text-slate-300">·</span>
+        <span className="font-bold text-slate-700">تاريخ التعديل:</span>
+        <span className="text-slate-600">{fmtDate(row.created_at)}</span>
+        <span className="text-slate-300">·</span>
+        <User size={12} className="text-slate-400" />
+        <span className="text-slate-600">
+          {row.full_name || row.username || '—'}
+        </span>
+        <span className="ms-auto text-[10px] font-mono text-slate-400">
+          {sourceLabel('activity')}
+        </span>
+      </div>
+      {row.summary && (
+        <div className="text-[12px] text-slate-700">{row.summary}</div>
+      )}
+    </li>
+  );
+}
+
+// ─── amendment entry (Phase-4 placeholder) ──────────────────────────
+
+function AmendmentEntry({ row }: { row: AuditAmendmentRow }) {
+  return (
+    <li
+      className="rounded-xl border border-amber-200 bg-amber-50/60 p-3 space-y-2"
+      data-testid={`audit-amendment-${row.id}`}
+    >
+      <div className="flex items-center gap-2 flex-wrap text-[11px]">
+        <span className="font-bold text-amber-800">نوع السجل:</span>
+        <span className="text-amber-700">تصحيح ({row.amendment_no})</span>
+        <span className="text-amber-300">·</span>
+        <span className="font-bold text-amber-800">نوع العملية:</span>
+        <span className="text-amber-700">{row.amendment_kind}</span>
+        <span className="text-amber-300">·</span>
+        <span className="font-bold text-amber-800">تاريخ التعديل:</span>
+        <span className="text-amber-700">{fmtDate(row.created_at)}</span>
+        <span className="text-amber-300">·</span>
+        <User size={12} className="text-amber-500" />
+        <span className="text-amber-700">{row.created_by_name || '—'}</span>
+        <span className="ms-auto text-[10px] font-mono text-amber-500">
+          {sourceLabel('amendment')}
+        </span>
+      </div>
+      {row.reason_text && (
+        <div className="text-[11px] text-amber-900 bg-white rounded-lg px-2 py-1.5 border border-amber-100">
+          <span className="font-bold">سبب التعديل:</span> {row.reason_text}
+        </div>
+      )}
+    </li>
+  );
+}
+
+// ─── diff renderer ──────────────────────────────────────────────────
+
+function DiffGrid({
+  old: oldData,
+  now,
+}: {
+  old: Record<string, any> | null;
+  now: Record<string, any> | null;
+}) {
+  const keys = useMemo(() => {
+    const all = new Set<string>();
+    if (oldData) Object.keys(oldData).forEach((k) => all.add(k));
+    if (now) Object.keys(now).forEach((k) => all.add(k));
+    NOISY_FIELDS.forEach((k) => all.delete(k));
+    return Array.from(all).filter((k) => {
+      const o = oldData?.[k];
+      const n = now?.[k];
+      // Hide unchanged keys when both old + new exist (UPDATE row).
+      if (oldData && now) return !shallowEq(o, n);
+      // For INSERT/DELETE rows, show every (non-noisy) key.
+      return true;
+    });
+  }, [oldData, now]);
+
+  if (keys.length === 0) return null;
+  return (
+    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px]">
+      <div className="rounded-lg border border-slate-100 bg-white p-2">
+        <div className="text-[10px] font-bold text-slate-500 mb-1">
+          قبل التعديل
+        </div>
+        {oldData ? (
+          <KeyValueList row={oldData} keys={keys} />
+        ) : (
+          <div className="text-slate-400">—</div>
+        )}
+      </div>
+      <div className="rounded-lg border border-slate-100 bg-white p-2">
+        <div className="text-[10px] font-bold text-slate-500 mb-1">
+          بعد التعديل
+        </div>
+        {now ? (
+          <KeyValueList row={now} keys={keys} />
+        ) : (
+          <div className="text-slate-400">—</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function KeyValueList({
+  row,
+  keys,
+}: {
+  row: Record<string, any>;
+  keys: string[];
+}) {
+  return (
+    <ul className="space-y-0.5">
+      {keys.map((k) => (
+        <li key={k} className="flex items-baseline gap-2">
+          <span className="font-mono text-slate-500 text-[10px] shrink-0">
+            {k}
+          </span>
+          <span className="text-slate-800 break-all">{renderVal(row[k])}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function renderVal(v: unknown): string {
+  if (v === null || v === undefined) return '—';
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+  try {
+    return JSON.stringify(v);
+  } catch {
+    return String(v);
+  }
+}
+
+function shallowEq(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (a == null || b == null) return false;
+  if (typeof a !== typeof b) return false;
+  if (typeof a === 'object') {
+    try {
+      return JSON.stringify(a) === JSON.stringify(b);
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+function pickReason(row: AuditChangeRow): string | null {
+  // Future-proof: when Phase 2+ writes reason text into one of these
+  // common columns, surface it.  Today the BE doesn't carry it on
+  // audit_logs, so this returns null.
+  const candidate =
+    (row.new_data && (row.new_data['reason_text'] || row.new_data['cancel_reason'])) ||
+    (row.old_data && (row.old_data['reason_text'] || row.old_data['cancel_reason']));
+  return typeof candidate === 'string' && candidate.length > 0
+    ? candidate
+    : null;
+}

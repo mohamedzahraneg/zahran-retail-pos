@@ -334,4 +334,64 @@ export const returnsApi = {
 
   getExchange: (id: string) =>
     unwrap<any>(api.get(`/exchanges/${id}`)),
+
+  // ── Audit history (read-only, Phase 1) ──────────────────────────
+  // GET /returns/:id/audit + GET /exchanges/:id/audit
+  // Composes audit_logs row-diffs (DB-trigger captured) +
+  // activity_logs (high-level user actions) + amendments
+  // (Phase-4 placeholder, currently always []).
+  getReturnAudit: (id: string) =>
+    unwrap<DocumentAuditResult>(api.get(`/returns/${id}/audit`)),
+
+  getExchangeAudit: (id: string) =>
+    unwrap<DocumentAuditResult>(api.get(`/exchanges/${id}/audit`)),
 };
+
+// ── Audit response types (mirror the BE shape) ─────────────────────
+
+export interface AuditChangeRow {
+  id: string;
+  table_name: string;
+  record_id: string;
+  operation: 'I' | 'U' | 'D';
+  changed_by: string | null;
+  changed_by_username: string | null;
+  changed_by_name: string | null;
+  old_data: Record<string, any> | null;
+  new_data: Record<string, any> | null;
+  changed_at: string;
+}
+
+export interface AuditActivityRow {
+  id: string;
+  user_id: string | null;
+  username: string | null;
+  full_name: string | null;
+  action: string;
+  entity: string;
+  entity_id: string | null;
+  summary: string | null;
+  metadata: any;
+  ip_address: string | null;
+  created_at: string;
+}
+
+export interface AuditAmendmentRow {
+  id: string;
+  amendment_no: string;
+  amendment_kind: string;
+  reason_text: string;
+  delta_summary: any;
+  created_by: string | null;
+  created_by_name: string | null;
+  created_at: string;
+}
+
+export interface DocumentAuditResult {
+  document_type: 'return' | 'exchange';
+  document_id: string;
+  document_changes: AuditChangeRow[];
+  item_changes: AuditChangeRow[];
+  activity: AuditActivityRow[];
+  amendments: AuditAmendmentRow[];
+}

@@ -40,6 +40,7 @@ import {
   ItemCondition,
 } from '@/api/returns.api';
 import { productsApi } from '@/api/products.api';
+import { ReturnsAuditPanel } from '@/components/returns/ReturnsAuditPanel';
 import { Trash2 } from 'lucide-react';
 import {
   CashSourceSelector,
@@ -1172,6 +1173,9 @@ function ExchangeDetailsPanel({
           <div>اكتملت: <span className="font-mono">{dateOr(e.completed_at)}</span></div>
         )}
       </div>
+
+      {/* PR-FIN-RETURNS-EXCHANGES-AUDIT — read-only audit history. */}
+      {op.id && <ReturnsAuditPanel entity="exchange" id={op.id} />}
     </div>
   );
 }
@@ -1560,6 +1564,11 @@ function ReturnDetailsPanel({
               <Ban size={16} /> إلغاء المرتجع
             </button>
           )}
+
+        {/* PR-FIN-RETURNS-EXCHANGES-AUDIT — read-only audit history.
+            Phase 1: composes audit_logs row diffs + activity_logs +
+            (Phase-4 placeholder) amendments.  No edit surface. */}
+        <ReturnsAuditPanel entity="return" id={r.id} />
       </div>
 
       {action === 'approve' && (
