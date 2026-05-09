@@ -48,6 +48,7 @@ const empty = {
   item_changes: [],
   activity: [],
   amendments: [],
+  edit_requests: [],
 };
 
 const populated = {
@@ -106,6 +107,49 @@ const populated = {
       created_by: 'u-1',
       created_by_name: 'مدير النظام',
       created_at: '2026-05-08T12:00:00Z',
+    },
+  ],
+  edit_requests: [
+    {
+      id: 'req-pending-1',
+      parent_id: 'doc-1',
+      document_no: 'RET-2026-EDIT-1',
+      requested_action: 'price_change',
+      requested_payload: { item_id: 'ri-1', new_unit_price: 120 },
+      before_snapshot: {
+        document: { return_no: 'RET-2026-EDIT-1' },
+        items: [{ id: 'ri-1', unit_price: 150 }],
+      },
+      after_preview: null,
+      reason_text: 'العميل وجد المنتج بسعر أقل في فاتورة أخرى',
+      status: 'pending' as const,
+      requested_by: 'u-2',
+      requested_by_name: 'محمد كاشير',
+      requested_at: '2026-05-09T13:00:00Z',
+      reviewed_by: null,
+      reviewed_by_name: null,
+      reviewed_at: null,
+      review_notes: null,
+      source: 'edit_request' as const,
+    },
+    {
+      id: 'req-rejected-1',
+      parent_id: 'doc-1',
+      document_no: 'RET-2026-EDIT-1',
+      requested_action: 'remove_item',
+      requested_payload: { item_id: 'ri-2' },
+      before_snapshot: { document: {}, items: [{ id: 'ri-2' }] },
+      after_preview: null,
+      reason_text: 'تم تسجيل الصنف بالخطأ',
+      status: 'rejected' as const,
+      requested_by: 'u-2',
+      requested_by_name: 'محمد كاشير',
+      requested_at: '2026-05-09T12:00:00Z',
+      reviewed_by: 'u-3',
+      reviewed_by_name: 'مدير النظام',
+      reviewed_at: '2026-05-09T12:30:00Z',
+      review_notes: 'لا يمكن إزالة الصنف لأن المرتجع تم اعتماده بالفعل',
+      source: 'edit_request' as const,
     },
   ],
 };
@@ -291,6 +335,59 @@ describe('<ReturnsAuditPanel />', () => {
     expect(
       screen.getByTestId('audit-amendment-am-1').textContent,
     ).toMatch(/تم بواسطة:/);
+  });
+
+  it('renders pending edit requests with status pill and Arabic labels', async () => {
+    (returnsApi.getReturnAudit as any).mockResolvedValueOnce(populated);
+    renderPanel('return');
+    await waitFor(() =>
+      expect(
+        screen.getByTestId('audit-edit-request-req-pending-1'),
+      ).toBeInTheDocument(),
+    );
+    const card = screen.getByTestId('audit-edit-request-req-pending-1');
+    expect(card.textContent).toMatch(/طلب تعديل/);
+    expect(card.textContent).toMatch(/طلب تعديل ينتظر موافقة الأدمن/);
+    expect(card.textContent).toMatch(/نوع التعديل المطلوب/);
+    expect(card.textContent).toMatch(/price_change/);
+    expect(card.textContent).toMatch(/طلب بواسطة/);
+    expect(card.textContent).toMatch(/محمد كاشير/);
+    expect(card.textContent).toMatch(/راجع بواسطة/);
+    expect(card.textContent).toMatch(/لم تتم المراجعة بعد/);
+    expect(card.textContent).toMatch(/سبب التعديل/);
+    expect(card.textContent).toMatch(
+      /العميل وجد المنتج بسعر أقل في فاتورة أخرى/,
+    );
+  });
+
+  it('renders rejected edit request with reviewer + review_notes + رفض pill', async () => {
+    (returnsApi.getReturnAudit as any).mockResolvedValueOnce(populated);
+    renderPanel('return');
+    await waitFor(() =>
+      expect(
+        screen.getByTestId('audit-edit-request-req-rejected-1'),
+      ).toBeInTheDocument(),
+    );
+    const card = screen.getByTestId('audit-edit-request-req-rejected-1');
+    expect(card.textContent).toMatch(/تم رفض الطلب/);
+    expect(card.textContent).toMatch(/مدير النظام/);
+    expect(card.textContent).toMatch(/ملاحظات المراجعة/);
+    expect(card.textContent).toMatch(
+      /لا يمكن إزالة الصنف لأن المرتجع تم اعتماده بالفعل/,
+    );
+  });
+
+  it('shows the deferred-creation informational note', async () => {
+    (returnsApi.getReturnAudit as any).mockResolvedValueOnce(empty);
+    renderPanel('return');
+    await waitFor(() =>
+      expect(
+        screen.getByTestId('audit-edit-request-deferred'),
+      ).toBeInTheDocument(),
+    );
+    expect(
+      screen.getByTestId('audit-edit-request-deferred').textContent,
+    ).toMatch(/إنشاء طلب تعديل سيتم تفعيله في المرحلة التالية/);
   });
 
   it('renders amendments (Phase 4 forward-compatible)', async () => {

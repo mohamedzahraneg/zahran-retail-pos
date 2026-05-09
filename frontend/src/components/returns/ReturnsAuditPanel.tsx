@@ -29,6 +29,7 @@ import {
   type AuditActivityRow,
   type AuditAmendmentRow,
   type AuditChangeRow,
+  type AuditEditRequestRow,
   type DocumentAuditResult,
 } from '@/api/returns.api';
 
@@ -129,12 +130,15 @@ export function ReturnsAuditPanel({ entity, id }: AuditPanelProps) {
       ? 'يعرض التغييرات المسجلة على المرتجع وبنوده'
       : 'يعرض التغييرات المسجلة على الاستبدال وبنوده';
 
+  const editRequests: AuditEditRequestRow[] = data?.edit_requests ?? [];
+
   const isEmpty =
     !!data &&
     data.document_changes.length === 0 &&
     data.item_changes.length === 0 &&
     data.activity.length === 0 &&
-    data.amendments.length === 0;
+    data.amendments.length === 0 &&
+    editRequests.length === 0;
 
   return (
     <section
@@ -239,12 +243,24 @@ export function ReturnsAuditPanel({ entity, id }: AuditPanelProps) {
           {data.activity.map((a) => (
             <ActivityEntry key={`act-${a.id}`} row={a} />
           ))}
+          {/* Edit requests (Phase 1 — request + review only) */}
+          {editRequests.map((req) => (
+            <EditRequestEntry key={`req-${req.id}`} row={req} />
+          ))}
           {/* Amendments (Phase-4 placeholder) */}
           {data.amendments.map((am) => (
             <AmendmentEntry key={`am-${am.id}`} row={am} />
           ))}
         </ul>
       )}
+
+      {/* Phase-1 informational note: request creation UI is deferred. */}
+      <div
+        className="text-[11px] text-slate-500 italic"
+        data-testid="audit-edit-request-deferred"
+      >
+        إنشاء طلب تعديل سيتم تفعيله في المرحلة التالية.
+      </div>
     </section>
   );
 }
@@ -398,6 +414,123 @@ function AmendmentEntry({ row }: { row: AuditAmendmentRow }) {
           <span className="font-bold">سبب التعديل:</span> {row.reason_text}
         </div>
       )}
+    </li>
+  );
+}
+
+// ─── edit-request entry (Phase 1 — request + review only) ───────────
+
+const REQUEST_STATUS_PILL: Record<
+  AuditEditRequestRow['status'],
+  { label: string; className: string }
+> = {
+  pending: {
+    label: 'طلب تعديل ينتظر موافقة الأدمن',
+    className:
+      'bg-indigo-50 text-indigo-800 border border-indigo-200',
+  },
+  approved: {
+    label: 'تم اعتماد الطلب (لم يُطبَّق بعد)',
+    className:
+      'bg-emerald-50 text-emerald-800 border border-emerald-200',
+  },
+  rejected: {
+    label: 'تم رفض الطلب',
+    className: 'bg-rose-50 text-rose-800 border border-rose-200',
+  },
+  cancelled: {
+    label: 'تم إلغاء الطلب',
+    className: 'bg-slate-50 text-slate-700 border border-slate-200',
+  },
+};
+
+function EditRequestEntry({ row }: { row: AuditEditRequestRow }) {
+  const pill = REQUEST_STATUS_PILL[row.status];
+  return (
+    <li
+      className="rounded-xl border border-indigo-200 bg-indigo-50/50 p-3 space-y-2"
+      data-testid={`audit-edit-request-${row.id}`}
+    >
+      <div className="flex items-center gap-2 flex-wrap text-[11px]">
+        <span className="font-bold text-indigo-800">نوع السجل:</span>
+        <span className="text-indigo-700">طلب تعديل</span>
+        <span className="text-indigo-300">·</span>
+        <span className="font-bold text-indigo-800">
+          نوع التعديل المطلوب:
+        </span>
+        <span className="text-indigo-700">{row.requested_action}</span>
+        <span
+          className={`ms-auto text-[10px] font-bold rounded-full px-2 py-0.5 ${pill.className}`}
+        >
+          {pill.label}
+        </span>
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px]">
+        <div className="rounded-lg border border-indigo-100 bg-white p-2">
+          <div className="text-[10px] font-bold text-indigo-700 mb-1">
+            طلب بواسطة
+          </div>
+          <div className="text-indigo-900">
+            {row.requested_by_name || '—'}
+          </div>
+          <div className="mt-1">
+            <Timestamp iso={row.requested_at} />
+          </div>
+        </div>
+        <div className="rounded-lg border border-indigo-100 bg-white p-2">
+          <div className="text-[10px] font-bold text-indigo-700 mb-1">
+            راجع بواسطة
+          </div>
+          <div className="text-indigo-900">
+            {row.reviewed_by_name || '—'}
+          </div>
+          <div className="mt-1">
+            {row.reviewed_at ? (
+              <Timestamp iso={row.reviewed_at} />
+            ) : (
+              <span className="text-indigo-400">لم تتم المراجعة بعد</span>
+            )}
+          </div>
+        </div>
+      </div>
+      <div className="text-[11px] text-indigo-900 bg-white rounded-lg px-2 py-1.5 border border-indigo-100">
+        <span className="font-bold">سبب التعديل:</span> {row.reason_text}
+      </div>
+      {row.review_notes && (
+        <div className="text-[11px] text-indigo-900 bg-white rounded-lg px-2 py-1.5 border border-indigo-100">
+          <span className="font-bold">ملاحظات المراجعة:</span>{' '}
+          {row.review_notes}
+        </div>
+      )}
+      <details className="text-[11px]">
+        <summary className="cursor-pointer text-indigo-700 font-bold">
+          تفاصيل (قبل التعديل / التعديل المطلوب)
+        </summary>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-1">
+          <div className="rounded-lg border border-indigo-100 bg-white p-2">
+            <div className="text-[10px] font-bold text-indigo-700 mb-1">
+              قبل التعديل
+            </div>
+            <pre
+              className="text-[10px] text-indigo-900 whitespace-pre-wrap break-all"
+              dir="ltr"
+            >
+              {JSON.stringify(row.before_snapshot, null, 2)}
+            </pre>
+          </div>
+          <div className="rounded-lg border border-indigo-100 bg-white p-2">
+            <div className="text-[10px] font-bold text-indigo-700 mb-1">
+              التعديل المطلوب
+            </div>
+            <pre
+              className="text-[10px] text-indigo-900 whitespace-pre-wrap break-all"
+              dir="ltr"
+            >
+              {JSON.stringify(row.requested_payload, null, 2)}
+            </pre>
+          </div>
+        </div>
+      </details>
     </li>
   );
 }

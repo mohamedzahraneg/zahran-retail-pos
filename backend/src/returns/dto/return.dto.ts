@@ -315,3 +315,50 @@ export class ListReturnsQueryDto {
     | 'needs_review'
     | 'not_applicable';
 }
+
+// ─── Edit-request workflow (Phase 1 — request only, no application) ──
+
+const REQUESTED_ACTIONS = [
+  'update_header',
+  'update_item',
+  'remove_item',
+  'replace_item',
+  'price_change',
+  'quantity_change',
+  'reason_change',
+] as const;
+type RequestedActionLiteral = (typeof REQUESTED_ACTIONS)[number];
+
+export class CreateEditRequestDto {
+  @ApiProperty({
+    enum: REQUESTED_ACTIONS,
+    description: 'نوع التعديل المطلوب — قيمة محصورة بالقائمة',
+  })
+  @IsIn(REQUESTED_ACTIONS as unknown as string[])
+  requested_action: RequestedActionLiteral;
+
+  @ApiProperty({
+    description:
+      'الحمولة المقترحة للتعديل (JSON object).  لا تُطبَّق في هذه المرحلة.',
+    type: 'object',
+  })
+  requested_payload: Record<string, unknown>;
+
+  @ApiProperty({
+    description: 'سبب التعديل المطلوب — مطلوب وبحد أدنى ٥ أحرف.',
+    minLength: 5,
+  })
+  @IsString()
+  @MinLength(5)
+  reason_text: string;
+}
+
+export class ReviewEditRequestDto {
+  @ApiPropertyOptional({
+    description:
+      'ملاحظات المراجعة — اختيارية للاعتماد، مطلوبة عند الرفض (٥ أحرف على الأقل).',
+  })
+  @IsOptional()
+  @IsString()
+  review_notes?: string;
+}

@@ -6,6 +6,7 @@ import { ReturnsController } from './returns.controller';
 import { ReturnsAnalyticsService } from './returns-analytics.service';
 import { ReturnsAnalyticsController } from './returns-analytics.controller';
 import { ReturnsAuditService } from './returns-audit.service';
+import { ReturnEditRequestsService } from './return-edit-requests.service';
 import { AuditModule } from '../audit/audit.module';
 // PR-FIX-IDEMPOTENCY-EXCHANGES-INVOICE-EDITS (Sprint 4 / PR-11C) —
 // wire the existing Redis-backed IdempotencyInterceptor + cache
@@ -26,10 +27,16 @@ import { IdempotencyInterceptor } from '../common/interceptors/idempotency.inter
     ReturnsService,
     ReturnsAnalyticsService,
     ReturnsAuditService,
+    ReturnEditRequestsService,
     IdempotencyCacheService,
     IdempotencyInterceptor,
   ],
   controllers: [ReturnsAnalyticsController, ReturnsController],
-  exports: [ReturnsService, ReturnsAnalyticsService, ReturnsAuditService],
+  exports: [
+    ReturnsService,
+    ReturnsAnalyticsService,
+    ReturnsAuditService,
+    ReturnEditRequestsService,
+  ],
 })
 export class ReturnsModule {}

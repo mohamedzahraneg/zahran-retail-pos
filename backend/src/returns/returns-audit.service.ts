@@ -79,6 +79,26 @@ export interface AuditAmendmentRow {
   created_at: string;
 }
 
+export interface AuditEditRequestRow {
+  id: string;
+  parent_id: string;
+  document_no: string | null;
+  requested_action: string;
+  requested_payload: Record<string, unknown>;
+  before_snapshot: Record<string, unknown>;
+  after_preview: Record<string, unknown> | null;
+  reason_text: string;
+  status: 'pending' | 'approved' | 'rejected' | 'cancelled';
+  requested_by: string;
+  requested_by_name: string | null;
+  requested_at: string;
+  reviewed_by: string | null;
+  reviewed_by_name: string | null;
+  reviewed_at: string | null;
+  review_notes: string | null;
+  source: 'edit_request';
+}
+
 export interface DocumentAuditResult {
   document_type: AuditEntity;
   document_id: string;
@@ -86,6 +106,7 @@ export interface DocumentAuditResult {
   item_changes: AuditChangeRow[];
   activity: AuditActivityRow[];
   amendments: AuditAmendmentRow[];
+  edit_requests: AuditEditRequestRow[];
 }
 
 @Injectable()
@@ -185,6 +206,51 @@ export class ReturnsAuditService {
     // for the real query.
     const amendments: AuditAmendmentRow[] = [];
 
+    // ── 5. Edit requests (Phase 1 — request + review only) ────────
+    // PR-FIN-RETURNS-EXCHANGES-EDIT-REQUESTS — surfaces the rows from
+    // `return_edit_requests` / `exchange_edit_requests`.  These are
+    // status-tracking rows only; the requested payload is NOT
+    // applied to the parent document at this phase.  The query is
+    // wrapped in try/catch so a missing migration on a stale env
+    // (table doesn't exist yet) still returns a usable response.
+    const editTable =
+      entity === 'return' ? 'return_edit_requests' : 'exchange_edit_requests';
+    const editFk = entity === 'return' ? 'return_id' : 'exchange_id';
+    let edit_requests: AuditEditRequestRow[] = [];
+    try {
+      const rawRequests: any[] = await this.ds.query(
+        `
+        SELECT er.id::text,
+               er.${editFk}::text AS parent_id,
+               COALESCE(er.return_no, er.exchange_no) AS document_no,
+               er.requested_action,
+               er.requested_payload,
+               er.before_snapshot,
+               er.after_preview,
+               er.reason_text,
+               er.status,
+               er.requested_by::text,
+               u_req.full_name AS requested_by_name,
+               er.requested_at::text,
+               er.reviewed_by::text,
+               u_rev.full_name AS reviewed_by_name,
+               er.reviewed_at::text,
+               er.review_notes
+          FROM ${editTable} er
+          LEFT JOIN users u_req ON u_req.id = er.requested_by
+          LEFT JOIN users u_rev ON u_rev.id = er.reviewed_by
+         WHERE er.${editFk}::text = $1
+         ORDER BY er.requested_at DESC
+        `,
+        [documentId],
+      );
+      edit_requests = rawRequests.map((r) => ({ ...r, source: 'edit_request' }));
+    } catch {
+      // Defensive: if the table is missing (pre-migration env) leave
+      // edit_requests as []; the rest of the response stays valid.
+      edit_requests = [];
+    }
+
     return {
       document_type: entity,
       document_id: documentId,
@@ -192,6 +258,7 @@ export class ReturnsAuditService {
       item_changes,
       activity,
       amendments,
+      edit_requests,
     };
   }
 }

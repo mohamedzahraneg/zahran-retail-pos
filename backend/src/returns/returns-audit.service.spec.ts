@@ -131,9 +131,9 @@ describe('ReturnsAuditService — read-only composition', () => {
     expect(out.activity).toHaveLength(1);
     expect(out.activity[0].action).toBe('void');
     expect(out.amendments).toEqual([]); // Phase 4 placeholder
-
-    // Three SELECTs were issued (document, items, activity).
-    expect(calls.length).toBe(3);
+    expect(out.edit_requests).toEqual([]); // No edit-request rows in this fixture
+    // Four SELECTs: document_changes, item_changes, activity, edit_requests.
+    expect(calls.length).toBe(4);
   });
 
   it('getExchangeAudit uses exchanges + exchange_items tables', async () => {

@@ -387,6 +387,26 @@ export interface AuditAmendmentRow {
   created_at: string;
 }
 
+export interface AuditEditRequestRow {
+  id: string;
+  parent_id: string;
+  document_no: string | null;
+  requested_action: string;
+  requested_payload: Record<string, unknown>;
+  before_snapshot: Record<string, unknown>;
+  after_preview: Record<string, unknown> | null;
+  reason_text: string;
+  status: 'pending' | 'approved' | 'rejected' | 'cancelled';
+  requested_by: string;
+  requested_by_name: string | null;
+  requested_at: string;
+  reviewed_by: string | null;
+  reviewed_by_name: string | null;
+  reviewed_at: string | null;
+  review_notes: string | null;
+  source: 'edit_request';
+}
+
 export interface DocumentAuditResult {
   document_type: 'return' | 'exchange';
   document_id: string;
@@ -394,4 +414,6 @@ export interface DocumentAuditResult {
   item_changes: AuditChangeRow[];
   activity: AuditActivityRow[];
   amendments: AuditAmendmentRow[];
+  /** Phase 1 — request + review only.  No payload application. */
+  edit_requests: AuditEditRequestRow[];
 }

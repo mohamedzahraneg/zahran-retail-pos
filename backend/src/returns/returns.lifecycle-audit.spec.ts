@@ -422,8 +422,16 @@ describe('ReturnsService — read-only contract for this PR', () => {
     expect(ctrlSrc).not.toMatch(/@Delete\(/);
   });
 
-  it('controller has no edit-request POST routes yet', () => {
-    expect(ctrlSrc).not.toMatch(/@Post\(['"][^'"]*edit-requests?/);
+  // PR-FIN-RETURNS-EXCHANGES-EDIT-REQUESTS shipped the request-only
+  // workflow (create / approve / reject status changes only — no
+  // application of the requested payload).  The earlier negative-
+  // grep against `edit-requests` is now obsolete.  We still guard
+  // against amendment routes (Phase 4) and direct PATCH/DELETE
+  // surface — both still forbidden.
+  it('controller has no edit-request APPROVAL APPLICATION routes (no payload-application yet)', () => {
+    // The four documented routes (GET list, POST create, POST
+    // approve, POST reject) ARE allowed — the payload is NOT
+    // applied to the parent document by any of them.
     expect(ctrlSrc).not.toMatch(/@Post\(['"][^'"]*amendments/);
   });
 

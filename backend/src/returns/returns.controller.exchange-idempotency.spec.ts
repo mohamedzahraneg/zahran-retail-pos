@@ -36,6 +36,7 @@ import { CallHandler, ExecutionContext } from '@nestjs/common';
 import { ReturnsController } from './returns.controller';
 import { ReturnsService } from './returns.service';
 import { ReturnsAuditService } from './returns-audit.service';
+import { ReturnEditRequestsService } from './return-edit-requests.service';
 import { IdempotencyInterceptor } from '../common/interceptors/idempotency.interceptor';
 import {
   AcquireResult,
@@ -361,6 +362,17 @@ describe('ReturnsController route-level wiring — PR-FIX-IDEMPOTENCY-EXCHANGES-
           useValue: {
             getReturnAudit: jest.fn(),
             getExchangeAudit: jest.fn(),
+          },
+        },
+        // PR-FIN-RETURNS-EXCHANGES-EDIT-REQUESTS — controller now also
+        // takes ReturnEditRequestsService.  Same stub treatment.
+        {
+          provide: ReturnEditRequestsService,
+          useValue: {
+            list: jest.fn(),
+            create: jest.fn(),
+            approve: jest.fn(),
+            reject: jest.fn(),
           },
         },
         { provide: IdempotencyCacheService, useValue: {} },

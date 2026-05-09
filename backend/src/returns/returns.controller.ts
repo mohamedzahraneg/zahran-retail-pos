@@ -11,14 +11,17 @@ import {
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { ReturnsService } from './returns.service';
 import { ReturnsAuditService } from './returns-audit.service';
+import { ReturnEditRequestsService } from './return-edit-requests.service';
 import {
   ApproveReturnDto,
   CancelReturnDto,
+  CreateEditRequestDto,
   CreateExchangeDto,
   CreateReturnDto,
   ListReturnsQueryDto,
   RefundReturnDto,
   RejectReturnDto,
+  ReviewEditRequestDto,
 } from './dto/return.dto';
 import { Roles, Permissions } from '../common/decorators/roles.decorator';
 import {
@@ -38,6 +41,7 @@ export class ReturnsController {
   constructor(
     private readonly svc: ReturnsService,
     private readonly auditSvc: ReturnsAuditService,
+    private readonly editReqSvc: ReturnEditRequestsService,
   ) {}
 
   // -------- Lookup invoice for return --------------------------------------
@@ -201,5 +205,155 @@ export class ReturnsController {
   @ApiOperation({ summary: 'سجل التعديلات على الاستبدال' })
   getExchangeAudit(@Param('id', ParseUUIDPipe) id: string) {
     return this.auditSvc.getExchangeAudit(id);
+  }
+
+  // ─── Edit-request workflow (Phase 1 — request + review only) ───
+  // PR-FIN-RETURNS-EXCHANGES-EDIT-REQUESTS:
+  //   · Creating a request DOES NOT modify the parent return /
+  //     exchange or its items.  Approval / rejection ONLY changes
+  //     the request row's status.  Direct application of the
+  //     requested payload is a later phase.
+  //   · Roles mirror the existing returns lifecycle convention:
+  //     create = admin/manager/cashier (same as createReturn /
+  //     createExchange), review = admin only (same as cancel).
+  //   · IdempotencyInterceptor on every mutation route, mirroring
+  //     PR-FIX-IDEMPOTENCY-VOID-CANCEL-REFUND-FAMILY.
+
+  @Get('returns/:id/edit-requests')
+  @ApiOperation({ summary: 'قائمة طلبات تعديل المرتجع' })
+  listReturnEditRequests(@Param('id', ParseUUIDPipe) id: string) {
+    return this.editReqSvc.list('return', id);
+  }
+
+  @Post('returns/:id/edit-requests')
+  @Roles('admin', 'manager', 'cashier')
+  @ApiOperation({
+    summary:
+      'إنشاء طلب تعديل لمرتجع — حالة pending، لا يُطبَّق التعديل.',
+  })
+  @UseInterceptors(IdempotencyInterceptor)
+  createReturnEditRequest(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CreateEditRequestDto,
+    @CurrentUser() user: JwtUser,
+  ) {
+    return this.editReqSvc.create({
+      entity: 'return',
+      parent_id: id,
+      requested_action: dto.requested_action,
+      requested_payload: dto.requested_payload,
+      reason_text: dto.reason_text,
+      user_id: user.userId,
+    });
+  }
+
+  @Post('returns/:id/edit-requests/:requestId/approve')
+  @Roles('admin')
+  @ApiOperation({
+    summary:
+      'اعتماد طلب تعديل مرتجع — يحدّث حالة الطلب فقط، لا يُطبِّق التعديل.',
+  })
+  @UseInterceptors(IdempotencyInterceptor)
+  approveReturnEditRequest(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('requestId', ParseUUIDPipe) requestId: string,
+    @Body() dto: ReviewEditRequestDto,
+    @CurrentUser() user: JwtUser,
+  ) {
+    return this.editReqSvc.approve({
+      entity: 'return',
+      request_id: requestId,
+      user_id: user.userId,
+      review_notes: dto.review_notes ?? null,
+    });
+  }
+
+  @Post('returns/:id/edit-requests/:requestId/reject')
+  @Roles('admin')
+  @ApiOperation({
+    summary: 'رفض طلب تعديل مرتجع — ملاحظات المراجعة مطلوبة.',
+  })
+  @UseInterceptors(IdempotencyInterceptor)
+  rejectReturnEditRequest(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('requestId', ParseUUIDPipe) requestId: string,
+    @Body() dto: ReviewEditRequestDto,
+    @CurrentUser() user: JwtUser,
+  ) {
+    return this.editReqSvc.reject({
+      entity: 'return',
+      request_id: requestId,
+      user_id: user.userId,
+      review_notes: dto.review_notes ?? null,
+    });
+  }
+
+  @Get('exchanges/:id/edit-requests')
+  @ApiOperation({ summary: 'قائمة طلبات تعديل الاستبدال' })
+  listExchangeEditRequests(@Param('id', ParseUUIDPipe) id: string) {
+    return this.editReqSvc.list('exchange', id);
+  }
+
+  @Post('exchanges/:id/edit-requests')
+  @Roles('admin', 'manager', 'cashier')
+  @ApiOperation({
+    summary:
+      'إنشاء طلب تعديل لاستبدال — حالة pending، لا يُطبَّق التعديل.',
+  })
+  @UseInterceptors(IdempotencyInterceptor)
+  createExchangeEditRequest(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CreateEditRequestDto,
+    @CurrentUser() user: JwtUser,
+  ) {
+    return this.editReqSvc.create({
+      entity: 'exchange',
+      parent_id: id,
+      requested_action: dto.requested_action,
+      requested_payload: dto.requested_payload,
+      reason_text: dto.reason_text,
+      user_id: user.userId,
+    });
+  }
+
+  @Post('exchanges/:id/edit-requests/:requestId/approve')
+  @Roles('admin')
+  @ApiOperation({
+    summary:
+      'اعتماد طلب تعديل استبدال — يحدّث حالة الطلب فقط.',
+  })
+  @UseInterceptors(IdempotencyInterceptor)
+  approveExchangeEditRequest(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('requestId', ParseUUIDPipe) requestId: string,
+    @Body() dto: ReviewEditRequestDto,
+    @CurrentUser() user: JwtUser,
+  ) {
+    return this.editReqSvc.approve({
+      entity: 'exchange',
+      request_id: requestId,
+      user_id: user.userId,
+      review_notes: dto.review_notes ?? null,
+    });
+  }
+
+  @Post('exchanges/:id/edit-requests/:requestId/reject')
+  @Roles('admin')
+  @ApiOperation({
+    summary: 'رفض طلب تعديل استبدال — ملاحظات المراجعة مطلوبة.',
+  })
+  @UseInterceptors(IdempotencyInterceptor)
+  rejectExchangeEditRequest(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('requestId', ParseUUIDPipe) requestId: string,
+    @Body() dto: ReviewEditRequestDto,
+    @CurrentUser() user: JwtUser,
+  ) {
+    return this.editReqSvc.reject({
+      entity: 'exchange',
+      request_id: requestId,
+      user_id: user.userId,
+      review_notes: dto.review_notes ?? null,
+    });
   }
 }
