@@ -417,7 +417,7 @@ describe('ReturnEditRequestsService — exchange parity', () => {
 
 // ─── Defense-in-depth source-grep ─────────────────────────────────
 
-describe('ReturnEditRequestsService — read-only contract for parent docs', () => {
+describe('ReturnEditRequestsService — Phase 2A safety contract (source-grep)', () => {
   const src = readFileSync(
     resolve(__dirname, 'return-edit-requests.service.ts'),
     'utf-8',
@@ -426,40 +426,78 @@ describe('ReturnEditRequestsService — read-only contract for parent docs', () 
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/^\s*\/\/.*$/gm, '');
 
-  it('does not import or call any posting / engine / mutation services', () => {
-    expect(code).not.toMatch(/\bAccountingPostingService\b/);
-    expect(code).not.toMatch(/\bFinancialEngineService\b/);
-    expect(code).not.toMatch(/\bpostReturn\b/);
-    expect(code).not.toMatch(/\brecordTransaction\b/);
-    expect(code).not.toMatch(/\brecordCashOnlyMovement\b/);
-    expect(code).not.toMatch(/\breverseByReference\b/);
-    expect(code).not.toMatch(/\baccounting_only\b/);
-  });
+  // Phase 2A widens the allowed surface: apply MUST mutate
+  // returns / return_items / stock / stock_movements (insert only)
+  // through the same patterns the cancel path uses.  But the
+  // forbidden surfaces stay forbidden.
 
-  it('does not write to financial tables or the parent document tables', () => {
+  it('does not write directly to financial tables (JE / JL / CT)', () => {
     expect(code).not.toMatch(/INSERT\s+INTO\s+journal_entries\b/i);
     expect(code).not.toMatch(/INSERT\s+INTO\s+journal_lines\b/i);
     expect(code).not.toMatch(/INSERT\s+INTO\s+cashbox_transactions\b/i);
-    expect(code).not.toMatch(/INSERT\s+INTO\s+stock_movements\b/i);
-    expect(code).not.toMatch(/INSERT\s+INTO\s+returns\b/i);
-    expect(code).not.toMatch(/INSERT\s+INTO\s+return_items\b/i);
-    expect(code).not.toMatch(/INSERT\s+INTO\s+exchanges\b/i);
-    expect(code).not.toMatch(/INSERT\s+INTO\s+exchange_items\b/i);
-    expect(code).not.toMatch(/UPDATE\s+returns\b/i);
-    expect(code).not.toMatch(/UPDATE\s+return_items\b/i);
-    expect(code).not.toMatch(/UPDATE\s+exchanges\b/i);
-    expect(code).not.toMatch(/UPDATE\s+exchange_items\b/i);
     expect(code).not.toMatch(/UPDATE\s+journal_entries\b/i);
+    expect(code).not.toMatch(/UPDATE\s+journal_lines\b/i);
     expect(code).not.toMatch(/UPDATE\s+cashbox_transactions\b/i);
-    expect(code).not.toMatch(/UPDATE\s+stock_movements\b/i);
-    expect(code).not.toMatch(/DELETE\s+FROM\s+(returns|return_items|exchanges|exchange_items|journal_entries|journal_lines|cashbox_transactions|stock_movements)\b/i);
+    expect(code).not.toMatch(
+      /DELETE\s+FROM\s+(journal_entries|journal_lines|cashbox_transactions)\b/i,
+    );
   });
 
-  it('writes only to return_edit_requests / exchange_edit_requests', () => {
-    // Whitelist the only tables touched by INSERT/UPDATE in the
-    // service body.
-    expect(code).toMatch(/INSERT\s+INTO\s+\$\{table\}/i); // template-literal INSERT (return_edit_requests OR exchange_edit_requests)
-    expect(code).toMatch(/UPDATE\s+\$\{table\}/i); // same for review()
+  it('never UPDATEs an existing stock_movements row (insert-only)', () => {
+    expect(code).not.toMatch(/UPDATE\s+stock_movements\b/i);
+    expect(code).not.toMatch(/DELETE\s+FROM\s+stock_movements\b/i);
+  });
+
+  it('never writes to exchanges or exchange_items (Phase 2A is return-only)', () => {
+    expect(code).not.toMatch(/INSERT\s+INTO\s+exchanges\b/i);
+    expect(code).not.toMatch(/INSERT\s+INTO\s+exchange_items\b/i);
+    expect(code).not.toMatch(/UPDATE\s+exchanges\b/i);
+    expect(code).not.toMatch(/UPDATE\s+exchange_items\b/i);
+    expect(code).not.toMatch(/DELETE\s+FROM\s+exchange_items\b/i);
+  });
+
+  it('does not bypass the financial engine', () => {
+    expect(code).not.toMatch(/\baccounting_only\b/);
+    // engine_context is set by the engine itself; nobody else should
+    // SET LOCAL it here.
+    expect(code).not.toMatch(/SET\s+LOCAL\s+app\.engine_context/i);
+    expect(code).not.toMatch(/\brecordTransaction\b/);
+    expect(code).not.toMatch(/\bFinancialEngineService\b/);
+  });
+
+  it('only financial-side primitives used are reverseByReference + postReturn', () => {
+    // These two are the ALLOWED indirect paths for Phase 2A apply.
+    // The `!?` allows for `this.posting!.reverseByReference(` (non-null
+    // assertion present because the guard at the top of the method
+    // already throws when `this.posting` is undefined).
+    expect(code).toMatch(/\bposting!?\.reverseByReference\(/);
+    expect(code).toMatch(/\bposting!?\.postReturn\(/);
+    // Other engine/posting primitives must NOT be called from this file.
+    expect(code).not.toMatch(/\bpostInvoice\b/);
+    expect(code).not.toMatch(/\bpostInvoiceEdit\b/);
+    expect(code).not.toMatch(/\bpostInvoicePayment\b/);
+    expect(code).not.toMatch(/\brecordCashOnlyMovement\b/);
+    expect(code).not.toMatch(/\bpostExchange\b/);
+  });
+
+  it('does not swallow engine errors', () => {
+    // Any error from reverseByReference / postReturn must throw —
+    // grep ensures we have at least one BadRequestException with the
+    // engine error message in scope of the apply method.
+    expect(code).toMatch(/BadRequestException\([^)]*reverseRes/i);
+    expect(code).toMatch(/BadRequestException\([^)]*postRes/i);
+  });
+
+  it('apply path uses SELECT FOR UPDATE on edit_request + parent return', () => {
+    expect(code).toMatch(
+      /FROM\s+return_edit_requests[\s\S]+FOR\s+UPDATE/i,
+    );
+    expect(code).toMatch(/FROM\s+returns[\s\S]+FOR\s+UPDATE/i);
+  });
+
+  it('apply path checks status=approved + applied_at IS NULL', () => {
+    expect(code).toMatch(/status\s*!==\s*'approved'/);
+    expect(code).toMatch(/applied_at\s+IS\s+NULL/i);
   });
 });
 
@@ -496,5 +534,28 @@ describe('ReturnsController — Phase 1 edit-request routes only', () => {
   it('still has zero @Patch / @Delete routes', () => {
     expect(ctrl).not.toMatch(/@Patch\(/);
     expect(ctrl).not.toMatch(/@Delete\(/);
+  });
+
+  // Phase 2A apply routes
+  it('exposes the two apply routes (return + exchange), both admin-only with idempotency', () => {
+    expect(ctrl).toMatch(
+      /@Post\(['"]returns\/:id\/edit-requests\/:requestId\/apply['"]\)/,
+    );
+    expect(ctrl).toMatch(
+      /@Post\(['"]exchanges\/:id\/edit-requests\/:requestId\/apply['"]\)/,
+    );
+    // Both decorated with @Roles('admin') and @UseInterceptors(IdempotencyInterceptor).
+    const applyReturnBlock = ctrl.match(
+      /@Post\(['"]returns\/:id\/edit-requests\/:requestId\/apply['"]\)[\s\S]{0,400}\)/,
+    );
+    expect(applyReturnBlock).not.toBeNull();
+    expect(applyReturnBlock![0]).toMatch(/@Roles\(['"]admin['"]\)/);
+    expect(applyReturnBlock![0]).toMatch(/IdempotencyInterceptor/);
+    const applyExchangeBlock = ctrl.match(
+      /@Post\(['"]exchanges\/:id\/edit-requests\/:requestId\/apply['"]\)[\s\S]{0,400}\)/,
+    );
+    expect(applyExchangeBlock).not.toBeNull();
+    expect(applyExchangeBlock![0]).toMatch(/@Roles\(['"]admin['"]\)/);
+    expect(applyExchangeBlock![0]).toMatch(/IdempotencyInterceptor/);
   });
 });

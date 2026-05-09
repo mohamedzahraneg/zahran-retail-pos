@@ -13,6 +13,7 @@ import { ReturnsService } from './returns.service';
 import { ReturnsAuditService } from './returns-audit.service';
 import { ReturnEditRequestsService } from './return-edit-requests.service';
 import {
+  ApplyEditRequestDto,
   ApproveReturnDto,
   CancelReturnDto,
   CreateEditRequestDto,
@@ -354,6 +355,67 @@ export class ReturnsController {
       request_id: requestId,
       user_id: user.userId,
       review_notes: dto.review_notes ?? null,
+    });
+  }
+
+  // ─── Edit-request APPLY (Phase 2A — admin-only, return-only) ───
+  // PR-FIN-RETURNS-EXCHANGES-EDIT-REQUESTS-APPLY:
+  //   · Return apply runs the reverse-and-replay strategy in a
+  //     single DB transaction (see ReturnEditRequestsService for the
+  //     exact step list + safety invariants).
+  //   · Exchange apply intentionally returns 501 in this PR; the full
+  //     implementation lands in Phase 2B with its own design report.
+  //   · Both endpoints are gated with @Roles('admin') (mirrors the
+  //     approve/reject gate; the BE is the source of truth) and the
+  //     IdempotencyInterceptor (third layer of double-apply
+  //     protection on top of FOR-UPDATE + applied_at IS NULL check).
+
+  @Post('returns/:id/edit-requests/:requestId/apply')
+  @Roles('admin')
+  @ApiOperation({
+    summary:
+      'تطبيق طلب تعديل مرتجع معتمد — يحدّث البنود/الإجمالي ويعيد قيد ' +
+      'الجزء المالي والمخزني عند الحاجة. تطبيق مرة واحدة فقط.',
+  })
+  @UseInterceptors(IdempotencyInterceptor)
+  applyReturnEditRequest(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('requestId', ParseUUIDPipe) requestId: string,
+    @Body() dto: ApplyEditRequestDto,
+    @CurrentUser() user: JwtUser,
+  ) {
+    return this.editReqSvc.applyApprovedReturn({
+      entity: 'return',
+      parent_id: id,
+      request_id: requestId,
+      user_id: user.userId,
+      cashbox_id: dto.cashbox_id ?? null,
+      shift_id: dto.shift_id ?? null,
+      notes: dto.notes ?? null,
+    });
+  }
+
+  @Post('exchanges/:id/edit-requests/:requestId/apply')
+  @Roles('admin')
+  @ApiOperation({
+    summary:
+      'تطبيق طلب تعديل استبدال — Phase 2A: يعيد 501 (قيد الإعداد).',
+  })
+  @UseInterceptors(IdempotencyInterceptor)
+  applyExchangeEditRequest(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('requestId', ParseUUIDPipe) requestId: string,
+    @Body() dto: ApplyEditRequestDto,
+    @CurrentUser() user: JwtUser,
+  ) {
+    return this.editReqSvc.applyApprovedExchange({
+      entity: 'exchange',
+      parent_id: id,
+      request_id: requestId,
+      user_id: user.userId,
+      cashbox_id: dto.cashbox_id ?? null,
+      shift_id: dto.shift_id ?? null,
+      notes: dto.notes ?? null,
     });
   }
 }

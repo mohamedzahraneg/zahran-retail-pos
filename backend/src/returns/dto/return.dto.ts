@@ -362,3 +362,36 @@ export class ReviewEditRequestDto {
   @IsString()
   review_notes?: string;
 }
+
+/**
+ * PR-FIN-RETURNS-EXCHANGES-EDIT-REQUESTS-APPLY — body for the
+ * admin-only apply endpoint.  Cashbox/shift are required by the
+ * service ONLY when the parent return is already 'refunded' AND the
+ * apply changes net_refund (i.e. there's a real cash delta to post).
+ * For the non-refunded path the service ignores both fields.
+ */
+export class ApplyEditRequestDto {
+  @ApiPropertyOptional({
+    description:
+      'مصدر النقدية للفرق المالي — مطلوب فقط إذا كان المرتجع تم صرفه بالفعل ' +
+      'وأدّى التعديل لتغيّر الصافي.',
+  })
+  @IsOptional()
+  @IsString()
+  cashbox_id?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'الوردية المفتوحة لتسجيل الفرق النقدي — بديل عن cashbox_id.',
+  })
+  @IsOptional()
+  @IsString()
+  shift_id?: string;
+
+  @ApiPropertyOptional({
+    description: 'ملاحظات إضافية تُسجَّل في سجل النشاط ولا تؤثر على الأرقام.',
+  })
+  @IsOptional()
+  @IsString()
+  notes?: string;
+}
