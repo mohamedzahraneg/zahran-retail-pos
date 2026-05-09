@@ -142,6 +142,29 @@ function InboxTab() {
     onError: (e: any) =>
       toast.error(e?.response?.data?.message || 'فشل الاعتماد'),
   });
+  // PR-FIX-APPROVAL-INBOX-GROUPING — when a single expense has more
+  // than one pending approval row (e.g. duplicate / overlapping rules
+  // on the same level+role bracket) we render ONE grouped card and
+  // approve every pending row in sequence.  Each call re-uses the
+  // existing approveApproval endpoint with a fresh idempotency key
+  // — there is no new mutation surface.  Errors short-circuit the
+  // chain and surface via a single toast.
+  const approveAllMut = useMutation({
+    mutationFn: async (ids: string[]) => {
+      const results: any[] = [];
+      for (const id of ids) {
+        resetAccountingOpsApprovalApproveIdempotencyKey();
+        results.push(await accountingApi.approveApproval(id));
+      }
+      return results;
+    },
+    onSuccess: () => {
+      toast.success('تم اعتماد كل الطلبات');
+      qc.invalidateQueries({ queryKey: ['approval-inbox'] });
+    },
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.message || 'فشل بعض الاعتمادات'),
+  });
   const rejectMut = useMutation({
     mutationFn: ({ id, reason }: { id: string; reason: string }) =>
       accountingApi.rejectApproval(id, reason),
@@ -152,6 +175,20 @@ function InboxTab() {
     onError: (e: any) =>
       toast.error(e?.response?.data?.message || 'فشل الرفض'),
   });
+
+  // PR-FIX-APPROVAL-INBOX-GROUPING — group inbox rows by expense_id
+  // so a single expense never surfaces as multiple identical cards.
+  // Insertion order preserves the BE's `ORDER BY created_at ASC`,
+  // so the earliest pending expense remains first.
+  const groups = useMemo(() => {
+    const byExpense = new Map<string, ApprovalInboxItem[]>();
+    for (const it of items) {
+      const arr = byExpense.get(it.expense_id) ?? [];
+      arr.push(it);
+      byExpense.set(it.expense_id, arr);
+    }
+    return Array.from(byExpense.values());
+  }, [items]);
 
   if (isLoading) {
     return (
@@ -171,29 +208,44 @@ function InboxTab() {
     );
   }
 
+  const pending =
+    approveMut.isPending || approveAllMut.isPending || rejectMut.isPending;
+
   return (
     <div className="space-y-3">
       <div className="text-sm text-slate-600">
-        {items.length} اعتماد منتظر قرارك
+        {groups.length} مصروف بانتظار قرارك
+        {groups.length !== items.length && (
+          <span className="text-slate-400">
+            {' '}
+            · {items.length} صف اعتماد إجمالي
+          </span>
+        )}
       </div>
       <div className="grid lg:grid-cols-2 gap-3">
-        {items.map((it) => (
+        {groups.map((rows) => (
           <ApprovalCard
-            key={it.id}
-            item={it}
-            onApprove={() => {
+            key={rows[0].expense_id}
+            rows={rows}
+            onApproveOne={(id) => {
               // PR-FE-IDEM-ACCOUNTING-OPS — reset per-click so each
               // row's approval gets a fresh key.
               resetAccountingOpsApprovalApproveIdempotencyKey();
-              approveMut.mutate(it.id);
+              approveMut.mutate(id);
             }}
-            onReject={() => {
+            onApproveAll={(ids) => {
+              // approveAllMut handles the per-row reset internally
+              // so the same idempotency invariant holds for each
+              // sequential call.
+              approveAllMut.mutate(ids);
+            }}
+            onReject={(id) => {
               const r = prompt('سبب الرفض:');
               if (r && r.trim().length >= 3) {
-                rejectMut.mutate({ id: it.id, reason: r });
+                rejectMut.mutate({ id, reason: r });
               }
             }}
-            pending={approveMut.isPending || rejectMut.isPending}
+            pending={pending}
           />
         ))}
       </div>
@@ -202,45 +254,97 @@ function InboxTab() {
 }
 
 function ApprovalCard({
-  item,
-  onApprove,
+  rows,
+  onApproveOne,
+  onApproveAll,
   onReject,
   pending,
 }: {
-  item: ApprovalInboxItem;
-  onApprove: () => void;
-  onReject: () => void;
+  rows: ApprovalInboxItem[];
+  onApproveOne: (id: string) => void;
+  onApproveAll: (ids: string[]) => void;
+  onReject: (firstPendingRowId: string) => void;
   pending: boolean;
 }) {
+  // The first row carries the expense-level fields (every row in the
+  // group is for the same expense, so expense_no / amount / category /
+  // … are identical across the group; only rule + level + required_role
+  // can differ).
+  const head = rows[0];
+  const isMulti = rows.length > 1;
+  const ids = rows.map((r) => r.id);
+
   return (
-    <div className="card p-4 border-2 border-amber-200 bg-amber-50/50">
+    <div
+      className="card p-4 border-2 border-amber-200 bg-amber-50/50"
+      data-testid={`approval-card-${head.expense_id}`}
+    >
       <div className="flex items-start justify-between gap-3">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="font-mono font-bold text-brand-700">
-              {item.expense_no}
+              {head.expense_no}
             </span>
-            <span className="chip bg-amber-100 text-amber-800 text-[10px]">
-              المستوى {item.level}
-            </span>
-            <span className="chip bg-slate-100 text-slate-600 text-[10px]">
-              {item.rule_name}
-            </span>
+            {isMulti ? (
+              <span
+                className="chip bg-rose-100 text-rose-800 text-[10px] font-extrabold"
+                data-testid={`approval-card-${head.expense_id}-multi-badge`}
+              >
+                {rows.length} اعتماد مطلوب
+              </span>
+            ) : (
+              <>
+                <span className="chip bg-amber-100 text-amber-800 text-[10px]">
+                  المستوى {head.level}
+                </span>
+                <span className="chip bg-slate-100 text-slate-600 text-[10px]">
+                  {head.rule_name}
+                </span>
+              </>
+            )}
           </div>
           <div className="font-black text-lg mt-1">
-            {EGP(item.amount)}
+            {EGP(head.amount)}
           </div>
           <div className="text-xs text-slate-600 mt-1">
-            {item.category_name || 'بدون تصنيف'}
-            {item.warehouse_name && ` · ${item.warehouse_name}`}
-            {item.vendor_name && ` · المورد: ${item.vendor_name}`}
+            {head.category_name || 'بدون تصنيف'}
+            {head.warehouse_name && ` · ${head.warehouse_name}`}
+            {head.vendor_name && ` · المورد: ${head.vendor_name}`}
           </div>
-          {item.description && (
-            <div className="text-xs text-slate-500 mt-1">{item.description}</div>
+          {head.description && (
+            <div className="text-xs text-slate-500 mt-1">{head.description}</div>
+          )}
+          {isMulti && (
+            <ul
+              className="mt-2 space-y-1 text-[11px] text-slate-600"
+              data-testid={`approval-card-${head.expense_id}-rules`}
+            >
+              <li className="text-[10px] text-slate-400">
+                0 من {rows.length} تم اعتماده — يتطلب اعتماد كل القواعد
+                المتطابقة قبل ترحيل القيد
+              </li>
+              {rows.map((r) => (
+                <li
+                  key={r.id}
+                  className="flex items-center gap-2"
+                  data-testid={`approval-card-${head.expense_id}-rule-row-${r.id}`}
+                >
+                  <span className="chip bg-amber-100 text-amber-800 text-[10px]">
+                    المستوى {r.level}
+                  </span>
+                  <span className="chip bg-slate-100 text-slate-600 text-[10px]">
+                    {r.rule_name || '—'}
+                  </span>
+                  <span className="text-[10px] text-slate-500">
+                    {r.required_role}
+                  </span>
+                </li>
+              ))}
+            </ul>
           )}
           <div className="text-[11px] text-slate-400 mt-2">
-            أنشأها {item.created_by_name || '—'} ·{' '}
-            {new Date(item.created_at).toLocaleDateString('en-GB', {
+            أنشأها {head.created_by_name || '—'} ·{' '}
+            {new Date(head.created_at).toLocaleDateString('en-GB', {
               timeZone: 'Africa/Cairo',
             })}
           </div>
@@ -249,15 +353,19 @@ function ApprovalCard({
       <div className="flex gap-2 mt-3 pt-3 border-t border-amber-200">
         <button
           className="flex-1 py-2 rounded-lg bg-emerald-600 text-white font-bold hover:bg-emerald-700 disabled:opacity-50 flex items-center justify-center gap-1"
-          onClick={onApprove}
+          onClick={() =>
+            isMulti ? onApproveAll(ids) : onApproveOne(head.id)
+          }
           disabled={pending}
+          data-testid={`approval-card-${head.expense_id}-approve`}
         >
-          <Check size={14} /> اعتماد
+          <Check size={14} /> {isMulti ? 'اعتماد الكل' : 'اعتماد'}
         </button>
         <button
           className="flex-1 py-2 rounded-lg bg-rose-600 text-white font-bold hover:bg-rose-700 disabled:opacity-50 flex items-center justify-center gap-1"
-          onClick={onReject}
+          onClick={() => onReject(head.id)}
           disabled={pending}
+          data-testid={`approval-card-${head.expense_id}-reject`}
         >
           <XIcon size={14} /> رفض
         </button>
