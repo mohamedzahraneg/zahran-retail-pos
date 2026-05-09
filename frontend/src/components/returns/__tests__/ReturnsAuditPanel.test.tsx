@@ -15,7 +15,7 @@
  *      component source.
  */
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { readFileSync } from 'node:fs';
 
@@ -1062,7 +1062,14 @@ describe('<ReturnsAuditPanel />', () => {
     // the formatter wiring is present in source.)
   });
 
-  it('document-level audit card is collapsed under "تفاصيل تقنية" when a near-time activity row describes the same event', async () => {
+  // ─── PR-FIX-AUDIT-PANEL-HIDE-NOISE — document/item filtering ──────
+  // The panel hides technical audit_logs cards from the normal
+  // timeline when the same event is already described by a friendly
+  // activity_logs row (document-level) or by a structured
+  // edit_request line_changes payload (item-level UUID-only diffs).
+  // Hidden cards live behind a single global "عرض التفاصيل التقنية"
+  // disclosure — there is no per-row collapsed bar in normal view.
+  it('document-level audit card is HIDDEN by default when a near-time activity row describes the same event', async () => {
     const sameTime = '2026-05-09T17:00:39Z';
     const fixture = {
       document_type: 'return' as const,
@@ -1076,8 +1083,12 @@ describe('<ReturnsAuditPanel />', () => {
           changed_by: 'u-1',
           changed_by_username: 'admin',
           changed_by_name: 'مدير النظام',
-          old_data: { total_refund: '450.00' },
-          new_data: { total_refund: '450.00' },
+          old_data: { status: 'approved', shift_id: null, cashbox_id: null },
+          new_data: {
+            status: 'refunded',
+            shift_id: 'shift-uuid',
+            cashbox_id: 'cb-uuid',
+          },
           changed_at: sameTime,
         },
       ],
@@ -1091,8 +1102,8 @@ describe('<ReturnsAuditPanel />', () => {
           action: 'update',
           entity: 'return',
           entity_id: 'doc-1',
-          summary: 'تم تطبيق طلب تعديل مرتجع',
-          metadata: { kind: 'edit_request_apply' },
+          summary: 'صرف مرتجع RET-2026-000006 (cash)',
+          metadata: { kind: 'refund_return' },
           ip_address: '10.0.0.1',
           created_at: sameTime,
         },
@@ -1102,18 +1113,25 @@ describe('<ReturnsAuditPanel />', () => {
     };
     (returnsApi.getReturnAudit as any).mockResolvedValueOnce(fixture);
     renderPanel('return');
-    // Collapsed wrapper present.
-    const collapsed = await screen.findByTestId(
-      'audit-change-doc-noisy-collapsed',
-    );
-    expect(collapsed.tagName.toLowerCase()).toBe('details');
-    // It's closed by default (no `open` attribute).
-    expect(collapsed.hasAttribute('open')).toBe(false);
-    // The summary contains the technical-details label.
-    expect(collapsed.textContent).toMatch(/تفاصيل تقنية/);
+    // The activity row is rendered (proves data loaded).
+    await screen.findByTestId('audit-activity-act-overlap');
+    // The eclipsed document card is NOT in the normal timeline — no
+    // per-row card, no per-row "تفاصيل تقنية" bar.
+    const visibleList = screen.getByTestId('audit-entries');
+    expect(
+      within(visibleList).queryByTestId('audit-change-doc-noisy'),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId('audit-change-doc-noisy-collapsed'),
+    ).not.toBeInTheDocument();
+    // It is preserved behind the global disclosure.
+    const techList = screen.getByTestId('audit-technical-entries');
+    expect(
+      within(techList).getByTestId('audit-change-doc-noisy'),
+    ).toBeInTheDocument();
   });
 
-  it('document-level audit card is NOT collapsed when no overlapping activity row exists', async () => {
+  it('document-level audit card IS rendered when no overlapping activity row exists', async () => {
     const fixture = {
       document_type: 'return' as const,
       document_id: 'doc-1',
@@ -1132,19 +1150,20 @@ describe('<ReturnsAuditPanel />', () => {
         },
       ],
       item_changes: [],
-      activity: [], // no near-time activity row
+      activity: [],
       amendments: [],
       edit_requests: [],
     };
     (returnsApi.getReturnAudit as any).mockResolvedValueOnce(fixture);
     renderPanel('return');
     await screen.findByTestId('audit-change-doc-standalone');
+    // The disclosure is absent because nothing was hidden.
     expect(
-      screen.queryByTestId('audit-change-doc-standalone-collapsed'),
+      screen.queryByTestId('audit-technical-disclosure'),
     ).not.toBeInTheDocument();
   });
 
-  it('item-level audit cards are NEVER collapsed (variant_id / qty diffs stay visible)', async () => {
+  it('item-level audit card with informative diff (qty / unit_price) stays visible in the normal timeline', async () => {
     const sameTime = '2026-05-09T17:00:39Z';
     const fixture = {
       document_type: 'return' as const,
@@ -1152,7 +1171,130 @@ describe('<ReturnsAuditPanel />', () => {
       document_changes: [],
       item_changes: [
         {
-          id: 'item-variant-swap',
+          id: 'item-price-change',
+          table_name: 'return_items',
+          record_id: 'ri-1',
+          operation: 'U' as const,
+          changed_by: 'u-1',
+          changed_by_username: 'admin',
+          changed_by_name: 'مدير النظام',
+          old_data: { unit_price: '450.00', quantity: 1 },
+          new_data: { unit_price: '400.00', quantity: 1 },
+          changed_at: sameTime,
+        },
+      ],
+      activity: [],
+      amendments: [],
+      edit_requests: [
+        // Even with a structured edit_request, the item card stays
+        // visible because the diff is informative (price change).
+        {
+          id: 'req-structured',
+          parent_id: 'doc-1',
+          document_no: 'RET-2026-EDIT-1',
+          requested_action: 'price_change',
+          requested_payload: {
+            kind: 'line_changes',
+            lines: { updated: [], removed: [], added: [] },
+            summary: { old_total: 0, new_total: 0, delta: 0 },
+          },
+          before_snapshot: {},
+          after_preview: null,
+          reason_text: 'سبب',
+          status: 'approved' as const,
+          requested_by: 'u-2',
+          requested_by_name: 'كاشير',
+          requested_at: '2026-05-09T13:00:00Z',
+          reviewed_by: 'u-3',
+          reviewed_by_name: 'مدير النظام',
+          reviewed_at: '2026-05-09T13:30:00Z',
+          review_notes: null,
+          source: 'edit_request' as const,
+        },
+      ],
+    };
+    (returnsApi.getReturnAudit as any).mockResolvedValueOnce(fixture);
+    renderPanel('return');
+    const card = await screen.findByTestId('audit-change-item-price-change');
+    expect(card.textContent).toMatch(/450\.00/);
+    expect(card.textContent).toMatch(/400\.00/);
+  });
+
+  it('item-level audit card with variant_id-only diff is HIDDEN when a structured edit_request payload exists', async () => {
+    const sameTime = '2026-05-09T17:00:39Z';
+    const fixture = {
+      document_type: 'return' as const,
+      document_id: 'doc-1',
+      document_changes: [],
+      item_changes: [
+        {
+          id: 'item-variant-only',
+          table_name: 'return_items',
+          record_id: 'ri-1',
+          operation: 'U' as const,
+          changed_by: 'u-1',
+          changed_by_username: 'admin',
+          changed_by_name: 'مدير النظام',
+          old_data: { variant_id: 'old-uuid', unit_price: '450.00' },
+          new_data: { variant_id: 'new-uuid', unit_price: '450.00' },
+          changed_at: sameTime,
+        },
+      ],
+      activity: [],
+      amendments: [],
+      edit_requests: [
+        {
+          id: 'req-structured',
+          parent_id: 'doc-1',
+          document_no: 'RET-2026-EDIT-1',
+          requested_action: 'replace_item',
+          requested_payload: {
+            kind: 'line_changes',
+            lines: { updated: [], removed: [], added: [] },
+            summary: { old_total: 450, new_total: 450, delta: 0 },
+          },
+          before_snapshot: {},
+          after_preview: null,
+          reason_text: 'مقاس',
+          status: 'approved' as const,
+          requested_by: 'u-2',
+          requested_by_name: 'كاشير',
+          requested_at: '2026-05-09T13:00:00Z',
+          reviewed_by: 'u-3',
+          reviewed_by_name: 'مدير النظام',
+          reviewed_at: '2026-05-09T13:30:00Z',
+          review_notes: null,
+          source: 'edit_request' as const,
+        },
+      ],
+    };
+    (returnsApi.getReturnAudit as any).mockResolvedValueOnce(fixture);
+    renderPanel('return');
+    // The structured edit-request card is rendered.
+    await screen.findByTestId('audit-edit-request-req-structured');
+    // The variant-only item audit card is NOT in the normal timeline.
+    const visibleList = screen.getByTestId('audit-entries');
+    expect(
+      within(visibleList).queryByTestId(
+        'audit-change-item-variant-only',
+      ),
+    ).not.toBeInTheDocument();
+    // It is preserved behind the global disclosure.
+    const techList = screen.getByTestId('audit-technical-entries');
+    expect(
+      within(techList).getByTestId('audit-change-item-variant-only'),
+    ).toBeInTheDocument();
+  });
+
+  it('item-level audit card with variant_id-only diff IS rendered when no structured edit_request exists', async () => {
+    const sameTime = '2026-05-09T17:00:39Z';
+    const fixture = {
+      document_type: 'return' as const,
+      document_id: 'doc-1',
+      document_changes: [],
+      item_changes: [
+        {
+          id: 'item-variant-bare',
           table_name: 'return_items',
           record_id: 'ri-1',
           operation: 'U' as const,
@@ -1164,19 +1306,51 @@ describe('<ReturnsAuditPanel />', () => {
           changed_at: sameTime,
         },
       ],
-      activity: [
-        // Same-time activity — would collapse a doc-level row, but
-        // item-level rows must remain expanded regardless.
+      activity: [],
+      amendments: [],
+      edit_requests: [],
+    };
+    (returnsApi.getReturnAudit as any).mockResolvedValueOnce(fixture);
+    renderPanel('return');
+    const card = await screen.findByTestId(
+      'audit-change-item-variant-bare',
+    );
+    // Diff visible without the structured edit-request safety net.
+    expect(card.textContent).toMatch(/old-uuid/);
+    expect(card.textContent).toMatch(/new-uuid/);
+  });
+
+  it('global "عرض التفاصيل التقنية" disclosure renders ONLY when something was hidden', async () => {
+    const sameTime = '2026-05-09T17:00:39Z';
+    const fixture = {
+      document_type: 'return' as const,
+      document_id: 'doc-1',
+      document_changes: [
         {
-          id: 'act-overlap-item',
+          id: 'doc-eclipsed',
+          table_name: 'returns',
+          record_id: 'doc-1',
+          operation: 'U' as const,
+          changed_by: 'u-1',
+          changed_by_username: 'admin',
+          changed_by_name: 'مدير النظام',
+          old_data: { status: 'approved' },
+          new_data: { status: 'refunded' },
+          changed_at: sameTime,
+        },
+      ],
+      item_changes: [],
+      activity: [
+        {
+          id: 'act-refund',
           user_id: 'u-3',
           username: 'admin',
           full_name: 'مدير النظام',
           action: 'update',
           entity: 'return',
           entity_id: 'doc-1',
-          summary: 'تطبيق',
-          metadata: { kind: 'edit_request_apply' },
+          summary: 'صرف مرتجع',
+          metadata: { kind: 'refund_return' },
           ip_address: '10.0.0.1',
           created_at: sameTime,
         },
@@ -1186,18 +1360,99 @@ describe('<ReturnsAuditPanel />', () => {
     };
     (returnsApi.getReturnAudit as any).mockResolvedValueOnce(fixture);
     renderPanel('return');
-    await screen.findByTestId('audit-change-item-variant-swap');
-    // No collapsed wrapper for item-level rows.
+    const disclosure = await screen.findByTestId(
+      'audit-technical-disclosure',
+    );
+    expect(disclosure.tagName.toLowerCase()).toBe('details');
+    expect(disclosure.hasAttribute('open')).toBe(false);
+    expect(disclosure.textContent).toMatch(/عرض التفاصيل التقنية/);
+    // The hidden card is NOT in the normal timeline by default.
+    const visibleList = screen.getByTestId('audit-entries');
     expect(
-      screen.queryByTestId('audit-change-item-variant-swap-collapsed'),
+      within(visibleList).queryByTestId('audit-change-doc-eclipsed'),
     ).not.toBeInTheDocument();
-    // The diff is directly visible.
+  });
+
+  it('expanding the global disclosure reveals the previously-hidden technical cards in full DiffGrid form', async () => {
+    const sameTime = '2026-05-09T17:00:39Z';
+    const fixture = {
+      document_type: 'return' as const,
+      document_id: 'doc-1',
+      document_changes: [
+        {
+          id: 'doc-eclipsed',
+          table_name: 'returns',
+          record_id: 'doc-1',
+          operation: 'U' as const,
+          changed_by: 'u-1',
+          changed_by_username: 'admin',
+          changed_by_name: 'مدير النظام',
+          old_data: { status: 'approved' },
+          new_data: { status: 'refunded' },
+          changed_at: sameTime,
+        },
+      ],
+      item_changes: [],
+      activity: [
+        {
+          id: 'act-refund-2',
+          user_id: 'u-3',
+          username: 'admin',
+          full_name: 'مدير النظام',
+          action: 'update',
+          entity: 'return',
+          entity_id: 'doc-1',
+          summary: 'صرف مرتجع',
+          metadata: { kind: 'refund_return' },
+          ip_address: '10.0.0.1',
+          created_at: sameTime,
+        },
+      ],
+      amendments: [],
+      edit_requests: [],
+    };
+    (returnsApi.getReturnAudit as any).mockResolvedValueOnce(fixture);
+    renderPanel('return');
+    await screen.findByTestId('audit-technical-disclosure');
+    // Inside the disclosure, the previously-hidden card lives under a
+    // dedicated list — full DiffGrid is rendered (translated values).
+    const techList = screen.getByTestId('audit-technical-entries');
+    expect(techList).toContainElement(
+      screen.getByTestId('audit-change-doc-eclipsed'),
+    );
+    expect(techList.textContent).toMatch(/معتمد/); // status='approved' translated
+    expect(techList.textContent).toMatch(/تم الصرف/); // status='refunded' translated
+  });
+
+  it('global disclosure is ABSENT when no audit row was hidden', async () => {
+    const fixture = {
+      document_type: 'return' as const,
+      document_id: 'doc-1',
+      document_changes: [
+        {
+          id: 'doc-clean',
+          table_name: 'returns',
+          record_id: 'doc-1',
+          operation: 'U' as const,
+          changed_by: 'u-1',
+          changed_by_username: 'admin',
+          changed_by_name: 'مدير النظام',
+          old_data: { status: 'pending' },
+          new_data: { status: 'approved' },
+          changed_at: '2026-05-09T10:00:00Z',
+        },
+      ],
+      item_changes: [],
+      activity: [],
+      amendments: [],
+      edit_requests: [],
+    };
+    (returnsApi.getReturnAudit as any).mockResolvedValueOnce(fixture);
+    renderPanel('return');
+    await screen.findByTestId('audit-change-doc-clean');
     expect(
-      screen.getByTestId('audit-change-item-variant-swap').textContent,
-    ).toMatch(/old-uuid/);
-    expect(
-      screen.getByTestId('audit-change-item-variant-swap').textContent,
-    ).toMatch(/new-uuid/);
+      screen.queryByTestId('audit-technical-disclosure'),
+    ).not.toBeInTheDocument();
   });
 });
 

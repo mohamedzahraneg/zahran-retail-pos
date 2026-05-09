@@ -314,6 +314,137 @@ describe('ReturnsAuditService — read-only composition', () => {
       expect(out.edit_requests[0].document_no).toBe('EXC-2026-000003');
     }
   });
+
+  // ─── PR-FIX-AUDIT-APPLY-FIELDS-PROJECTION ─────────────────────────
+  // The edit_requests row on the DB carries seven apply-state columns
+  // populated by the apply service (applied_at, applied_by, apply_summary,
+  // apply_journal_entry_ids, apply_cashbox_transaction_ids,
+  // apply_stock_movement_ids).  The audit SELECT must project them so
+  // the FE can render the applied pill, hide the apply button, and
+  // show the AppliedBlock.  Without this projection the FE always
+  // sees applied_at=undefined and the UI sticks on "approved/not
+  // applied yet".
+  it('edit_requests row exposes applied_at + applied_by + apply_summary + apply_*_ids when DB has them', async () => {
+    const APPLIED_AT = '2026-05-09T17:00:39.269Z';
+    const { ds } = makeRouter([
+      { match: /FROM\s+audit_logs/i, rows: [] },
+      { match: /FROM\s+activity_logs/i, rows: [] },
+      {
+        match: /FROM\s+return_edit_requests/i,
+        rows: [
+          {
+            id: 'er-applied',
+            parent_id: RETURN_ID,
+            document_no: 'RET-2026-000006',
+            requested_action: 'replace_item',
+            requested_payload: {},
+            before_snapshot: {},
+            after_preview: null,
+            reason_text: 'مقاس',
+            status: 'approved',
+            requested_by: 'u-2',
+            requested_by_name: 'كاشير',
+            requested_at: '2026-05-09T13:37:25.671Z',
+            reviewed_by: 'u-3',
+            reviewed_by_name: 'مدير النظام',
+            reviewed_at: '2026-05-09T13:39:02.679Z',
+            review_notes: null,
+            applied_at: APPLIED_AT,
+            applied_by: 'u-3',
+            applied_by_name: 'مدير النظام',
+            apply_summary: {
+              status_at_apply: 'refunded',
+              was_refunded: true,
+              old_total_refund: 450,
+              new_total_refund: 450,
+              old_net_refund: 450,
+              new_net_refund: 450,
+              delta_total_refund: 0,
+              delta_net_refund: 0,
+              lines_updated: 1,
+              lines_removed: 0,
+              lines_added: 0,
+              notes: null,
+            },
+            apply_journal_entry_ids: [
+              '7f578b99-7740-47cd-b027-feb189522d1e',
+              '7a1487bb-0c21-406e-b82f-0b2cc35a3c4b',
+            ],
+            apply_cashbox_transaction_ids: ['391'],
+            apply_stock_movement_ids: ['1646', '1647'],
+          },
+        ],
+      },
+    ]);
+    const svc = await buildSvc(ds);
+    const out = await svc.getReturnAudit(RETURN_ID);
+
+    expect(out.edit_requests).toHaveLength(1);
+    const r = out.edit_requests[0];
+    expect(r.applied_at).toBe(APPLIED_AT);
+    expect(r.applied_by).toBe('u-3');
+    expect(r.applied_by_name).toBe('مدير النظام');
+    expect(r.apply_summary).toBeTruthy();
+    expect((r.apply_summary as any).lines_updated).toBe(1);
+    expect((r.apply_summary as any).new_total_refund).toBe(450);
+    expect(r.apply_journal_entry_ids).toEqual([
+      '7f578b99-7740-47cd-b027-feb189522d1e',
+      '7a1487bb-0c21-406e-b82f-0b2cc35a3c4b',
+    ]);
+    expect(r.apply_cashbox_transaction_ids).toEqual(['391']);
+    expect(r.apply_stock_movement_ids).toEqual(['1646', '1647']);
+    // Source identifier still wired through.
+    expect(r.source).toBe('edit_request');
+  });
+
+  it('edit_requests row keeps applied_* null when DB has no apply state yet', async () => {
+    const { ds } = makeRouter([
+      { match: /FROM\s+audit_logs/i, rows: [] },
+      { match: /FROM\s+activity_logs/i, rows: [] },
+      {
+        match: /FROM\s+return_edit_requests/i,
+        rows: [
+          {
+            id: 'er-pending',
+            parent_id: RETURN_ID,
+            document_no: 'RET-2026-000010',
+            requested_action: 'price_change',
+            requested_payload: {},
+            before_snapshot: {},
+            after_preview: null,
+            reason_text: 'سبب',
+            status: 'pending',
+            requested_by: 'u-2',
+            requested_by_name: 'كاشير',
+            requested_at: '2026-05-09T08:00:00Z',
+            reviewed_by: null,
+            reviewed_by_name: null,
+            reviewed_at: null,
+            review_notes: null,
+            applied_at: null,
+            applied_by: null,
+            applied_by_name: null,
+            apply_summary: null,
+            apply_journal_entry_ids: null,
+            apply_cashbox_transaction_ids: null,
+            apply_stock_movement_ids: null,
+          },
+        ],
+      },
+    ]);
+    const svc = await buildSvc(ds);
+    const out = await svc.getReturnAudit(RETURN_ID);
+
+    expect(out.edit_requests).toHaveLength(1);
+    const r = out.edit_requests[0];
+    expect(r.applied_at).toBeNull();
+    expect(r.applied_by).toBeNull();
+    expect(r.applied_by_name).toBeNull();
+    expect(r.apply_summary).toBeNull();
+    expect(r.apply_journal_entry_ids).toBeNull();
+    expect(r.apply_cashbox_transaction_ids).toBeNull();
+    expect(r.apply_stock_movement_ids).toBeNull();
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────
@@ -376,6 +507,31 @@ describe('ReturnsAuditService — read-only contract', () => {
     // column literal — no hard-coded `er.exchange_no` next to the
     // return path or vice versa.
     expect(code).not.toMatch(/er\.return_no\s*,\s*er\.exchange_no/);
+  });
+
+  // ─── PR-FIX-AUDIT-APPLY-FIELDS-PROJECTION — pins the apply_* columns
+  // and the LEFT JOIN users u_app in the edit_requests SELECT.  Without
+  // these the FE always sees applied_at=undefined and the apply UI
+  // sticks on "approved/not applied yet".
+  it('edit_requests SELECT projects every apply_* column needed by the FE applied state', () => {
+    expect(code).toMatch(/er\.applied_at::text/);
+    expect(code).toMatch(/er\.applied_by::text/);
+    expect(code).toMatch(
+      /u_app\.full_name\s+AS\s+applied_by_name/,
+    );
+    expect(code).toMatch(/er\.apply_summary/);
+    expect(code).toMatch(
+      /er\.apply_journal_entry_ids::text\[\]\s+AS\s+apply_journal_entry_ids/,
+    );
+    expect(code).toMatch(
+      /er\.apply_cashbox_transaction_ids::text\[\]\s+AS\s+apply_cashbox_transaction_ids/,
+    );
+    expect(code).toMatch(
+      /er\.apply_stock_movement_ids::text\[\]\s+AS\s+apply_stock_movement_ids/,
+    );
+    expect(code).toMatch(
+      /LEFT\s+JOIN\s+users\s+u_app\s+ON\s+u_app\.id\s*=\s*er\.applied_by/i,
+    );
   });
 
   it('endpoint is GET-only — no controller method has @Post/@Patch/@Delete on the audit routes', () => {

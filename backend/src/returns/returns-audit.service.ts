@@ -97,6 +97,18 @@ export interface AuditEditRequestRow {
   reviewed_at: string | null;
   review_notes: string | null;
   source: 'edit_request';
+  // PR-FIX-AUDIT-APPLY-FIELDS-PROJECTION — Phase 2A apply state.  All
+  // seven are nullable: an unapplied request has applied_at=null and
+  // empty/null id arrays.  Without these the FE can't tell that a
+  // request was already applied — the pill stays "approved/not applied
+  // yet" and the "تطبيق التعديل" button stays clickable.
+  applied_at: string | null;
+  applied_by: string | null;
+  applied_by_name: string | null;
+  apply_summary: Record<string, unknown> | null;
+  apply_journal_entry_ids: string[] | null;
+  apply_cashbox_transaction_ids: string[] | null;
+  apply_stock_movement_ids: string[] | null;
 }
 
 export interface DocumentAuditResult {
@@ -224,6 +236,11 @@ export class ReturnsAuditService {
     const editDocCol = entity === 'return' ? 'return_no' : 'exchange_no';
     let edit_requests: AuditEditRequestRow[] = [];
     try {
+      // PR-FIX-AUDIT-APPLY-FIELDS-PROJECTION — apply_* columns ride the
+      // same SELECT so the FE can render the applied-state pill / hide
+      // the "تطبيق التعديل" button / show the AppliedBlock.  Bigint[]
+      // and uuid[] columns are cast to text[] so the JS driver returns
+      // string[]; the FE shape declares them as `string[] | null`.
       const rawRequests: any[] = await this.ds.query(
         `
         SELECT er.id::text,
@@ -241,10 +258,18 @@ export class ReturnsAuditService {
                er.reviewed_by::text,
                u_rev.full_name AS reviewed_by_name,
                er.reviewed_at::text,
-               er.review_notes
+               er.review_notes,
+               er.applied_at::text,
+               er.applied_by::text,
+               u_app.full_name AS applied_by_name,
+               er.apply_summary,
+               er.apply_journal_entry_ids::text[]      AS apply_journal_entry_ids,
+               er.apply_cashbox_transaction_ids::text[] AS apply_cashbox_transaction_ids,
+               er.apply_stock_movement_ids::text[]     AS apply_stock_movement_ids
           FROM ${editTable} er
           LEFT JOIN users u_req ON u_req.id = er.requested_by
           LEFT JOIN users u_rev ON u_rev.id = er.reviewed_by
+          LEFT JOIN users u_app ON u_app.id = er.applied_by
          WHERE er.${editFk}::text = $1
          ORDER BY er.requested_at DESC
         `,

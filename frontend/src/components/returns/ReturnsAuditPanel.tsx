@@ -228,6 +228,42 @@ export function ReturnsAuditPanel({ entity, id }: AuditPanelProps) {
 
   const editRequests: AuditEditRequestRow[] = data?.edit_requests ?? [];
 
+  // PR-FIX-AUDIT-PANEL-HIDE-NOISE — split each audit_logs source into
+  // "visible by default" (informative) vs "hidden behind the global
+  // عرض التفاصيل التقنية disclosure" (technical/redundant).  The
+  // hidden bucket is empty until something matches, in which case the
+  // disclosure renders ONCE at the bottom — no per-row collapsed bar.
+  const visibleDocChanges = useMemo(
+    () =>
+      (data?.document_changes ?? []).filter(
+        (c) => !isOverlappedByActivity(c, data?.activity ?? []),
+      ),
+    [data?.document_changes, data?.activity],
+  );
+  const hiddenDocChanges = useMemo(
+    () =>
+      (data?.document_changes ?? []).filter((c) =>
+        isOverlappedByActivity(c, data?.activity ?? []),
+      ),
+    [data?.document_changes, data?.activity],
+  );
+  const visibleItemChanges = useMemo(
+    () =>
+      (data?.item_changes ?? []).filter(
+        (c) => !isItemAuditEclipsedByEditRequest(c, editRequests),
+      ),
+    [data?.item_changes, editRequests],
+  );
+  const hiddenItemChanges = useMemo(
+    () =>
+      (data?.item_changes ?? []).filter((c) =>
+        isItemAuditEclipsedByEditRequest(c, editRequests),
+      ),
+    [data?.item_changes, editRequests],
+  );
+  const hiddenTechnicalCount =
+    hiddenDocChanges.length + hiddenItemChanges.length;
+
   const isEmpty =
     !!data &&
     data.document_changes.length === 0 &&
@@ -329,22 +365,20 @@ export function ReturnsAuditPanel({ entity, id }: AuditPanelProps) {
 
       {data && !isEmpty && (
         <ul className="space-y-2" data-testid="audit-entries">
-          {/* Document changes (audit_logs) — collapsed under
-              "تفاصيل تقنية" when a near-time activity row already
-              describes the same event in user-friendly Arabic.
-              See PR-FIX-AUDIT-PANEL-NOISY-DOC-COLLAPSE. */}
-          {data.document_changes.map((c) => (
-            <ChangeEntry
-              key={`doc-${c.id}`}
-              row={c}
-              kind="document"
-              collapsed={isOverlappedByActivity(c, data.activity)}
-            />
+          {/* Document changes (audit_logs) — only the rows NOT eclipsed
+              by an adjacent activity_logs row.  Eclipsed rows are
+              hidden entirely from the normal timeline; one click on
+              the global "عرض التفاصيل التقنية" disclosure reveals
+              them.  See PR-FIX-AUDIT-PANEL-HIDE-NOISE. */}
+          {visibleDocChanges.map((c) => (
+            <ChangeEntry key={`doc-${c.id}`} row={c} kind="document" />
           ))}
-          {/* Item changes (audit_logs) — never collapsed; per-item
-              variant / qty / price diffs are the most informative
-              cards in the panel and stay expanded. */}
-          {data.item_changes.map((c) => (
+          {/* Item changes (audit_logs) — only rows whose diff carries
+              business value (qty / unit_price / refund_amount …).
+              Item rows whose only diff is `variant_id` UUID→UUID get
+              hidden when a structured edit_request payload already
+              shows the readable product before/after. */}
+          {visibleItemChanges.map((c) => (
             <ChangeEntry key={`item-${c.id}`} row={c} kind="item" />
           ))}
           {/* Activity (activity_logs) */}
@@ -367,6 +401,44 @@ export function ReturnsAuditPanel({ entity, id }: AuditPanelProps) {
         </ul>
       )}
 
+      {/* PR-FIX-AUDIT-PANEL-HIDE-NOISE — global disclosure for the
+          technical rows we filtered out (overlapped doc cards + raw
+          variant-only item cards).  Renders ONLY when something was
+          actually hidden.  Closed by default; one click expands all
+          of them in their full DiffGrid form. */}
+      {data && hiddenTechnicalCount > 0 && (
+        <details
+          className="text-[11px]"
+          data-testid="audit-technical-disclosure"
+        >
+          <summary className="cursor-pointer text-slate-500 font-bold inline-flex items-center gap-1">
+            عرض التفاصيل التقنية
+            <span className="text-[10px] font-mono text-slate-400">
+              ({hiddenTechnicalCount})
+            </span>
+          </summary>
+          <ul
+            className="space-y-2 mt-2"
+            data-testid="audit-technical-entries"
+          >
+            {hiddenDocChanges.map((c) => (
+              <ChangeEntry
+                key={`doc-hidden-${c.id}`}
+                row={c}
+                kind="document"
+              />
+            ))}
+            {hiddenItemChanges.map((c) => (
+              <ChangeEntry
+                key={`item-hidden-${c.id}`}
+                row={c}
+                kind="item"
+              />
+            ))}
+          </ul>
+        </details>
+      )}
+
         {/* Phase-1 informational note: request entry lives on the
             details panel; admin approval is required before any
             payload is applied to the parent document. */}
@@ -386,19 +458,9 @@ export function ReturnsAuditPanel({ entity, id }: AuditPanelProps) {
 function ChangeEntry({
   row,
   kind,
-  collapsed = false,
 }: {
   row: AuditChangeRow;
   kind: 'document' | 'item';
-  /**
-   * PR-FIX-AUDIT-PANEL-NOISY-DOC-COLLAPSE — when true, the card
-   * renders only the metadata header + a collapsed `<details>`
-   * "تفاصيل تقنية" toggle hiding the column-level diff.  Used for
-   * document-level audit_logs rows whose meaning is already
-   * described by an adjacent activity_logs row.  Item-level rows
-   * are never collapsed.
-   */
-  collapsed?: boolean;
 }) {
   const opLabel = OP_LABEL[row.operation] ?? row.operation;
   const recordKind = kind === 'document' ? 'مستند' : 'بند';
@@ -433,31 +495,37 @@ function ChangeEntry({
           <span className="font-bold">سبب التعديل:</span> {reason}
         </div>
       )}
-      {collapsed ? (
-        <details
-          className="text-[11px]"
-          data-testid={`audit-change-${row.id}-collapsed`}
-        >
-          <summary className="cursor-pointer text-slate-600 font-bold">
-            تفاصيل تقنية
-          </summary>
-          <div className="mt-2">
-            <DiffGrid old={row.old_data} now={row.new_data} />
-          </div>
-        </details>
-      ) : (
-        <DiffGrid old={row.old_data} now={row.new_data} />
-      )}
+      <DiffGrid old={row.old_data} now={row.new_data} />
     </li>
   );
+}
+
+/**
+ * PR-FIX-AUDIT-PANEL-HIDE-NOISE — return the list of business-relevant
+ * keys that actually differ between old_data and new_data.  Used to
+ * decide whether an item-level audit row is informative (changed
+ * unit_price / quantity / refund_amount …) or just a raw UUID swap on
+ * variant_id that the structured edit_request diff already explains.
+ */
+function changedBusinessKeys(row: AuditChangeRow): string[] {
+  const o = (row.old_data as Record<string, any> | null) ?? {};
+  const n = (row.new_data as Record<string, any> | null) ?? {};
+  const keys = new Set<string>([...Object.keys(o), ...Object.keys(n)]);
+  const out: string[] = [];
+  for (const k of keys) {
+    if (NOISY_FIELDS.has(k)) continue;
+    if (!shallowEq(o[k], n[k])) out.push(k);
+  }
+  return out;
 }
 
 /**
  * Return true if `change.changed_at` is within ±5 seconds of any
  * activity row whose `metadata.kind` is a recognized lifecycle
  * discriminator (edit_request_apply, refund_return, etc.).  When
- * true, the document-level audit card is rendered collapsed
- * because its meaning is already described by the activity row.
+ * true, the document-level audit card is hidden from the normal
+ * timeline because its meaning is already described by the activity
+ * row in business-friendly Arabic.
  */
 function isOverlappedByActivity(
   change: AuditChangeRow,
@@ -476,6 +544,25 @@ function isOverlappedByActivity(
     if (Math.abs(aMs - changedAtMs) <= 5_000) return true;
   }
   return false;
+}
+
+/**
+ * PR-FIX-AUDIT-PANEL-HIDE-NOISE — true when an item-level audit row's
+ * only diff is `variant_id` (UUID → UUID, unreadable) AND any
+ * edit_request carries a structured `line_changes` payload that
+ * already shows the readable product before/after.  Also true when
+ * the diff is empty after stripping noise — there's no useful info
+ * to render.
+ */
+function isItemAuditEclipsedByEditRequest(
+  change: AuditChangeRow,
+  editRequests: AuditEditRequestRow[],
+): boolean {
+  const changed = changedBusinessKeys(change);
+  if (changed.length === 0) return true;
+  const onlyVariant = changed.length === 1 && changed[0] === 'variant_id';
+  if (!onlyVariant) return false;
+  return editRequests.some((req) => isLineChangesPayload(req.requested_payload));
 }
 
 function parseIsoMs(iso?: string | null): number | null {
