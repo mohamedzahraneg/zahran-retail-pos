@@ -16,7 +16,6 @@
 import { ArrowLeftRight, Minus, Pencil, Plus } from 'lucide-react';
 import type {
   HeaderEdit,
-  ItemSnapshot,
   LineChangeAdded,
   LineChangeRemoved,
   LineChangeUpdated,
@@ -67,53 +66,76 @@ export function isLineChangesPayload(
 
 // ── Per-line subviews ──────────────────────────────────────────────
 
-function ItemLabel({ item }: { item: ItemSnapshot }) {
-  const parts: string[] = [];
-  if (item.name) parts.push(item.name);
-  else if (item.sku) parts.push(item.sku);
-  else parts.push('—');
-  const meta: string[] = [];
-  if (item.sku && item.name) meta.push(item.sku);
-  if (item.color) meta.push(item.color);
-  if (item.size) meta.push(item.size);
+/**
+ * Renders a single key/value cell.  Used by both the "before" column
+ * and the "after" column of an updated-line diff so the two halves
+ * line up visually with explicit Arabic labels (e.g. "السعر قبل" vs
+ * "السعر بعد"), per spec.  This replaces the earlier compact
+ * strikethrough-arrow form which conveyed the same data in less
+ * scannable form.
+ */
+function DiffCell({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: string;
+  tone: 'before' | 'after' | 'plain';
+}) {
+  const valueClass =
+    tone === 'before'
+      ? 'text-rose-700'
+      : tone === 'after'
+        ? 'text-emerald-700 font-bold'
+        : 'text-slate-800';
   return (
-    <div className="min-w-0">
-      <div className="font-semibold text-slate-800 truncate">
-        {parts.join(' ')}
-      </div>
-      {meta.length > 0 && (
-        <div className="text-[11px] text-slate-500 font-mono truncate">
-          {meta.join(' • ')}
-        </div>
-      )}
+    <div className="flex items-baseline gap-2 text-[12px]">
+      <span className="text-slate-500 shrink-0 w-28">{label}</span>
+      <span className={valueClass}>{value}</span>
     </div>
   );
 }
 
-function FieldDiff({
-  label,
-  before,
-  after,
-  fmt,
-}: {
-  label: string;
-  before: string | number | null | undefined;
-  after: string | number | null | undefined;
-  fmt?: (v: string | number | null | undefined) => string;
-}) {
-  const f = fmt ?? ((v) => (v == null || v === '' ? '—' : String(v)));
-  if (f(before) === f(after)) return null;
-  return (
-    <div className="flex items-center gap-2 text-[12px]">
-      <span className="text-slate-500 shrink-0 w-20">{label}</span>
-      <span className="text-rose-700 line-through">{f(before)}</span>
-      <span className="text-slate-400">←</span>
-      <span className="text-emerald-700 font-bold">{f(after)}</span>
-    </div>
-  );
+function fmtMoneyOrDash(v: string | number | null | undefined): string {
+  if (v == null || v === '') return '—';
+  return fmtMoney(Number(v));
+}
+
+function fmtTextOrDash(v: string | number | null | undefined): string {
+  if (v == null || v === '') return '—';
+  return String(v);
+}
+
+/**
+ * Product-cell display that combines name + SKU when both exist so a
+ * reviewer reading the diff still sees both identifiers next to the
+ * "المنتج قبل/بعد/المحذوف/المضاف" label.  Falls back to whichever
+ * is present.
+ */
+function fmtProduct(
+  name: string | null | undefined,
+  sku: string | null | undefined,
+): string {
+  const n = (name ?? '').trim();
+  const s = (sku ?? '').trim();
+  if (n && s) return `${n} (${s})`;
+  if (n) return n;
+  if (s) return s;
+  return '—';
 }
 
 function UpdatedRow({ row }: { row: LineChangeUpdated }) {
+  // Always show the four canonical pairs (المنتج / الكمية / السعر /
+  // الإجمالي) so reviewers see consistent column headings even when a
+  // particular line only touched one dimension.  Optional secondary
+  // pairs (الكود / ملاحظات) only render when they actually changed.
+  const beforeTotal = (row.before.quantity || 0) * (row.before.unit_price || 0);
+  const afterTotal = (row.after.quantity || 0) * (row.after.unit_price || 0);
+  const skuChanged = (row.before.sku ?? null) !== (row.after.sku ?? null);
+  const notesChanged =
+    (row.before.notes ?? null) !== (row.after.notes ?? null);
+
   return (
     <div
       className="rounded-lg border border-amber-200 bg-amber-50 p-3 space-y-2"
@@ -123,38 +145,79 @@ function UpdatedRow({ row }: { row: LineChangeUpdated }) {
         <Pencil size={12} />
         <span className="text-[11px] font-bold">بند معدل</span>
       </div>
-      <ItemLabel item={row.after} />
-      <div className="space-y-1">
-        <FieldDiff
-          label="الكمية"
-          before={row.before.quantity}
-          after={row.after.quantity}
-        />
-        <FieldDiff
-          label="السعر"
-          before={row.before.unit_price}
-          after={row.after.unit_price}
-          fmt={(v) =>
-            typeof v === 'number' || (typeof v === 'string' && v !== '')
-              ? fmtMoney(Number(v))
-              : '—'
-          }
-        />
-        <FieldDiff
-          label="المنتج"
-          before={row.before.name ?? row.before.sku}
-          after={row.after.name ?? row.after.sku}
-        />
-        <FieldDiff
-          label="الكود"
-          before={row.before.sku}
-          after={row.after.sku}
-        />
-        <FieldDiff
-          label="ملاحظات"
-          before={row.before.notes}
-          after={row.after.notes}
-        />
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1">
+        <div className="space-y-1">
+          <DiffCell
+            label="المنتج قبل"
+            value={fmtProduct(row.before.name, row.before.sku)}
+            tone="before"
+          />
+          <DiffCell
+            label="الكمية قبل"
+            value={fmtTextOrDash(row.before.quantity)}
+            tone="before"
+          />
+          <DiffCell
+            label="السعر قبل"
+            value={fmtMoneyOrDash(row.before.unit_price)}
+            tone="before"
+          />
+          <DiffCell
+            label="الإجمالي قبل"
+            value={fmtMoney(beforeTotal)}
+            tone="before"
+          />
+          {skuChanged && (
+            <DiffCell
+              label="الكود قبل"
+              value={fmtTextOrDash(row.before.sku)}
+              tone="before"
+            />
+          )}
+          {notesChanged && (
+            <DiffCell
+              label="ملاحظات قبل"
+              value={fmtTextOrDash(row.before.notes)}
+              tone="before"
+            />
+          )}
+        </div>
+        <div className="space-y-1">
+          <DiffCell
+            label="المنتج بعد"
+            value={fmtProduct(row.after.name, row.after.sku)}
+            tone="after"
+          />
+          <DiffCell
+            label="الكمية بعد"
+            value={fmtTextOrDash(row.after.quantity)}
+            tone="after"
+          />
+          <DiffCell
+            label="السعر بعد"
+            value={fmtMoneyOrDash(row.after.unit_price)}
+            tone="after"
+          />
+          <DiffCell
+            label="الإجمالي بعد"
+            value={fmtMoney(afterTotal)}
+            tone="after"
+          />
+          {skuChanged && (
+            <DiffCell
+              label="الكود بعد"
+              value={fmtTextOrDash(row.after.sku)}
+              tone="after"
+            />
+          )}
+          {notesChanged && (
+            <DiffCell
+              label="ملاحظات بعد"
+              value={fmtTextOrDash(row.after.notes)}
+              tone="after"
+            />
+          )}
+        </div>
       </div>
     </div>
   );
@@ -164,18 +227,30 @@ function RemovedRow({ row }: { row: LineChangeRemoved }) {
   const total = (row.before.quantity || 0) * (row.before.unit_price || 0);
   return (
     <div
-      className="rounded-lg border border-rose-200 bg-rose-50 p-3 space-y-1"
+      className="rounded-lg border border-rose-200 bg-rose-50 p-3 space-y-2"
       data-testid="er-diff-removed-row"
     >
       <div className="flex items-center gap-2 text-rose-800">
         <Minus size={12} />
         <span className="text-[11px] font-bold">بند محذوف</span>
       </div>
-      <ItemLabel item={row.before} />
-      <div className="text-[11px] text-rose-700/90 flex items-center gap-3">
-        <span>الكمية: {row.before.quantity}</span>
-        <span>السعر: {fmtMoney(row.before.unit_price)}</span>
-        <span>الإجمالي: {fmtMoney(total)}</span>
+      <div className="space-y-1">
+        <DiffCell
+          label="المنتج المحذوف"
+          value={fmtProduct(row.before.name, row.before.sku)}
+          tone="plain"
+        />
+        <DiffCell
+          label="الكمية"
+          value={fmtTextOrDash(row.before.quantity)}
+          tone="plain"
+        />
+        <DiffCell
+          label="السعر"
+          value={fmtMoneyOrDash(row.before.unit_price)}
+          tone="plain"
+        />
+        <DiffCell label="الإجمالي" value={fmtMoney(total)} tone="plain" />
       </div>
     </div>
   );
@@ -185,24 +260,38 @@ function AddedRow({ row }: { row: LineChangeAdded }) {
   const total = (row.quantity || 0) * (row.unit_price || 0);
   return (
     <div
-      className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 space-y-1"
+      className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 space-y-2"
       data-testid="er-diff-added-row"
     >
       <div className="flex items-center gap-2 text-emerald-800">
         <Plus size={12} />
         <span className="text-[11px] font-bold">بند مضاف</span>
       </div>
-      <ItemLabel item={row} />
-      <div className="text-[11px] text-emerald-700/90 flex items-center gap-3">
-        <span>الكمية: {row.quantity}</span>
-        <span>السعر: {fmtMoney(row.unit_price)}</span>
-        <span>الإجمالي: {fmtMoney(total)}</span>
+      <div className="space-y-1">
+        <DiffCell
+          label="المنتج المضاف"
+          value={fmtProduct(row.name, row.sku)}
+          tone="plain"
+        />
+        <DiffCell
+          label="الكمية"
+          value={fmtTextOrDash(row.quantity)}
+          tone="plain"
+        />
+        <DiffCell
+          label="السعر"
+          value={fmtMoneyOrDash(row.unit_price)}
+          tone="plain"
+        />
+        <DiffCell label="الإجمالي" value={fmtMoney(total)} tone="plain" />
+        {row.notes && (
+          <DiffCell
+            label="ملاحظات"
+            value={fmtTextOrDash(row.notes)}
+            tone="plain"
+          />
+        )}
       </div>
-      {row.notes && (
-        <div className="text-[11px] text-slate-600 italic">
-          ملاحظات: {row.notes}
-        </div>
-      )}
     </div>
   );
 }

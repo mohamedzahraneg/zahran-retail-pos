@@ -459,15 +459,43 @@ describe('<ReturnsAuditPanel />', () => {
     expect(diff.textContent).toMatch(/ملخص التعديل المطلوب/);
 
     // Each kind of change shows up as its own row.
-    expect(screen.getByTestId('er-diff-updated-row').textContent).toMatch(
-      /تيشيرت أزرق/,
-    );
-    expect(screen.getByTestId('er-diff-removed-row').textContent).toMatch(
-      /بنطلون أسود/,
-    );
-    expect(screen.getByTestId('er-diff-added-row').textContent).toMatch(
-      /منتج جديد/,
-    );
+    const updated = screen.getByTestId('er-diff-updated-row');
+    const removed = screen.getByTestId('er-diff-removed-row');
+    const added = screen.getByTestId('er-diff-added-row');
+
+    expect(updated.textContent).toMatch(/تيشيرت أزرق/);
+    expect(removed.textContent).toMatch(/بنطلون أسود/);
+    expect(added.textContent).toMatch(/منتج جديد/);
+
+    // PR-FIN-RETURNS-EXCHANGES-EDIT-REQUEST-LABELS — every per-line
+    // diff row carries explicit Arabic before/after labels per the
+    // user spec (instead of the older compact strikethrough-arrow
+    // form that conveyed the same data without literal labels).
+    for (const label of [
+      'المنتج قبل',
+      'المنتج بعد',
+      'الكمية قبل',
+      'الكمية بعد',
+      'السعر قبل',
+      'السعر بعد',
+      'الإجمالي قبل',
+      'الإجمالي بعد',
+    ]) {
+      expect(updated.textContent).toContain(label);
+    }
+    expect(removed.textContent).toContain('المنتج المحذوف');
+    expect(removed.textContent).toContain('الكمية');
+    expect(removed.textContent).toContain('السعر');
+    expect(removed.textContent).toContain('الإجمالي');
+    expect(added.textContent).toContain('المنتج المضاف');
+    expect(added.textContent).toContain('الكمية');
+    expect(added.textContent).toContain('السعر');
+    expect(added.textContent).toContain('الإجمالي');
+
+    // The actual before/after values are still rendered alongside
+    // their labels so reviewers can compare.
+    expect(updated.textContent).toMatch(/450/); // before price
+    expect(updated.textContent).toMatch(/400/); // after price
 
     // Totals appear in the summary footer.
     const totals = screen.getByTestId('er-diff-totals');
