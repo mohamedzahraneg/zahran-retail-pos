@@ -40,17 +40,60 @@ const OP_LABEL: Record<'I' | 'U' | 'D', string> = {
   D: 'حذف',
 };
 
-const fmtDate = (iso?: string | null) => {
-  if (!iso) return '—';
+function fmtTimestamp(iso?: string | null): {
+  day: string;
+  ymd: string;
+  hms: string;
+} | null {
+  if (!iso) return null;
   try {
-    return new Date(iso).toLocaleString('ar-EG', {
-      dateStyle: 'short',
-      timeStyle: 'short',
-    });
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return null;
+    const day = new Intl.DateTimeFormat('ar-EG', { weekday: 'long' }).format(d);
+    const ymd = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const hms = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
+    return { day, ymd, hms };
   } catch {
-    return iso;
+    return null;
   }
-};
+}
+
+/**
+ * Inline triple — اليوم / التاريخ / الساعة — used by every entry kind.
+ * Renders a placeholder em-dash if the timestamp is missing or unparseable.
+ */
+function Timestamp({
+  iso,
+  tone = 'slate',
+}: {
+  iso: string | null | undefined;
+  tone?: 'slate' | 'amber';
+}) {
+  const ts = fmtTimestamp(iso);
+  const labelClass =
+    tone === 'amber' ? 'text-amber-600' : 'text-slate-500';
+  const valueClass =
+    tone === 'amber' ? 'text-amber-800' : 'text-slate-700';
+  const sepClass = tone === 'amber' ? 'text-amber-300' : 'text-slate-300';
+  if (!ts) {
+    return <span className={valueClass}>—</span>;
+  }
+  return (
+    <span
+      className="inline-flex items-center gap-1 flex-wrap"
+      data-testid="audit-timestamp"
+    >
+      <span className={`font-bold ${labelClass}`}>اليوم:</span>
+      <span className={valueClass}>{ts.day}</span>
+      <span className={sepClass}>·</span>
+      <span className={`font-bold ${labelClass}`}>التاريخ:</span>
+      <span className={`${valueClass} font-mono`}>{ts.ymd}</span>
+      <span className={sepClass}>·</span>
+      <span className={`font-bold ${labelClass}`}>الساعة:</span>
+      <span className={`${valueClass} font-mono`}>{ts.hms}</span>
+    </span>
+  );
+}
 
 const sourceLabel = (source: 'audit' | 'activity' | 'amendment') =>
   source === 'audit'
@@ -231,9 +274,6 @@ function ChangeEntry({
         <span className="font-bold text-slate-700">نوع العملية:</span>
         <span className="text-slate-600">{opLabel}</span>
         <span className="text-slate-300">·</span>
-        <span className="font-bold text-slate-700">تاريخ التعديل:</span>
-        <span className="text-slate-600">{fmtDate(row.changed_at)}</span>
-        <span className="text-slate-300">·</span>
         <User size={12} className="text-slate-400" />
         <span className="font-bold text-slate-700">تم بواسطة:</span>
         <span className="text-slate-600">
@@ -242,6 +282,9 @@ function ChangeEntry({
         <span className="ms-auto text-[10px] font-mono text-slate-400">
           {sourceLabel('audit')}
         </span>
+      </div>
+      <div className="text-[11px]">
+        <Timestamp iso={row.changed_at} />
       </div>
       {reason && (
         <div className="text-[11px] text-slate-700 bg-white rounded-lg px-2 py-1.5 border border-slate-100">
@@ -268,9 +311,6 @@ function ActivityEntry({ row }: { row: AuditActivityRow }) {
         <span className="font-bold text-slate-700">نوع العملية:</span>
         <span className="text-slate-600">{row.action}</span>
         <span className="text-slate-300">·</span>
-        <span className="font-bold text-slate-700">تاريخ التعديل:</span>
-        <span className="text-slate-600">{fmtDate(row.created_at)}</span>
-        <span className="text-slate-300">·</span>
         <User size={12} className="text-slate-400" />
         <span className="font-bold text-slate-700">تم بواسطة:</span>
         <span className="text-slate-600">
@@ -280,10 +320,51 @@ function ActivityEntry({ row }: { row: AuditActivityRow }) {
           {sourceLabel('activity')}
         </span>
       </div>
+      <div className="text-[11px]">
+        <Timestamp iso={row.created_at} />
+      </div>
       {row.summary && (
         <div className="text-[12px] text-slate-700">{row.summary}</div>
       )}
+      <ActivityMetaSummary metadata={row.metadata} />
     </li>
+  );
+}
+
+/**
+ * Surface the lifecycle event extras the BE writes (status_before /
+ * status_after / reason / amount / refund_method / etc.) so users can
+ * read the lifecycle without expanding raw JSON.
+ */
+function ActivityMetaSummary({ metadata }: { metadata: any }) {
+  if (!metadata || typeof metadata !== 'object') return null;
+  const md = metadata as Record<string, any>;
+  const interesting: Array<{ label: string; value: string }> = [];
+  if (md.kind) interesting.push({ label: 'نوع الحدث', value: String(md.kind) });
+  if (md.status_before)
+    interesting.push({ label: 'الحالة قبل', value: String(md.status_before) });
+  if (md.status_after)
+    interesting.push({ label: 'الحالة بعد', value: String(md.status_after) });
+  if (md.reason) interesting.push({ label: 'سبب الإجراء', value: String(md.reason) });
+  if (md.notes) interesting.push({ label: 'ملاحظات', value: String(md.notes) });
+  if (md.refund_method)
+    interesting.push({ label: 'طريقة الصرف', value: String(md.refund_method) });
+  if (md.payment_method)
+    interesting.push({ label: 'طريقة الدفع', value: String(md.payment_method) });
+  if (md.net_refund !== undefined)
+    interesting.push({ label: 'صافي المردود', value: String(md.net_refund) });
+  if (md.price_difference !== undefined)
+    interesting.push({ label: 'فرق السعر', value: String(md.price_difference) });
+  if (interesting.length === 0) return null;
+  return (
+    <ul className="grid grid-cols-1 sm:grid-cols-2 gap-1 text-[11px]">
+      {interesting.map((kv, i) => (
+        <li key={i} className="flex items-baseline gap-2">
+          <span className="font-bold text-slate-500">{kv.label}:</span>
+          <span className="text-slate-700 break-all">{kv.value}</span>
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -302,15 +383,15 @@ function AmendmentEntry({ row }: { row: AuditAmendmentRow }) {
         <span className="font-bold text-amber-800">نوع العملية:</span>
         <span className="text-amber-700">{row.amendment_kind}</span>
         <span className="text-amber-300">·</span>
-        <span className="font-bold text-amber-800">تاريخ التعديل:</span>
-        <span className="text-amber-700">{fmtDate(row.created_at)}</span>
-        <span className="text-amber-300">·</span>
         <User size={12} className="text-amber-500" />
         <span className="font-bold text-amber-800">تم بواسطة:</span>
         <span className="text-amber-700">{row.created_by_name || '—'}</span>
         <span className="ms-auto text-[10px] font-mono text-amber-500">
           {sourceLabel('amendment')}
         </span>
+      </div>
+      <div className="text-[11px]">
+        <Timestamp iso={row.created_at} tone="amber" />
       </div>
       {row.reason_text && (
         <div className="text-[11px] text-amber-900 bg-white rounded-lg px-2 py-1.5 border border-amber-100">

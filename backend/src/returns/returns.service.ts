@@ -171,6 +171,40 @@ export class ReturnsService {
         );
       }
 
+      // PR-FIN-RETURNS-EXCHANGES-AUDIT — best-effort lifecycle log.
+      // Existing project convention: action enum is fixed (login,
+      // logout, create, update, delete, void, approve, reject, print,
+      // export, import, sync) so the precise lifecycle event is
+      // disambiguated via `extra.kind` (mirrors the existing cancel
+      // flow which uses action='void' + extra.kind='cancel_return').
+      if (this.audit) {
+        try {
+          await this.audit.writeActivity({
+            user_id: userId,
+            action: 'create',
+            entity: 'return',
+            entity_id: ret.id,
+            summary: `طلب مرتجع ${ret.return_no}: ${dto.reason}`,
+            extra: {
+              kind: 'create_return',
+              return_no: ret.return_no,
+              status_after: ret.status,
+              reason: dto.reason,
+              reason_details: dto.reason_details ?? null,
+              total_refund: Number(ret.total_refund),
+              restocking_fee: Number(ret.restocking_fee),
+              net_refund: Number(ret.net_refund),
+              refund_method: dto.refund_method ?? null,
+              original_invoice_id: dto.original_invoice_id ?? null,
+              warehouse_id: dto.warehouse_id,
+              items_count: dto.items.length,
+            },
+          });
+        } catch {
+          /* swallowed — audit is best-effort */
+        }
+      }
+
       return {
         id: ret.id,
         return_no: ret.return_no,
@@ -233,6 +267,29 @@ export class ReturnsService {
       );
 
       // GL posting moved to refund() — see header comment above.
+
+      // PR-FIN-RETURNS-EXCHANGES-AUDIT — lifecycle log (best-effort).
+      if (this.audit) {
+        try {
+          await this.audit.writeActivity({
+            user_id: userId,
+            action: 'approve',
+            entity: 'return',
+            entity_id: id,
+            summary: `اعتماد مرتجع ${ret.return_no}${dto.notes ? `: ${dto.notes}` : ''}`,
+            extra: {
+              kind: 'approve_return',
+              return_no: ret.return_no,
+              status_before: 'pending',
+              status_after: 'approved',
+              notes: dto.notes ?? null,
+              warehouse_id: ret.warehouse_id,
+            },
+          });
+        } catch {
+          /* swallowed — audit is best-effort */
+        }
+      }
 
       return this.findOne(id);
     });
@@ -369,12 +426,47 @@ export class ReturnsService {
         );
       }
 
+      // PR-FIN-RETURNS-EXCHANGES-AUDIT — lifecycle log (best-effort).
+      // The activity_action enum does not have a literal 'refund'
+      // value; we use 'update' (a state transition from approved →
+      // refunded) and disambiguate via extra.kind='refund_return'.
+      // Same disambiguation pattern as cancel() above.
+      if (this.audit) {
+        try {
+          await this.audit.writeActivity({
+            user_id: userId,
+            action: 'update',
+            entity: 'return',
+            entity_id: id,
+            summary: `صرف مرتجع ${ret.return_no} (${dto.refund_method})`,
+            extra: {
+              kind: 'refund_return',
+              return_no: ret.return_no,
+              status_before: 'approved',
+              status_after: 'refunded',
+              refund_method: dto.refund_method,
+              net_refund: Number(ret.net_refund),
+              total_refund: Number(ret.total_refund),
+              shift_id: resolvedShiftId,
+              cashbox_id: resolvedCashboxId,
+              je_entry_id:
+                postResult && (postResult as any).entry_id
+                  ? (postResult as any).entry_id
+                  : null,
+              notes: dto.notes ?? null,
+            },
+          });
+        } catch {
+          /* swallowed — audit is best-effort */
+        }
+      }
+
       return this.findOne(id);
     });
   }
 
   async reject(id: string, dto: RejectReturnDto, userId: string) {
-    await this.mustBeStatus(id, ['pending']);
+    const ret = await this.mustBeStatus(id, ['pending']);
     await this.ds.query(
       `
       UPDATE returns
@@ -385,6 +477,29 @@ export class ReturnsService {
       `,
       [id, `\n[Rejected by ${userId}] ${dto.reason}`],
     );
+
+    // PR-FIN-RETURNS-EXCHANGES-AUDIT — lifecycle log (best-effort).
+    if (this.audit) {
+      try {
+        await this.audit.writeActivity({
+          user_id: userId,
+          action: 'reject',
+          entity: 'return',
+          entity_id: id,
+          summary: `رفض مرتجع ${ret.return_no}: ${dto.reason}`,
+          extra: {
+            kind: 'reject_return',
+            return_no: ret.return_no,
+            status_before: 'pending',
+            status_after: 'rejected',
+            reason: dto.reason,
+          },
+        });
+      } catch {
+        /* swallowed — audit is best-effort */
+      }
+    }
+
     return this.findOne(id);
   }
 
@@ -1300,6 +1415,41 @@ export class ReturnsService {
           throw new BadRequestException(
             `فشل تسجيل فرق الاستبدال نقدياً: ${res.error}`,
           );
+        }
+      }
+
+      // PR-FIN-RETURNS-EXCHANGES-AUDIT — lifecycle log (best-effort).
+      // Exchanges are one-shot today (no separate approve/refund step),
+      // so a single 'create' activity captures the full lifecycle.
+      if (this.audit) {
+        try {
+          await this.audit.writeActivity({
+            user_id: userId,
+            action: 'create',
+            entity: 'exchange',
+            entity_id: exc.id,
+            summary: `إنشاء استبدال ${exc.exchange_no}: فرق سعر ${price_difference}`,
+            extra: {
+              kind: 'create_exchange',
+              exchange_no: exc.exchange_no,
+              status_after: 'completed',
+              original_invoice_id: dto.original_invoice_id,
+              new_invoice_id: newInv.id,
+              new_invoice_no: newInv.invoice_no,
+              returned_value,
+              new_items_value,
+              price_difference,
+              payment_method: dto.payment_method ?? null,
+              refund_method: dto.refund_method ?? null,
+              shift_id: resolvedShiftId,
+              cashbox_id: resolvedCashboxId,
+              warehouse_id: invoice?.warehouse_id ?? null,
+              reason: dto.reason ?? null,
+              reason_details: dto.reason_details ?? null,
+            },
+          });
+        } catch {
+          /* swallowed — audit is best-effort */
         }
       }
 

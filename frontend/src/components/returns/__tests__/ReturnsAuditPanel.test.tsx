@@ -205,6 +205,69 @@ describe('<ReturnsAuditPanel />', () => {
     expect(activityCard.textContent).toMatch(/تم إلغاء المرتجع/);
   });
 
+  it('renders the day/date/time triple (اليوم / التاريخ / الساعة) with seconds on every entry', async () => {
+    (returnsApi.getReturnAudit as any).mockResolvedValueOnce(populated);
+    renderPanel('return');
+    await waitFor(() =>
+      expect(screen.getByTestId('audit-entries')).toBeInTheDocument(),
+    );
+
+    const stamps = screen.getAllByTestId('audit-timestamp');
+    // 4 entries (document + item + activity + amendment) = 4 timestamps.
+    expect(stamps.length).toBeGreaterThanOrEqual(4);
+    for (const ts of stamps) {
+      expect(ts.textContent).toMatch(/اليوم:/);
+      expect(ts.textContent).toMatch(/التاريخ:/);
+      expect(ts.textContent).toMatch(/الساعة:/);
+      // ISO-style date.
+      expect(ts.textContent).toMatch(/\d{4}-\d{2}-\d{2}/);
+      // HH:MM:SS — three pairs of digits separated by colons.
+      expect(ts.textContent).toMatch(/\d{2}:\d{2}:\d{2}/);
+    }
+  });
+
+  it('surfaces lifecycle metadata (status_before / status_after / kind) when activity carries them', async () => {
+    const withMeta = {
+      ...empty,
+      activity: [
+        {
+          id: 'act-meta-1',
+          user_id: 'u-1',
+          username: 'admin',
+          full_name: 'مدير النظام',
+          action: 'update',
+          entity: 'return',
+          entity_id: 'doc-1',
+          summary: 'صرف مرتجع RET-1 (cash)',
+          metadata: {
+            kind: 'refund_return',
+            status_before: 'approved',
+            status_after: 'refunded',
+            refund_method: 'cash',
+            net_refund: 150,
+          },
+          ip_address: '10.0.0.1',
+          created_at: '2026-05-09T11:00:00Z',
+        },
+      ],
+    };
+    (returnsApi.getReturnAudit as any).mockResolvedValueOnce(withMeta);
+    renderPanel('return');
+    await waitFor(() =>
+      expect(
+        screen.getByTestId('audit-activity-act-meta-1'),
+      ).toBeInTheDocument(),
+    );
+    const card = screen.getByTestId('audit-activity-act-meta-1');
+    expect(card.textContent).toMatch(/الحالة قبل/);
+    expect(card.textContent).toMatch(/approved/);
+    expect(card.textContent).toMatch(/الحالة بعد/);
+    expect(card.textContent).toMatch(/refunded/);
+    expect(card.textContent).toMatch(/refund_return/);
+    expect(card.textContent).toMatch(/طريقة الصرف/);
+    expect(card.textContent).toMatch(/cash/);
+  });
+
   it('renders the literal "تم بواسطة:" prefix on every entry kind', async () => {
     (returnsApi.getReturnAudit as any).mockResolvedValueOnce(populated);
     renderPanel('return');
