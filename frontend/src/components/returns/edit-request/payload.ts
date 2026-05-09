@@ -113,11 +113,23 @@ function round2(n: number): number {
  * Build the `requested_payload` object the BE will store verbatim.
  * Returns `null` when the user has produced no actual change — the
  * modal uses this to keep submit disabled.
+ *
+ * PR-FIN-RETURNS-EXCHANGES-EDIT-REQUEST-LOOKUP — defense in depth:
+ * any added row whose `variant_id` is null/empty is dropped.  The
+ * modal already gates the "إضافة لطلب التعديل" button on a resolved
+ * lookup, so this filter should never fire in practice — but if a
+ * future code path manages to enqueue an unresolved row we'd rather
+ * silently drop it than send a fake variant to the BE.
  */
 export function buildPayload(state: BuilderState): LineChangesPayload | null {
   const updated: LineChangeUpdated[] = [];
   const removed: LineChangeRemoved[] = [];
-  const added: LineChangeAdded[] = state.added.map((row) => ({ ...row.after }));
+  const added: LineChangeAdded[] = state.added
+    .map((row) => ({ ...row.after }))
+    .filter((snap) => {
+      const id = (snap.variant_id ?? '').toString().trim();
+      return id.length > 0;
+    });
 
   for (const row of Object.values(state.existing)) {
     if (row.removed) {

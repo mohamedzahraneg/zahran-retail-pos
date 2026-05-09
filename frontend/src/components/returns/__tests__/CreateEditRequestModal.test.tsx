@@ -320,21 +320,43 @@ describe('CreateEditRequestModal — line editor', () => {
     );
   });
 
-  it('adding a new line pushes it under "بند مضاف" in the preview', async () => {
+  it('adding a new line via the gated lookup flow pushes it under "بند مضاف"', async () => {
+    (productsApi.byBarcode as any).mockResolvedValue({
+      product: { name_ar: 'منتج جديد' },
+      variant: {
+        id: 'var-resolved-1',
+        sku: 'SKU-NEW-1',
+        selling_price: '125',
+      },
+    });
     renderModal();
     await screen.findByTestId('er-existing-line-ri-1');
-    fireEvent.change(screen.getByTestId('er-add-line-name'), {
-      target: { value: 'منتج جديد' },
-    });
-    fireEvent.change(screen.getByTestId('er-add-line-sku'), {
-      target: { value: 'SKU-NEW-1' },
-    });
+
+    // Form is hidden by default; toggle button is visible.
+    expect(
+      screen.queryByTestId('er-add-line-form'),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('er-add-line-toggle'));
+
+    // Form renders.  SKU lookup is required first.
+    expect(screen.getByTestId('er-add-line-form')).toBeInTheDocument();
+    fireEvent.change(
+      screen.getByTestId('er-add-line-lookup-sku-input'),
+      { target: { value: 'SKU-NEW-1' } },
+    );
+    fireEvent.click(screen.getByTestId('er-add-line-lookup-search'));
+
+    // Resolved → success card visible, qty/price inputs render.
+    await waitFor(() =>
+      expect(
+        screen.getByTestId('er-add-line-lookup-resolved'),
+      ).toBeInTheDocument(),
+    );
     fireEvent.change(screen.getByTestId('er-add-line-quantity'), {
       target: { value: '2' },
     });
-    fireEvent.change(screen.getByTestId('er-add-line-price'), {
-      target: { value: '125' },
-    });
+    // Suggested price was pre-filled from variant.selling_price.
+
     fireEvent.click(screen.getByTestId('er-add-line-submit'));
 
     await waitFor(() =>
@@ -346,6 +368,293 @@ describe('CreateEditRequestModal — line editor', () => {
     // Drafts list under the form shows the same line.
     const drafts = screen.getByTestId('er-add-line-drafts');
     expect(within(drafts).getByText('منتج جديد')).toBeInTheDocument();
+    // Form is closed again after a successful add.
+    expect(
+      screen.queryByTestId('er-add-line-form'),
+    ).not.toBeInTheDocument();
+  });
+});
+
+// ─── Product-lookup gating on add-new-line flow ────────────────────
+
+describe('CreateEditRequestModal — add-new-line product lookup', () => {
+  it('does NOT show the add-line form on modal open (button-gated)', async () => {
+    renderModal();
+    await screen.findByTestId('er-existing-line-ri-1');
+    // The toggle button is visible.
+    expect(screen.getByTestId('er-add-line-toggle')).toHaveTextContent(
+      'إضافة منتج جديد لطلب التعديل',
+    );
+    // The form itself is NOT mounted.
+    expect(
+      screen.queryByTestId('er-add-line-form'),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId('er-add-line-lookup-sku-input'),
+    ).not.toBeInTheDocument();
+  });
+
+  it('clicking the toggle button shows the form with the SKU lookup input', async () => {
+    renderModal();
+    fireEvent.click(await screen.findByTestId('er-add-line-toggle'));
+    expect(screen.getByTestId('er-add-line-form')).toBeInTheDocument();
+    expect(
+      screen.getByTestId('er-add-line-lookup-sku-input'),
+    ).toBeInTheDocument();
+    // Toggle button is gone while the form is open.
+    expect(
+      screen.queryByTestId('er-add-line-toggle'),
+    ).not.toBeInTheDocument();
+  });
+
+  it('cancel button hides the form, clears the draft, and re-shows the toggle', async () => {
+    (productsApi.byBarcode as any).mockResolvedValue({
+      product: { name_ar: 'منتج' },
+      variant: { id: 'v-1', sku: 'X' },
+    });
+    renderModal();
+    fireEvent.click(await screen.findByTestId('er-add-line-toggle'));
+    fireEvent.change(
+      screen.getByTestId('er-add-line-lookup-sku-input'),
+      { target: { value: 'X' } },
+    );
+    fireEvent.click(screen.getByTestId('er-add-line-lookup-search'));
+    await waitFor(() =>
+      expect(
+        screen.getByTestId('er-add-line-lookup-resolved'),
+      ).toBeInTheDocument(),
+    );
+
+    fireEvent.click(screen.getByTestId('er-add-line-cancel'));
+    expect(
+      screen.queryByTestId('er-add-line-form'),
+    ).not.toBeInTheDocument();
+    expect(screen.getByTestId('er-add-line-toggle')).toBeInTheDocument();
+
+    // Re-opening the form starts fresh: no resolved card, no draft.
+    fireEvent.click(screen.getByTestId('er-add-line-toggle'));
+    expect(
+      screen.queryByTestId('er-add-line-lookup-resolved'),
+    ).not.toBeInTheDocument();
+    expect(
+      (
+        screen.getByTestId(
+          'er-add-line-lookup-sku-input',
+        ) as HTMLInputElement
+      ).value,
+    ).toBe('');
+  });
+
+  it('empty SKU blocks adding and shows "كود المنتج مطلوب"', async () => {
+    renderModal();
+    fireEvent.click(await screen.findByTestId('er-add-line-toggle'));
+    fireEvent.click(screen.getByTestId('er-add-line-lookup-search'));
+    expect(
+      screen.getByTestId('er-add-line-lookup-error-empty').textContent,
+    ).toMatch(/كود المنتج مطلوب/);
+    expect(productsApi.byBarcode).not.toHaveBeenCalled();
+    // No qty/price/notes/Add controls until resolved.
+    expect(
+      screen.queryByTestId('er-add-line-quantity'),
+    ).not.toBeInTheDocument();
+  });
+
+  it('unknown SKU blocks adding and shows "كود المنتج غير موجود في قاعدة البيانات"', async () => {
+    (productsApi.byBarcode as any).mockRejectedValueOnce(
+      new Error('not found'),
+    );
+    renderModal();
+    fireEvent.click(await screen.findByTestId('er-add-line-toggle'));
+    fireEvent.change(
+      screen.getByTestId('er-add-line-lookup-sku-input'),
+      { target: { value: 'FAKE-SKU' } },
+    );
+    fireEvent.click(screen.getByTestId('er-add-line-lookup-search'));
+
+    await waitFor(() =>
+      expect(
+        screen.getByTestId('er-add-line-lookup-error-not-found').textContent,
+      ).toMatch(/كود المنتج غير موجود في قاعدة البيانات/),
+    );
+    // Add button stays disabled while no variant is resolved, so a
+    // misclick can't push a fake row through.
+    expect(
+      screen.getByTestId('er-add-line-submit') as HTMLButtonElement,
+    ).toBeDisabled();
+    expect(
+      screen.queryByTestId('er-diff-added-row'),
+    ).not.toBeInTheDocument();
+  });
+
+  it('known SKU resolves the product and enables the Add button', async () => {
+    (productsApi.byBarcode as any).mockResolvedValueOnce({
+      product: { name_ar: 'منتج موجود', base_price: 200 },
+      variant: { id: 'var-9', sku: 'SKU-OK', selling_price: '250' },
+    });
+    renderModal();
+    fireEvent.click(await screen.findByTestId('er-add-line-toggle'));
+    fireEvent.change(
+      screen.getByTestId('er-add-line-lookup-sku-input'),
+      { target: { value: 'SKU-OK' } },
+    );
+    fireEvent.click(screen.getByTestId('er-add-line-lookup-search'));
+
+    const resolved = await screen.findByTestId(
+      'er-add-line-lookup-resolved',
+    );
+    expect(resolved.textContent).toMatch(/تم العثور على المنتج/);
+    expect(resolved.textContent).toMatch(/منتج موجود/);
+    const submit = screen.getByTestId(
+      'er-add-line-submit',
+    ) as HTMLButtonElement;
+    expect(submit.disabled).toBe(false);
+  });
+
+  it('submitted payload includes the resolved variant_id + canonical SKU/name (no fakes possible)', async () => {
+    (productsApi.byBarcode as any).mockResolvedValueOnce({
+      product: { name_ar: 'منتج محسوم' },
+      variant: { id: 'var-final', sku: 'SKU-CANON', selling_price: '99' },
+    });
+    (returnsApi.createReturnEditRequest as any).mockResolvedValue({ id: 'er' });
+    renderModal();
+
+    // Add the new line via the lookup flow.
+    fireEvent.click(await screen.findByTestId('er-add-line-toggle'));
+    fireEvent.change(
+      screen.getByTestId('er-add-line-lookup-sku-input'),
+      { target: { value: 'SKU-CANON' } },
+    );
+    fireEvent.click(screen.getByTestId('er-add-line-lookup-search'));
+    await screen.findByTestId('er-add-line-lookup-resolved');
+    fireEvent.click(screen.getByTestId('er-add-line-submit'));
+
+    fireEvent.change(screen.getByTestId('create-edit-request-reason'), {
+      target: { value: 'إضافة منتج بعد التحقق' },
+    });
+    await waitFor(() =>
+      expect(
+        (
+          screen.getByTestId(
+            'create-edit-request-submit',
+          ) as HTMLButtonElement
+        ).disabled,
+      ).toBe(false),
+    );
+    fireEvent.click(screen.getByTestId('create-edit-request-submit'));
+
+    await waitFor(() =>
+      expect(returnsApi.createReturnEditRequest).toHaveBeenCalledTimes(1),
+    );
+    const [, body] = (returnsApi.createReturnEditRequest as any).mock
+      .calls[0];
+    expect(body.requested_payload.lines.added).toHaveLength(1);
+    const addedLine = body.requested_payload.lines.added[0];
+    expect(addedLine.variant_id).toBe('var-final');
+    expect(addedLine.sku).toBe('SKU-CANON');
+    expect(addedLine.name).toBe('منتج محسوم');
+    // Defense in depth: requested_payload never carries an added line
+    // with a null/empty variant_id, no matter what the user typed.
+    for (const line of body.requested_payload.lines.added) {
+      expect(line.variant_id).toBeTruthy();
+      expect(typeof line.variant_id).toBe('string');
+    }
+  });
+});
+
+// ─── Product-replacement on existing line ──────────────────────────
+
+describe('CreateEditRequestModal — replace product on existing line', () => {
+  it('blocks replacement when the new SKU is unknown (no variant_id swap)', async () => {
+    (productsApi.byBarcode as any).mockRejectedValueOnce(
+      new Error('not found'),
+    );
+    renderModal();
+    fireEvent.click(
+      await screen.findByTestId('er-existing-line-ri-1-edit'),
+    );
+    fireEvent.click(
+      screen.getByTestId('er-line-editor-ri-1-change-product'),
+    );
+    fireEvent.change(
+      screen.getByTestId('er-line-editor-ri-1-lookup-sku-input'),
+      { target: { value: 'BAD-SKU' } },
+    );
+    fireEvent.click(
+      screen.getByTestId('er-line-editor-ri-1-lookup-search'),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByTestId(
+          'er-line-editor-ri-1-lookup-error-not-found',
+        ).textContent,
+      ).toMatch(/كود المنتج الجديد غير موجود/),
+    );
+    // Live diff still shows the original product identity (no swap
+    // happened) — so no updated row exists for ri-1 yet.
+    expect(
+      screen.queryByTestId('er-diff-updated-row'),
+    ).not.toBeInTheDocument();
+  });
+
+  it('updates after.variant_id when the new SKU is known', async () => {
+    (productsApi.byBarcode as any).mockResolvedValueOnce({
+      product: { name_ar: 'منتج بديل' },
+      variant: {
+        id: 'var-replacement',
+        sku: 'SKU-REPL',
+        selling_price: '600',
+      },
+    });
+    (returnsApi.createReturnEditRequest as any).mockResolvedValue({ id: 'er' });
+    renderModal();
+
+    fireEvent.click(
+      await screen.findByTestId('er-existing-line-ri-1-edit'),
+    );
+    fireEvent.click(
+      screen.getByTestId('er-line-editor-ri-1-change-product'),
+    );
+    fireEvent.change(
+      screen.getByTestId('er-line-editor-ri-1-lookup-sku-input'),
+      { target: { value: 'SKU-REPL' } },
+    );
+    fireEvent.click(
+      screen.getByTestId('er-line-editor-ri-1-lookup-search'),
+    );
+    await screen.findByTestId('er-line-editor-ri-1-lookup-resolved');
+
+    // Snapshot updated → live diff shows the replacement.
+    await waitFor(() =>
+      expect(screen.getByTestId('er-diff-updated-row')).toBeInTheDocument(),
+    );
+    const updated = screen.getByTestId('er-diff-updated-row');
+    expect(updated.textContent).toMatch(/منتج بديل/);
+    expect(updated.textContent).toMatch(/SKU-REPL/);
+
+    // Submit and confirm the payload carries the new variant_id.
+    fireEvent.change(screen.getByTestId('create-edit-request-reason'), {
+      target: { value: 'استبدال المنتج' },
+    });
+    await waitFor(() =>
+      expect(
+        (
+          screen.getByTestId(
+            'create-edit-request-submit',
+          ) as HTMLButtonElement
+        ).disabled,
+      ).toBe(false),
+    );
+    fireEvent.click(screen.getByTestId('create-edit-request-submit'));
+    await waitFor(() =>
+      expect(returnsApi.createReturnEditRequest).toHaveBeenCalledTimes(1),
+    );
+    const [, body] = (returnsApi.createReturnEditRequest as any).mock
+      .calls[0];
+    const updatedLine = body.requested_payload.lines.updated[0];
+    expect(updatedLine.before.variant_id).toBe('var-1');
+    expect(updatedLine.after.variant_id).toBe('var-replacement');
+    expect(updatedLine.after.sku).toBe('SKU-REPL');
+    expect(updatedLine.after.name).toBe('منتج بديل');
   });
 });
 
@@ -635,5 +944,40 @@ describe('CreateEditRequestModal — create-only contract (source-grep)', () => 
     for (const call of calls) {
       expect(allowed.has(call)).toBe(true);
     }
+  });
+});
+
+// ─── Source-grep — ProductLookupInput is GET-only ─────────────────
+
+describe('ProductLookupInput — GET-only contract (source-grep)', () => {
+  const src = readFileSync(
+    'src/components/returns/edit-request/productLookup.tsx',
+    'utf-8',
+  );
+  const code = src
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/gm, '');
+
+  it('does not call api.put / api.patch / api.delete / api.post', () => {
+    expect(code).not.toMatch(/api\.put\(/);
+    expect(code).not.toMatch(/api\.patch\(/);
+    expect(code).not.toMatch(/api\.delete\(/);
+    expect(code).not.toMatch(/api\.post\(/);
+  });
+
+  it('only product API used is byBarcode (GET)', () => {
+    const calls = code.match(/productsApi\.\w+/g) ?? [];
+    for (const call of calls) {
+      expect(call).toBe('productsApi.byBarcode');
+    }
+  });
+
+  it('does not invoke any return / exchange / edit-request mutation', () => {
+    expect(code).not.toMatch(/returnsApi/);
+    expect(code).not.toMatch(/createReturnEditRequest/);
+    expect(code).not.toMatch(/createExchangeEditRequest/);
+    expect(code).not.toMatch(/approveEditRequest/);
+    expect(code).not.toMatch(/rejectEditRequest/);
+    expect(code).not.toMatch(/applyEditRequest/);
   });
 });

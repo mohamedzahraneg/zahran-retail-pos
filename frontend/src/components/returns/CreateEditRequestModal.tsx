@@ -46,7 +46,6 @@ import {
   Pencil,
   Plus,
   RotateCcw,
-  Search,
   Trash2,
   XCircle,
 } from 'lucide-react';
@@ -62,13 +61,16 @@ import {
   type ReturnItem,
   type ReturnReason,
 } from '@/api/returns.api';
-import { productsApi } from '@/api/products.api';
 import {
   buildPayload,
   deriveAction,
   type BuilderState,
 } from './edit-request/payload';
 import { LineChangesDiff, payloadCounts } from './edit-request/diff';
+import {
+  ProductLookupInput,
+  type ResolvedProduct,
+} from './edit-request/productLookup';
 
 // ── Constants (Arabic copy, label maps) ────────────────────────────
 
@@ -262,52 +264,16 @@ export function CreateEditRequestModal({
     },
   });
 
-  /**
-   * Best-effort variant resolution for "added" rows the user typed by
-   * SKU.  Failure is non-fatal — the typed SKU + name still go into
-   * the request body so the admin reviewer can see what the user
-   * meant.  No write — `byBarcode` is GET-only.
-   */
-  async function resolveAddedRows(
-    rows: ItemSnapshot[],
-  ): Promise<ItemSnapshot[]> {
-    return Promise.all(
-      rows.map(async (row) => {
-        // If user already has a variant_id, trust it.
-        if (row.variant_id) return row;
-        const code = row.sku?.trim();
-        if (!code) return row;
-        try {
-          const r = await productsApi.byBarcode(code);
-          return {
-            ...row,
-            variant_id: r.variant?.id ?? row.variant_id ?? null,
-            sku: r.variant?.sku ?? row.sku,
-            name: r.product?.name_ar ?? row.name,
-          };
-        } catch {
-          // Fall back to whatever the user typed.
-          return row;
-        }
-      }),
-    );
-  }
-
-  async function handleSubmit() {
+  // PR-FIN-RETURNS-EXCHANGES-EDIT-REQUEST-LOOKUP — added rows are now
+  // guaranteed to carry a real `variant_id` because the AddLineForm
+  // requires `productsApi.byBarcode` to resolve before exposing the
+  // "إضافة لطلب التعديل" button.  No best-effort fallback is needed
+  // at submit time, so the flow is purely a single POST.
+  function handleSubmit() {
     if (!canSubmit || !payload || !action || mut.isPending) return;
-
-    // Resolve any added-row SKUs to their canonical variant_id +
-    // product name so the persisted payload is self-describing.  This
-    // is GET-only (no mutation).
-    const resolvedAdded = await resolveAddedRows(payload.lines.added);
-    const finalPayload: LineChangesPayload = {
-      ...payload,
-      lines: { ...payload.lines, added: resolvedAdded },
-    };
-
     mut.mutate({
       requested_action: action,
-      requested_payload: finalPayload as unknown as Record<string, unknown>,
+      requested_payload: payload as unknown as Record<string, unknown>,
       reason_text: reason.trim(),
     });
   }
@@ -630,6 +596,7 @@ function ExistingLinesSection({
               </div>
               {isEditing && !row.removed && (
                 <LineEditor
+                  itemId={row.item_id}
                   snapshot={row.after}
                   beforeSnapshot={row.before}
                   onChange={(after) =>
@@ -651,89 +618,134 @@ function ExistingLinesSection({
   );
 }
 
-// ─── Per-line editor (used by both existing-line edit + add) ───────
+// ─── Per-line editor ──────────────────────────────────────────────
+// Per spec: free text is allowed only for notes / quantity / price.
+// Product identity (variant_id, sku, name) is locked behind the
+// explicit "تغيير المنتج" → ProductLookupInput flow so the user can't
+// type a fake SKU.  The product display is read-only otherwise.
 
 function LineEditor({
   snapshot,
   beforeSnapshot,
   onChange,
+  itemId,
 }: {
   snapshot: ItemSnapshot;
   beforeSnapshot?: ItemSnapshot;
   onChange: (next: ItemSnapshot) => void;
+  itemId: string;
 }) {
   const change = (patch: Partial<ItemSnapshot>) =>
     onChange({ ...snapshot, ...patch });
+  const [productLookupOpen, setProductLookupOpen] = useState(false);
   return (
     <div
-      className="mt-3 pt-3 border-t border-slate-100 grid grid-cols-1 md:grid-cols-2 gap-2"
+      className="mt-3 pt-3 border-t border-slate-100 space-y-3"
       data-testid="er-line-editor"
     >
-      <Field label="اسم المنتج">
-        <input
-          type="text"
-          value={snapshot.name ?? ''}
-          onChange={(e) => change({ name: e.target.value })}
-          className="bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 text-sm w-full focus:bg-white focus:border-brand-300 outline-none"
-          data-testid="er-line-editor-name"
-        />
-      </Field>
-      <Field label="الكود / SKU">
-        <input
-          type="text"
-          value={snapshot.sku ?? ''}
-          onChange={(e) =>
-            change({
-              sku: e.target.value,
-              // SKU change invalidates a previously-resolved variant_id
-              // so the BE/admin sees the new code unambiguously.
-              variant_id:
-                e.target.value === beforeSnapshot?.sku
-                  ? beforeSnapshot.variant_id ?? null
-                  : null,
-            })
-          }
-          className="bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 text-sm w-full font-mono focus:bg-white focus:border-brand-300 outline-none"
-          data-testid="er-line-editor-sku"
-          dir="ltr"
-        />
-      </Field>
-      <Field label="الكمية">
-        <input
-          type="number"
-          min={1}
-          value={snapshot.quantity}
-          onChange={(e) =>
-            change({ quantity: Math.max(1, Number(e.target.value) || 1) })
-          }
-          className="bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 text-sm w-full focus:bg-white focus:border-brand-300 outline-none"
-          data-testid="er-line-editor-quantity"
-        />
-      </Field>
-      <Field label="السعر">
-        <input
-          type="number"
-          min={0}
-          step="0.01"
-          value={snapshot.unit_price}
-          onChange={(e) =>
-            change({ unit_price: Math.max(0, Number(e.target.value) || 0) })
-          }
-          className="bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 text-sm w-full focus:bg-white focus:border-brand-300 outline-none"
-          data-testid="er-line-editor-price"
-        />
-      </Field>
-      <Field label="ملاحظات" className="md:col-span-2">
-        <input
-          type="text"
-          value={snapshot.notes ?? ''}
-          onChange={(e) => change({ notes: e.target.value || null })}
-          className="bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 text-sm w-full focus:bg-white focus:border-brand-300 outline-none"
-          data-testid="er-line-editor-notes"
-        />
-      </Field>
+      {/* Product identity row — read-only display + explicit swap */}
+      <div className="rounded-lg border border-slate-200 bg-white p-2.5">
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0 flex-1">
+            <div className="text-[11px] font-bold text-slate-700 mb-0.5">
+              المنتج
+            </div>
+            <div
+              className="font-semibold text-slate-800 truncate"
+              data-testid={`er-line-editor-${itemId}-product-name`}
+            >
+              {snapshot.name || snapshot.sku || '—'}
+            </div>
+            <div
+              className="text-[11px] text-slate-500 font-mono truncate"
+              data-testid={`er-line-editor-${itemId}-product-sku`}
+              dir="ltr"
+            >
+              {[snapshot.sku, snapshot.color, snapshot.size]
+                .filter(Boolean)
+                .join(' • ') || '—'}
+            </div>
+          </div>
+          {!productLookupOpen && (
+            <button
+              type="button"
+              onClick={() => setProductLookupOpen(true)}
+              className="text-[11px] font-bold text-brand-700 bg-brand-50 hover:bg-brand-100 px-2 py-1 rounded-lg shrink-0"
+              data-testid={`er-line-editor-${itemId}-change-product`}
+            >
+              تغيير المنتج
+            </button>
+          )}
+        </div>
+        {productLookupOpen && (
+          <div className="mt-3 pt-3 border-t border-slate-100 space-y-2">
+            <ProductLookupInput
+              testIdPrefix={`er-line-editor-${itemId}-lookup`}
+              missMessage="كود المنتج الجديد غير موجود"
+              onResolved={(resolved) =>
+                change({
+                  variant_id: resolved.variant_id,
+                  sku: resolved.sku,
+                  name: resolved.name,
+                  color: resolved.color,
+                  size: resolved.size,
+                })
+              }
+            />
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setProductLookupOpen(false)}
+                className="text-[11px] font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 px-2 py-1 rounded-lg"
+                data-testid={`er-line-editor-${itemId}-change-product-close`}
+              >
+                إغلاق تغيير المنتج
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Quantity / price / notes — free text allowed */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+        <Field label="الكمية">
+          <input
+            type="number"
+            min={1}
+            value={snapshot.quantity}
+            onChange={(e) =>
+              change({ quantity: Math.max(1, Number(e.target.value) || 1) })
+            }
+            className="bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 text-sm w-full focus:bg-white focus:border-brand-300 outline-none"
+            data-testid="er-line-editor-quantity"
+          />
+        </Field>
+        <Field label="السعر">
+          <input
+            type="number"
+            min={0}
+            step="0.01"
+            value={snapshot.unit_price}
+            onChange={(e) =>
+              change({ unit_price: Math.max(0, Number(e.target.value) || 0) })
+            }
+            className="bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 text-sm w-full focus:bg-white focus:border-brand-300 outline-none"
+            data-testid="er-line-editor-price"
+          />
+        </Field>
+        <Field label="ملاحظات" className="md:col-span-2">
+          <input
+            type="text"
+            value={snapshot.notes ?? ''}
+            onChange={(e) => change({ notes: e.target.value || null })}
+            className="bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 text-sm w-full focus:bg-white focus:border-brand-300 outline-none"
+            data-testid="er-line-editor-notes"
+          />
+        </Field>
+      </div>
+
       {beforeSnapshot && (
-        <div className="md:col-span-2 text-[11px] text-slate-500 flex items-center gap-3">
+        <div className="text-[11px] text-slate-500 flex items-center gap-3 flex-wrap">
           <span>قبل: {beforeSnapshot.quantity} × {fmtMoney(beforeSnapshot.unit_price)}</span>
           <span>=</span>
           <span>{fmtMoney(beforeSnapshot.quantity * beforeSnapshot.unit_price)}</span>
@@ -750,6 +762,11 @@ function LineEditor({
 }
 
 // ─── "Add new line" section ────────────────────────────────────────
+// Per spec, the form is HIDDEN by default — adding a product is an
+// explicit user action, not a permanently-visible empty form.  The
+// SKU MUST resolve to a real product variant via productsApi.byBarcode
+// before the line can be added; the user cannot type a free-text SKU
+// and have it land in the request.
 
 function AddLineSection({
   drafts,
@@ -760,113 +777,30 @@ function AddLineSection({
   onAdd: (snapshot: ItemSnapshot) => void;
   onRemoveDraft: (temp_id: string) => void;
 }) {
-  const empty: ItemSnapshot = {
-    variant_id: null,
-    sku: '',
-    name: '',
-    quantity: 1,
-    unit_price: 0,
-    notes: null,
-  };
-  const [draft, setDraft] = useState<ItemSnapshot>(empty);
-  const draftValid =
-    (draft.sku ?? '').trim().length > 0 || (draft.name ?? '').trim().length > 0;
-
+  const [open, setOpen] = useState(false);
   return (
     <section data-testid="er-add-line">
       <div className="font-bold text-slate-700 mb-2 text-sm">
         إضافة بند جديد
       </div>
-      <div className="rounded-lg border border-emerald-200 bg-emerald-50/40 p-3 space-y-2">
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-          <Field label="اسم المنتج">
-            <input
-              type="text"
-              value={draft.name ?? ''}
-              onChange={(e) =>
-                setDraft({ ...draft, name: e.target.value || null })
-              }
-              className="bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-sm w-full focus:border-brand-300 outline-none"
-              data-testid="er-add-line-name"
-              placeholder="مثال: تيشيرت أزرق L"
-            />
-          </Field>
-          <Field label="الكود / SKU">
-            <div className="relative">
-              <input
-                type="text"
-                value={draft.sku ?? ''}
-                onChange={(e) =>
-                  setDraft({ ...draft, sku: e.target.value || null })
-                }
-                className="bg-white border border-slate-200 rounded-lg px-2 py-1.5 pl-8 text-sm w-full font-mono focus:border-brand-300 outline-none"
-                data-testid="er-add-line-sku"
-                dir="ltr"
-                placeholder="SKU"
-              />
-              <Search
-                size={12}
-                className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none"
-              />
-            </div>
-          </Field>
-          <Field label="الكمية">
-            <input
-              type="number"
-              min={1}
-              value={draft.quantity}
-              onChange={(e) =>
-                setDraft({
-                  ...draft,
-                  quantity: Math.max(1, Number(e.target.value) || 1),
-                })
-              }
-              className="bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-sm w-full focus:border-brand-300 outline-none"
-              data-testid="er-add-line-quantity"
-            />
-          </Field>
-          <Field label="السعر">
-            <input
-              type="number"
-              min={0}
-              step="0.01"
-              value={draft.unit_price}
-              onChange={(e) =>
-                setDraft({
-                  ...draft,
-                  unit_price: Math.max(0, Number(e.target.value) || 0),
-                })
-              }
-              className="bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-sm w-full focus:border-brand-300 outline-none"
-              data-testid="er-add-line-price"
-            />
-          </Field>
-          <Field label="ملاحظات" className="md:col-span-2">
-            <input
-              type="text"
-              value={draft.notes ?? ''}
-              onChange={(e) =>
-                setDraft({ ...draft, notes: e.target.value || null })
-              }
-              className="bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-sm w-full focus:border-brand-300 outline-none"
-              data-testid="er-add-line-notes"
-            />
-          </Field>
-        </div>
+      {!open ? (
         <button
           type="button"
-          onClick={() => {
-            if (!draftValid) return;
-            onAdd(draft);
-            setDraft(empty);
-          }}
-          disabled={!draftValid}
-          className="text-[12px] font-bold text-emerald-700 bg-emerald-100 hover:bg-emerald-200 disabled:opacity-50 disabled:cursor-not-allowed px-3 py-1.5 rounded-lg inline-flex items-center gap-1"
-          data-testid="er-add-line-submit"
+          onClick={() => setOpen(true)}
+          className="w-full text-[12px] font-bold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border-2 border-dashed border-emerald-300 px-3 py-2 rounded-lg inline-flex items-center justify-center gap-1"
+          data-testid="er-add-line-toggle"
         >
-          <Plus size={12} /> إضافة لطلب التعديل
+          <Plus size={12} /> إضافة منتج جديد لطلب التعديل
         </button>
-      </div>
+      ) : (
+        <AddLineForm
+          onAdd={(snapshot) => {
+            onAdd(snapshot);
+            setOpen(false);
+          }}
+          onCancel={() => setOpen(false)}
+        />
+      )}
 
       {drafts.length > 0 && (
         <div className="mt-2 space-y-1.5" data-testid="er-add-line-drafts">
@@ -897,6 +831,122 @@ function AddLineSection({
         </div>
       )}
     </section>
+  );
+}
+
+/**
+ * The actual add-line form, only mounted while the user has clicked
+ * the toggle button.  SKU lookup is mandatory before the row can be
+ * added — the "إضافة لطلب التعديل" button stays disabled until
+ * `resolved !== null`.
+ */
+function AddLineForm({
+  onAdd,
+  onCancel,
+}: {
+  onAdd: (snapshot: ItemSnapshot) => void;
+  onCancel: () => void;
+}) {
+  const [resolved, setResolved] = useState<ResolvedProduct | null>(null);
+  const [quantity, setQuantity] = useState(1);
+  const [unitPrice, setUnitPrice] = useState(0);
+  const [notes, setNotes] = useState('');
+
+  function handleAdd() {
+    if (!resolved) return;
+    onAdd({
+      variant_id: resolved.variant_id,
+      sku: resolved.sku,
+      name: resolved.name,
+      color: resolved.color,
+      size: resolved.size,
+      quantity: Math.max(1, quantity),
+      unit_price: Math.max(0, unitPrice),
+      notes: notes.trim() ? notes.trim() : null,
+    });
+  }
+
+  return (
+    <div
+      className="rounded-lg border border-emerald-200 bg-emerald-50/40 p-3 space-y-3"
+      data-testid="er-add-line-form"
+    >
+      <div>
+        <div className="text-[11px] font-bold text-slate-700 mb-1">
+          ابحث عن المنتج بالكود (SKU)
+        </div>
+        <ProductLookupInput
+          testIdPrefix="er-add-line-lookup"
+          onResolved={(r) => {
+            setResolved(r);
+            // Pre-fill the price input with the variant's selling
+            // price so the user only needs to override when they want
+            // a different price for this request.
+            if (r.suggested_price > 0) setUnitPrice(r.suggested_price);
+          }}
+          onCleared={() => setResolved(null)}
+        />
+      </div>
+
+      {resolved && (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+          <Field label="الكمية">
+            <input
+              type="number"
+              min={1}
+              value={quantity}
+              onChange={(e) =>
+                setQuantity(Math.max(1, Number(e.target.value) || 1))
+              }
+              className="bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-sm w-full focus:border-brand-300 outline-none"
+              data-testid="er-add-line-quantity"
+            />
+          </Field>
+          <Field label="السعر">
+            <input
+              type="number"
+              min={0}
+              step="0.01"
+              value={unitPrice}
+              onChange={(e) =>
+                setUnitPrice(Math.max(0, Number(e.target.value) || 0))
+              }
+              className="bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-sm w-full focus:border-brand-300 outline-none"
+              data-testid="er-add-line-price"
+            />
+          </Field>
+          <Field label="ملاحظات" className="md:col-span-2">
+            <input
+              type="text"
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              className="bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-sm w-full focus:border-brand-300 outline-none"
+              data-testid="er-add-line-notes"
+            />
+          </Field>
+        </div>
+      )}
+
+      <div className="flex gap-2 justify-end">
+        <button
+          type="button"
+          onClick={onCancel}
+          className="text-[12px] font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-lg"
+          data-testid="er-add-line-cancel"
+        >
+          إلغاء إضافة المنتج
+        </button>
+        <button
+          type="button"
+          onClick={handleAdd}
+          disabled={!resolved}
+          className="text-[12px] font-bold text-emerald-700 bg-emerald-100 hover:bg-emerald-200 disabled:opacity-50 disabled:cursor-not-allowed px-3 py-1.5 rounded-lg inline-flex items-center gap-1"
+          data-testid="er-add-line-submit"
+        >
+          <Plus size={12} /> إضافة لطلب التعديل
+        </button>
+      </div>
+    </div>
   );
 }
 
