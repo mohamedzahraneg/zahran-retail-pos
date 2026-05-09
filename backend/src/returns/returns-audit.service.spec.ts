@@ -54,10 +54,15 @@ describe('ReturnsAuditService — read-only composition', () => {
     // the routes so the SQL-router resolves it before the broader
     // document-changes pattern.
     const { ds, calls } = makeRouter([
-      // Item changes (table_name='return_items')
+      // Item changes (table_name='return_items') — PR-FIX-RETURNS-AUDIT-500
+      // pins the explicit `::text` cast on the FK comparison.  Without
+      // it, PostgreSQL's parameter-type inference unifies $2 to text
+      // (driven by the JSONB ->> usage in the OR branch) and fails
+      // with `operator does not exist: text = uuid` against the
+      // return_id uuid column.
       {
         match:
-          /FROM\s+audit_logs[\s\S]+IN\s+\(SELECT id::text FROM return_items WHERE return_id\s*=\s*\$2\)/i,
+          /FROM\s+audit_logs[\s\S]+IN\s+\(SELECT id::text FROM return_items WHERE return_id::text\s*=\s*\$2\)/i,
         rows: [
           {
             id: 'ad-2',
@@ -133,10 +138,12 @@ describe('ReturnsAuditService — read-only composition', () => {
 
   it('getExchangeAudit uses exchanges + exchange_items tables', async () => {
     const { ds, calls } = makeRouter([
-      // Items first (more specific).
+      // Items first (more specific) — PR-FIX-RETURNS-AUDIT-500 pins the
+      // explicit `::text` cast on the FK comparison (same fix as the
+      // returns side).
       {
         match:
-          /FROM\s+audit_logs[\s\S]+IN\s+\(SELECT id::text FROM exchange_items WHERE exchange_id\s*=\s*\$2\)/i,
+          /FROM\s+audit_logs[\s\S]+IN\s+\(SELECT id::text FROM exchange_items WHERE exchange_id::text\s*=\s*\$2\)/i,
         rows: [],
       },
       // Document next.
@@ -218,6 +225,32 @@ describe('ReturnsAuditService — read-only contract', () => {
     expect(code).not.toMatch(/\brecordTransaction\b/);
     expect(code).not.toMatch(/\brecordCashOnlyMovement\b/);
     expect(code).not.toMatch(/\baccounting_only\b/);
+  });
+
+  // ─── PR-FIX-RETURNS-AUDIT-500 — pins the explicit ::text cast ──
+  it('item-subquery FK uses ::text cast (avoids uuid=text PG type error)', () => {
+    // The fix is symmetric for both returns and exchanges — the
+    // service interpolates the items table + FK column name into the
+    // SAME query, so a single template-literal lookup proves both.
+    expect(code).toMatch(/\$\{itemsFk\}::text\s*=\s*\$2/);
+    // Defense in depth: there must be NO un-cast ${itemsFk} = $2
+    // form remaining anywhere in the source, in case a future edit
+    // accidentally drops the cast.
+    expect(code).not.toMatch(/\$\{itemsFk\}\s*=\s*\$2/);
+  });
+
+  it('endpoint is GET-only — no controller method has @Post/@Patch/@Delete on the audit routes', () => {
+    const ctrl = readFileSync(
+      resolve(__dirname, 'returns.controller.ts'),
+      'utf-8',
+    );
+    // The two audit routes use @Get only.
+    expect(ctrl).toMatch(/@Get\(['"]returns\/:id\/audit['"]\)/);
+    expect(ctrl).toMatch(/@Get\(['"]exchanges\/:id\/audit['"]\)/);
+    // No mutation verbs registered against /audit anywhere.
+    expect(ctrl).not.toMatch(/@Post\(['"][^'"]*\/audit['"]/);
+    expect(ctrl).not.toMatch(/@Patch\(['"][^'"]*\/audit['"]/);
+    expect(ctrl).not.toMatch(/@Delete\(['"][^'"]*\/audit['"]/);
   });
 });
 

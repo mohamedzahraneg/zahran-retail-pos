@@ -133,6 +133,16 @@ export class ReturnsAuditService {
     // JSONB key match against `<itemsFk>` so trigger-recorded
     // DELETE/INSERT rows (whose item id may not be in the live table
     // anymore) still surface.
+    //
+    // PR-FIX-RETURNS-AUDIT-500 — `$2` is consumed in two places: the
+    // FK comparison `<itemsFk> = $2` (uuid column) and the JSONB text
+    // comparison `(new_data ->> $3) = $2` (text).  PostgreSQL's
+    // parameter-type inference unifies $2 to a single type and binds
+    // it as text (driven by the JSONB ->> usage), then can't compare
+    // `uuid = text` in the FK subquery → 500.  Cast the FK column to
+    // ::text so the comparison is text-vs-text on both sides.  No
+    // behavior change: the FK and the `$2` value still compare equal
+    // when they should; we just stop relying on PG's auto-coercion.
     const item_changes: AuditChangeRow[] = await this.ds.query(
       `
       SELECT ad.id::text, ad.table_name, ad.record_id, ad.operation,
@@ -143,7 +153,7 @@ export class ReturnsAuditService {
         LEFT JOIN users u ON u.id = ad.changed_by
        WHERE ad.table_name = $1
          AND (
-              ad.record_id IN (SELECT id::text FROM ${itemsTable} WHERE ${itemsFk} = $2)
+              ad.record_id IN (SELECT id::text FROM ${itemsTable} WHERE ${itemsFk}::text = $2)
            OR (ad.new_data ->> $3) = $2
            OR (ad.old_data ->> $3) = $2
          )
