@@ -832,6 +832,136 @@ describe('CreateEditRequestModal — submit (return)', () => {
   });
 });
 
+// ─── PR-FIX-EDIT-REQUEST-PAYLOAD-WHITELIST — body-shape regression
+//     pins.  These tests would have caught the BE strip-bug at the
+//     FE boundary too: they assert the FE-built body is exactly the
+//     shape the BE DTO expects (snake_case keys, requested_payload
+//     as a real object, not a JSON string).
+
+describe('CreateEditRequestModal — body shape contract', () => {
+  it('submits a real JS object for requested_payload (not a JSON string)', async () => {
+    (returnsApi.createReturnEditRequest as any).mockResolvedValueOnce({
+      id: 'er-shape',
+    });
+    renderModal();
+    fireEvent.click(
+      await screen.findByTestId('er-existing-line-ri-1-remove'),
+    );
+    fireEvent.change(screen.getByTestId('create-edit-request-reason'), {
+      target: { value: 'سبب كافٍ للاختبار' },
+    });
+    await waitFor(() =>
+      expect(
+        (
+          screen.getByTestId(
+            'create-edit-request-submit',
+          ) as HTMLButtonElement
+        ).disabled,
+      ).toBe(false),
+    );
+    fireEvent.click(screen.getByTestId('create-edit-request-submit'));
+
+    await waitFor(() =>
+      expect(returnsApi.createReturnEditRequest).toHaveBeenCalledTimes(1),
+    );
+    const [calledId, body] = (returnsApi.createReturnEditRequest as any).mock
+      .calls[0];
+
+    // Path key.
+    expect(calledId).toBe('ret-1');
+
+    // Snake-case keys, no camelCase variants.
+    expect(body).toHaveProperty('requested_action');
+    expect(body).toHaveProperty('requested_payload');
+    expect(body).toHaveProperty('reason_text');
+    expect(body).not.toHaveProperty('requestedAction');
+    expect(body).not.toHaveProperty('requestedPayload');
+    expect(body).not.toHaveProperty('reasonText');
+
+    // requested_payload MUST be a real plain object — never a string,
+    // never an array, never null/undefined.
+    expect(body.requested_payload).toBeDefined();
+    expect(body.requested_payload).not.toBeNull();
+    expect(typeof body.requested_payload).toBe('object');
+    expect(typeof body.requested_payload).not.toBe('string');
+    expect(Array.isArray(body.requested_payload)).toBe(false);
+
+    // Structured payload contract.
+    expect(body.requested_payload.kind).toBe('line_changes');
+    expect(Array.isArray(body.requested_payload.lines.updated)).toBe(true);
+    expect(Array.isArray(body.requested_payload.lines.removed)).toBe(true);
+    expect(Array.isArray(body.requested_payload.lines.added)).toBe(true);
+
+    // reason_text is the trimmed user input.
+    expect(typeof body.reason_text).toBe('string');
+    expect(body.reason_text).toBe('سبب كافٍ للاختبار');
+  });
+
+  it('exchange path also uses snake_case keys + object payload', async () => {
+    (returnsApi.createExchangeEditRequest as any).mockResolvedValueOnce({
+      id: 'er-shape-exch',
+    });
+    renderModal({
+      entity: 'exchange',
+      parentId: 'exch-1',
+      documentNo: 'EXC-1',
+    });
+    fireEvent.click(
+      await screen.findByTestId('er-existing-line-ei-1-remove'),
+    );
+    fireEvent.change(screen.getByTestId('create-edit-request-reason'), {
+      target: { value: 'سبب كافٍ للاختبار' },
+    });
+    await waitFor(() =>
+      expect(
+        (
+          screen.getByTestId(
+            'create-edit-request-submit',
+          ) as HTMLButtonElement
+        ).disabled,
+      ).toBe(false),
+    );
+    fireEvent.click(screen.getByTestId('create-edit-request-submit'));
+    await waitFor(() =>
+      expect(returnsApi.createExchangeEditRequest).toHaveBeenCalledTimes(1),
+    );
+    const [, body] = (returnsApi.createExchangeEditRequest as any).mock
+      .calls[0];
+    expect(body).toHaveProperty('requested_payload');
+    expect(typeof body.requested_payload).toBe('object');
+    expect(typeof body.requested_payload).not.toBe('string');
+    expect(body.requested_payload.kind).toBe('line_changes');
+  });
+});
+
+// ─── API wrapper contract — never stringify the body ──────────────
+
+describe('returnsApi createEditRequest wrappers — payload stays an object', () => {
+  it('createReturnEditRequest source does not call JSON.stringify on the body', () => {
+    const src = readFileSync('src/api/returns.api.ts', 'utf-8');
+    // Locate the wrapper definition.
+    const m = src.match(
+      /createReturnEditRequest:[\s\S]+?api\.post\([^)]+\)/,
+    );
+    expect(m).not.toBeNull();
+    expect(m![0]).not.toMatch(/JSON\.stringify/);
+    expect(m![0]).not.toMatch(/FormData/);
+    // The body is passed through as-is.
+    expect(m![0]).toMatch(/api\.post\(`\/returns\/\$\{id\}\/edit-requests`,\s*body\)/);
+  });
+
+  it('createExchangeEditRequest source does not call JSON.stringify on the body', () => {
+    const src = readFileSync('src/api/returns.api.ts', 'utf-8');
+    const m = src.match(
+      /createExchangeEditRequest:[\s\S]+?api\.post\([^)]+\)/,
+    );
+    expect(m).not.toBeNull();
+    expect(m![0]).not.toMatch(/JSON\.stringify/);
+    expect(m![0]).not.toMatch(/FormData/);
+    expect(m![0]).toMatch(/api\.post\(`\/exchanges\/\$\{id\}\/edit-requests`,\s*body\)/);
+  });
+});
+
 describe('CreateEditRequestModal — submit (exchange)', () => {
   it('hits the exchange wrapper after fetching detail via getExchange', async () => {
     (returnsApi.createExchangeEditRequest as any).mockResolvedValue({

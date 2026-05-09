@@ -6,6 +6,7 @@ import {
   IsEnum,
   IsIn,
   IsNumber,
+  IsObject,
   IsOptional,
   IsString,
   IsUUID,
@@ -337,11 +338,22 @@ export class CreateEditRequestDto {
   @IsIn(REQUESTED_ACTIONS as unknown as string[])
   requested_action: RequestedActionLiteral;
 
+  // PR-FIX-EDIT-REQUEST-PAYLOAD-WHITELIST — the global ValidationPipe
+  // is configured with `whitelist: true` (backend/src/main.ts:44),
+  // which strips any class field that lacks a class-validator
+  // decorator.  Until this @IsObject() landed, `requested_payload`
+  // had only the swagger `@ApiProperty` (which class-validator
+  // doesn't recognize) and was silently dropped from the validated
+  // DTO instance, leaving the service to receive `undefined` and
+  // throw "requested_payload يجب أن يكون كائنًا (JSON object)".
+  // The service still re-runs `validatePayload` for the array /
+  // null edge cases that `@IsObject()` doesn't cover.
   @ApiProperty({
     description:
       'الحمولة المقترحة للتعديل (JSON object).  لا تُطبَّق في هذه المرحلة.',
     type: 'object',
   })
+  @IsObject()
   requested_payload: Record<string, unknown>;
 
   @ApiProperty({
