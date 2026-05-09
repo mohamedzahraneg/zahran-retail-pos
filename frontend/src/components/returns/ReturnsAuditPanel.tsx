@@ -32,6 +32,10 @@ import {
   type AuditEditRequestRow,
   type DocumentAuditResult,
 } from '@/api/returns.api';
+import {
+  isLineChangesPayload,
+  LineChangesDiff,
+} from './edit-request/diff';
 
 const NOISY_FIELDS = new Set(['updated_at', 'id', 'created_at']);
 
@@ -449,8 +453,26 @@ const REQUEST_STATUS_PILL: Record<
   },
 };
 
+// Friendly Arabic labels for the 7-value `requested_action` enum.  We
+// fall back to the raw value if a future BE adds a new action — the
+// admin still sees something readable rather than a blank.
+const ACTION_LABELS_AR: Record<string, string> = {
+  update_header: 'تحديث بيانات عامة',
+  update_item: 'تعديل بند',
+  remove_item: 'حذف بند',
+  replace_item: 'استبدال منتج',
+  price_change: 'تعديل سعر',
+  quantity_change: 'تعديل كمية',
+  reason_change: 'تعديل السبب',
+};
+
 function EditRequestEntry({ row }: { row: AuditEditRequestRow }) {
   const pill = REQUEST_STATUS_PILL[row.status];
+  const structured = isLineChangesPayload(row.requested_payload)
+    ? row.requested_payload
+    : null;
+  const actionLabel =
+    ACTION_LABELS_AR[row.requested_action] ?? row.requested_action;
   return (
     <li
       className="rounded-xl border border-indigo-200 bg-indigo-50/50 p-3 space-y-2"
@@ -463,7 +485,7 @@ function EditRequestEntry({ row }: { row: AuditEditRequestRow }) {
         <span className="font-bold text-indigo-800">
           نوع التعديل المطلوب:
         </span>
-        <span className="text-indigo-700">{row.requested_action}</span>
+        <span className="text-indigo-700">{actionLabel}</span>
         <span
           className={`ms-auto text-[10px] font-bold rounded-full px-2 py-0.5 ${pill.className}`}
         >
@@ -499,7 +521,7 @@ function EditRequestEntry({ row }: { row: AuditEditRequestRow }) {
         </div>
       </div>
       <div className="text-[11px] text-indigo-900 bg-white rounded-lg px-2 py-1.5 border border-indigo-100">
-        <span className="font-bold">سبب التعديل:</span> {row.reason_text}
+        <span className="font-bold">سبب طلب التعديل:</span> {row.reason_text}
       </div>
       {row.review_notes && (
         <div className="text-[11px] text-indigo-900 bg-white rounded-lg px-2 py-1.5 border border-indigo-100">
@@ -507,9 +529,27 @@ function EditRequestEntry({ row }: { row: AuditEditRequestRow }) {
           {row.review_notes}
         </div>
       )}
-      <details className="text-[11px]">
+
+      {/* PR-FIN-RETURNS-EXCHANGES-EDIT-REQUEST-GUIDED — when the request
+          was filed through the new guided UI it ships with a structured
+          `line_changes` payload, which we render as a friendly Arabic
+          diff.  Legacy / unknown payloads fall back to the existing
+          before/after JSON view inside a "تفاصيل تقنية" collapsible. */}
+      {structured ? (
+        <div
+          className="rounded-lg border border-indigo-100 bg-white p-2"
+          data-testid={`audit-edit-request-${row.id}-diff`}
+        >
+          <div className="text-[10px] font-bold text-indigo-700 mb-2">
+            ملخص التعديل المطلوب
+          </div>
+          <LineChangesDiff payload={structured} showTotals />
+        </div>
+      ) : null}
+
+      <details className="text-[11px]" data-testid={`audit-edit-request-${row.id}-raw`}>
         <summary className="cursor-pointer text-indigo-700 font-bold">
-          تفاصيل (قبل التعديل / التعديل المطلوب)
+          تفاصيل تقنية
         </summary>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-1">
           <div className="rounded-lg border border-indigo-100 bg-white p-2">

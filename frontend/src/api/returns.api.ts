@@ -333,7 +333,7 @@ export const returnsApi = {
   },
 
   getExchange: (id: string) =>
-    unwrap<any>(api.get(`/exchanges/${id}`)),
+    unwrap<ExchangeDetails>(api.get(`/exchanges/${id}`)),
 
   // ── Audit history (read-only, Phase 1) ──────────────────────────
   // GET /returns/:id/audit + GET /exchanges/:id/audit
@@ -379,6 +379,104 @@ export interface CreateEditRequestBody {
   requested_action: RequestedAction;
   requested_payload: Record<string, unknown>;
   reason_text: string;
+}
+
+// ── Guided edit-request payload model (Phase 2 UX) ─────────────────
+//
+// PR-FIN-RETURNS-EXCHANGES-EDIT-REQUEST-GUIDED — the modal builds a
+// strongly-shaped payload instead of asking the user to type JSON.
+// All numeric fields here are JS numbers (not strings) so the diff
+// renderer + summary can do arithmetic without parseFloat noise on
+// every read.  The BE still accepts an opaque `Record<string, unknown>`
+// so this shape is purely a frontend contract; admins reviewing a
+// pending request see the same payload they get from the API.
+export interface ItemSnapshot {
+  /** May be empty for "added" rows that the user typed without resolving via byBarcode. */
+  variant_id: string | null;
+  sku: string | null;
+  name: string | null;
+  /** Optional — present for return items, optional for new exchange lines. */
+  color?: string | null;
+  size?: string | null;
+  /** Returned items on an exchange use kind='returned'; new items use 'new'. */
+  kind?: 'return' | 'returned' | 'new' | null;
+  quantity: number;
+  unit_price: number;
+  notes?: string | null;
+}
+
+export interface LineChangeUpdated {
+  item_id: string;
+  before: ItemSnapshot;
+  after: ItemSnapshot;
+}
+
+export interface LineChangeRemoved {
+  item_id: string;
+  before: ItemSnapshot;
+}
+
+/** Same shape as ItemSnapshot — kept named for clarity. */
+export type LineChangeAdded = ItemSnapshot;
+
+export interface HeaderEdit {
+  reason?: ReturnReason | null;
+  reason_details?: string | null;
+  notes?: string | null;
+  refund_method?: PaymentMethod | null;
+}
+
+export interface LineChangesPayload {
+  kind: 'line_changes';
+  lines: {
+    updated: LineChangeUpdated[];
+    removed: LineChangeRemoved[];
+    added: LineChangeAdded[];
+  };
+  header?: HeaderEdit;
+  summary: {
+    old_total: number;
+    new_total: number;
+    delta: number;
+  };
+}
+
+// Loose ExchangeDetails shape — the BE returns the joined exchange row
+// + items array.  We only model the fields the FE consumes.
+export interface ExchangeItemDetail {
+  id: string;
+  exchange_id: string;
+  variant_id: string;
+  /** 'returned' = sent back, 'new' = replacement.  BE uses these literals. */
+  kind: 'returned' | 'new';
+  quantity: number;
+  unit_price: string;
+  product_name: string;
+  sku: string;
+  color: string | null;
+  size: string | null;
+  condition?: ItemCondition | null;
+  notes?: string | null;
+}
+
+export interface ExchangeDetails {
+  id: string;
+  exchange_no: string;
+  status: 'pending' | 'completed' | 'cancelled';
+  returned_value: string;
+  new_items_value: string;
+  price_difference: string;
+  reason?: ReturnReason | null;
+  reason_details?: string | null;
+  notes?: string | null;
+  refund_method?: PaymentMethod | null;
+  payment_method?: PaymentMethod | null;
+  original_invoice_no: string | null;
+  new_invoice_no: string | null;
+  customer_name: string | null;
+  created_at: string;
+  completed_at: string | null;
+  items: ExchangeItemDetail[];
 }
 
 // ── Audit response types (mirror the BE shape) ─────────────────────

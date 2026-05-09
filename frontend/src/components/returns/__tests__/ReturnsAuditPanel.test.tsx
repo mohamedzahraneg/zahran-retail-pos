@@ -349,12 +349,14 @@ describe('<ReturnsAuditPanel />', () => {
     expect(card.textContent).toMatch(/طلب تعديل/);
     expect(card.textContent).toMatch(/طلب تعديل ينتظر موافقة الأدمن/);
     expect(card.textContent).toMatch(/نوع التعديل المطلوب/);
-    expect(card.textContent).toMatch(/price_change/);
+    // Action enum is rendered through the ACTION_LABELS_AR map.
+    expect(card.textContent).toMatch(/تعديل سعر/);
+    expect(card.textContent).not.toMatch(/price_change/);
     expect(card.textContent).toMatch(/طلب بواسطة/);
     expect(card.textContent).toMatch(/محمد كاشير/);
     expect(card.textContent).toMatch(/راجع بواسطة/);
     expect(card.textContent).toMatch(/لم تتم المراجعة بعد/);
-    expect(card.textContent).toMatch(/سبب التعديل/);
+    expect(card.textContent).toMatch(/سبب طلب التعديل/);
     expect(card.textContent).toMatch(
       /العميل وجد المنتج بسعر أقل في فاتورة أخرى/,
     );
@@ -375,6 +377,147 @@ describe('<ReturnsAuditPanel />', () => {
     expect(card.textContent).toMatch(
       /لا يمكن إزالة الصنف لأن المرتجع تم اعتماده بالفعل/,
     );
+  });
+
+  // ─── PR-FIN-RETURNS-EXCHANGES-EDIT-REQUEST-GUIDED — structured diff
+  it('renders structured Arabic diff for line_changes payloads (no raw JSON in default view)', async () => {
+    const fixture = {
+      ...empty,
+      edit_requests: [
+        {
+          id: 'req-guided-1',
+          parent_id: 'doc-1',
+          document_no: 'RET-2026-EDIT-1',
+          requested_action: 'update_item',
+          requested_payload: {
+            kind: 'line_changes',
+            lines: {
+              updated: [
+                {
+                  item_id: 'ri-1',
+                  before: {
+                    variant_id: 'var-a',
+                    sku: 'SKU-AAA',
+                    name: 'تيشيرت أزرق',
+                    quantity: 1,
+                    unit_price: 450,
+                  },
+                  after: {
+                    variant_id: 'var-a',
+                    sku: 'SKU-AAA',
+                    name: 'تيشيرت أزرق',
+                    quantity: 1,
+                    unit_price: 400,
+                  },
+                },
+              ],
+              removed: [
+                {
+                  item_id: 'ri-2',
+                  before: {
+                    variant_id: 'var-b',
+                    sku: 'SKU-BBB',
+                    name: 'بنطلون أسود',
+                    quantity: 2,
+                    unit_price: 300,
+                  },
+                },
+              ],
+              added: [
+                {
+                  variant_id: null,
+                  sku: 'SKU-NEW',
+                  name: 'منتج جديد',
+                  quantity: 1,
+                  unit_price: 200,
+                },
+              ],
+            },
+            summary: { old_total: 1050, new_total: 600, delta: -450 },
+          },
+          before_snapshot: {},
+          after_preview: null,
+          reason_text: 'تعديل متعدد على البنود',
+          status: 'pending' as const,
+          requested_by: 'u-2',
+          requested_by_name: 'محمد كاشير',
+          requested_at: '2026-05-09T13:00:00Z',
+          reviewed_by: null,
+          reviewed_by_name: null,
+          reviewed_at: null,
+          review_notes: null,
+          source: 'edit_request' as const,
+        },
+      ],
+    };
+    (returnsApi.getReturnAudit as any).mockResolvedValueOnce(fixture);
+    renderPanel('return');
+    const diff = await screen.findByTestId(
+      'audit-edit-request-req-guided-1-diff',
+    );
+    expect(diff).toBeInTheDocument();
+    expect(diff.textContent).toMatch(/ملخص التعديل المطلوب/);
+
+    // Each kind of change shows up as its own row.
+    expect(screen.getByTestId('er-diff-updated-row').textContent).toMatch(
+      /تيشيرت أزرق/,
+    );
+    expect(screen.getByTestId('er-diff-removed-row').textContent).toMatch(
+      /بنطلون أسود/,
+    );
+    expect(screen.getByTestId('er-diff-added-row').textContent).toMatch(
+      /منتج جديد/,
+    );
+
+    // Totals appear in the summary footer.
+    const totals = screen.getByTestId('er-diff-totals');
+    expect(totals.textContent).toMatch(/الإجمالي قبل/);
+    expect(totals.textContent).toMatch(/الإجمالي بعد/);
+    expect(totals.textContent).toMatch(/الفرق/);
+    expect(totals.textContent).toMatch(/-450/);
+  });
+
+  it('keeps raw JSON for legacy/unknown payloads but only inside تفاصيل تقنية', async () => {
+    const fixture = {
+      ...empty,
+      edit_requests: [
+        {
+          id: 'req-legacy-1',
+          parent_id: 'doc-1',
+          document_no: 'RET-2026-EDIT-1',
+          requested_action: 'price_change',
+          // Legacy free-form payload — pre-guided UI shape.
+          requested_payload: { item_id: 'ri-1', new_unit_price: 120 },
+          before_snapshot: { items: [{ id: 'ri-1', unit_price: 150 }] },
+          after_preview: null,
+          reason_text: 'سبب تجريبي',
+          status: 'pending' as const,
+          requested_by: 'u-2',
+          requested_by_name: 'محمد كاشير',
+          requested_at: '2026-05-09T13:00:00Z',
+          reviewed_by: null,
+          reviewed_by_name: null,
+          reviewed_at: null,
+          review_notes: null,
+          source: 'edit_request' as const,
+        },
+      ],
+    };
+    (returnsApi.getReturnAudit as any).mockResolvedValueOnce(fixture);
+    renderPanel('return');
+    await waitFor(() =>
+      expect(
+        screen.getByTestId('audit-edit-request-req-legacy-1'),
+      ).toBeInTheDocument(),
+    );
+    // No structured-diff block is rendered for legacy payloads.
+    expect(
+      screen.queryByTestId('audit-edit-request-req-legacy-1-diff'),
+    ).not.toBeInTheDocument();
+    // Raw JSON survives, but only inside a collapsible "تفاصيل تقنية".
+    const raw = screen.getByTestId('audit-edit-request-req-legacy-1-raw');
+    expect(raw.textContent).toMatch(/تفاصيل تقنية/);
+    expect(raw.textContent).toMatch(/new_unit_price/);
   });
 
   it('shows the request-entry informational note pointing at the panel button', async () => {
