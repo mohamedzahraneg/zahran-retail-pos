@@ -192,6 +192,128 @@ describe('ReturnsAuditService — read-only composition', () => {
     expect(out.activity).toEqual([]);
     expect(out.amendments).toEqual([]);
   });
+
+  // ─── PR-FIX-RETURNS-AUDIT-EDIT-DOC-NO — each edit-requests table only
+  // carries the document-number column for its own entity.  These tests
+  // pin the entity-aware SELECT so a future refactor can't re-introduce
+  // `COALESCE(er.return_no, er.exchange_no)` (which raised
+  // `column er.exchange_no does not exist` on every return audit).
+  it('return audit edit_requests query selects return_no, never exchange_no', async () => {
+    const { ds, calls } = makeRouter([
+      { match: /FROM\s+audit_logs/i, rows: [] },
+      { match: /FROM\s+activity_logs/i, rows: [] },
+      { match: /FROM\s+return_edit_requests/i, rows: [] },
+    ]);
+    const svc = await buildSvc(ds);
+    await svc.getReturnAudit(RETURN_ID);
+
+    const editCall = calls.find((c) =>
+      /FROM\s+return_edit_requests/i.test(c.sql),
+    );
+    expect(editCall).toBeDefined();
+    expect(editCall!.sql).toMatch(/er\.return_no\s+AS\s+document_no/);
+    expect(editCall!.sql).not.toMatch(/exchange_no/);
+    expect(editCall!.sql).not.toMatch(
+      /COALESCE\s*\(\s*er\.return_no\s*,\s*er\.exchange_no\s*\)/i,
+    );
+    expect(editCall!.params).toEqual([RETURN_ID]);
+  });
+
+  it('exchange audit edit_requests query selects exchange_no, never return_no', async () => {
+    const { ds, calls } = makeRouter([
+      { match: /FROM\s+audit_logs/i, rows: [] },
+      { match: /FROM\s+activity_logs/i, rows: [] },
+      { match: /FROM\s+exchange_edit_requests/i, rows: [] },
+    ]);
+    const svc = await buildSvc(ds);
+    await svc.getExchangeAudit(EXCHANGE_ID);
+
+    const editCall = calls.find((c) =>
+      /FROM\s+exchange_edit_requests/i.test(c.sql),
+    );
+    expect(editCall).toBeDefined();
+    expect(editCall!.sql).toMatch(/er\.exchange_no\s+AS\s+document_no/);
+    // The doc_no SELECT line must not name return_no.  (The FK column
+    // `return_id` is intentionally absent here too — the exchange
+    // branch uses exchange_id.)
+    expect(editCall!.sql).not.toMatch(/er\.return_no\b/);
+    expect(editCall!.sql).not.toMatch(
+      /COALESCE\s*\(\s*er\.return_no\s*,\s*er\.exchange_no\s*\)/i,
+    );
+    expect(editCall!.params).toEqual([EXCHANGE_ID]);
+  });
+
+  it('surfaces edit_requests rows with the correct document_no for both entities', async () => {
+    // Return side
+    {
+      const { ds } = makeRouter([
+        { match: /FROM\s+audit_logs/i, rows: [] },
+        { match: /FROM\s+activity_logs/i, rows: [] },
+        {
+          match: /FROM\s+return_edit_requests/i,
+          rows: [
+            {
+              id: 'er-1',
+              parent_id: RETURN_ID,
+              document_no: 'RET-2026-000007',
+              requested_action: 'price_change',
+              requested_payload: {},
+              before_snapshot: {},
+              after_preview: null,
+              reason_text: 'سبب',
+              status: 'pending',
+              requested_by: 'u-1',
+              requested_by_name: 'مدير النظام',
+              requested_at: '2026-05-09T08:00:00Z',
+              reviewed_by: null,
+              reviewed_by_name: null,
+              reviewed_at: null,
+              review_notes: null,
+            },
+          ],
+        },
+      ]);
+      const svc = await buildSvc(ds);
+      const out = await svc.getReturnAudit(RETURN_ID);
+      expect(out.edit_requests).toHaveLength(1);
+      expect(out.edit_requests[0].document_no).toBe('RET-2026-000007');
+      expect(out.edit_requests[0].source).toBe('edit_request');
+    }
+    // Exchange side
+    {
+      const { ds } = makeRouter([
+        { match: /FROM\s+audit_logs/i, rows: [] },
+        { match: /FROM\s+activity_logs/i, rows: [] },
+        {
+          match: /FROM\s+exchange_edit_requests/i,
+          rows: [
+            {
+              id: 'er-2',
+              parent_id: EXCHANGE_ID,
+              document_no: 'EXC-2026-000003',
+              requested_action: 'remove_item',
+              requested_payload: {},
+              before_snapshot: {},
+              after_preview: null,
+              reason_text: 'سبب',
+              status: 'pending',
+              requested_by: 'u-1',
+              requested_by_name: 'مدير النظام',
+              requested_at: '2026-05-09T08:00:00Z',
+              reviewed_by: null,
+              reviewed_by_name: null,
+              reviewed_at: null,
+              review_notes: null,
+            },
+          ],
+        },
+      ]);
+      const svc = await buildSvc(ds);
+      const out = await svc.getExchangeAudit(EXCHANGE_ID);
+      expect(out.edit_requests).toHaveLength(1);
+      expect(out.edit_requests[0].document_no).toBe('EXC-2026-000003');
+    }
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────
@@ -237,6 +359,23 @@ describe('ReturnsAuditService — read-only contract', () => {
     // form remaining anywhere in the source, in case a future edit
     // accidentally drops the cast.
     expect(code).not.toMatch(/\$\{itemsFk\}\s*=\s*\$2/);
+  });
+
+  // ─── PR-FIX-RETURNS-AUDIT-EDIT-DOC-NO — pins the entity-aware doc-no
+  // column.  return_edit_requests has return_no only; exchange_edit_
+  // requests has exchange_no only.  The query must pick the right
+  // column by entity rather than COALESCE over a non-existent one.
+  it('edit_requests SELECT uses an entity-aware ${editDocCol} (no cross-table COALESCE)', () => {
+    // The fix introduces an entity-aware template variable.
+    expect(code).toMatch(/\$\{editDocCol\}\s+AS\s+document_no/);
+    // The original broken form must be gone.
+    expect(code).not.toMatch(
+      /COALESCE\s*\(\s*er\.return_no\s*,\s*er\.exchange_no\s*\)/,
+    );
+    // Each table should only ever be addressed with its own doc-no
+    // column literal — no hard-coded `er.exchange_no` next to the
+    // return path or vice versa.
+    expect(code).not.toMatch(/er\.return_no\s*,\s*er\.exchange_no/);
   });
 
   it('endpoint is GET-only — no controller method has @Post/@Patch/@Delete on the audit routes', () => {

@@ -216,13 +216,19 @@ export class ReturnsAuditService {
     const editTable =
       entity === 'return' ? 'return_edit_requests' : 'exchange_edit_requests';
     const editFk = entity === 'return' ? 'return_id' : 'exchange_id';
+    // PR-FIX-RETURNS-AUDIT-EDIT-DOC-NO — each table only carries the
+    // document-number column for its own entity (return_edit_requests
+    // has return_no, exchange_edit_requests has exchange_no), so a
+    // COALESCE over both raised `column er.exchange_no does not exist`
+    // on every audit fetch.  Pick the correct column by entity instead.
+    const editDocCol = entity === 'return' ? 'return_no' : 'exchange_no';
     let edit_requests: AuditEditRequestRow[] = [];
     try {
       const rawRequests: any[] = await this.ds.query(
         `
         SELECT er.id::text,
                er.${editFk}::text AS parent_id,
-               COALESCE(er.return_no, er.exchange_no) AS document_no,
+               er.${editDocCol} AS document_no,
                er.requested_action,
                er.requested_payload,
                er.before_snapshot,
