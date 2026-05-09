@@ -547,3 +547,188 @@ describe('Returns — exchange-specific display', () => {
     expect(delta.textContent).toContain('تم رد الفرق للعميل');
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────
+//  7. Cancelled-return classification (PR-FIX-RETURNS-CANCELLED-DISPLAY)
+// ─────────────────────────────────────────────────────────────────────
+
+describe('Returns — cancelled classification (display)', () => {
+  function cancelledReversedRow(over: Partial<ReturnListItem> = {}): ReturnListItem {
+    // RET-2026-000003-style row: cancellation JE posted, cash bridge
+    // present.  BE classifies as 'reversed' / 'matched'.
+    const base = row({
+      id: 'r-cancel-ok',
+      return_no: 'RET-2026-000003',
+      status: 'cancelled',
+      // Original JE was correctly voided as part of cancellation, so
+      // the active-JE projection is null on the wire.
+      journal_entry_id: null,
+      journal_entry_no: null,
+      journal_entry_posted_at: null,
+      refund_cashbox_transaction_id: null,
+      accounting_status: 'reversed',
+      match_status: 'matched',
+      ...over,
+    } as Partial<ReturnListItem>);
+    // Cancellation artifact projection (new in this PR).
+    return {
+      ...base,
+      cancellation_entry_id: 'rev-je-1',
+      cancellation_entry_no: 'JE-2026-000378',
+      cancellation_je_posted_at: '2026-05-02T19:24:33Z',
+      cancellation_je_present: true,
+      cancellation_cash_bridge_present: true,
+    };
+  }
+
+  function cancelledIncompleteRow(over: Partial<ReturnListItem> = {}): ReturnListItem {
+    const base = row({
+      id: 'r-cancel-broken',
+      return_no: 'RET-2026-000099',
+      status: 'cancelled',
+      journal_entry_id: null,
+      journal_entry_no: null,
+      journal_entry_posted_at: null,
+      refund_cashbox_transaction_id: null,
+      accounting_status: 'cancellation_incomplete',
+      match_status: 'needs_review',
+      ...over,
+    } as Partial<ReturnListItem>);
+    return {
+      ...base,
+      cancellation_entry_id: null,
+      cancellation_entry_no: null,
+      cancellation_je_posted_at: null,
+      cancellation_je_present: false,
+      cancellation_cash_bridge_present: false,
+    };
+  }
+
+  function cancelledDetail(reversed: boolean): ReturnDetails {
+    const base = reversed ? cancelledReversedRow() : cancelledIncompleteRow();
+    return {
+      ...base,
+      requested_by_name: base.requested_by_name ?? null,
+      approved_by_name: base.approved_by_name ?? null,
+      refunded_by_name: base.refunded_by_name ?? null,
+      reason_details: '',
+      notes: '',
+      warehouse_id: 'w1',
+      warehouse_name: 'المخزن الرئيسي',
+      invoice_date: '2026-04-25T16:00:00Z',
+      items: [],
+    };
+  }
+
+  it("cancelled + 'reversed' row uses the emerald 'تم عكس الأثر' badge (no 'تحتاج مراجعة' on the row)", async () => {
+    listMock.mockResolvedValueOnce([cancelledReversedRow()]);
+    renderPage();
+    const r = await screen.findByTestId('returns-row-r-cancel-ok');
+    expect(r.textContent).toContain('تم عكس الأثر');
+    expect(r.textContent).not.toContain('القيد غير موجود');
+  });
+
+  it("cancelled + 'reversed' details panel hides the 'تحتاج مراجعة' pill and the rose review chrome", async () => {
+    listMock.mockResolvedValueOnce([cancelledReversedRow()]);
+    getMock.mockResolvedValueOnce(cancelledDetail(true));
+    renderPage();
+    fireEvent.click(await screen.findByTestId('returns-row-r-cancel-ok'));
+    const acc = await screen.findByTestId('returns-detail-accounting-section');
+    // No "needs review" pill copy on the section header.
+    expect(acc.textContent).not.toMatch(/تحتاج مراجعة/);
+    // Healthy 'تم عكس الأثر' badge appears in the section.
+    expect(acc.textContent).toContain('تم عكس الأثر');
+    // Section is NOT auto-opened (acctProblem=false → no rose chrome,
+    // no `open` attribute).
+    expect(acc.hasAttribute('open')).toBe(false);
+  });
+
+  it("cancelled + 'reversed' detail surfaces cancellation_entry_no in place of 'غير موجود'", async () => {
+    listMock.mockResolvedValueOnce([cancelledReversedRow()]);
+    getMock.mockResolvedValueOnce(cancelledDetail(true));
+    renderPage();
+    fireEvent.click(await screen.findByTestId('returns-row-r-cancel-ok'));
+    const acc = await screen.findByTestId('returns-detail-accounting-section');
+    // Open the section so the JE row is rendered (closed-by-default
+    // when there's no acctProblem).
+    fireEvent.click(acc.querySelector('summary')!);
+    expect(acc.textContent).toContain('JE-2026-000378');
+    expect(acc.textContent).toContain('قيد عكس المرتجع');
+    expect(acc.textContent).not.toContain('غير موجود');
+  });
+
+  it("cancelled + 'cancellation_incomplete' row keeps the warning pill and 'إلغاء غير مكتمل' badge", async () => {
+    listMock.mockResolvedValueOnce([cancelledIncompleteRow()]);
+    renderPage();
+    const r = await screen.findByTestId('returns-row-r-cancel-broken');
+    expect(r.textContent).toContain('إلغاء غير مكتمل');
+    expect(r.textContent).toContain('تحتاج مراجعة'); // match_status=needs_review
+  });
+
+  it("cancelled + 'cancellation_incomplete' details panel surfaces the 'يحتاج مراجعة إلغاء' pill", async () => {
+    listMock.mockResolvedValueOnce([cancelledIncompleteRow()]);
+    getMock.mockResolvedValueOnce(cancelledDetail(false));
+    renderPage();
+    fireEvent.click(await screen.findByTestId('returns-row-r-cancel-broken'));
+    const acc = await screen.findByTestId('returns-detail-accounting-section');
+    // Header pill uses the cancellation-specific copy when the
+    // accounting_status is 'cancellation_incomplete'.
+    expect(acc.textContent).toContain('يحتاج مراجعة إلغاء');
+    expect(acc.textContent).toContain('إلغاء غير مكتمل');
+    // The standalone in-panel warning banner shows the cancellation
+    // copy too.
+    const warn = await screen.findByTestId(
+      'returns-detail-accounting-warning',
+    );
+    expect(warn.textContent).toContain('ملغي — يحتاج مراجعة إلغاء');
+  });
+
+  it('non-cancelled refunded review row keeps the legacy generic warning copy unchanged', async () => {
+    // Regression guard: the cancellation-specific banner copy is
+    // gated on accounting_status==='cancellation_incomplete'.  An
+    // unrelated cashbox_not_linked / refunded row must still show
+    // the generic "تنبيه: هذا المرتجع لديه ملاحظات محاسبية" copy.
+    listMock.mockResolvedValueOnce([
+      row({
+        id: 'r-broken-cash',
+        return_no: 'RET-2026-CASH-LINK',
+        accounting_status: 'cashbox_not_linked',
+        match_status: 'needs_review',
+        has_unlinked_cash_leg: true,
+      }),
+    ]);
+    getMock.mockResolvedValueOnce({
+      ...detail(),
+      id: 'r-broken-cash',
+      return_no: 'RET-2026-CASH-LINK',
+      accounting_status: 'cashbox_not_linked',
+      match_status: 'needs_review',
+      has_unlinked_cash_leg: true,
+    });
+    renderPage();
+    fireEvent.click(await screen.findByTestId('returns-row-r-broken-cash'));
+    const warn = await screen.findByTestId(
+      'returns-detail-accounting-warning',
+    );
+    expect(warn.textContent).toContain(
+      'هذا المرتجع لديه ملاحظات محاسبية',
+    );
+    expect(warn.textContent).not.toContain('ملغي — يحتاج مراجعة إلغاء');
+  });
+
+  it("accounting_status filter dropdown exposes 'reversed' + 'cancellation_incomplete' as filterable options", async () => {
+    listMock.mockResolvedValue([row()]);
+    renderPage();
+    await screen.findByTestId('returns-page');
+    // The dropdown lives in the advanced-filter popover (PR-1E).
+    fireEvent.click(
+      await screen.findByTestId('returns-filter-advanced-toggle'),
+    );
+    const select = (await screen.findByTestId(
+      'returns-filter-accounting',
+    )) as HTMLSelectElement;
+    const values = Array.from(select.options).map((o) => o.value);
+    expect(values).toContain('reversed');
+    expect(values).toContain('cancellation_incomplete');
+  });
+});

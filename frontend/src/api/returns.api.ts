@@ -98,7 +98,14 @@ export type ReturnAccountingStatus =
   | 'je_missing'
   | 'cashbox_not_linked'
   | 'needs_review'
-  | 'not_applicable';
+  | 'not_applicable'
+  // PR-FIX-RETURNS-CANCELLED-DISPLAY — financially-complete cancelled
+  // return (cancellation JE posted; cash bridge present for cash
+  // returns).  Treated as healthy by the FE (not a review surface).
+  | 'reversed'
+  // Cancelled return whose reversal artifacts are missing — the only
+  // case where a cancelled row genuinely needs admin review.
+  | 'cancellation_incomplete';
 
 export type ReturnInventoryStatus = 'restored' | 'not_applicable';
 
@@ -144,6 +151,16 @@ export interface ReturnListItem {
   inventory_status?: ReturnInventoryStatus;
   match_status?: ReturnMatchStatus;
   restock_eligible_items?: number | null;
+  // PR-FIX-RETURNS-CANCELLED-DISPLAY — cancellation artifact projection
+  // populated for cancelled rows (null on non-cancelled).  The FE uses
+  // cancellation_entry_no in the detail panel as a fallback when
+  // journal_entry_no is null because the original JE was correctly
+  // voided as part of cancellation.
+  cancellation_entry_id?: string | null;
+  cancellation_entry_no?: string | null;
+  cancellation_je_posted_at?: string | null;
+  cancellation_je_present?: boolean | null;
+  cancellation_cash_bridge_present?: boolean | null;
 }
 
 export interface ReturnItem {
@@ -270,7 +287,9 @@ export const returnsApi = {
       | 'je_missing'
       | 'cashbox_not_linked'
       | 'needs_review'
-      | 'not_applicable';
+      | 'not_applicable'
+      | 'reversed'
+      | 'cancellation_incomplete';
   }) => {
     // PR-FIN-RETURNS-UX-0B — pass payload through `normalizeListResponse`
     // so a future BE shape change (or transient `{rows, total}` style

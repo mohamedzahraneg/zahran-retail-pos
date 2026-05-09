@@ -292,13 +292,17 @@ export class ListReturnsQueryDto {
 
   @ApiPropertyOptional({
     description:
-      'Diagnostic filter by computed accounting health. Useful for the operations dashboard.',
+      'Diagnostic filter by computed accounting health. Useful for the operations dashboard. ' +
+      "'reversed' / 'cancellation_incomplete' classify cancelled returns by whether " +
+      'the reversal artifacts (reversal JE + cash bridge) are present.',
     enum: [
       'matched',
       'je_missing',
       'cashbox_not_linked',
       'needs_review',
       'not_applicable',
+      'reversed',
+      'cancellation_incomplete',
     ],
   })
   @IsOptional()
@@ -308,13 +312,17 @@ export class ListReturnsQueryDto {
     'cashbox_not_linked',
     'needs_review',
     'not_applicable',
+    'reversed',
+    'cancellation_incomplete',
   ])
   accounting_status?:
     | 'matched'
     | 'je_missing'
     | 'cashbox_not_linked'
     | 'needs_review'
-    | 'not_applicable';
+    | 'not_applicable'
+    | 'reversed'
+    | 'cancellation_incomplete';
 }
 
 // ─── Edit-request workflow (Phase 1 — request only, no application) ──

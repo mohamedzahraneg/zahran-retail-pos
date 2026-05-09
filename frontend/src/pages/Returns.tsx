@@ -916,6 +916,11 @@ const ACCOUNTING_LABEL: Record<string, string> = {
   needs_review: 'يحتاج مراجعة',
   je_missing: 'القيد غير موجود',
   cashbox_not_linked: 'سطر النقد غير مربوط',
+  // PR-FIX-RETURNS-CANCELLED-DISPLAY — labels for cancelled returns.
+  // 'reversed' = healthy (cancellation JE + cash bridge in place).
+  // 'cancellation_incomplete' = the only cancelled-row review surface.
+  reversed: 'تم عكس الأثر',
+  cancellation_incomplete: 'إلغاء غير مكتمل',
   not_applicable: '—',
 };
 const INVENTORY_LABEL: Record<string, string> = {
@@ -1020,7 +1025,8 @@ function ReturnRow({
           <Badge
             label={`المحاسبة: ${ACCOUNTING_LABEL[op.accounting_status] ?? '—'}`}
             tone={
-              op.accounting_status === 'matched'
+              op.accounting_status === 'matched' ||
+              op.accounting_status === 'reversed'
                 ? 'emerald'
                 : op.accounting_status === 'not_applicable'
                 ? 'slate'
@@ -1451,6 +1457,8 @@ function ReturnDetailsPanel({
             | 'cashbox_not_linked'
             | 'needs_review'
             | 'not_applicable'
+            | 'reversed'
+            | 'cancellation_incomplete'
             | undefined;
           const matchStatus = (r as any).match_status as
             | 'matched'
@@ -1460,12 +1468,42 @@ function ReturnDetailsPanel({
           const hasUnlinkedCash = (r as any).has_unlinked_cash_leg as
             | boolean
             | undefined;
+          const isCancelled = (r as any).status === 'cancelled';
+          const cancellationEntryNo = (r as any).cancellation_entry_no as
+            | string
+            | null
+            | undefined;
+          const cancellationJePostedAt = (r as any)
+            .cancellation_je_posted_at as string | null | undefined;
+          // PR-FIX-RETURNS-CANCELLED-DISPLAY — 'reversed' is healthy and
+          // must NOT trigger the rose review chrome.  Only
+          // 'cancellation_incomplete' (and the legacy non-cancelled
+          // problem states) keep the warning surface.
           const acctProblem =
             !!hasUnlinkedCash ||
             (acctStatus &&
               acctStatus !== 'matched' &&
-              acctStatus !== 'not_applicable') ||
+              acctStatus !== 'not_applicable' &&
+              acctStatus !== 'reversed') ||
             matchStatus === 'needs_review';
+          // For cancelled returns, surface the cancellation JE info in
+          // place of the (now-voided) original.  Falls back to '—' if
+          // there is no cancellation JE either.
+          const journalEntryNo = isCancelled
+            ? cancellationEntryNo ??
+              (r as any).journal_entry_no ??
+              'غير موجود'
+            : (r as any).journal_entry_no ?? 'غير موجود';
+          const journalEntryPostedAt = isCancelled
+            ? cancellationJePostedAt ?? (r as any).journal_entry_posted_at
+            : (r as any).journal_entry_posted_at;
+          const journalEntryRowLabel = isCancelled
+            ? 'قيد عكس المرتجع'
+            : 'القيد المحاسبي';
+          const reviewPillLabel =
+            acctStatus === 'cancellation_incomplete'
+              ? 'يحتاج مراجعة إلغاء'
+              : 'تحتاج مراجعة';
           return (
             <details
               data-testid="returns-detail-accounting-section"
@@ -1480,22 +1518,20 @@ function ReturnDetailsPanel({
                 <ShieldCheck size={14} /> الحالة المحاسبية
                 {acctProblem && (
                   <span className="text-[10px] rounded-full bg-rose-100 text-rose-800 border border-rose-200 px-1.5 py-0.5 font-bold">
-                    تحتاج مراجعة
+                    {reviewPillLabel}
                   </span>
                 )}
               </summary>
               <div className="mt-2 space-y-1.5">
                 <div className="flex items-center justify-between">
-                  <span>القيد المحاسبي</span>
-                  <span className="font-mono text-xs">
-                    {(r as any).journal_entry_no ?? 'غير موجود'}
-                  </span>
+                  <span>{journalEntryRowLabel}</span>
+                  <span className="font-mono text-xs">{journalEntryNo}</span>
                 </div>
-                {(r as any).journal_entry_posted_at && (
+                {journalEntryPostedAt && (
                   <div className="flex items-center justify-between">
                     <span>وقت الترحيل</span>
                     <span className="font-mono text-xs">
-                      {dateOr((r as any).journal_entry_posted_at)}
+                      {dateOr(journalEntryPostedAt)}
                     </span>
                   </div>
                 )}
@@ -1517,7 +1553,7 @@ function ReturnDetailsPanel({
                   <Badge
                     label={`المحاسبة: ${ACCOUNTING_LABEL[acctStatus ?? 'not_applicable']}`}
                     tone={
-                      acctStatus === 'matched'
+                      acctStatus === 'matched' || acctStatus === 'reversed'
                         ? 'emerald'
                         : acctStatus === 'not_applicable'
                         ? 'slate'
@@ -1607,13 +1643,17 @@ function ReturnDetailsPanel({
           const hasUnlinkedCash = (r as any).has_unlinked_cash_leg as
             | boolean
             | undefined;
+          // PR-FIX-RETURNS-CANCELLED-DISPLAY — 'reversed' is healthy.
           const acctProblem =
             !!hasUnlinkedCash ||
             (acctStatus &&
               acctStatus !== 'matched' &&
-              acctStatus !== 'not_applicable') ||
+              acctStatus !== 'not_applicable' &&
+              acctStatus !== 'reversed') ||
             matchStatus === 'needs_review';
           if (!acctProblem) return null;
+          const isCancellationIncomplete =
+            acctStatus === 'cancellation_incomplete';
           return (
             <div
               className="rounded-lg border border-rose-300 bg-rose-50 px-3 py-2 text-sm flex items-start gap-2"
@@ -1624,9 +1664,19 @@ function ReturnDetailsPanel({
                 className="text-rose-600 mt-0.5 shrink-0"
               />
               <div className="text-rose-900 leading-relaxed">
-                <span className="font-bold">تنبيه:</span> هذا المرتجع
-                لديه ملاحظات محاسبية. راجع قسم "الحالة المحاسبية" قبل
-                الاعتماد أو الصرف.
+                {isCancellationIncomplete ? (
+                  <>
+                    <span className="font-bold">ملغي — يحتاج مراجعة إلغاء:</span>{' '}
+                    هذا المرتجع ملغي لكن قيد العكس أو حركة الكاش المقابلة
+                    غير مكتملة. راجع قسم "الحالة المحاسبية".
+                  </>
+                ) : (
+                  <>
+                    <span className="font-bold">تنبيه:</span> هذا المرتجع
+                    لديه ملاحظات محاسبية. راجع قسم "الحالة المحاسبية" قبل
+                    الاعتماد أو الصرف.
+                  </>
+                )}
               </div>
             </div>
           );
@@ -3932,6 +3982,11 @@ function SmartFilterBar(props: SmartFilterBarProps) {
               <option value="needs_review">يحتاج مراجعة</option>
               <option value="je_missing">القيد غير موجود</option>
               <option value="cashbox_not_linked">سطر النقد غير مربوط</option>
+              {/* PR-FIX-RETURNS-CANCELLED-DISPLAY — admins can scope
+                  the table to cancelled rows that landed correctly
+                  ('reversed') or that need cancellation review. */}
+              <option value="reversed">تم عكس الأثر</option>
+              <option value="cancellation_incomplete">إلغاء غير مكتمل</option>
             </select>
           </div>
 
@@ -4173,7 +4228,8 @@ function ReturnsDataTable({
                   <Badge
                     label={ACCOUNTING_LABEL[op.accounting_status] ?? '—'}
                     tone={
-                      op.accounting_status === 'matched'
+                      op.accounting_status === 'matched' ||
+                      op.accounting_status === 'reversed'
                         ? 'emerald'
                         : op.accounting_status === 'not_applicable'
                           ? 'slate'

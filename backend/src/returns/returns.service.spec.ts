@@ -127,6 +127,107 @@ describe('ReturnsService.list — read enrichment SQL shape', () => {
     expect(sql).toMatch(/'restored'/);
   });
 
+  // ─── PR-FIX-RETURNS-CANCELLED-DISPLAY ────────────────────────────────
+  // The cancelled branch must come before the journal_entry_id IS NULL
+  // branch in both CASE expressions so a cancelled return whose
+  // original JE was correctly voided does not classify as je_missing /
+  // needs_review.  See investigation report for RET-2026-000003.
+  it('list() projects cancellation artifact detection columns inside the base CTE', async () => {
+    const { ds, calls } = makeFakeDs([[]]);
+    const svc = await buildService(ds);
+    await svc.list({} as any);
+    const sql = calls[0].sql;
+
+    expect(sql).toMatch(/AS cancellation_je_present/);
+    expect(sql).toMatch(/AS cancellation_entry_no/);
+    expect(sql).toMatch(/AS cancellation_je_posted_at/);
+    expect(sql).toMatch(/AS cancellation_cash_bridge_present/);
+    // cancellation_je_present looks up the active reversal JE by id.
+    expect(sql).toMatch(
+      /je\.id\s*=\s*r\.cancellation_entry_id[\s\S]+is_posted\s*=\s*true[\s\S]+is_void\s*=\s*false/,
+    );
+    // cancellation_cash_bridge_present scans cashbox_transactions
+    // directly (the breadcrumb on returns is sometimes null).
+    expect(sql).toMatch(
+      /cashbox_transactions ct[\s\S]+ct\.reference_type\s*=\s*'other'[\s\S]+ct\.category\s*=\s*'reversal_refund'/,
+    );
+  });
+
+  it('list() classifies cancelled returns ahead of the je_missing branch (accounting_status)', async () => {
+    const { ds, calls } = makeFakeDs([[]]);
+    const svc = await buildService(ds);
+    await svc.list({} as any);
+    const sql = calls[0].sql;
+
+    // The cancelled branch + 'reversed' / 'cancellation_incomplete'
+    // values are present.
+    expect(sql).toMatch(/WHEN b\.status\s*=\s*'cancelled'/);
+    expect(sql).toMatch(/'reversed'/);
+    expect(sql).toMatch(/'cancellation_incomplete'/);
+    // Cancelled branch precedes the journal_entry_id IS NULL branch in
+    // the accounting_status CASE.  Find the first occurrences after the
+    // 'AS accounting_status' anchor and assert ordering.
+    const acctIdx = sql.indexOf('AS accounting_status');
+    expect(acctIdx).toBeGreaterThan(-1);
+    // Search the slice ending at accounting_status alias (CASE comes
+    // before the alias).
+    const acctCaseSlice = sql.substring(0, acctIdx);
+    const cancelledIdx = acctCaseSlice.lastIndexOf("status = 'cancelled'");
+    const jeMissingIdx = acctCaseSlice.lastIndexOf('journal_entry_id IS NULL');
+    expect(cancelledIdx).toBeGreaterThan(-1);
+    expect(jeMissingIdx).toBeGreaterThan(-1);
+    expect(cancelledIdx).toBeLessThan(jeMissingIdx);
+  });
+
+  it('list() classifies cancelled returns ahead of the je_missing branch (match_status)', async () => {
+    const { ds, calls } = makeFakeDs([[]]);
+    const svc = await buildService(ds);
+    await svc.list({} as any);
+    const sql = calls[0].sql;
+
+    // Locate the match_status CASE block (after accounting_status).
+    const matchIdx = sql.indexOf('AS match_status');
+    const acctIdx = sql.indexOf('AS accounting_status');
+    expect(matchIdx).toBeGreaterThan(acctIdx);
+
+    const matchSlice = sql.substring(acctIdx, matchIdx);
+    const cancelledIdx = matchSlice.lastIndexOf("status = 'cancelled'");
+    const jeMissingIdx = matchSlice.lastIndexOf('journal_entry_id IS NULL');
+    expect(cancelledIdx).toBeGreaterThan(-1);
+    expect(jeMissingIdx).toBeGreaterThan(-1);
+    expect(cancelledIdx).toBeLessThan(jeMissingIdx);
+  });
+
+  it('list() cancelled CASE checks cancellation_je_present AND (refund_method <> cash OR cash_bridge_present)', async () => {
+    const { ds, calls } = makeFakeDs([[]]);
+    const svc = await buildService(ds);
+    await svc.list({} as any);
+    const sql = calls[0].sql;
+
+    // The two-part guard expression appears verbatim in the SQL —
+    // proves cash returns require the bridge while non-cash returns
+    // don't.
+    expect(sql).toMatch(
+      /b\.cancellation_je_present[\s\S]+b\.refund_method\s*<>\s*'cash'[\s\S]+b\.cancellation_cash_bridge_present/,
+    );
+  });
+
+  it("list() accepts accounting_status='reversed' / 'cancellation_incomplete' filters", async () => {
+    {
+      const { ds, calls } = makeFakeDs([[]]);
+      const svc = await buildService(ds);
+      await svc.list({ accounting_status: 'reversed' } as any);
+      expect(calls[0].sql).toMatch(/FROM enriched\s+WHERE accounting_status\s*=\s*\$\d+/);
+      expect(calls[0].params).toEqual(['reversed', 50, 0]);
+    }
+    {
+      const { ds, calls } = makeFakeDs([[]]);
+      const svc = await buildService(ds);
+      await svc.list({ accounting_status: 'cancellation_incomplete' } as any);
+      expect(calls[0].params).toEqual(['cancellation_incomplete', 50, 0]);
+    }
+  });
+
   it('passes-through existing fields and adds created_at + updated_at', async () => {
     const { ds, calls } = makeFakeDs([[]]);
     const svc = await buildService(ds);
@@ -306,6 +407,96 @@ describe('ReturnsService.findOne — read enrichment', () => {
     expect(out.journal_entry_no).toBe('JE-2026-000358');
     expect(out.accounting_status).toBe('matched');
     expect(out.match_status).toBe('matched');
+  });
+
+  // ─── PR-FIX-RETURNS-CANCELLED-DISPLAY ────────────────────────────────
+  it('findOne() projects cancellation_* artifact columns and the cancelled CASE branch', async () => {
+    const headerRow = {
+      id: 'ret-cancelled-1',
+      return_no: 'RET-2026-000003',
+      status: 'cancelled',
+      cancellation_entry_id: 'rev-je-1',
+      cancellation_entry_no: 'JE-2026-000378',
+      cancellation_je_posted_at: '2026-05-02T19:24:33Z',
+      cancellation_je_present: true,
+      cancellation_cash_bridge_present: true,
+      refund_method: 'cash',
+      // For a cancelled return whose original JE was correctly voided,
+      // journal_entry_* are NULL — that's the bug RET-2026-000003
+      // tripped over.  The new SQL classifies this as 'reversed'.
+      journal_entry_id: null,
+      journal_entry_no: null,
+      journal_entry_posted_at: null,
+      refund_cashbox_transaction_id: null,
+      accounting_status: 'reversed',
+      inventory_status: 'restored',
+      match_status: 'matched',
+    };
+    const { ds, calls } = makeFakeDs([[headerRow], []]);
+    const svc = await buildService(ds);
+    const out = await svc.findOne('ret-cancelled-1');
+
+    const sql = calls[0].sql;
+    // New cancellation artifact projections present in findOne SQL.
+    expect(sql).toMatch(/AS cancellation_je_present/);
+    expect(sql).toMatch(/AS cancellation_entry_no/);
+    expect(sql).toMatch(/AS cancellation_je_posted_at/);
+    expect(sql).toMatch(/AS cancellation_cash_bridge_present/);
+    // Cancelled branch is present.
+    expect(sql).toMatch(/WHEN b\.status\s*=\s*'cancelled'/);
+    expect(sql).toMatch(/'reversed'/);
+    expect(sql).toMatch(/'cancellation_incomplete'/);
+
+    // findOne() ordering: cancelled branch precedes je_missing branch
+    // in BOTH CASE expressions.
+    const acctIdx = sql.indexOf('AS accounting_status');
+    const acctSlice = sql.substring(0, acctIdx);
+    expect(acctSlice.lastIndexOf("status = 'cancelled'"))
+      .toBeLessThan(acctSlice.lastIndexOf('journal_entry_id IS NULL'));
+    const matchIdx = sql.indexOf('AS match_status');
+    const matchSlice = sql.substring(acctIdx, matchIdx);
+    expect(matchSlice.lastIndexOf("status = 'cancelled'"))
+      .toBeLessThan(matchSlice.lastIndexOf('journal_entry_id IS NULL'));
+
+    // Header row passes through verbatim — including the new fields.
+    expect(out.cancellation_entry_no).toBe('JE-2026-000378');
+    expect(out.cancellation_je_posted_at).toBe('2026-05-02T19:24:33Z');
+    expect(out.cancellation_je_present).toBe(true);
+    expect(out.cancellation_cash_bridge_present).toBe(true);
+    expect(out.accounting_status).toBe('reversed');
+    expect(out.match_status).toBe('matched');
+    expect(out.journal_entry_no).toBeNull();
+  });
+
+  it('findOne() returns cancellation_incomplete when cash bridge is missing on a cash refund', async () => {
+    const headerRow = {
+      id: 'ret-cancelled-2',
+      return_no: 'RET-2026-000099',
+      status: 'cancelled',
+      cancellation_entry_id: null,
+      cancellation_entry_no: null,
+      cancellation_je_posted_at: null,
+      cancellation_je_present: false,
+      cancellation_cash_bridge_present: false,
+      refund_method: 'cash',
+      journal_entry_id: null,
+      journal_entry_no: null,
+      refund_cashbox_transaction_id: null,
+      // The SQL CASE produces these — we assert the wire-shape passes
+      // through cleanly (the live DB drives the values; the test pins
+      // the contract for the FE consumer).
+      accounting_status: 'cancellation_incomplete',
+      inventory_status: 'restored',
+      match_status: 'needs_review',
+    };
+    const { ds } = makeFakeDs([[headerRow], []]);
+    const svc = await buildService(ds);
+    const out = await svc.findOne('ret-cancelled-2');
+
+    expect(out.accounting_status).toBe('cancellation_incomplete');
+    expect(out.match_status).toBe('needs_review');
+    expect(out.cancellation_je_present).toBe(false);
+    expect(out.cancellation_cash_bridge_present).toBe(false);
   });
 });
 

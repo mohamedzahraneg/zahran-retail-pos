@@ -898,7 +898,38 @@ export class ReturnsService {
             WHERE je.reference_type='return' AND je.reference_id = r.id
               AND je.is_posted=true AND je.is_void=false
               AND coa.code LIKE '111_'
-              AND jl.credit > 0)                                      AS has_unlinked_cash_leg
+              AND jl.credit > 0)                                      AS has_unlinked_cash_leg,
+          -- PR-FIX-RETURNS-CANCELLED-DISPLAY — cancellation artifact
+          -- detection so the classifier below can recognise a
+          -- financially-complete cancelled return as 'reversed'
+          -- instead of falling through to the je-missing branch.
+          (SELECT EXISTS (
+             SELECT 1 FROM journal_entries je
+              WHERE je.id = r.cancellation_entry_id
+                AND je.is_posted = true
+                AND je.is_void   = false
+          ))                                                          AS cancellation_je_present,
+          (SELECT je.entry_no  FROM journal_entries je
+            WHERE je.id = r.cancellation_entry_id LIMIT 1)            AS cancellation_entry_no,
+          (SELECT je.posted_at FROM journal_entries je
+            WHERE je.id = r.cancellation_entry_id LIMIT 1)            AS cancellation_je_posted_at,
+          -- The reversal CT may sit in cashbox_transactions even when
+          -- returns.cancellation_cashbox_transaction_id is null (the
+          -- breadcrumb is not always backfilled — cashbox-gl-drift
+          -- helper makes the same observation).  Detect it by
+          -- scanning for the live reversal CT bridged off the
+          -- original return JE.
+          (SELECT EXISTS (
+             SELECT 1
+               FROM cashbox_transactions ct
+               JOIN journal_entries orig
+                 ON orig.id::text       = ct.reference_id::text
+              WHERE orig.reference_type = 'return'
+                AND orig.reference_id   = r.id
+                AND ct.reference_type   = 'other'
+                AND ct.category         = 'reversal_refund'
+                AND ct.is_void          = false
+          ))                                                          AS cancellation_cash_bridge_present
         FROM returns r
         LEFT JOIN invoices   i  ON i.id  = r.original_invoice_id
         LEFT JOIN customers  c  ON c.id  = r.customer_id
@@ -913,12 +944,29 @@ export class ReturnsService {
           b.*,
           -- Computed accounting_status:
           --   not_applicable: pending/rejected (no JE expected)
+          --   reversed:       cancelled WITH the cancellation JE posted
+          --                   AND (non-cash OR cash bridge present)
+          --   cancellation_incomplete: cancelled but artifacts missing
           --   je_missing:     approved/refunded but no active JE
           --   cashbox_not_linked: JE exists but cash leg cashbox_id NULL
           --   matched:        JE present + (no unlinked cash leg) + (refund CT present iff cash refund)
           --   needs_review:   anything else
+          --
+          -- PR-FIX-RETURNS-CANCELLED-DISPLAY — the cancelled branch
+          -- MUST come before the journal_entry_id IS NULL branch:
+          -- the active-JE subquery above filters voided rows out,
+          -- so a correctly-cancelled return looks 'je_missing'
+          -- otherwise.
           CASE
             WHEN b.status IN ('pending','rejected') THEN 'not_applicable'
+            WHEN b.status = 'cancelled' THEN
+              CASE
+                WHEN b.cancellation_je_present
+                 AND (b.refund_method <> 'cash'
+                      OR b.cancellation_cash_bridge_present)
+                  THEN 'reversed'
+                ELSE 'cancellation_incomplete'
+              END
             WHEN b.journal_entry_id IS NULL THEN 'je_missing'
             WHEN b.has_unlinked_cash_leg = true THEN 'cashbox_not_linked'
             WHEN b.refund_method = 'cash'
@@ -938,8 +986,18 @@ export class ReturnsService {
             ELSE 'restored'
           END AS inventory_status,
           -- Match status: top-line operational badge for the row.
+          -- Mirrors the cancelled branch above so a financially
+          -- reversed return shows 'matched' instead of needs_review.
           CASE
             WHEN b.status IN ('pending','rejected') THEN 'pending'
+            WHEN b.status = 'cancelled' THEN
+              CASE
+                WHEN b.cancellation_je_present
+                 AND (b.refund_method <> 'cash'
+                      OR b.cancellation_cash_bridge_present)
+                  THEN 'matched'
+                ELSE 'needs_review'
+              END
             WHEN b.journal_entry_id IS NULL THEN 'needs_review'
             WHEN b.has_unlinked_cash_leg = true THEN 'needs_review'
             ELSE 'matched'
@@ -1000,7 +1058,32 @@ export class ReturnsService {
             WHERE je.reference_type='return' AND je.reference_id = r.id
               AND je.is_posted=true AND je.is_void=false
               AND coa.code LIKE '111_'
-              AND jl.credit > 0)                                      AS has_unlinked_cash_leg
+              AND jl.credit > 0)                                      AS has_unlinked_cash_leg,
+          -- PR-FIX-RETURNS-CANCELLED-DISPLAY — cancellation artifact
+          -- detection (mirrors list()).  See list() comment for the
+          -- rationale on cancellation_cash_bridge_present scanning
+          -- cashbox_transactions directly.
+          (SELECT EXISTS (
+             SELECT 1 FROM journal_entries je
+              WHERE je.id = r.cancellation_entry_id
+                AND je.is_posted = true
+                AND je.is_void   = false
+          ))                                                          AS cancellation_je_present,
+          (SELECT je.entry_no  FROM journal_entries je
+            WHERE je.id = r.cancellation_entry_id LIMIT 1)            AS cancellation_entry_no,
+          (SELECT je.posted_at FROM journal_entries je
+            WHERE je.id = r.cancellation_entry_id LIMIT 1)            AS cancellation_je_posted_at,
+          (SELECT EXISTS (
+             SELECT 1
+               FROM cashbox_transactions ct
+               JOIN journal_entries orig
+                 ON orig.id::text       = ct.reference_id::text
+              WHERE orig.reference_type = 'return'
+                AND orig.reference_id   = r.id
+                AND ct.reference_type   = 'other'
+                AND ct.category         = 'reversal_refund'
+                AND ct.is_void          = false
+          ))                                                          AS cancellation_cash_bridge_present
         FROM returns r
         LEFT JOIN invoices  i ON i.id  = r.original_invoice_id
         LEFT JOIN customers c ON c.id  = r.customer_id
@@ -1013,8 +1096,20 @@ export class ReturnsService {
       )
       SELECT
         b.*,
+        -- PR-FIX-RETURNS-CANCELLED-DISPLAY — cancelled branch must
+        -- precede the journal_entry_id IS NULL branch so a
+        -- financially-complete cancellation classifies as 'reversed'
+        -- instead of 'je_missing'.
         CASE
           WHEN b.status IN ('pending','rejected') THEN 'not_applicable'
+          WHEN b.status = 'cancelled' THEN
+            CASE
+              WHEN b.cancellation_je_present
+               AND (b.refund_method <> 'cash'
+                    OR b.cancellation_cash_bridge_present)
+                THEN 'reversed'
+              ELSE 'cancellation_incomplete'
+            END
           WHEN b.journal_entry_id IS NULL THEN 'je_missing'
           WHEN b.has_unlinked_cash_leg = true THEN 'cashbox_not_linked'
           WHEN b.refund_method = 'cash'
@@ -1029,6 +1124,14 @@ export class ReturnsService {
         END AS inventory_status,
         CASE
           WHEN b.status IN ('pending','rejected') THEN 'pending'
+          WHEN b.status = 'cancelled' THEN
+            CASE
+              WHEN b.cancellation_je_present
+               AND (b.refund_method <> 'cash'
+                    OR b.cancellation_cash_bridge_present)
+                THEN 'matched'
+              ELSE 'needs_review'
+            END
           WHEN b.journal_entry_id IS NULL THEN 'needs_review'
           WHEN b.has_unlinked_cash_leg = true THEN 'needs_review'
           ELSE 'matched'
