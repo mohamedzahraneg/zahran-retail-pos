@@ -19,6 +19,94 @@ import { AccountingPostingService } from '../chart-of-accounts/posting.service';
 import { FinancialEngineService } from '../chart-of-accounts/financial-engine.service';
 import { GL_EMPLOYEE_RECEIVABLE } from '../chart-of-accounts/gl-codes.constants';
 
+// ─── Refund cash totals helper (PR-FIX-SHIFT-CASH-APPLY-REVERSAL-NET)
+
+/**
+ * Movement shape consumed by the totals computation.  The full row in
+ * `refund_cash_movements` carries many more fields, but the totals
+ * only need these four.
+ */
+export interface RefundCashMovementForTotals {
+  direction: 'in' | 'out';
+  amount: number;
+  is_reversal?: boolean;
+  source_return_status?: string | null;
+}
+
+export interface RefundCashTotals {
+  totalRefundCashOut: number;
+  totalRefundCashIn: number;
+  netRefundCashImpact: number;
+  cancelledReturnOutAmount: number;
+  cancelledReturnReversalAmount: number;
+  cancelledReturnNet: number;
+}
+
+/**
+ * Compute the active + audit-only cash totals for the
+ * "المرتجعات والاستبدالات النقدية" section of the shift summary.
+ *
+ * Active vs audit-only is keyed off the SOURCE return's status:
+ *   · cancelled  → both halves of the cancelled-original / reversal
+ *                  pair are EXCLUDED from active totals so the net
+ *                  effect is zero (the customer never actually got
+ *                  the money — it was restored).  The amounts surface
+ *                  in the audit-only fields for the FE footer.
+ *   · refunded   → ALL CTs contribute, including the reversal-in.
+ *                  This is the edit-request APPLY case where the
+ *                  engine reverse-and-replays the financial leg:
+ *                  original (out 450) + reversal (in 450) +
+ *                  new (out 450)  →  net -450.  Excluding the
+ *                  reversal half (the previous behaviour) made the
+ *                  shift report show -900 instead of -450 (observed
+ *                  on RET-2026-000006).
+ *
+ * Exported for direct unit testing — `summary()` calls this once and
+ * destructures the result.
+ */
+export function computeRefundCashTotals(
+  refund_cash_movements: RefundCashMovementForTotals[],
+): RefundCashTotals {
+  const isActiveCashImpact = (m: RefundCashMovementForTotals) =>
+    m.source_return_status !== 'cancelled';
+  const totalRefundCashOut = refund_cash_movements
+    .filter((m) => m.direction === 'out' && isActiveCashImpact(m))
+    .reduce((s, m) => s + m.amount, 0);
+  const totalRefundCashIn = refund_cash_movements
+    .filter((m) => m.direction === 'in' && isActiveCashImpact(m))
+    .reduce((s, m) => s + m.amount, 0);
+  const netRefundCashImpact = totalRefundCashOut - totalRefundCashIn;
+  // Audit-only — informational, never feeds into expected_closing.
+  // Tightened so apply-reversals on refunded returns are NOT counted
+  // as cancelled-pair amounts.
+  const cancelledReturnOutAmount = refund_cash_movements
+    .filter(
+      (m) =>
+        m.source_return_status === 'cancelled' &&
+        !m.is_reversal &&
+        m.direction === 'out',
+    )
+    .reduce((s, m) => s + m.amount, 0);
+  const cancelledReturnReversalAmount = refund_cash_movements
+    .filter(
+      (m) =>
+        m.is_reversal &&
+        m.direction === 'in' &&
+        m.source_return_status === 'cancelled',
+    )
+    .reduce((s, m) => s + m.amount, 0);
+  const cancelledReturnNet =
+    cancelledReturnOutAmount - cancelledReturnReversalAmount;
+  return {
+    totalRefundCashOut,
+    totalRefundCashIn,
+    netRefundCashImpact,
+    cancelledReturnOutAmount,
+    cancelledReturnReversalAmount,
+    cancelledReturnNet,
+  };
+}
+
 /**
  * Cashier shift (وردية) service.
  *
@@ -798,30 +886,14 @@ export class ShiftsService {
     //
     // expected_closing is unchanged because the +350 / −350 in the
     // legacy formula cancelled out — TB / cashbox balance untouched.
-    const isActiveCashImpact = (m: { is_reversal?: boolean; source_return_status?: string | null }) =>
-      m.source_return_status !== 'cancelled' && !m.is_reversal;
-    const totalRefundCashOut = refund_cash_movements
-      .filter((m) => m.direction === 'out' && isActiveCashImpact(m))
-      .reduce((s, m) => s + m.amount, 0);
-    const totalRefundCashIn = refund_cash_movements
-      .filter((m) => m.direction === 'in' && isActiveCashImpact(m))
-      .reduce((s, m) => s + m.amount, 0);
-    const netRefundCashImpact = totalRefundCashOut - totalRefundCashIn;
-
-    // Audit-only totals — informational only, do NOT feed into
-    // active cash totals or expected_closing.
-    const cancelledReturnOutAmount = refund_cash_movements
-      .filter((m) =>
-        m.source_return_status === 'cancelled' &&
-        !m.is_reversal &&
-        m.direction === 'out',
-      )
-      .reduce((s, m) => s + m.amount, 0);
-    const cancelledReturnReversalAmount = refund_cash_movements
-      .filter((m) => m.is_reversal && m.direction === 'in')
-      .reduce((s, m) => s + m.amount, 0);
-    const cancelledReturnNet =
-      cancelledReturnOutAmount - cancelledReturnReversalAmount;
+    const refundTotals = computeRefundCashTotals(refund_cash_movements);
+    const totalRefundCashOut = refundTotals.totalRefundCashOut;
+    const totalRefundCashIn = refundTotals.totalRefundCashIn;
+    const netRefundCashImpact = refundTotals.netRefundCashImpact;
+    const cancelledReturnOutAmount = refundTotals.cancelledReturnOutAmount;
+    const cancelledReturnReversalAmount =
+      refundTotals.cancelledReturnReversalAmount;
+    const cancelledReturnNet = refundTotals.cancelledReturnNet;
 
     // PR-21 — Use cashbox_transactions as the canonical source for
     // refund cash movement (totalRefundCashOut/In above). The legacy

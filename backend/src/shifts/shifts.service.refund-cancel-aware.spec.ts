@@ -102,41 +102,196 @@ describe('ShiftsService.summary — refund_cash_movements cancel-aware SQL', () 
   });
 });
 
-describe('ShiftsService.summary — cancelled-pair excluded from active totals (PR-FIN-RETURNS-SHIFT-CANCELLED-EXCLUDE-FROM-TOTALS)', () => {
-  it('totalRefundCashOut filter excludes cancelled-original AND reversal rows', () => {
-    expect(SRC).toMatch(
-      /totalRefundCashOut\s*=\s*refund_cash_movements[\s\S]+isActiveCashImpact/,
+describe('ShiftsService.summary — cancelled-pair excluded from active totals (PR-FIN-RETURNS-SHIFT-CANCELLED-EXCLUDE-FROM-TOTALS, updated by PR-FIX-SHIFT-CASH-APPLY-REVERSAL-NET)', () => {
+  it('isActiveCashImpact predicate keys ONLY off source_return_status (no longer drops reversal rows blindly)', () => {
+    // After PR-FIX-SHIFT-CASH-APPLY-REVERSAL-NET, the apply
+    // reverse-and-replay scenario needs the reversal-in to count.
+    // The predicate is now scoped purely by source_return_status.
+    //
+    // We isolate the predicate window (between the const declaration
+    // and the closing arrow) so the broader source's audit-only
+    // filters — which legitimately still use `!m.is_reversal` for
+    // cancelled-pair detection — don't false-positive this check.
+    const predicateMatch = SRC.match(
+      /const\s+isActiveCashImpact\s*=[\s\S]*?=>\s*[\s\S]*?;/,
     );
+    expect(predicateMatch).not.toBeNull();
+    const predicate = predicateMatch![0];
+    expect(predicate).toMatch(/source_return_status\s*!==\s*'cancelled'/);
+    expect(predicate).not.toMatch(/!m\.is_reversal/);
+  });
+
+  it('totalRefundCash{Out,In} are computed via the exported helper', () => {
+    expect(SRC).toMatch(/computeRefundCashTotals\(/);
+    expect(SRC).toMatch(/totalRefundCashOut\s*=\s*refundTotals\.totalRefundCashOut/);
+    expect(SRC).toMatch(/totalRefundCashIn\s*=\s*refundTotals\.totalRefundCashIn/);
+  });
+
+  it('audit-only cancelled-out total still requires source_return_status === cancelled', () => {
     expect(SRC).toMatch(
-      /isActiveCashImpact[\s\S]+source_return_status\s*!==\s*'cancelled'[\s\S]+!m\.is_reversal/,
+      /cancelledReturnOutAmount[\s\S]+source_return_status\s*===\s*'cancelled'/,
     );
   });
 
-  it('totalRefundCashIn filter applies the same isActiveCashImpact gate', () => {
+  it('audit-only cancelled-reversal total ALSO requires source_return_status === cancelled (so apply-reversals are not counted)', () => {
+    // PR-FIX-SHIFT-CASH-APPLY-REVERSAL-NET tightening: the apply
+    // case writes a reversal CT whose source return is `refunded`,
+    // and that must NOT contribute to the cancelled-reversal audit
+    // total.
     expect(SRC).toMatch(
-      /totalRefundCashIn\s*=\s*refund_cash_movements[\s\S]+isActiveCashImpact/,
+      /cancelledReturnReversalAmount[\s\S]+m\.is_reversal[\s\S]+source_return_status\s*===\s*'cancelled'/,
     );
   });
 
-  it('audit-only totals are computed for cancelled rows (out, reversal, net)', () => {
-    expect(SRC).toMatch(/cancelledReturnOutAmount[\s\S]+source_return_status\s*===\s*'cancelled'/);
-    expect(SRC).toMatch(/cancelledReturnReversalAmount[\s\S]+m\.is_reversal/);
-    expect(SRC).toMatch(/cancelledReturnNet\s*=\s*cancelledReturnOutAmount\s*-\s*cancelledReturnReversalAmount/);
+  it('cancelledReturnNet still equals out − reversal', () => {
+    expect(SRC).toMatch(
+      /cancelledReturnNet\s*=\s*cancelledReturnOutAmount\s*-\s*cancelledReturnReversalAmount/,
+    );
   });
 
-  it('response shape exposes the new audit-only fields', () => {
+  it('response shape exposes the audit-only fields', () => {
     expect(SRC).toMatch(/cancelled_return_out_amount:\s*cancelledReturnOutAmount/);
     expect(SRC).toMatch(/cancelled_return_reversal_amount:\s*cancelledReturnReversalAmount/);
     expect(SRC).toMatch(/cancelled_return_net:\s*cancelledReturnNet/);
   });
 
-  it('expected_closing math is unchanged because cancelled pair was already net-zero', () => {
-    // The legacy formula included +reversal in the in-side and +out
-    // in the out-side, which cancelled out. The new formula excludes
-    // both, so opening + activeIn - activeOut = same numerical value.
-    // We pin that the formula structure is preserved.
+  it('expected_closing math is unchanged — formula structure preserved', () => {
     expect(SRC).toMatch(
       /expectedClosing\s*=\s*Number\(shift\.opening_balance[\s\S]+totalCashIn\s*-\s*totalCashOut/,
     );
+  });
+});
+
+// ─── Behavioural tests on the exported helper ─────────────────────
+//   PR-FIX-SHIFT-CASH-APPLY-REVERSAL-NET — these drive the actual
+//   filter+reduce logic (no SQL, no DataSource needed) so a future
+//   regression that flips the predicate back gets caught here, not
+//   in production.
+
+import { computeRefundCashTotals } from './shifts.service';
+
+describe('computeRefundCashTotals — behavioural (PR-FIX-SHIFT-CASH-APPLY-REVERSAL-NET)', () => {
+  it('apply reverse-and-replay on a refunded return: original out 450 + reversal in 450 + replay out 450 → net -450 (NOT -900)', () => {
+    // The exact CT shape that landed for RET-2026-000006 after apply.
+    // Both `out` rows have source_return_status='refunded'.  The
+    // reversal `in` row's source resolves through the JE-bridge to
+    // the same `refunded` return.  All three must contribute.
+    const totals = computeRefundCashTotals([
+      // CT 378 — original refund
+      {
+        direction: 'out',
+        amount: 450,
+        is_reversal: false,
+        source_return_status: 'refunded',
+      },
+      // CT 390 — reversal of the original (engine writes this with
+      //          reference_type='other', is_reversal=true; the
+      //          source still resolves to the refunded return)
+      {
+        direction: 'in',
+        amount: 450,
+        is_reversal: true,
+        source_return_status: 'refunded',
+      },
+      // CT 391 — re-post after apply
+      {
+        direction: 'out',
+        amount: 450,
+        is_reversal: false,
+        source_return_status: 'refunded',
+      },
+    ]);
+    expect(totals.totalRefundCashOut).toBe(900);
+    expect(totals.totalRefundCashIn).toBe(450);
+    expect(totals.netRefundCashImpact).toBe(450);
+    // Display sign is `-net` in the FE; `EGP(-net) = -450`.
+    // Audit-only fields stay zero — nothing was cancelled.
+    expect(totals.cancelledReturnOutAmount).toBe(0);
+    expect(totals.cancelledReturnReversalAmount).toBe(0);
+    expect(totals.cancelledReturnNet).toBe(0);
+  });
+
+  it('cancelled return: original out 450 + reversal in 450 → net 0 (both excluded from active totals)', () => {
+    const totals = computeRefundCashTotals([
+      {
+        direction: 'out',
+        amount: 450,
+        is_reversal: false,
+        source_return_status: 'cancelled',
+      },
+      {
+        direction: 'in',
+        amount: 450,
+        is_reversal: true,
+        source_return_status: 'cancelled',
+      },
+    ]);
+    expect(totals.totalRefundCashOut).toBe(0);
+    expect(totals.totalRefundCashIn).toBe(0);
+    expect(totals.netRefundCashImpact).toBe(0);
+    // Both surface in the audit-only fields for the FE footer.
+    expect(totals.cancelledReturnOutAmount).toBe(450);
+    expect(totals.cancelledReturnReversalAmount).toBe(450);
+    expect(totals.cancelledReturnNet).toBe(0);
+  });
+
+  it('apply-reversal on a refunded return is NOT counted in cancelledReturnReversalAmount', () => {
+    // Regression guard: the previous filter
+    //   cancelledReturnReversalAmount = m.is_reversal && direction='in'
+    // would have included the apply-reversal too — wrong.
+    const totals = computeRefundCashTotals([
+      {
+        direction: 'in',
+        amount: 450,
+        is_reversal: true,
+        source_return_status: 'refunded',
+      },
+    ]);
+    expect(totals.cancelledReturnReversalAmount).toBe(0);
+    // It DOES contribute to the active totals though.
+    expect(totals.totalRefundCashIn).toBe(450);
+  });
+
+  it('mixed shift — refunded apply trio + a cancelled pair: each scenario nets correctly side-by-side', () => {
+    const totals = computeRefundCashTotals([
+      // Apply trio on refunded return → net -450
+      { direction: 'out', amount: 450, is_reversal: false, source_return_status: 'refunded' },
+      { direction: 'in',  amount: 450, is_reversal: true,  source_return_status: 'refunded' },
+      { direction: 'out', amount: 450, is_reversal: false, source_return_status: 'refunded' },
+      // Cancelled pair → net 0 (both excluded from active)
+      { direction: 'out', amount: 200, is_reversal: false, source_return_status: 'cancelled' },
+      { direction: 'in',  amount: 200, is_reversal: true,  source_return_status: 'cancelled' },
+      // Plain refund on a refunded return → -100
+      { direction: 'out', amount: 100, is_reversal: false, source_return_status: 'refunded' },
+    ]);
+    // Active: out = 450 + 450 + 100 = 1000; in = 450; net = 550
+    expect(totals.totalRefundCashOut).toBe(1000);
+    expect(totals.totalRefundCashIn).toBe(450);
+    expect(totals.netRefundCashImpact).toBe(550);
+    // Audit-only: cancelled pair contributes 200/200/0
+    expect(totals.cancelledReturnOutAmount).toBe(200);
+    expect(totals.cancelledReturnReversalAmount).toBe(200);
+    expect(totals.cancelledReturnNet).toBe(0);
+  });
+
+  it('plain single refund on a refunded return: out 450 → net -450', () => {
+    const totals = computeRefundCashTotals([
+      { direction: 'out', amount: 450, is_reversal: false, source_return_status: 'refunded' },
+    ]);
+    expect(totals.totalRefundCashOut).toBe(450);
+    expect(totals.totalRefundCashIn).toBe(0);
+    expect(totals.netRefundCashImpact).toBe(450);
+  });
+
+  it('empty input → all zeros', () => {
+    const totals = computeRefundCashTotals([]);
+    expect(totals).toEqual({
+      totalRefundCashOut: 0,
+      totalRefundCashIn: 0,
+      netRefundCashImpact: 0,
+      cancelledReturnOutAmount: 0,
+      cancelledReturnReversalAmount: 0,
+      cancelledReturnNet: 0,
+    });
   });
 });

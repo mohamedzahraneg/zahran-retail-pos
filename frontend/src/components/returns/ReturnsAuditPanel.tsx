@@ -45,6 +45,92 @@ import { useAuthStore } from '@/stores/auth.store';
 
 const NOISY_FIELDS = new Set(['updated_at', 'id', 'created_at']);
 
+// PR-FIX-AUDIT-PANEL-ARABIC-VALUES — centralized maps so audit rows
+// don't render raw English DB enum values to non-technical users.
+// Unknown values fall through to the raw string (renderVal handles
+// numbers/booleans/objects).
+
+const STATUS_AR: Record<string, string> = {
+  pending: 'قيد الانتظار',
+  approved: 'معتمد',
+  refunded: 'تم الصرف',
+  rejected: 'مرفوض',
+  cancelled: 'ملغي',
+};
+
+const METHOD_AR: Record<string, string> = {
+  cash: 'كاش',
+  card: 'بطاقة',
+  instapay: 'إنستاباي',
+  bank_transfer: 'تحويل بنكي',
+};
+
+const ACTION_AR: Record<string, string> = {
+  create: 'إنشاء',
+  update: 'تعديل',
+  delete: 'حذف',
+  approve: 'اعتماد',
+  reject: 'رفض',
+  void: 'إلغاء',
+  apply: 'تطبيق',
+  print: 'طباعة',
+  export: 'تصدير',
+  import: 'استيراد',
+  sync: 'مزامنة',
+  login: 'تسجيل دخول',
+  logout: 'تسجيل خروج',
+};
+
+const EXTRA_KIND_AR: Record<string, string> = {
+  edit_request_create: 'إنشاء طلب تعديل',
+  edit_request_approve: 'اعتماد طلب تعديل',
+  edit_request_reject: 'رفض طلب تعديل',
+  edit_request_apply: 'تطبيق طلب تعديل',
+  edit_request_cancel: 'إلغاء طلب تعديل',
+  refund_return: 'صرف مرتجع',
+  cancel_return: 'إلغاء مرتجع',
+  approve_return: 'اعتماد مرتجع',
+  reject_return: 'رفض مرتجع',
+};
+
+/**
+ * Translate a raw audit field value to Arabic when we recognize the
+ * key.  Unknown keys / values fall through to the raw string.  Used
+ * by ActivityEntry's `action` cell and the DiffGrid's KeyValueList.
+ */
+export function formatAuditValue(key: string, value: unknown): string {
+  if (value === null || value === undefined) return '—';
+  if (typeof value !== 'string') {
+    if (typeof value === 'number' || typeof value === 'boolean') {
+      return String(value);
+    }
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+  if (key === 'status' || key === 'old_status' || key === 'new_status' ||
+      key === 'status_before' || key === 'status_after' ||
+      key === 'status_at_apply') {
+    return STATUS_AR[value] ?? value;
+  }
+  if (
+    key === 'refund_method' ||
+    key === 'payment_method' ||
+    key === 'method'
+  ) {
+    return METHOD_AR[value] ?? value;
+  }
+  if (key === 'action') {
+    return ACTION_AR[value] ?? value;
+  }
+  if (key === 'kind' || key === 'extra_kind') {
+    return EXTRA_KIND_AR[value] ?? value;
+  }
+  return value;
+}
+
 const OP_LABEL: Record<'I' | 'U' | 'D', string> = {
   I: 'إضافة',
   U: 'تعديل',
@@ -243,11 +329,21 @@ export function ReturnsAuditPanel({ entity, id }: AuditPanelProps) {
 
       {data && !isEmpty && (
         <ul className="space-y-2" data-testid="audit-entries">
-          {/* Document changes (audit_logs) */}
+          {/* Document changes (audit_logs) — collapsed under
+              "تفاصيل تقنية" when a near-time activity row already
+              describes the same event in user-friendly Arabic.
+              See PR-FIX-AUDIT-PANEL-NOISY-DOC-COLLAPSE. */}
           {data.document_changes.map((c) => (
-            <ChangeEntry key={`doc-${c.id}`} row={c} kind="document" />
+            <ChangeEntry
+              key={`doc-${c.id}`}
+              row={c}
+              kind="document"
+              collapsed={isOverlappedByActivity(c, data.activity)}
+            />
           ))}
-          {/* Item changes (audit_logs) */}
+          {/* Item changes (audit_logs) — never collapsed; per-item
+              variant / qty / price diffs are the most informative
+              cards in the panel and stay expanded. */}
           {data.item_changes.map((c) => (
             <ChangeEntry key={`item-${c.id}`} row={c} kind="item" />
           ))}
@@ -290,9 +386,19 @@ export function ReturnsAuditPanel({ entity, id }: AuditPanelProps) {
 function ChangeEntry({
   row,
   kind,
+  collapsed = false,
 }: {
   row: AuditChangeRow;
   kind: 'document' | 'item';
+  /**
+   * PR-FIX-AUDIT-PANEL-NOISY-DOC-COLLAPSE — when true, the card
+   * renders only the metadata header + a collapsed `<details>`
+   * "تفاصيل تقنية" toggle hiding the column-level diff.  Used for
+   * document-level audit_logs rows whose meaning is already
+   * described by an adjacent activity_logs row.  Item-level rows
+   * are never collapsed.
+   */
+  collapsed?: boolean;
 }) {
   const opLabel = OP_LABEL[row.operation] ?? row.operation;
   const recordKind = kind === 'document' ? 'مستند' : 'بند';
@@ -327,9 +433,55 @@ function ChangeEntry({
           <span className="font-bold">سبب التعديل:</span> {reason}
         </div>
       )}
-      <DiffGrid old={row.old_data} now={row.new_data} />
+      {collapsed ? (
+        <details
+          className="text-[11px]"
+          data-testid={`audit-change-${row.id}-collapsed`}
+        >
+          <summary className="cursor-pointer text-slate-600 font-bold">
+            تفاصيل تقنية
+          </summary>
+          <div className="mt-2">
+            <DiffGrid old={row.old_data} now={row.new_data} />
+          </div>
+        </details>
+      ) : (
+        <DiffGrid old={row.old_data} now={row.new_data} />
+      )}
     </li>
   );
+}
+
+/**
+ * Return true if `change.changed_at` is within ±5 seconds of any
+ * activity row whose `metadata.kind` is a recognized lifecycle
+ * discriminator (edit_request_apply, refund_return, etc.).  When
+ * true, the document-level audit card is rendered collapsed
+ * because its meaning is already described by the activity row.
+ */
+function isOverlappedByActivity(
+  change: AuditChangeRow,
+  activities: AuditActivityRow[],
+): boolean {
+  const changedAtMs = parseIsoMs(change.changed_at);
+  if (changedAtMs == null) return false;
+  for (const a of activities) {
+    const md = (a.metadata && typeof a.metadata === 'object'
+      ? (a.metadata as Record<string, unknown>)
+      : null);
+    const kind = md && typeof md.kind === 'string' ? md.kind : null;
+    if (!kind || !(kind in EXTRA_KIND_AR)) continue;
+    const aMs = parseIsoMs(a.created_at);
+    if (aMs == null) continue;
+    if (Math.abs(aMs - changedAtMs) <= 5_000) return true;
+  }
+  return false;
+}
+
+function parseIsoMs(iso?: string | null): number | null {
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  return Number.isFinite(t) ? t : null;
 }
 
 // ─── activity entry (activity_logs) ─────────────────────────────────
@@ -345,7 +497,13 @@ function ActivityEntry({ row }: { row: AuditActivityRow }) {
         <span className="text-slate-600">نشاط</span>
         <span className="text-slate-300">·</span>
         <span className="font-bold text-slate-700">نوع العملية:</span>
-        <span className="text-slate-600">{row.action}</span>
+        {/* PR-FIX-AUDIT-PANEL-ARABIC-VALUES — was raw English ('update',
+            'approve', etc.).  When the row carries an `extra.kind`
+            discriminator we prefer that (more specific, e.g.
+            "تطبيق طلب تعديل" beats "تعديل"). */}
+        <span className="text-slate-600">
+          {extractExtraKindLabel(row) ?? formatAuditValue('action', row.action)}
+        </span>
         <span className="text-slate-300">·</span>
         <User size={12} className="text-slate-400" />
         <span className="font-bold text-slate-700">تم بواسطة:</span>
@@ -376,17 +534,21 @@ function ActivityMetaSummary({ metadata }: { metadata: any }) {
   if (!metadata || typeof metadata !== 'object') return null;
   const md = metadata as Record<string, any>;
   const interesting: Array<{ label: string; value: string }> = [];
-  if (md.kind) interesting.push({ label: 'نوع الحدث', value: String(md.kind) });
+  // PR-FIX-AUDIT-PANEL-ARABIC-VALUES — translate enum values via the
+  // centralized formatter so users see "تطبيق طلب تعديل" instead of
+  // "edit_request_apply", "معتمد" instead of "approved", etc.
+  if (md.kind)
+    interesting.push({ label: 'نوع الحدث', value: formatAuditValue('kind', md.kind) });
   if (md.status_before)
-    interesting.push({ label: 'الحالة قبل', value: String(md.status_before) });
+    interesting.push({ label: 'الحالة قبل', value: formatAuditValue('status', md.status_before) });
   if (md.status_after)
-    interesting.push({ label: 'الحالة بعد', value: String(md.status_after) });
+    interesting.push({ label: 'الحالة بعد', value: formatAuditValue('status', md.status_after) });
   if (md.reason) interesting.push({ label: 'سبب الإجراء', value: String(md.reason) });
   if (md.notes) interesting.push({ label: 'ملاحظات', value: String(md.notes) });
   if (md.refund_method)
-    interesting.push({ label: 'طريقة الصرف', value: String(md.refund_method) });
+    interesting.push({ label: 'طريقة الصرف', value: formatAuditValue('refund_method', md.refund_method) });
   if (md.payment_method)
-    interesting.push({ label: 'طريقة الدفع', value: String(md.payment_method) });
+    interesting.push({ label: 'طريقة الدفع', value: formatAuditValue('payment_method', md.payment_method) });
   if (md.net_refund !== undefined)
     interesting.push({ label: 'صافي المردود', value: String(md.net_refund) });
   if (md.price_difference !== undefined)
@@ -527,11 +689,22 @@ function EditRequestEntry({
           نوع التعديل المطلوب:
         </span>
         <span className="text-indigo-700">{actionLabel}</span>
+        {/* PR-FIX-EDIT-REQUEST-PILL-APPLIED — once `applied_at` is set
+            the pill should NOT keep saying "تم اعتماد الطلب - لم يتم
+            تطبيق التعديل بعد".  The row's `status` stays `'approved'`
+            after apply (we use `applied_at` as a separate flag, no
+            new status), so we override the pill here.  The
+            AppliedBlock below still renders the full applied
+            metadata (by, at, summary, artifact ids). */}
         <span
-          className={`ms-auto text-[10px] font-bold rounded-full px-2 py-0.5 ${pill.className}`}
+          className={`ms-auto text-[10px] font-bold rounded-full px-2 py-0.5 ${
+            isApplied
+              ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+              : pill.className
+          }`}
           data-testid={`audit-edit-request-${row.id}-status-pill`}
         >
-          {pill.label}
+          {isApplied ? 'تم تطبيق التعديل' : pill.label}
         </span>
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px]">
@@ -898,11 +1071,33 @@ function KeyValueList({
           <span className="font-mono text-slate-500 text-[10px] shrink-0">
             {k}
           </span>
-          <span className="text-slate-800 break-all">{renderVal(row[k])}</span>
+          {/* PR-FIX-AUDIT-PANEL-ARABIC-VALUES — values for known DB
+              enum fields (status, refund_method, action, kind …) are
+              translated to Arabic.  Unknown keys fall through to
+              renderVal's generic rendering. */}
+          <span className="text-slate-800 break-all">
+            {formatAuditValue(k, row[k])}
+          </span>
         </li>
       ))}
     </ul>
   );
+}
+
+/**
+ * For activity_logs rows whose `metadata.kind` is a recognized
+ * lifecycle discriminator, return the Arabic label for it.  Otherwise
+ * undefined so the caller falls back to `action`.  This makes
+ * "edit_request_apply" surface as "تطبيق طلب تعديل" rather than the
+ * generic "تعديل" we'd get from translating action='update'.
+ */
+function extractExtraKindLabel(row: AuditActivityRow): string | undefined {
+  const kind: unknown =
+    row.metadata && typeof row.metadata === 'object'
+      ? (row.metadata as Record<string, unknown>).kind
+      : undefined;
+  if (typeof kind !== 'string') return undefined;
+  return EXTRA_KIND_AR[kind];
 }
 
 function renderVal(v: unknown): string {

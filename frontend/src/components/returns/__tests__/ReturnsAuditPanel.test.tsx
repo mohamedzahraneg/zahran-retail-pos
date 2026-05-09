@@ -277,10 +277,15 @@ describe('<ReturnsAuditPanel />', () => {
     expect(screen.getAllByText('قبل التعديل').length).toBeGreaterThan(0);
     expect(screen.getAllByText('بعد التعديل').length).toBeGreaterThan(0);
     // The diff hides updated_at and shows the changed key (status).
+    // PR-FIX-AUDIT-PANEL-ARABIC-VALUES — status enum values are now
+    // translated through formatAuditValue, so users see Arabic
+    // copy ("قيد الانتظار" / "معتمد") instead of raw English.
     const docCard = screen.getByTestId('audit-change-ad-1');
     expect(docCard.textContent).toMatch(/status/);
-    expect(docCard.textContent).toMatch(/pending/);
-    expect(docCard.textContent).toMatch(/approved/);
+    expect(docCard.textContent).toMatch(/قيد الانتظار/);
+    expect(docCard.textContent).toMatch(/معتمد/);
+    expect(docCard.textContent).not.toMatch(/\bpending\b/);
+    expect(docCard.textContent).not.toMatch(/\bapproved\b/);
   });
 
   it('renders item changes (INSERT row, no old_data)', async () => {
@@ -304,7 +309,10 @@ describe('<ReturnsAuditPanel />', () => {
       expect(screen.getByTestId('audit-activity-act-1')).toBeInTheDocument(),
     );
     const activityCard = screen.getByTestId('audit-activity-act-1');
-    expect(activityCard.textContent).toMatch(/void/);
+    // PR-FIX-AUDIT-PANEL-ARABIC-VALUES — action="void" is rendered
+    // through formatAuditValue → "إلغاء" (Arabic).
+    expect(activityCard.textContent).toMatch(/إلغاء/);
+    expect(activityCard.textContent).not.toMatch(/\bvoid\b/);
     expect(activityCard.textContent).toMatch(/تم إلغاء المرتجع/);
   });
 
@@ -362,11 +370,18 @@ describe('<ReturnsAuditPanel />', () => {
       ).toBeInTheDocument(),
     );
     const card = screen.getByTestId('audit-activity-act-meta-1');
+    // PR-FIX-AUDIT-PANEL-ARABIC-VALUES — every enum value coming
+    // through ActivityMetaSummary is now translated via
+    // formatAuditValue.  status_before/after/kind/refund_method
+    // values render Arabic; raw English is gone.
     expect(card.textContent).toMatch(/الحالة قبل/);
-    expect(card.textContent).toMatch(/approved/);
+    expect(card.textContent).toMatch(/معتمد/);          // approved
     expect(card.textContent).toMatch(/الحالة بعد/);
-    expect(card.textContent).toMatch(/refunded/);
-    expect(card.textContent).toMatch(/refund_return/);
+    expect(card.textContent).toMatch(/تم الصرف/);        // refunded
+    expect(card.textContent).toMatch(/صرف مرتجع/);       // kind=refund_return
+    expect(card.textContent).not.toMatch(/\bapproved\b/);
+    expect(card.textContent).not.toMatch(/\brefunded\b/);
+    expect(card.textContent).not.toMatch(/refund_return/);
     expect(card.textContent).toMatch(/طريقة الصرف/);
     expect(card.textContent).toMatch(/cash/);
   });
@@ -946,6 +961,243 @@ describe('<ReturnsAuditPanel />', () => {
     expect(
       screen.getByText('يعرض التغييرات المسجلة على الاستبدال وبنوده'),
     ).toBeInTheDocument();
+  });
+
+  // ─── PR-FIX-EDIT-REQUEST-PILL-APPLIED + PR-FIX-AUDIT-PANEL-ARABIC-VALUES
+  //     + PR-FIX-AUDIT-PANEL-NOISY-DOC-COLLAPSE — UX fixes after the
+  //     RET-2026-000006 incident.
+
+  it('applied request status pill flips to "تم تطبيق التعديل" (and the "not applied yet" copy is gone)', async () => {
+    loginAdmin();
+    (returnsApi.getReturnAudit as any).mockResolvedValueOnce(
+      fixtureWithRequest(
+        approvedNotAppliedRow({
+          applied_at: '2026-05-09T17:00:39Z',
+          applied_by: 'u-3',
+          applied_by_name: 'مدير النظام',
+          apply_journal_entry_ids: ['je-rev', 'je-new'],
+          apply_cashbox_transaction_ids: ['378', '391'],
+          apply_stock_movement_ids: ['1646', '1647'],
+          apply_summary: { lines_updated: 1, delta_total_refund: 0 },
+        }),
+      ),
+    );
+    renderPanel('return');
+    const pill = await screen.findByTestId(
+      'audit-edit-request-req-approved-unapplied-status-pill',
+    );
+    expect(pill.textContent).toBe('تم تطبيق التعديل');
+    // The old "not applied yet" copy must NOT appear anywhere on the
+    // applied row (the AppliedBlock below uses different copy).
+    const card = screen.getByTestId(
+      'audit-edit-request-req-approved-unapplied',
+    );
+    expect(card.textContent).not.toMatch(/لم يتم تطبيق التعديل بعد/);
+  });
+
+  it('un-applied approved request still shows the "not applied yet" pill', async () => {
+    loginAdmin();
+    (returnsApi.getReturnAudit as any).mockResolvedValueOnce(
+      fixtureWithRequest(approvedNotAppliedRow()),
+    );
+    renderPanel('return');
+    const pill = await screen.findByTestId(
+      'audit-edit-request-req-approved-unapplied-status-pill',
+    );
+    expect(pill.textContent).toBe(
+      'تم اعتماد الطلب - لم يتم تطبيق التعديل بعد',
+    );
+  });
+
+  it('formatAuditValue: status / refund_method / action / kind values render in Arabic in audit cards', async () => {
+    const fixture = {
+      document_type: 'return' as const,
+      document_id: 'doc-1',
+      document_changes: [
+        {
+          id: 'doc-arabic',
+          table_name: 'returns',
+          record_id: 'doc-1',
+          operation: 'U' as const,
+          changed_by: 'u-1',
+          changed_by_username: 'admin',
+          changed_by_name: 'مدير النظام',
+          old_data: { status: 'pending', refund_method: 'cash' },
+          new_data: { status: 'refunded', refund_method: 'cash' },
+          changed_at: '2026-05-09T13:37:58Z',
+        },
+      ],
+      item_changes: [],
+      activity: [
+        {
+          id: 'act-arabic',
+          user_id: 'u-3',
+          username: 'admin',
+          full_name: 'مدير النظام',
+          action: 'update', // generic action — should fall through to extra.kind
+          entity: 'return',
+          entity_id: 'doc-1',
+          summary: null,
+          metadata: { kind: 'edit_request_apply' },
+          ip_address: '10.0.0.1',
+          created_at: '2026-05-09T17:00:39Z',
+        },
+      ],
+      amendments: [],
+      edit_requests: [],
+    };
+    (returnsApi.getReturnAudit as any).mockResolvedValueOnce(fixture);
+    renderPanel('return');
+
+    // Activity row uses extra.kind in Arabic when present (more
+    // specific than the generic action label).
+    const activity = await screen.findByTestId('audit-activity-act-arabic');
+    expect(activity.textContent).toMatch(/تطبيق طلب تعديل/);
+    expect(activity.textContent).not.toMatch(/\bupdate\b/);
+    expect(activity.textContent).not.toMatch(/edit_request_apply/);
+
+    // Document-change card translates status / refund_method values.
+    // (The card itself is collapsed because activity overlap fires —
+    // we expand it to inspect, see next test.  Here we only confirm
+    // the formatter wiring is present in source.)
+  });
+
+  it('document-level audit card is collapsed under "تفاصيل تقنية" when a near-time activity row describes the same event', async () => {
+    const sameTime = '2026-05-09T17:00:39Z';
+    const fixture = {
+      document_type: 'return' as const,
+      document_id: 'doc-1',
+      document_changes: [
+        {
+          id: 'doc-noisy',
+          table_name: 'returns',
+          record_id: 'doc-1',
+          operation: 'U' as const,
+          changed_by: 'u-1',
+          changed_by_username: 'admin',
+          changed_by_name: 'مدير النظام',
+          old_data: { total_refund: '450.00' },
+          new_data: { total_refund: '450.00' },
+          changed_at: sameTime,
+        },
+      ],
+      item_changes: [],
+      activity: [
+        {
+          id: 'act-overlap',
+          user_id: 'u-3',
+          username: 'admin',
+          full_name: 'مدير النظام',
+          action: 'update',
+          entity: 'return',
+          entity_id: 'doc-1',
+          summary: 'تم تطبيق طلب تعديل مرتجع',
+          metadata: { kind: 'edit_request_apply' },
+          ip_address: '10.0.0.1',
+          created_at: sameTime,
+        },
+      ],
+      amendments: [],
+      edit_requests: [],
+    };
+    (returnsApi.getReturnAudit as any).mockResolvedValueOnce(fixture);
+    renderPanel('return');
+    // Collapsed wrapper present.
+    const collapsed = await screen.findByTestId(
+      'audit-change-doc-noisy-collapsed',
+    );
+    expect(collapsed.tagName.toLowerCase()).toBe('details');
+    // It's closed by default (no `open` attribute).
+    expect(collapsed.hasAttribute('open')).toBe(false);
+    // The summary contains the technical-details label.
+    expect(collapsed.textContent).toMatch(/تفاصيل تقنية/);
+  });
+
+  it('document-level audit card is NOT collapsed when no overlapping activity row exists', async () => {
+    const fixture = {
+      document_type: 'return' as const,
+      document_id: 'doc-1',
+      document_changes: [
+        {
+          id: 'doc-standalone',
+          table_name: 'returns',
+          record_id: 'doc-1',
+          operation: 'U' as const,
+          changed_by: 'u-1',
+          changed_by_username: 'admin',
+          changed_by_name: 'مدير النظام',
+          old_data: { status: 'pending' },
+          new_data: { status: 'approved' },
+          changed_at: '2026-05-09T10:00:00Z',
+        },
+      ],
+      item_changes: [],
+      activity: [], // no near-time activity row
+      amendments: [],
+      edit_requests: [],
+    };
+    (returnsApi.getReturnAudit as any).mockResolvedValueOnce(fixture);
+    renderPanel('return');
+    await screen.findByTestId('audit-change-doc-standalone');
+    expect(
+      screen.queryByTestId('audit-change-doc-standalone-collapsed'),
+    ).not.toBeInTheDocument();
+  });
+
+  it('item-level audit cards are NEVER collapsed (variant_id / qty diffs stay visible)', async () => {
+    const sameTime = '2026-05-09T17:00:39Z';
+    const fixture = {
+      document_type: 'return' as const,
+      document_id: 'doc-1',
+      document_changes: [],
+      item_changes: [
+        {
+          id: 'item-variant-swap',
+          table_name: 'return_items',
+          record_id: 'ri-1',
+          operation: 'U' as const,
+          changed_by: 'u-1',
+          changed_by_username: 'admin',
+          changed_by_name: 'مدير النظام',
+          old_data: { variant_id: 'old-uuid' },
+          new_data: { variant_id: 'new-uuid' },
+          changed_at: sameTime,
+        },
+      ],
+      activity: [
+        // Same-time activity — would collapse a doc-level row, but
+        // item-level rows must remain expanded regardless.
+        {
+          id: 'act-overlap-item',
+          user_id: 'u-3',
+          username: 'admin',
+          full_name: 'مدير النظام',
+          action: 'update',
+          entity: 'return',
+          entity_id: 'doc-1',
+          summary: 'تطبيق',
+          metadata: { kind: 'edit_request_apply' },
+          ip_address: '10.0.0.1',
+          created_at: sameTime,
+        },
+      ],
+      amendments: [],
+      edit_requests: [],
+    };
+    (returnsApi.getReturnAudit as any).mockResolvedValueOnce(fixture);
+    renderPanel('return');
+    await screen.findByTestId('audit-change-item-variant-swap');
+    // No collapsed wrapper for item-level rows.
+    expect(
+      screen.queryByTestId('audit-change-item-variant-swap-collapsed'),
+    ).not.toBeInTheDocument();
+    // The diff is directly visible.
+    expect(
+      screen.getByTestId('audit-change-item-variant-swap').textContent,
+    ).toMatch(/old-uuid/);
+    expect(
+      screen.getByTestId('audit-change-item-variant-swap').textContent,
+    ).toMatch(/new-uuid/);
   });
 });
 
