@@ -40,6 +40,7 @@ import {
   ApproveEditRequestModal,
   RejectEditRequestModal,
 } from './ReviewEditRequestModals';
+import { ApplyEditRequestModal } from './ApplyEditRequestModal';
 import { useAuthStore } from '@/stores/auth.store';
 
 const NOISY_FIELDS = new Set(['updated_at', 'id', 'created_at']);
@@ -501,7 +502,18 @@ function EditRequestEntry({
   const [reviewAction, setReviewAction] = useState<
     'approve' | 'reject' | null
   >(null);
+  const [applyOpen, setApplyOpen] = useState(false);
   const canReview = isAdmin && row.status === 'pending';
+  // PR-FIN-RETURNS-EXCHANGES-EDIT-REQUESTS-APPLY — admin can apply an
+  // already-approved request that hasn't been applied yet.  Phase 2A
+  // ships RETURN apply only; exchange shows a disabled "قيد الإعداد"
+  // hint instead of the button.
+  const isApproved = row.status === 'approved';
+  const isApplied = Boolean(row.applied_at);
+  const canApplyReturn =
+    isAdmin && entity === 'return' && isApproved && !isApplied;
+  const showExchangeApplyDeferred =
+    entity === 'exchange' && isApproved && !isApplied;
   return (
     <li
       className="rounded-xl border border-indigo-200 bg-indigo-50/50 p-3 space-y-2"
@@ -634,6 +646,47 @@ function EditRequestEntry({
         </div>
       )}
 
+      {/* PR-FIN-RETURNS-EXCHANGES-EDIT-REQUESTS-APPLY — admin button to
+          apply an already-approved RETURN request.  Strong-warning
+          styling because this is the financial side-effect step.
+          Visibility: admin AND entity='return' AND status='approved'
+          AND not yet applied. */}
+      {canApplyReturn && (
+        <div
+          className="flex gap-2 pt-2 border-t border-indigo-100"
+          data-testid={`audit-edit-request-${row.id}-apply-actions`}
+        >
+          <button
+            type="button"
+            onClick={() => setApplyOpen(true)}
+            className="text-[12px] font-bold text-white bg-rose-600 hover:bg-rose-700 px-3 py-1.5 rounded-lg inline-flex items-center gap-1"
+            data-testid={`audit-edit-request-${row.id}-apply`}
+          >
+            <AlertTriangle size={12} /> تطبيق التعديل
+          </button>
+        </div>
+      )}
+
+      {/* Phase 2A — exchange apply is intentionally not shipped.  Show
+          a small disabled "قيد الإعداد" hint when an exchange request
+          is approved but not applied. */}
+      {showExchangeApplyDeferred && (
+        <div
+          className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1.5"
+          data-testid={`audit-edit-request-${row.id}-apply-deferred`}
+        >
+          تطبيق تعديلات الاستبدال قيد الإعداد
+        </div>
+      )}
+
+      {/* Applied-state — once applied_at is set, render the badge +
+          summary + linked artifact ids so admins can trace the
+          financial / inventory side-effects from the audit panel
+          without leaving the page. */}
+      {isApplied && (
+        <AppliedBlock row={row} />
+      )}
+
       {reviewAction === 'approve' && (
         <ApproveEditRequestModal
           entity={entity}
@@ -650,7 +703,133 @@ function EditRequestEntry({
           onClose={() => setReviewAction(null)}
         />
       )}
+      {applyOpen && (
+        <ApplyEditRequestModal
+          entity={entity}
+          parentId={parentId}
+          request={row}
+          onClose={() => setApplyOpen(false)}
+        />
+      )}
     </li>
+  );
+}
+
+// ─── Applied-state block (Phase 2A) ────────────────────────────────
+// Renders when `row.applied_at` is set.  Shows the badge, who applied
+// it and when, the apply_summary deltas, and the linked artifact ids
+// (JE / CT / SM) so the trace surface is one click away.
+
+function AppliedBlock({ row }: { row: AuditEditRequestRow }) {
+  const summary = row.apply_summary ?? null;
+  const jes = row.apply_journal_entry_ids ?? [];
+  const cts = row.apply_cashbox_transaction_ids ?? [];
+  const sms = row.apply_stock_movement_ids ?? [];
+  return (
+    <div
+      className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 space-y-2"
+      data-testid={`audit-edit-request-${row.id}-applied`}
+    >
+      <div className="flex items-center gap-2 flex-wrap text-[11px]">
+        <span
+          className="text-[10px] font-bold rounded-full px-2 py-0.5 bg-emerald-100 text-emerald-800 border border-emerald-300"
+          data-testid={`audit-edit-request-${row.id}-applied-badge`}
+        >
+          ✓ تم تطبيق التعديل
+        </span>
+        {row.applied_by_name && (
+          <>
+            <span className="text-emerald-300">·</span>
+            <span className="text-emerald-800">طُبِّق بواسطة:</span>
+            <span className="font-bold text-emerald-900">
+              {row.applied_by_name}
+            </span>
+          </>
+        )}
+        {row.applied_at && (
+          <>
+            <span className="text-emerald-300">·</span>
+            <Timestamp iso={row.applied_at} />
+          </>
+        )}
+      </div>
+
+      {summary && (
+        <div
+          className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px]"
+          data-testid={`audit-edit-request-${row.id}-applied-summary`}
+        >
+          {(summary.lines_updated ?? 0) > 0 && (
+            <div>
+              <span className="text-emerald-700">عدد البنود المعدلة: </span>
+              <span className="font-bold">{summary.lines_updated}</span>
+            </div>
+          )}
+          {(summary.lines_removed ?? 0) > 0 && (
+            <div>
+              <span className="text-emerald-700">عدد البنود المحذوفة: </span>
+              <span className="font-bold">{summary.lines_removed}</span>
+            </div>
+          )}
+          {(summary.lines_added ?? 0) > 0 && (
+            <div>
+              <span className="text-emerald-700">عدد البنود المضافة: </span>
+              <span className="font-bold">{summary.lines_added}</span>
+            </div>
+          )}
+          {summary.delta_total_refund != null && (
+            <div>
+              <span className="text-emerald-700">فرق الإجمالي: </span>
+              <span className="font-bold font-mono">
+                {summary.delta_total_refund > 0 ? '+' : ''}
+                {summary.delta_total_refund.toFixed(2)}
+              </span>
+            </div>
+          )}
+          {summary.delta_net_refund != null && (
+            <div>
+              <span className="text-emerald-700">فرق الصافي: </span>
+              <span className="font-bold font-mono">
+                {summary.delta_net_refund > 0 ? '+' : ''}
+                {summary.delta_net_refund.toFixed(2)}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {(jes.length > 0 || cts.length > 0 || sms.length > 0) && (
+        <div
+          className="text-[11px] text-emerald-900 space-y-0.5"
+          data-testid={`audit-edit-request-${row.id}-applied-artifacts`}
+        >
+          {jes.length > 0 && (
+            <div>
+              <span className="text-emerald-700">قيود محاسبية: </span>
+              <span className="font-mono" dir="ltr">
+                {jes.join(', ')}
+              </span>
+            </div>
+          )}
+          {cts.length > 0 && (
+            <div>
+              <span className="text-emerald-700">حركات خزنة: </span>
+              <span className="font-mono" dir="ltr">
+                {cts.join(', ')}
+              </span>
+            </div>
+          )}
+          {sms.length > 0 && (
+            <div>
+              <span className="text-emerald-700">حركات مخزون: </span>
+              <span className="font-mono" dir="ltr">
+                {sms.join(', ')}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 

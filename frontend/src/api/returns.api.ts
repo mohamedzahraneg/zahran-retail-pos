@@ -421,11 +421,37 @@ export const returnsApi = {
         body,
       ),
     ),
+
+  // ── Edit-request APPLY (Phase 2A — return-only) ────────────────
+  // POST /returns/:id/edit-requests/:requestId/apply
+  //
+  // Strict scope: this wrapper exposes ONLY the return apply endpoint.
+  // Exchange apply is intentionally NOT exposed via the FE API
+  // wrapper — the BE endpoint exists and returns 501, but the FE
+  // surface deliberately keeps it un-callable so a future regression
+  // can't accidentally invoke the unimplemented path.  When Phase 2B
+  // ships, the exchange wrapper lands alongside the new BE.
+  applyReturnEditRequest: (
+    returnId: string,
+    requestId: string,
+    body?: ApplyEditRequestBody,
+  ) =>
+    unwrap<AuditEditRequestRow>(
+      api.post(
+        `/returns/${returnId}/edit-requests/${requestId}/apply`,
+        body ?? {},
+      ),
+    ),
 };
 
 export interface ReviewEditRequestBody {
   /** Required for reject (BE rejects empty); optional for approve. */
   review_notes?: string;
+}
+
+export interface ApplyEditRequestBody {
+  /** Free-text notes recorded on activity_logs only — never affects financial numbers. */
+  notes?: string;
 }
 
 export type RequestedAction =
@@ -599,6 +625,36 @@ export interface AuditEditRequestRow {
   reviewed_at: string | null;
   review_notes: string | null;
   source: 'edit_request';
+  // PR-FIN-RETURNS-EXCHANGES-EDIT-REQUESTS-APPLY (Phase 2A) — applied
+  // state.  All six are nullable: a request that hasn't been applied
+  // yet has applied_at=null and the four id arrays are null/empty.
+  applied_at?: string | null;
+  applied_by?: string | null;
+  applied_by_name?: string | null;
+  apply_journal_entry_ids?: string[] | null;
+  apply_cashbox_transaction_ids?: string[] | null;
+  apply_stock_movement_ids?: string[] | null;
+  apply_summary?: ApplySummary | null;
+}
+
+/**
+ * Shape of `apply_summary` written by the BE.  Numeric fields are
+ * floats (the BE rounds to 2dp before serializing).  All optional —
+ * older rows or future schema additions won't break the renderer.
+ */
+export interface ApplySummary {
+  status_at_apply?: string;
+  was_refunded?: boolean;
+  old_total_refund?: number;
+  new_total_refund?: number;
+  old_net_refund?: number;
+  new_net_refund?: number;
+  delta_total_refund?: number;
+  delta_net_refund?: number;
+  lines_updated?: number;
+  lines_removed?: number;
+  lines_added?: number;
+  notes?: string | null;
 }
 
 export interface DocumentAuditResult {

@@ -29,6 +29,7 @@ vi.mock('@/api/returns.api', () => ({
     rejectReturnEditRequest: vi.fn(),
     approveExchangeEditRequest: vi.fn(),
     rejectExchangeEditRequest: vi.fn(),
+    applyReturnEditRequest: vi.fn(),
   },
 }));
 
@@ -540,6 +541,183 @@ describe('<ReturnsAuditPanel />', () => {
     expect(
       screen.queryByTestId(
         'audit-edit-request-req-rejected-1-admin-actions',
+      ),
+    ).not.toBeInTheDocument();
+  });
+
+  // ─── PR-FIN-RETURNS-EXCHANGES-EDIT-REQUESTS-APPLY — apply button visibility
+
+  function fixtureWithRequest(req: any) {
+    return { ...empty, edit_requests: [req] };
+  }
+
+  function approvedNotAppliedRow(overrides: Record<string, any> = {}) {
+    return {
+      id: 'req-approved-unapplied',
+      parent_id: 'doc-1',
+      document_no: 'RET-2026-EDIT-1',
+      requested_action: 'price_change',
+      requested_payload: {
+        kind: 'line_changes',
+        lines: { updated: [], removed: [], added: [] },
+        summary: { old_total: 450, new_total: 400, delta: -50 },
+      },
+      before_snapshot: {},
+      after_preview: null,
+      reason_text: 'موافقة على التخفيض',
+      status: 'approved' as const,
+      requested_by: 'u-2',
+      requested_by_name: 'محمد كاشير',
+      requested_at: '2026-05-09T13:00:00Z',
+      reviewed_by: 'u-3',
+      reviewed_by_name: 'مدير النظام',
+      reviewed_at: '2026-05-09T13:30:00Z',
+      review_notes: null,
+      applied_at: null,
+      applied_by: null,
+      applied_by_name: null,
+      apply_journal_entry_ids: null,
+      apply_cashbox_transaction_ids: null,
+      apply_stock_movement_ids: null,
+      apply_summary: null,
+      source: 'edit_request' as const,
+      ...overrides,
+    };
+  }
+
+  it('shows the apply button on an approved-unapplied RETURN request for an admin', async () => {
+    loginAdmin();
+    (returnsApi.getReturnAudit as any).mockResolvedValueOnce(
+      fixtureWithRequest(approvedNotAppliedRow()),
+    );
+    renderPanel('return');
+    const applyBtn = await screen.findByTestId(
+      'audit-edit-request-req-approved-unapplied-apply',
+    );
+    expect(applyBtn).toHaveTextContent('تطبيق التعديل');
+  });
+
+  it('hides the apply button for a non-admin user', async () => {
+    loginCashier();
+    (returnsApi.getReturnAudit as any).mockResolvedValueOnce(
+      fixtureWithRequest(approvedNotAppliedRow()),
+    );
+    renderPanel('return');
+    await waitFor(() =>
+      expect(
+        screen.getByTestId(
+          'audit-edit-request-req-approved-unapplied',
+        ),
+      ).toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByTestId(
+        'audit-edit-request-req-approved-unapplied-apply',
+      ),
+    ).not.toBeInTheDocument();
+  });
+
+  it('hides the apply button on a PENDING request even for admin', async () => {
+    loginAdmin();
+    (returnsApi.getReturnAudit as any).mockResolvedValueOnce(populated);
+    renderPanel('return');
+    await waitFor(() =>
+      expect(
+        screen.getByTestId('audit-edit-request-req-pending-1'),
+      ).toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByTestId('audit-edit-request-req-pending-1-apply'),
+    ).not.toBeInTheDocument();
+  });
+
+  it('hides the apply button on a REJECTED request even for admin', async () => {
+    loginAdmin();
+    (returnsApi.getReturnAudit as any).mockResolvedValueOnce(populated);
+    renderPanel('return');
+    await waitFor(() =>
+      expect(
+        screen.getByTestId('audit-edit-request-req-rejected-1'),
+      ).toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByTestId('audit-edit-request-req-rejected-1-apply'),
+    ).not.toBeInTheDocument();
+  });
+
+  it('hides the apply button on an already-applied request and shows the applied badge instead', async () => {
+    loginAdmin();
+    (returnsApi.getReturnAudit as any).mockResolvedValueOnce(
+      fixtureWithRequest(
+        approvedNotAppliedRow({
+          applied_at: '2026-05-09T14:00:00Z',
+          applied_by: 'u-3',
+          applied_by_name: 'مدير النظام',
+          apply_journal_entry_ids: ['je-rev', 'je-new'],
+          apply_cashbox_transaction_ids: ['101', '202'],
+          apply_stock_movement_ids: ['sm-1', 'sm-2'],
+          apply_summary: {
+            lines_updated: 1,
+            lines_removed: 0,
+            lines_added: 0,
+            delta_total_refund: -50,
+            delta_net_refund: -50,
+          },
+        }),
+      ),
+    );
+    renderPanel('return');
+    const applied = await screen.findByTestId(
+      'audit-edit-request-req-approved-unapplied-applied',
+    );
+    expect(applied).toBeInTheDocument();
+    expect(
+      screen.getByTestId(
+        'audit-edit-request-req-approved-unapplied-applied-badge',
+      ).textContent,
+    ).toMatch(/تم تطبيق التعديل/);
+    // Apply button is gone.
+    expect(
+      screen.queryByTestId(
+        'audit-edit-request-req-approved-unapplied-apply',
+      ),
+    ).not.toBeInTheDocument();
+    // Applied summary + artifact ids are visible.
+    expect(
+      screen.getByTestId(
+        'audit-edit-request-req-approved-unapplied-applied-summary',
+      ).textContent,
+    ).toMatch(/عدد البنود المعدلة/);
+    expect(
+      screen.getByTestId(
+        'audit-edit-request-req-approved-unapplied-applied-summary',
+      ).textContent,
+    ).toMatch(/فرق الإجمالي/);
+    const artifacts = screen.getByTestId(
+      'audit-edit-request-req-approved-unapplied-applied-artifacts',
+    );
+    expect(artifacts.textContent).toMatch(/قيود محاسبية/);
+    expect(artifacts.textContent).toMatch(/حركات خزنة/);
+    expect(artifacts.textContent).toMatch(/حركات مخزون/);
+    expect(artifacts.textContent).toMatch(/je-rev/);
+    expect(artifacts.textContent).toMatch(/sm-1/);
+  });
+
+  it('shows "قيد الإعداد" hint and no active button for an EXCHANGE approved-unapplied request', async () => {
+    loginAdmin();
+    (returnsApi.getExchangeAudit as any).mockResolvedValueOnce(
+      fixtureWithRequest(approvedNotAppliedRow()),
+    );
+    renderPanel('exchange');
+    const deferred = await screen.findByTestId(
+      'audit-edit-request-req-approved-unapplied-apply-deferred',
+    );
+    expect(deferred.textContent).toMatch(
+      /تطبيق تعديلات الاستبدال قيد الإعداد/,
+    );
+    expect(
+      screen.queryByTestId(
+        'audit-edit-request-req-approved-unapplied-apply',
       ),
     ).not.toBeInTheDocument();
   });
