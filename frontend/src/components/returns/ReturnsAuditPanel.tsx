@@ -14,7 +14,7 @@
  * endpoint.  The "admin approval" copy below is an informational note
  * only — it announces the FUTURE flow but does NOT enable it.
  */
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
   AlertTriangle,
@@ -36,6 +36,11 @@ import {
   isLineChangesPayload,
   LineChangesDiff,
 } from './edit-request/diff';
+import {
+  ApproveEditRequestModal,
+  RejectEditRequestModal,
+} from './ReviewEditRequestModals';
+import { useAuthStore } from '@/stores/auth.store';
 
 const NOISY_FIELDS = new Set(['updated_at', 'id', 'created_at']);
 
@@ -251,7 +256,12 @@ export function ReturnsAuditPanel({ entity, id }: AuditPanelProps) {
           ))}
           {/* Edit requests (Phase 1 — request + review only) */}
           {editRequests.map((req) => (
-            <EditRequestEntry key={`req-${req.id}`} row={req} />
+            <EditRequestEntry
+              key={`req-${req.id}`}
+              row={req}
+              entity={entity}
+              parentId={id}
+            />
           ))}
           {/* Amendments (Phase-4 placeholder) */}
           {data.amendments.map((am) => (
@@ -439,7 +449,7 @@ const REQUEST_STATUS_PILL: Record<
       'bg-indigo-50 text-indigo-800 border border-indigo-200',
   },
   approved: {
-    label: 'تم اعتماد الطلب (لم يُطبَّق بعد)',
+    label: 'تم اعتماد الطلب - لم يتم تطبيق التعديل بعد',
     className:
       'bg-emerald-50 text-emerald-800 border border-emerald-200',
   },
@@ -466,13 +476,32 @@ const ACTION_LABELS_AR: Record<string, string> = {
   reason_change: 'تعديل السبب',
 };
 
-function EditRequestEntry({ row }: { row: AuditEditRequestRow }) {
+function EditRequestEntry({
+  row,
+  entity,
+  parentId,
+}: {
+  row: AuditEditRequestRow;
+  entity: 'return' | 'exchange';
+  parentId: string;
+}) {
   const pill = REQUEST_STATUS_PILL[row.status];
   const structured = isLineChangesPayload(row.requested_payload)
     ? row.requested_payload
     : null;
   const actionLabel =
     ACTION_LABELS_AR[row.requested_action] ?? row.requested_action;
+
+  // PR-FIN-RETURNS-EXCHANGES-EDIT-REQUESTS-REVIEW — admin-only review
+  // actions.  The BE gates approve/reject with @Roles('admin') only;
+  // we mirror that here so non-admin users never see the buttons.
+  // The buttons just open confirm modals; they never apply the
+  // requested payload to the parent document.
+  const isAdmin = useAuthStore((s) => s.hasRole('admin'));
+  const [reviewAction, setReviewAction] = useState<
+    'approve' | 'reject' | null
+  >(null);
+  const canReview = isAdmin && row.status === 'pending';
   return (
     <li
       className="rounded-xl border border-indigo-200 bg-indigo-50/50 p-3 space-y-2"
@@ -488,6 +517,7 @@ function EditRequestEntry({ row }: { row: AuditEditRequestRow }) {
         <span className="text-indigo-700">{actionLabel}</span>
         <span
           className={`ms-auto text-[10px] font-bold rounded-full px-2 py-0.5 ${pill.className}`}
+          data-testid={`audit-edit-request-${row.id}-status-pill`}
         >
           {pill.label}
         </span>
@@ -576,6 +606,50 @@ function EditRequestEntry({ row }: { row: AuditEditRequestRow }) {
           </div>
         </div>
       </details>
+
+      {/* PR-FIN-RETURNS-EXCHANGES-EDIT-REQUESTS-REVIEW — admin actions
+          on pending requests.  Hidden for non-admin users and for any
+          status other than `pending` (BE re-checks both). */}
+      {canReview && (
+        <div
+          className="flex gap-2 pt-2 border-t border-indigo-100"
+          data-testid={`audit-edit-request-${row.id}-admin-actions`}
+        >
+          <button
+            type="button"
+            onClick={() => setReviewAction('approve')}
+            className="text-[12px] font-bold text-emerald-800 bg-emerald-100 hover:bg-emerald-200 px-3 py-1.5 rounded-lg"
+            data-testid={`audit-edit-request-${row.id}-approve`}
+          >
+            اعتماد الطلب
+          </button>
+          <button
+            type="button"
+            onClick={() => setReviewAction('reject')}
+            className="text-[12px] font-bold text-rose-800 bg-rose-100 hover:bg-rose-200 px-3 py-1.5 rounded-lg"
+            data-testid={`audit-edit-request-${row.id}-reject`}
+          >
+            رفض الطلب
+          </button>
+        </div>
+      )}
+
+      {reviewAction === 'approve' && (
+        <ApproveEditRequestModal
+          entity={entity}
+          parentId={parentId}
+          request={row}
+          onClose={() => setReviewAction(null)}
+        />
+      )}
+      {reviewAction === 'reject' && (
+        <RejectEditRequestModal
+          entity={entity}
+          parentId={parentId}
+          request={row}
+          onClose={() => setReviewAction(null)}
+        />
+      )}
     </li>
   );
 }

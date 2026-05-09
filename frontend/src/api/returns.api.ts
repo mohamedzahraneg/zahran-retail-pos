@@ -364,7 +364,69 @@ export const returnsApi = {
     unwrap<AuditEditRequestRow>(
       api.post(`/exchanges/${id}/edit-requests`, body),
     ),
+
+  // ── Edit-request REVIEW (Phase 2 — admin-only status change) ────
+  // POST .../edit-requests/:requestId/approve|reject
+  //
+  // Strict scope: these wrappers expose ONLY the status-change
+  // endpoints.  Approve flips the row's status to 'approved' but does
+  // NOT touch the parent return / exchange / items / journal entries
+  // / cashbox txns / stock movements — applying the requested payload
+  // is intentionally out of scope for this phase.  See PR-FIN-RETURNS-
+  // EXCHANGES-EDIT-REQUESTS-REVIEW for the design.
+  approveReturnEditRequest: (
+    returnId: string,
+    requestId: string,
+    body?: ReviewEditRequestBody,
+  ) =>
+    unwrap<AuditEditRequestRow>(
+      api.post(
+        `/returns/${returnId}/edit-requests/${requestId}/approve`,
+        body ?? {},
+      ),
+    ),
+
+  rejectReturnEditRequest: (
+    returnId: string,
+    requestId: string,
+    body: ReviewEditRequestBody,
+  ) =>
+    unwrap<AuditEditRequestRow>(
+      api.post(
+        `/returns/${returnId}/edit-requests/${requestId}/reject`,
+        body,
+      ),
+    ),
+
+  approveExchangeEditRequest: (
+    exchangeId: string,
+    requestId: string,
+    body?: ReviewEditRequestBody,
+  ) =>
+    unwrap<AuditEditRequestRow>(
+      api.post(
+        `/exchanges/${exchangeId}/edit-requests/${requestId}/approve`,
+        body ?? {},
+      ),
+    ),
+
+  rejectExchangeEditRequest: (
+    exchangeId: string,
+    requestId: string,
+    body: ReviewEditRequestBody,
+  ) =>
+    unwrap<AuditEditRequestRow>(
+      api.post(
+        `/exchanges/${exchangeId}/edit-requests/${requestId}/reject`,
+        body,
+      ),
+    ),
 };
+
+export interface ReviewEditRequestBody {
+  /** Required for reject (BE rejects empty); optional for approve. */
+  review_notes?: string;
+}
 
 export type RequestedAction =
   | 'update_header'

@@ -25,10 +25,63 @@ vi.mock('@/api/returns.api', () => ({
   returnsApi: {
     getReturnAudit: vi.fn(),
     getExchangeAudit: vi.fn(),
+    approveReturnEditRequest: vi.fn(),
+    rejectReturnEditRequest: vi.fn(),
+    approveExchangeEditRequest: vi.fn(),
+    rejectExchangeEditRequest: vi.fn(),
   },
 }));
 
+const toastMocks = vi.hoisted(() => ({
+  success: vi.fn(),
+  error: vi.fn(),
+}));
+vi.mock('react-hot-toast', () => ({
+  default: { success: toastMocks.success, error: toastMocks.error },
+}));
+
 import { returnsApi } from '@/api/returns.api';
+import { useAuthStore } from '@/stores/auth.store';
+
+/** Reset auth-store to a logged-out state between tests. */
+function logout() {
+  useAuthStore.setState({
+    accessToken: null,
+    refreshToken: null,
+    user: null,
+    isHydrated: true,
+  } as any);
+}
+
+function loginAdmin() {
+  useAuthStore.setState({
+    accessToken: 'fake',
+    refreshToken: 'fake',
+    user: {
+      id: 'u-admin',
+      username: 'admin',
+      full_name: 'Admin',
+      role: 'admin',
+      permissions: ['*'],
+    } as any,
+    isHydrated: true,
+  });
+}
+
+function loginCashier() {
+  useAuthStore.setState({
+    accessToken: 'fake',
+    refreshToken: 'fake',
+    user: {
+      id: 'u-cashier',
+      username: 'cashier',
+      full_name: 'Cashier',
+      role: 'cashier',
+      permissions: ['returns.view'],
+    } as any,
+    isHydrated: true,
+  });
+}
 
 function renderPanel(entity: 'return' | 'exchange', id = 'doc-1') {
   const qc = new QueryClient({
@@ -157,6 +210,11 @@ const populated = {
 describe('<ReturnsAuditPanel />', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // PR-FIN-RETURNS-EXCHANGES-EDIT-REQUESTS-REVIEW — admin actions
+    // gate on `useAuthStore`, so each test starts from a clean
+    // logged-out state and explicitly opts in via loginAdmin /
+    // loginCashier when role gating matters.
+    logout();
   });
 
   it('renders the title + read-only badge + Arabic subtitle', async () => {
@@ -377,6 +435,113 @@ describe('<ReturnsAuditPanel />', () => {
     expect(card.textContent).toMatch(
       /لا يمكن إزالة الصنف لأن المرتجع تم اعتماده بالفعل/,
     );
+  });
+
+  // ─── PR-FIN-RETURNS-EXCHANGES-EDIT-REQUESTS-REVIEW — admin actions
+  it('approved status pill renders the "no payload applied yet" copy', async () => {
+    const fixture = {
+      ...empty,
+      edit_requests: [
+        {
+          id: 'req-approved-1',
+          parent_id: 'doc-1',
+          document_no: 'RET-2026-EDIT-1',
+          requested_action: 'price_change',
+          requested_payload: { kind: 'line_changes', lines: { updated: [], removed: [], added: [] }, summary: { old_total: 0, new_total: 0, delta: 0 } },
+          before_snapshot: {},
+          after_preview: null,
+          reason_text: 'سبب',
+          status: 'approved' as const,
+          requested_by: 'u-2',
+          requested_by_name: 'محمد كاشير',
+          requested_at: '2026-05-09T13:00:00Z',
+          reviewed_by: 'u-3',
+          reviewed_by_name: 'مدير النظام',
+          reviewed_at: '2026-05-09T13:30:00Z',
+          review_notes: null,
+          source: 'edit_request' as const,
+        },
+      ],
+    };
+    (returnsApi.getReturnAudit as any).mockResolvedValueOnce(fixture);
+    renderPanel('return');
+    const pill = await screen.findByTestId(
+      'audit-edit-request-req-approved-1-status-pill',
+    );
+    expect(pill.textContent).toBe('تم اعتماد الطلب - لم يتم تطبيق التعديل بعد');
+  });
+
+  it('shows admin اعتماد / رفض actions on a pending request when current user is admin', async () => {
+    loginAdmin();
+    (returnsApi.getReturnAudit as any).mockResolvedValueOnce(populated);
+    renderPanel('return');
+    await waitFor(() =>
+      expect(
+        screen.getByTestId('audit-edit-request-req-pending-1'),
+      ).toBeInTheDocument(),
+    );
+    expect(
+      screen.getByTestId(
+        'audit-edit-request-req-pending-1-admin-actions',
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTestId('audit-edit-request-req-pending-1-approve'),
+    ).toHaveTextContent('اعتماد الطلب');
+    expect(
+      screen.getByTestId('audit-edit-request-req-pending-1-reject'),
+    ).toHaveTextContent('رفض الطلب');
+  });
+
+  it('hides admin actions for non-admin users', async () => {
+    loginCashier();
+    (returnsApi.getReturnAudit as any).mockResolvedValueOnce(populated);
+    renderPanel('return');
+    await waitFor(() =>
+      expect(
+        screen.getByTestId('audit-edit-request-req-pending-1'),
+      ).toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByTestId(
+        'audit-edit-request-req-pending-1-admin-actions',
+      ),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId('audit-edit-request-req-pending-1-approve'),
+    ).not.toBeInTheDocument();
+  });
+
+  it('hides admin actions when no user is logged in', async () => {
+    // logout() already ran in beforeEach.
+    (returnsApi.getReturnAudit as any).mockResolvedValueOnce(populated);
+    renderPanel('return');
+    await waitFor(() =>
+      expect(
+        screen.getByTestId('audit-edit-request-req-pending-1'),
+      ).toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByTestId(
+        'audit-edit-request-req-pending-1-admin-actions',
+      ),
+    ).not.toBeInTheDocument();
+  });
+
+  it('does NOT show admin actions on already-rejected requests, even for admin', async () => {
+    loginAdmin();
+    (returnsApi.getReturnAudit as any).mockResolvedValueOnce(populated);
+    renderPanel('return');
+    await waitFor(() =>
+      expect(
+        screen.getByTestId('audit-edit-request-req-rejected-1'),
+      ).toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByTestId(
+        'audit-edit-request-req-rejected-1-admin-actions',
+      ),
+    ).not.toBeInTheDocument();
   });
 
   // ─── PR-FIN-RETURNS-EXCHANGES-EDIT-REQUEST-GUIDED — structured diff
