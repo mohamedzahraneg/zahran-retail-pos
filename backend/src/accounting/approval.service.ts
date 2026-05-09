@@ -49,6 +49,48 @@ export class ExpenseApprovalService {
     );
   }
 
+  /**
+   * PR-FIX-EXPENSE-APPROVAL-RULES-DEDUPE — duplicate-key detection
+   * for the natural key on `expense_approval_rules`:
+   *   (required_role, level, min_amount, COALESCE(max_amount, -1))
+   * scoped to `is_active=TRUE`.  When `excludeId` is provided (the
+   * UPDATE path), the row being modified is excluded from the
+   * comparison so notes-only or no-op updates pass.  The DB partial
+   * unique index `uq_expense_approval_rules_active_natural_key`
+   * (migration 129) is the defence-in-depth backstop; this helper
+   * surfaces a clean Arabic error before the SQL `unique_violation`
+   * round-trip.
+   */
+  private async findDuplicateActiveRule(
+    key: {
+      required_role: string;
+      level: number;
+      min_amount: number;
+      max_amount: number | null | undefined;
+    },
+    excludeId: string | null,
+  ): Promise<boolean> {
+    const [row] = await this.ds.query(
+      `SELECT 1 AS hit
+         FROM expense_approval_rules
+        WHERE is_active = TRUE
+          AND required_role = $1
+          AND level = $2
+          AND min_amount = $3
+          AND COALESCE(max_amount, '-1'::numeric) = COALESCE($4::numeric, '-1'::numeric)
+          AND ($5::uuid IS NULL OR id <> $5)
+        LIMIT 1`,
+      [
+        key.required_role,
+        key.level,
+        key.min_amount,
+        key.max_amount ?? null,
+        excludeId,
+      ],
+    );
+    return Boolean(row);
+  }
+
   async createRule(dto: CreateRuleDto) {
     if (!dto.name_ar?.trim()) throw new BadRequestException('الاسم مطلوب');
     if (!(dto.min_amount >= 0))
@@ -57,6 +99,22 @@ export class ExpenseApprovalService {
       throw new BadRequestException(
         'الحد الأقصى يجب أن يكون أكبر من الحد الأدنى',
       );
+    }
+    // PR-FIX-EXPENSE-APPROVAL-RULES-DEDUPE — reject before INSERT so
+    // operators get a friendly Arabic message instead of a Postgres
+    // unique_violation from the partial unique index.
+    if (
+      await this.findDuplicateActiveRule(
+        {
+          required_role: dto.required_role,
+          level: dto.level,
+          min_amount: dto.min_amount,
+          max_amount: dto.max_amount ?? null,
+        },
+        null,
+      )
+    ) {
+      throw new BadRequestException('توجد قاعدة اعتماد نشطة بنفس الشروط');
     }
     const [row] = await this.ds.query(
       `INSERT INTO expense_approval_rules
@@ -98,6 +156,68 @@ export class ExpenseApprovalService {
         [id],
       );
       return row;
+    }
+    // PR-FIX-EXPENSE-APPROVAL-RULES-DEDUPE — re-check the natural key
+    // when ANY of the four key columns OR is_active is being touched,
+    // since each of those can move the row into a duplicate active
+    // group.  Read the current row to fill in unchanged columns so
+    // the duplicate-key compare uses the post-update tuple.
+    const touchesKey =
+      dto.required_role !== undefined ||
+      dto.level !== undefined ||
+      dto.min_amount !== undefined ||
+      dto.max_amount !== undefined ||
+      dto.is_active !== undefined;
+    if (touchesKey) {
+      const [current] = await this.ds.query(
+        `SELECT id, required_role, level, min_amount, max_amount, is_active
+           FROM expense_approval_rules WHERE id = $1`,
+        [id],
+      );
+      if (!current) throw new NotFoundException('القاعدة غير موجودة');
+      const after = {
+        required_role:
+          dto.required_role !== undefined
+            ? dto.required_role
+            : String(current.required_role),
+        level:
+          dto.level !== undefined
+            ? Number(dto.level)
+            : Number(current.level),
+        min_amount:
+          dto.min_amount !== undefined
+            ? Number(dto.min_amount)
+            : Number(current.min_amount),
+        max_amount:
+          dto.max_amount !== undefined
+            ? dto.max_amount
+            : current.max_amount == null
+              ? null
+              : Number(current.max_amount),
+        is_active:
+          dto.is_active !== undefined
+            ? Boolean(dto.is_active)
+            : Boolean(current.is_active),
+      };
+      // Only enforce the invariant when the post-update row is active;
+      // a deactivation never collides with an existing active rule.
+      if (after.is_active) {
+        if (
+          await this.findDuplicateActiveRule(
+            {
+              required_role: after.required_role,
+              level: after.level,
+              min_amount: after.min_amount,
+              max_amount: after.max_amount,
+            },
+            id,
+          )
+        ) {
+          throw new BadRequestException(
+            'توجد قاعدة اعتماد نشطة بنفس الشروط',
+          );
+        }
+      }
     }
     sets.push('updated_at = NOW()');
     args.push(id);

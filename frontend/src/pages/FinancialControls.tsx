@@ -389,6 +389,40 @@ function RulesTab() {
     queryFn: () => accountingApi.listApprovalRules(),
   });
 
+  // PR-FIX-EXPENSE-APPROVAL-RULES-DEDUPE — surface a "قاعدة مكررة"
+  // chip when the same active rule appears twice (or more) on the
+  // natural key (required_role, level, min_amount, COALESCE(max_amount,-1)).
+  // Migration 129 deactivated existing duplicates and added a partial
+  // unique index, but the chip stays as a defence-in-depth signal in
+  // case a future legacy import or admin script re-introduces a
+  // duplicate before the BE rejects it.  Computed client-side over
+  // the loaded rules array — no extra API call.
+  const duplicateActiveRuleIds = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const r of rules) {
+      if (!r.is_active) continue;
+      const key = [
+        r.required_role,
+        r.level,
+        Number(r.min_amount),
+        r.max_amount == null ? '∞' : Number(r.max_amount),
+      ].join('|');
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    const dups = new Set<string>();
+    for (const r of rules) {
+      if (!r.is_active) continue;
+      const key = [
+        r.required_role,
+        r.level,
+        Number(r.min_amount),
+        r.max_amount == null ? '∞' : Number(r.max_amount),
+      ].join('|');
+      if ((counts.get(key) ?? 0) > 1) dups.add(r.id);
+    }
+    return dups;
+  }, [rules]);
+
   const del = useMutation({
     mutationFn: (id: string) => accountingApi.removeApprovalRule(id),
     onSuccess: () => {
@@ -432,8 +466,22 @@ function RulesTab() {
                   className={`border-t border-slate-100 hover:bg-slate-50 ${
                     r.is_active ? '' : 'opacity-60'
                   }`}
+                  data-testid={`approval-rule-row-${r.id}`}
                 >
-                  <td className="px-3 py-2 font-bold">{r.name_ar}</td>
+                  <td className="px-3 py-2 font-bold">
+                    <span className="inline-flex items-center gap-1.5 flex-wrap">
+                      {r.name_ar}
+                      {duplicateActiveRuleIds.has(r.id) && (
+                        <span
+                          className="chip bg-rose-100 text-rose-700 text-[10px] font-extrabold border border-rose-200"
+                          title="قاعدة نشطة أخرى لها نفس الدور والمستوى وحدود المبلغ — يجب تعطيل إحداهما"
+                          data-testid={`approval-rule-${r.id}-duplicate-badge`}
+                        >
+                          قاعدة مكررة
+                        </span>
+                      )}
+                    </span>
+                  </td>
                   <td className="px-3 py-2 font-mono">
                     {EGP(r.min_amount)}
                   </td>
