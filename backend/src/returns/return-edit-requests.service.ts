@@ -366,14 +366,16 @@ export class ReturnEditRequestsService {
             'لا يمكن إضافة بند بدون variant_id حقيقي',
           );
         }
+        // PR-FIX-EDIT-REQUEST-APPLY-NUMERIC-CAST — finite-number guard
+        // (NaN / Infinity slip past `> 0` and `>= 0`).
         const qty = Number(a?.quantity ?? 0);
-        if (!(qty > 0)) {
+        if (!Number.isFinite(qty) || qty <= 0) {
           throw new BadRequestException(
             'الكمية يجب أن تكون أكبر من صفر للبنود المضافة',
           );
         }
         const price = Number(a?.unit_price ?? 0);
-        if (!(price >= 0)) {
+        if (!Number.isFinite(price) || price < 0) {
           throw new BadRequestException(
             'سعر البند المضاف لا يمكن أن يكون سالباً',
           );
@@ -397,14 +399,19 @@ export class ReturnEditRequestsService {
             `بند غير موجود في المرتجع: ${itemId}`,
           );
         }
+        // PR-FIX-EDIT-REQUEST-APPLY-NUMERIC-CAST — `> 0` / `>= 0` alone
+        // accept Infinity, so we explicitly require a finite number
+        // before either the SQL multiplication or the BE arithmetic
+        // touches the value.  NaN / Infinity / -Infinity all fail
+        // Number.isFinite and throw with a clean Arabic message.
         const newQty = Number(u?.after?.quantity ?? 0);
-        if (!(newQty > 0)) {
+        if (!Number.isFinite(newQty) || newQty <= 0) {
           throw new BadRequestException(
             'الكمية يجب أن تكون أكبر من صفر للبنود المعدلة',
           );
         }
         const newPrice = Number(u?.after?.unit_price ?? 0);
-        if (!(newPrice >= 0)) {
+        if (!Number.isFinite(newPrice) || newPrice < 0) {
           throw new BadRequestException(
             'السعر لا يمكن أن يكون سالباً',
           );
@@ -532,13 +539,19 @@ export class ReturnEditRequestsService {
           after.variant_id && String(after.variant_id).trim().length > 0
             ? String(after.variant_id)
             : null;
+        // PR-FIX-EDIT-REQUEST-APPLY-NUMERIC-CAST — all parameters fed
+        // into a Postgres `*` expression are explicitly cast to
+        // ::numeric.  Without these casts pg sends JS numbers as
+        // `unknown` and Postgres can't pick between int*int / numeric*
+        // numeric / etc., raising "operator is not unique: unknown *
+        // unknown" (observed on the live RET-2026-000006 apply).
         if (newVariantId) {
           await em.query(
             `UPDATE return_items
                 SET variant_id    = $2,
-                    quantity      = $3,
-                    unit_price    = $4,
-                    refund_amount = ($3 * $4)::numeric(14,2),
+                    quantity      = $3::int,
+                    unit_price    = $4::numeric,
+                    refund_amount = ($3::numeric * $4::numeric)::numeric(14,2),
                     notes         = $5
               WHERE id = $1 AND return_id = $6`,
             [itemId, newVariantId, newQty, newPrice, newNotes, input.parent_id],
@@ -546,9 +559,9 @@ export class ReturnEditRequestsService {
         } else {
           await em.query(
             `UPDATE return_items
-                SET quantity      = $2,
-                    unit_price    = $3,
-                    refund_amount = ($2 * $3)::numeric(14,2),
+                SET quantity      = $2::int,
+                    unit_price    = $3::numeric,
+                    refund_amount = ($2::numeric * $3::numeric)::numeric(14,2),
                     notes         = $4
               WHERE id = $1 AND return_id = $5`,
             [itemId, newQty, newPrice, newNotes, input.parent_id],
@@ -580,11 +593,14 @@ export class ReturnEditRequestsService {
         const qty = Number(a.quantity || 0);
         const price = Number(a.unit_price || 0);
         const notes = a.notes == null ? null : String(a.notes);
+        // Same `::numeric` casts as the UPDATE branches above —
+        // see PR-FIX-EDIT-REQUEST-APPLY-NUMERIC-CAST.
         await em.query(
           `INSERT INTO return_items
               (return_id, variant_id, quantity, unit_price, refund_amount, notes)
            VALUES
-              ($1, $2, $3, $4, ($3 * $4)::numeric(14,2), $5)`,
+              ($1, $2, $3::int, $4::numeric,
+               ($3::numeric * $4::numeric)::numeric(14,2), $5)`,
           [input.parent_id, variantId, qty, price, notes],
         );
         addedCount++;

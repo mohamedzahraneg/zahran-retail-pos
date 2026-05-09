@@ -832,6 +832,213 @@ describe('applyApprovedExchange — Phase 2A scope guard', () => {
 
 // ─── Migration 126 — static + idempotency checks ──────────────────
 
+// ─── PR-FIX-EDIT-REQUEST-APPLY-NUMERIC-CAST — pins the SQL casts +
+//     finite-number guards that fix the live "operator is not unique:
+//     unknown * unknown" Postgres error observed on RET-2026-000006.
+
+describe('applyApprovedReturn — numeric SQL casts (source-grep)', () => {
+  const src = require('node:fs').readFileSync(
+    require('node:path').resolve(__dirname, 'return-edit-requests.service.ts'),
+    'utf-8',
+  ) as string;
+  const code = src
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/gm, '');
+
+  it('every $N * $M multiplication has explicit ::numeric casts on both operands', () => {
+    // Allowed shape: ($N::numeric * $M::numeric)::numeric(14,2)
+    // Forbidden shape: ($N * $M)::numeric(14,2)  (the bug we just fixed)
+    expect(code).not.toMatch(/\(\s*\$\d+\s*\*\s*\$\d+\s*\)/);
+    // At least one casted form must be present (proves we're computing
+    // refund_amount inside SQL, not bypassing the contract).
+    expect(code).toMatch(
+      /\(\s*\$\d+::numeric\s*\*\s*\$\d+::numeric\s*\)::numeric\(14,2\)/,
+    );
+  });
+
+  it('quantity / unit_price parameters carry an explicit type cast', () => {
+    // Spot-check: every parameter that flows into a numeric column or
+    // an arithmetic expression must be cast.  We don't enforce a
+    // specific cast for every $N (some are uuid, some text), but we
+    // assert the casts the failing SQL needed.
+    expect(code).toMatch(/quantity\s*=\s*\$\d+::int/);
+    expect(code).toMatch(/unit_price\s*=\s*\$\d+::numeric/);
+  });
+
+  it('finite-number guards reject NaN / Infinity before SQL', () => {
+    // The guard wraps both updated and added line-validation blocks.
+    expect(code).toMatch(/Number\.isFinite\(newQty\)/);
+    expect(code).toMatch(/Number\.isFinite\(newPrice\)/);
+    expect(code).toMatch(/Number\.isFinite\(qty\)/);
+    expect(code).toMatch(/Number\.isFinite\(price\)/);
+  });
+
+  it('safety contract still holds — no raw financial / inventory writes', () => {
+    expect(code).not.toMatch(/INSERT\s+INTO\s+journal_entries\b/i);
+    expect(code).not.toMatch(/INSERT\s+INTO\s+journal_lines\b/i);
+    expect(code).not.toMatch(/INSERT\s+INTO\s+cashbox_transactions\b/i);
+    expect(code).not.toMatch(/UPDATE\s+stock_movements\b/i);
+    expect(code).not.toMatch(/DELETE\s+FROM\s+stock_movements\b/i);
+    expect(code).not.toMatch(/\baccounting_only\b/);
+  });
+});
+
+describe('applyApprovedReturn — finite-number rejection (behavioural)', () => {
+  it('rejects an updated line whose after.quantity is Infinity', async () => {
+    const reqInfQty = approvedRequestRow({
+      requested_payload: {
+        kind: 'line_changes',
+        lines: {
+          updated: [
+            {
+              item_id: ITEM_ID,
+              before: {
+                variant_id: VAR_OLD,
+                sku: 'X',
+                name: 'X',
+                quantity: 1,
+                unit_price: 450,
+              },
+              after: {
+                variant_id: VAR_OLD,
+                sku: 'X',
+                name: 'X',
+                quantity: Infinity, // should be rejected pre-SQL
+                unit_price: 450,
+              },
+            },
+          ],
+          removed: [],
+          added: [],
+        },
+        summary: { old_total: 450, new_total: 450, delta: 0 },
+      },
+    });
+    const { ds } = makeRouter(baseRoutes({ request: reqInfQty }));
+    const posting: any = {
+      reverseByReference: jest.fn(),
+      postReturn: jest.fn(),
+    };
+    const svc = await buildSvc(ds, posting);
+    await expect(
+      svc.applyApprovedReturn({
+        entity: 'return',
+        parent_id: RET_ID,
+        request_id: REQ_ID,
+        user_id: USER_ID,
+      }),
+    ).rejects.toThrow(BadRequestException);
+  });
+
+  it('rejects an updated line whose after.unit_price is NaN', async () => {
+    const reqNaNPrice = approvedRequestRow({
+      requested_payload: {
+        kind: 'line_changes',
+        lines: {
+          updated: [
+            {
+              item_id: ITEM_ID,
+              before: {
+                variant_id: VAR_OLD,
+                sku: 'X',
+                name: 'X',
+                quantity: 1,
+                unit_price: 450,
+              },
+              after: {
+                variant_id: VAR_OLD,
+                sku: 'X',
+                name: 'X',
+                quantity: 1,
+                unit_price: NaN,
+              },
+            },
+          ],
+          removed: [],
+          added: [],
+        },
+        summary: { old_total: 450, new_total: 0, delta: -450 },
+      },
+    });
+    const { ds } = makeRouter(baseRoutes({ request: reqNaNPrice }));
+    const posting: any = {
+      reverseByReference: jest.fn(),
+      postReturn: jest.fn(),
+    };
+    const svc = await buildSvc(ds, posting);
+    await expect(
+      svc.applyApprovedReturn({
+        entity: 'return',
+        parent_id: RET_ID,
+        request_id: REQ_ID,
+        user_id: USER_ID,
+      }),
+    ).rejects.toThrow(BadRequestException);
+  });
+
+  it('rejects an added line whose quantity is Infinity', async () => {
+    const reqInfAdd = approvedRequestRow({
+      requested_payload: {
+        kind: 'line_changes',
+        lines: {
+          updated: [],
+          removed: [],
+          added: [
+            {
+              variant_id: VAR_NEW,
+              sku: 'NEW',
+              name: 'new',
+              quantity: Infinity,
+              unit_price: 100,
+            },
+          ],
+        },
+        summary: { old_total: 450, new_total: 450, delta: 0 },
+      },
+    });
+    const { ds } = makeRouter(baseRoutes({ request: reqInfAdd }));
+    const posting: any = {
+      reverseByReference: jest.fn(),
+      postReturn: jest.fn(),
+    };
+    const svc = await buildSvc(ds, posting);
+    await expect(
+      svc.applyApprovedReturn({
+        entity: 'return',
+        parent_id: RET_ID,
+        request_id: REQ_ID,
+        user_id: USER_ID,
+      }),
+    ).rejects.toThrow(BadRequestException);
+  });
+
+  it('captures the casted SQL on the wire (regression for the live RET-2026-000006 error)', async () => {
+    // Confirms what reaches the DataSource for an UPDATE of a line.
+    // The fix means the SQL now contains $N::numeric * $M::numeric
+    // — and the old `($N * $M)` form is gone.
+    const { ds, calls } = makeRouter(baseRoutes({}));
+    const posting: any = {
+      reverseByReference: jest.fn(),
+      postReturn: jest.fn(),
+    };
+    const svc = await buildSvc(ds, posting);
+    await svc.applyApprovedReturn({
+      entity: 'return',
+      parent_id: RET_ID,
+      request_id: REQ_ID,
+      user_id: USER_ID,
+    });
+    const updateCall = calls.find((c) =>
+      /UPDATE\s+return_items\s+SET/i.test(c.sql),
+    );
+    expect(updateCall).toBeDefined();
+    expect(updateCall!.sql).toMatch(
+      /\(\s*\$\d+::numeric\s*\*\s*\$\d+::numeric\s*\)::numeric\(14,2\)/,
+    );
+    expect(updateCall!.sql).not.toMatch(/\(\s*\$\d+\s*\*\s*\$\d+\s*\)/);
+  });
+});
+
 describe('migration 126 — additive + idempotent', () => {
   const rawSql = require('node:fs')
     .readFileSync(
