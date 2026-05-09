@@ -22,6 +22,7 @@ import {
   OpenShiftPayload,
   ShiftSummary,
   ShiftCountAdjustment,
+  ShiftOpeningBalanceAdjustment,
   VarianceTreatment,
   ApproveClosePayload,
   PaymentBreakdown,
@@ -1023,8 +1024,14 @@ function ShiftDetailModal({ shift, onClose }: { shift: Shift; onClose: () => voi
   const [showClose, setShowClose] = useState(false);
   // PR-B1 — counted-cash adjustment modal state.
   const [showAdjust, setShowAdjust] = useState(false);
+  // PR-FIX-SHIFTS-OPENING-BALANCE-ADJUST — opening-balance adjust state.
+  const [showOpeningBalanceAdjust, setShowOpeningBalanceAdjust] =
+    useState(false);
   const hasPermission = useAuthStore((s) => s.hasPermission);
   const canAdjustCount = hasPermission('shifts.close.adjust');
+  const canAdjustOpeningBalance = hasPermission(
+    'shifts.opening_balance.adjust',
+  );
 
   // Always fetch the live detail (includes summary + full invoice list) so the
   // modal is correct for both open and closed shifts — never rely on the row
@@ -1042,6 +1049,14 @@ function ShiftDetailModal({ shift, onClose }: { shift: Shift; onClose: () => voi
   const { data: adjustments = [] } = useQuery({
     queryKey: ['shift-adjustments', shift.id],
     queryFn: () => shiftsApi.listAdjustments(shift.id),
+    staleTime: 30_000,
+  });
+
+  // PR-FIX-SHIFTS-OPENING-BALANCE-ADJUST — opening-balance audit trail.
+  // Read-only view; safe to render for any user who can see the shift.
+  const { data: openingAdjustments = [] } = useQuery({
+    queryKey: ['shift-opening-balance-adjustments', shift.id],
+    queryFn: () => shiftsApi.listOpeningBalanceAdjustments(shift.id),
     staleTime: 30_000,
   });
 
@@ -1604,6 +1619,31 @@ function ShiftDetailModal({ shift, onClose }: { shift: Shift; onClose: () => voi
             <ShiftAdjustmentHistory adjustments={adjustments} />
           )}
 
+          {/* PR-FIX-SHIFTS-OPENING-BALANCE-ADJUST — adjust the opening
+           *  balance on an OPEN shift.  Permission-gated; closed and
+           *  pending_close shifts hide the button entirely (the BE
+           *  rejects them too — defence in depth). */}
+          {isOpen && canAdjustOpeningBalance && detail && (
+            <div className="flex items-center justify-end pt-1">
+              <button
+                type="button"
+                className="px-3 py-1.5 rounded-lg text-xs font-bold bg-amber-50 text-amber-800 border border-amber-200 hover:bg-amber-100"
+                onClick={() => setShowOpeningBalanceAdjust(true)}
+                data-testid="shift-adjust-opening-balance-trigger"
+              >
+                ✎ تعديل الرصيد الافتتاحي
+              </button>
+            </div>
+          )}
+
+          {/* PR-FIX-SHIFTS-OPENING-BALANCE-ADJUST — audit history.
+           *  Read-only; visible to anyone who can view the shift. */}
+          {openingAdjustments.length > 0 && (
+            <ShiftOpeningBalanceAdjustmentHistory
+              adjustments={openingAdjustments}
+            />
+          )}
+
           {isOpen && (
             <div className="flex items-center justify-end pt-2">
               <button
@@ -1613,6 +1653,27 @@ function ShiftDetailModal({ shift, onClose }: { shift: Shift; onClose: () => voi
                 <Square size={16} /> إغلاق الوردية الآن
               </button>
             </div>
+          )}
+
+          {/* PR-FIX-SHIFTS-OPENING-BALANCE-ADJUST — adjust modal.
+           *  Mount only when the operator clicked the trigger. */}
+          {showOpeningBalanceAdjust && detail && (
+            <AdjustOpeningBalanceModal
+              shift={detail}
+              hasMovements={
+                Number(s?.total_cash_in || 0) > 0 ||
+                Number(s?.total_cash_out || 0) > 0
+              }
+              onClose={() => setShowOpeningBalanceAdjust(false)}
+              onSaved={() => {
+                qc.invalidateQueries({ queryKey: ['shift-detail', shift.id] });
+                qc.invalidateQueries({
+                  queryKey: ['shift-opening-balance-adjustments', shift.id],
+                });
+                qc.invalidateQueries({ queryKey: ['shifts'] });
+                setShowOpeningBalanceAdjust(false);
+              }}
+            />
           )}
 
           {/* PR-B1 — adjustment modal */}
@@ -2527,6 +2588,270 @@ function ShiftAdjustmentHistory({
                   </td>
                   <td className="px-2 py-1.5 font-mono tabular-nums">
                     {a.new_difference == null ? '—' : EGP(Number(a.new_difference))}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ──────────────────────────────────────────────────────────────────
+ * PR-FIX-SHIFTS-OPENING-BALANCE-ADJUST (migration 128)
+ *
+ * Permission-gated correction of shifts.opening_balance on an OPEN
+ * shift.  Pure metadata — NO journal_entries, NO cashbox_transactions,
+ * NO cashboxes.current_balance change, NO FinancialEngine call.  The
+ * BE writes one audit row + one activity_logs row inside a single
+ * transaction.
+ *
+ * When the shift already has cash movements, the operator must
+ * additionally check an "I understand" box because the live
+ * `expected_closing` recompute will pick up the new opening_balance
+ * and the variance will shift accordingly.
+ * ────────────────────────────────────────────────────────────────── */
+function AdjustOpeningBalanceModal({
+  shift,
+  hasMovements,
+  onClose,
+  onSaved,
+}: {
+  shift: Shift;
+  hasMovements: boolean;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const currentOpening = Number(
+    (shift as any).opening_balance ?? 0,
+  );
+  const [newOpening, setNewOpening] = useState<string>(
+    currentOpening ? String(currentOpening) : '',
+  );
+  const [reason, setReason] = useState('');
+  const [notes, setNotes] = useState('');
+  const [acknowledged, setAcknowledged] = useState(false);
+
+  const newOpeningNum = Number(newOpening || 0);
+  const newOpeningValid =
+    Number.isFinite(newOpeningNum) &&
+    newOpeningNum >= 0 &&
+    Math.abs(newOpeningNum - currentOpening) > 0.005;
+  const reasonValid = reason.trim().length >= 5;
+  const movementGate = hasMovements ? acknowledged : true;
+  const canSave = newOpeningValid && reasonValid && movementGate;
+
+  const save = useMutation({
+    mutationFn: () =>
+      shiftsApi.adjustOpeningBalance(shift.id, {
+        new_opening_balance: newOpeningNum,
+        reason: reason.trim(),
+        notes: notes.trim() || undefined,
+      }),
+    onSuccess: () => {
+      toast.success('تم تعديل الرصيد الافتتاحي بنجاح');
+      onSaved();
+    },
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.message || 'فشل التعديل'),
+  });
+
+  return (
+    <Modal
+      title={`تعديل الرصيد الافتتاحي — ${shift.shift_no}`}
+      onClose={onClose}
+    >
+      <div
+        className="space-y-4"
+        data-testid="shift-adjust-opening-balance-modal"
+      >
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[12px] text-amber-900">
+          <span className="font-bold">ملاحظة محاسبية: </span>
+          هذا التعديل يعدّل الرصيد الافتتاحي للوردية فقط — لا يتم إنشاء أي
+          قيد محاسبي ولا حركة خزنة. الرصيد الفعلي للخزنة لا يتغير.
+        </div>
+
+        {hasMovements && (
+          <div
+            className="rounded-lg border border-rose-300 bg-rose-50 px-3 py-2 text-[12px] text-rose-900"
+            data-testid="shift-adjust-opening-balance-movements-warning"
+          >
+            <span className="font-bold">تحذير: </span>
+            هذه الوردية لديها حركات كاش. تعديل الرصيد الافتتاحي سيعيد
+            حساب المتوقع والفروقات.
+          </div>
+        )}
+
+        <div className="grid grid-cols-2 gap-3 text-sm">
+          <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+            <div className="text-[10px] text-slate-500 font-bold mb-1">
+              الرصيد الحالي
+            </div>
+            <div
+              className="font-black tabular-nums text-slate-800"
+              data-testid="shift-adjust-opening-balance-current"
+            >
+              {EGP(currentOpening)}
+            </div>
+          </div>
+          <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+            <div className="text-[10px] text-slate-500 font-bold mb-1">
+              الرصيد الجديد
+            </div>
+            <div className="font-black tabular-nums text-emerald-700">
+              {newOpening ? EGP(newOpeningNum) : '—'}
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <label className="label">الرصيد الافتتاحي الجديد *</label>
+          <input
+            type="number"
+            min="0"
+            step="0.01"
+            className="input"
+            value={newOpening}
+            placeholder="0.00"
+            onChange={(e) => setNewOpening(e.target.value)}
+            disabled={save.isPending}
+            data-testid="shift-adjust-opening-balance-input"
+          />
+        </div>
+
+        <div>
+          <label className="label text-rose-600">
+            سبب التعديل (مطلوب) *
+          </label>
+          <textarea
+            className="input"
+            rows={2}
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            placeholder="مثال: الكاشير أدخل 500 بالخطأ بدلاً من 1000 — تم العدّ يدوياً"
+            disabled={save.isPending}
+            data-testid="shift-adjust-opening-balance-reason"
+          />
+        </div>
+
+        <div>
+          <label className="label">ملاحظات (اختياري)</label>
+          <textarea
+            className="input"
+            rows={2}
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            disabled={save.isPending}
+            data-testid="shift-adjust-opening-balance-notes"
+          />
+        </div>
+
+        {hasMovements && (
+          <label
+            className="flex items-start gap-2 text-[12px] text-rose-900 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2 cursor-pointer"
+            data-testid="shift-adjust-opening-balance-ack-label"
+          >
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={acknowledged}
+              onChange={(e) => setAcknowledged(e.target.checked)}
+              disabled={save.isPending}
+              data-testid="shift-adjust-opening-balance-ack"
+            />
+            <span>
+              أفهم أن المتوقع وفروقات الكاش ستُعاد حسابها
+            </span>
+          </label>
+        )}
+
+        <div className="flex items-center justify-end gap-2 border-t border-slate-200 pt-3">
+          <button
+            type="button"
+            className="px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-100 text-slate-700 hover:bg-slate-200"
+            onClick={onClose}
+            disabled={save.isPending}
+          >
+            إلغاء
+          </button>
+          <button
+            type="button"
+            className="px-4 py-1.5 rounded-lg text-xs font-bold bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            onClick={() => save.mutate()}
+            disabled={!canSave || save.isPending}
+            data-testid="shift-adjust-opening-balance-submit"
+          >
+            {save.isPending ? 'جارٍ الحفظ…' : 'حفظ التعديل'}
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function ShiftOpeningBalanceAdjustmentHistory({
+  adjustments,
+}: {
+  adjustments: ShiftOpeningBalanceAdjustment[];
+}) {
+  return (
+    <div
+      className="border border-slate-200 rounded-lg overflow-hidden"
+      data-testid="shift-opening-balance-history"
+    >
+      <div className="bg-slate-50 p-3 text-sm font-bold flex items-center justify-between">
+        <span>سجل تعديلات الرصيد الافتتاحي</span>
+        <span className="text-[11px] text-slate-500">
+          {adjustments.length} تعديل
+        </span>
+      </div>
+      {adjustments.length === 0 ? (
+        <div className="text-center text-xs text-slate-500 py-6">
+          لا توجد تعديلات على الرصيد الافتتاحي
+        </div>
+      ) : (
+        <div className="overflow-x-auto max-h-56 overflow-y-auto">
+          <table className="min-w-full text-xs">
+            <thead className="bg-slate-100">
+              <tr>
+                <th className="text-right px-2 py-2">التاريخ والوقت</th>
+                <th className="text-right px-2 py-2">من عدّل</th>
+                <th className="text-right px-2 py-2">السبب</th>
+                <th className="text-right px-2 py-2">القديم</th>
+                <th className="text-right px-2 py-2">الجديد</th>
+                <th className="text-right px-2 py-2">عند التعديل</th>
+              </tr>
+            </thead>
+            <tbody>
+              {adjustments.map((a) => (
+                <tr key={a.id} className="border-t border-slate-100">
+                  <td className="px-2 py-1.5 font-mono tabular-nums whitespace-nowrap">
+                    {new Date(a.adjusted_at).toLocaleString('en-GB', {
+                      timeZone: 'Africa/Cairo',
+                      hour12: false,
+                    })}
+                  </td>
+                  <td className="px-2 py-1.5">{a.adjusted_by_name || '—'}</td>
+                  <td
+                    className="px-2 py-1.5 text-slate-700 max-w-[260px] truncate"
+                    title={a.reason}
+                  >
+                    {a.reason}
+                  </td>
+                  <td className="px-2 py-1.5 text-rose-600 font-mono tabular-nums">
+                    {EGP(Number(a.old_opening_balance))}
+                  </td>
+                  <td className="px-2 py-1.5 text-emerald-700 font-mono tabular-nums font-bold">
+                    {EGP(Number(a.new_opening_balance))}
+                  </td>
+                  <td className="px-2 py-1.5 text-[11px] text-slate-600">
+                    {a.has_movements_at_adjust
+                      ? 'يوجد حركات'
+                      : 'لا حركات'}
+                    {' · '}
+                    {a.shift_status_at_adjust}
                   </td>
                 </tr>
               ))}

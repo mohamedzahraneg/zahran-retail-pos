@@ -5,6 +5,7 @@ import {
   IsString,
   IsUUID,
   Min,
+  MinLength,
 } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
@@ -67,4 +68,30 @@ export class ApproveCloseDto {
 
   @ApiPropertyOptional() @IsOptional() @IsString()
   variance_notes?: string;
+}
+
+/**
+ * PR-FIX-SHIFTS-OPENING-BALANCE-ADJUST — payload for
+ * `POST /shifts/:id/adjust-opening-balance`.  Permission-gated audit
+ * trail for correcting `shifts.opening_balance` on an open shift.
+ * NOT an accounting transaction — no JE/CT/SM, no FinancialEngine
+ * call.  Service rejects closed / pending_close shifts.  Reason min
+ * length is enforced again at the service layer (and at the DB CHECK
+ * constraint) — defence in depth.
+ */
+export class AdjustOpeningBalanceDto {
+  @ApiProperty()
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(0)
+  new_opening_balance: number;
+
+  @ApiProperty()
+  @IsString()
+  @MinLength(5)
+  reason: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  notes?: string;
 }

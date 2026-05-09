@@ -11,6 +11,7 @@ import {
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { ShiftsService } from './shifts.service';
 import {
+  AdjustOpeningBalanceDto,
   ApproveCloseDto,
   CloseShiftDto,
   OpenShiftDto,
@@ -213,5 +214,38 @@ export class ShiftsController {
   @ApiOperation({ summary: 'سجل تعديلات مبلغ الإقفال للوردية' })
   listAdjustments(@Param('id', ParseUUIDPipe) id: string) {
     return this.svc.listAdjustments(id);
+  }
+
+  // ─── PR-FIX-SHIFTS-OPENING-BALANCE-ADJUST (migration 128) ───────
+  // POST /shifts/:id/adjust-opening-balance → permission-gated
+  // correction of shifts.opening_balance on an open shift.  NOT an
+  // accounting transaction: no JE/CT/SM, no FinancialEngine call.
+  // The `decide()`-style transaction inside the service writes a
+  // single audit row + an activity_logs row.  The IdempotencyInterceptor
+  // protects against double-clicks on the modal save button (mirrors
+  // the adjust-count protection in PR-11A).
+  // GET  /shifts/:id/opening-balance-adjustments → audit history
+  // for the shift.  Read-only; any viewer can see why opening cash
+  // changed.
+  // ────────────────────────────────────────────────────────────────
+
+  @Post(':id/adjust-opening-balance')
+  @Permissions('shifts.opening_balance.adjust')
+  @ApiOperation({ summary: 'تعديل الرصيد الافتتاحي للوردية' })
+  @UseInterceptors(IdempotencyInterceptor)
+  adjustOpeningBalance(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: AdjustOpeningBalanceDto,
+    @CurrentUser() user: JwtUser,
+  ) {
+    return this.svc.adjustOpeningBalance(id, dto, user.userId);
+  }
+
+  @Get(':id/opening-balance-adjustments')
+  @ApiOperation({
+    summary: 'سجل تعديلات الرصيد الافتتاحي للوردية',
+  })
+  listOpeningBalanceAdjustments(@Param('id', ParseUUIDPipe) id: string) {
+    return this.svc.listOpeningBalanceAdjustments(id);
   }
 }

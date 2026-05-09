@@ -143,6 +143,27 @@ export interface ShiftCountAdjustment {
   adjusted_at: string;
 }
 
+/**
+ * PR-FIX-SHIFTS-OPENING-BALANCE-ADJUST (migration 128) — one row in
+ * the shift opening-balance adjustment audit.  Mirrors the
+ * shape of `shift_opening_balance_adjustments`.
+ */
+export interface ShiftOpeningBalanceAdjustment {
+  id: string;
+  shift_id: string;
+  old_opening_balance: number | string;
+  new_opening_balance: number | string;
+  old_expected_closing: number | string | null;
+  new_expected_closing: number | string | null;
+  shift_status_at_adjust: string;
+  has_movements_at_adjust: boolean;
+  reason: string;
+  notes: string | null;
+  adjusted_by: string;
+  adjusted_by_name?: string | null;
+  adjusted_at: string;
+}
+
 export interface ShiftSummary {
   shift_id: string;
   shift_no: string;
@@ -492,6 +513,26 @@ export const shiftsApi = {
     ),
   listAdjustments: (id: string) =>
     unwrap<ShiftCountAdjustment[]>(api.get(`/shifts/${id}/adjustments`)),
+
+  // PR-FIX-SHIFTS-OPENING-BALANCE-ADJUST (migration 128) — opening
+  // balance correction on an OPEN shift.  Permission-gated
+  // (shifts.opening_balance.adjust).  Pure metadata + audit; no JE/
+  // CT/SM, no FinancialEngine call.
+  adjustOpeningBalance: (
+    id: string,
+    body: {
+      new_opening_balance: number;
+      reason: string;
+      notes?: string;
+    },
+  ) =>
+    unwrap<{ shift: Shift; adjustment: ShiftOpeningBalanceAdjustment }>(
+      api.post(`/shifts/${id}/adjust-opening-balance`, body),
+    ),
+  listOpeningBalanceAdjustments: (id: string) =>
+    unwrap<ShiftOpeningBalanceAdjustment[]>(
+      api.get(`/shifts/${id}/opening-balance-adjustments`),
+    ),
 
   open: (payload: OpenShiftPayload) =>
     unwrap<Shift>(api.post('/shifts/open', payload)),

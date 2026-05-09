@@ -1732,6 +1732,242 @@ export class ShiftsService {
     );
   }
 
+  // ─── PR-FIX-SHIFTS-OPENING-BALANCE-ADJUST (migration 128) ──────────
+  //
+  //   Permission-gated correction for typos / miscounts in
+  //   shifts.opening_balance on an OPEN shift.  NOT an accounting
+  //   transaction:
+  //     · NO journal_entries created
+  //     · NO cashbox_transactions created
+  //     · NO cashboxes.current_balance change
+  //     · NO FinancialEngine call
+  //   Pure metadata UPDATE on shifts.opening_balance (and
+  //   expected_closing when no movements have happened yet — they
+  //   were initialised together at open() time and stay synchronised
+  //   while no cash has moved).  Once cash has moved, only
+  //   opening_balance is rewritten and the live `summary()` recompute
+  //   produces the new expected_closing on demand
+  //   (`opening_balance + cash_in − cash_out`).
+  //
+  //   Closed / pending_close shifts are explicitly REJECTED — closing
+  //   already posted the variance JE based on the old opening_balance,
+  //   so editing it after close would imply a corrective JE which is
+  //   out of scope for this PR.
+  //
+  //   Audit row inserted into shift_opening_balance_adjustments with
+  //   old/new opening + expected, status_at_adjust, has_movements_at_
+  //   adjust, reason, notes.  Plus one activity_logs row with
+  //   `metadata.kind='shift_opening_balance_adjust'` so the shift
+  //   timeline surfaces it.
+  //
+  //   Permission gate (`shifts.opening_balance.adjust`) is enforced at
+  //   the controller layer; the service trusts the caller has been
+  //   authorised already.
+  // ────────────────────────────────────────────────────────────────
+
+  async adjustOpeningBalance(
+    shiftId: string,
+    dto: { new_opening_balance: number; reason: string; notes?: string },
+    userId: string,
+  ) {
+    const reason = (dto.reason || '').trim();
+    if (reason.length < 5) {
+      throw new BadRequestException(
+        'سبب التعديل مطلوب (5 أحرف على الأقل)',
+      );
+    }
+    const newOpening = Number(dto.new_opening_balance);
+    if (!Number.isFinite(newOpening) || newOpening < 0) {
+      throw new BadRequestException(
+        'الرصيد الافتتاحي الجديد يجب أن يكون رقمًا موجبًا',
+      );
+    }
+    const notes = dto.notes ? String(dto.notes).trim() : null;
+
+    return this.ds.transaction(async (em) => {
+      // Lock the row so concurrent adjust + close don't race.
+      const [shift] = await em.query(
+        `SELECT id, shift_no, status, opening_balance, expected_closing,
+                cashbox_id, opened_at
+           FROM shifts WHERE id = $1 FOR UPDATE`,
+        [shiftId],
+      );
+      if (!shift) throw new NotFoundException('الوردية غير موجودة');
+
+      // PR-FIX-SHIFTS-OPENING-BALANCE-ADJUST — explicitly reject closed
+      // shifts.  At close time the variance JE was posted based on the
+      // frozen opening_balance + actual_closing.  Mutating the opening
+      // value afterwards would imply that JE is wrong; that's a separate
+      // concern (would need a corrective JE through FinancialEngine).
+      // For this PR we disallow it and tell the operator to use the
+      // counted-cash adjustment workflow instead.
+      if (shift.status === 'closed') {
+        throw new BadRequestException(
+          'لا يمكن تعديل الرصيد الافتتاحي لوردية مغلقة. ' +
+          'استخدم تعديل العد للوردية المغلقة بدلاً من ذلك.',
+        );
+      }
+      // pending_close — operator already submitted the count, manager
+      // is reviewing.  Same reasoning as 'closed': editing the open
+      // value at this point would invalidate the variance the manager
+      // is currently approving.  Same rejection copy keeps the FE
+      // path simple.
+      if (shift.status === 'pending_close') {
+        throw new BadRequestException(
+          'لا يمكن تعديل الرصيد الافتتاحي لوردية مغلقة. ' +
+          'استخدم تعديل العد للوردية المغلقة بدلاً من ذلك.',
+        );
+      }
+
+      const oldOpening = Number(shift.opening_balance);
+      const oldExpected =
+        shift.expected_closing == null
+          ? null
+          : Number(shift.expected_closing);
+
+      // No-op guard — refuse to write a noisy audit row when the new
+      // value matches the existing one to two decimals.
+      if (Math.abs(oldOpening - newOpening) < 0.005) {
+        throw new BadRequestException(
+          'القيمة الجديدة مطابقة للقيمة الحالية',
+        );
+      }
+
+      // Movement detection — any non-void cashbox_transaction on this
+      // shift's cashbox after `opened_at` counts.  Mirrors the same
+      // window used by computeSummary()'s totals.  We DON'T constrain
+      // by reference_type because every flavour of cash movement
+      // (sale, refund, customer_payment, deposit, …) belongs to the
+      // shift.  is_void=false excludes voided rows (mirrors summary).
+      const [{ has_movements }] = await em.query(
+        `SELECT EXISTS (
+            SELECT 1 FROM cashbox_transactions
+             WHERE cashbox_id = $1
+               AND created_at >= $2
+               AND is_void = FALSE
+         ) AS has_movements`,
+        [shift.cashbox_id, shift.opened_at],
+      );
+
+      // Decide whether to also update expected_closing.
+      //
+      //   · No movements yet → at open() time we wrote
+      //     opening_balance = expected_closing = $5.  Nothing has
+      //     moved since.  Both columns must move together; otherwise
+      //     close() and summary() would disagree.
+      //
+      //   · Has movements → expected_closing is the snapshot summary()
+      //     stamps at close time; for an OPEN shift it's recomputed
+      //     live every time anyway via:
+      //       opening_balance + total_cash_in − total_cash_out
+      //     so updating opening_balance alone is sufficient.  We
+      //     intentionally do NOT rewrite expected_closing on the row
+      //     here — leaving the existing snapshot lets a future close
+      //     flow keep its established semantics.
+      let newExpected: number | null = oldExpected;
+      if (!has_movements) {
+        newExpected = newOpening;
+        await em.query(
+          `UPDATE shifts SET opening_balance = $1, expected_closing = $1, updated_at = NOW()
+            WHERE id = $2`,
+          [newOpening, shiftId],
+        );
+      } else {
+        await em.query(
+          `UPDATE shifts SET opening_balance = $1, updated_at = NOW()
+            WHERE id = $2`,
+          [newOpening, shiftId],
+        );
+      }
+
+      // Insert the audit row.  shift_status_at_adjust is captured
+      // explicitly so a future relaxation of the closed-shift rule
+      // remains auditable from the row alone.
+      const [audit] = await em.query(
+        `INSERT INTO shift_opening_balance_adjustments
+           (shift_id, old_opening_balance, new_opening_balance,
+            old_expected_closing, new_expected_closing,
+            shift_status_at_adjust, has_movements_at_adjust,
+            reason, notes, adjusted_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         RETURNING *`,
+        [
+          shiftId,
+          oldOpening,
+          newOpening,
+          oldExpected,
+          newExpected,
+          String(shift.status),
+          Boolean(has_movements),
+          reason,
+          notes,
+          userId,
+        ],
+      );
+
+      // Best-effort activity log so the shift timeline carries this
+      // event with kind='shift_opening_balance_adjust'.  Failures here
+      // do not roll back the audit row — same defensive pattern as the
+      // payments-service backfill activity log.
+      try {
+        await em.query(
+          `INSERT INTO activity_logs
+             (action, entity, entity_id, user_id, summary, metadata)
+           VALUES ('update'::activity_action, 'shift'::entity_type, $1::uuid,
+                   $2::uuid, $3,
+                   jsonb_build_object(
+                     'kind', 'shift_opening_balance_adjust',
+                     'shift_no', $4::text,
+                     'old_opening_balance', $5::text,
+                     'new_opening_balance', $6::text,
+                     'has_movements_at_adjust', $7::boolean,
+                     'reason', $8::text
+                   ))`,
+          [
+            shiftId,
+            userId,
+            `تم تعديل الرصيد الافتتاحي للوردية ${shift.shift_no} من ${oldOpening.toFixed(2)} إلى ${newOpening.toFixed(2)}`,
+            shift.shift_no,
+            oldOpening.toFixed(2),
+            newOpening.toFixed(2),
+            Boolean(has_movements),
+            reason,
+          ],
+        );
+      } catch {
+        // Audit row + the UPDATE on shifts already committed inside
+        // this transaction; failing the activity_logs write would
+        // roll them back.  We intentionally swallow — the trail still
+        // lives on shift_opening_balance_adjustments.
+      }
+
+      // Return the updated shift + the new audit row so the UI can
+      // show both in a single round-trip.
+      const [updated] = await em.query(
+        `SELECT s.*,
+                cb.name_ar AS cashbox_name,
+                u1.full_name AS opened_by_name
+           FROM shifts s
+           LEFT JOIN cashboxes cb ON cb.id = s.cashbox_id
+           LEFT JOIN users u1     ON u1.id = s.opened_by
+          WHERE s.id = $1`,
+        [shiftId],
+      );
+      return { shift: updated, adjustment: audit };
+    });
+  }
+
+  async listOpeningBalanceAdjustments(shiftId: string) {
+    return this.ds.query(
+      `SELECT a.*, u.full_name AS adjusted_by_name
+         FROM shift_opening_balance_adjustments a
+         LEFT JOIN users u ON u.id = a.adjusted_by
+        WHERE a.shift_id = $1
+        ORDER BY a.adjusted_at DESC`,
+      [shiftId],
+    );
+  }
+
   // ──────────────────────────────────────────────────────────────────
   // PR-FIX-POS-INVOICE-EDIT-REFRESH-CLOSED-SHIFT-SNAPSHOT
   //
