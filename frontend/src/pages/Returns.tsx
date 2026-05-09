@@ -41,6 +41,7 @@ import {
 } from '@/api/returns.api';
 import { productsApi } from '@/api/products.api';
 import { ReturnsAuditPanel } from '@/components/returns/ReturnsAuditPanel';
+import { CreateEditRequestModal } from '@/components/returns/CreateEditRequestModal';
 import { Trash2 } from 'lucide-react';
 import {
   CashSourceSelector,
@@ -1100,6 +1101,10 @@ function ExchangeDetailsPanel({
   const e = op.raw;
   const delta = Number(e?.price_difference ?? 0);
   const noCash = delta === 0;
+  // PR-FIN-RETURNS-EXCHANGES-EDIT-REQUEST — Phase 1 create-only.
+  // Submitting a request does NOT mutate the exchange; it queues a
+  // pending row for admin review (BE: POST /exchanges/:id/edit-requests).
+  const [showEditRequest, setShowEditRequest] = useState(false);
   return (
     <div className="card p-5 space-y-4" data-testid="exchange-details-panel">
       <div className="flex items-center justify-between">
@@ -1174,8 +1179,32 @@ function ExchangeDetailsPanel({
         )}
       </div>
 
+      {/* PR-FIN-RETURNS-EXCHANGES-EDIT-REQUEST — entry to the
+          create-only edit-request modal.  Visible to anyone viewing
+          this details panel; the BE re-checks permissions on POST. */}
+      {op.id && (
+        <button
+          type="button"
+          onClick={() => setShowEditRequest(true)}
+          className="w-full bg-amber-50 hover:bg-amber-100 text-amber-800 border-2 border-dashed border-amber-300 font-bold py-2.5 rounded-lg text-sm flex items-center justify-center gap-2"
+          data-testid="exchanges-action-edit-request"
+        >
+          ✎ طلب تعديل
+        </button>
+      )}
+
       {/* PR-FIN-RETURNS-EXCHANGES-AUDIT — read-only audit history. */}
       {op.id && <ReturnsAuditPanel entity="exchange" id={op.id} />}
+
+      {showEditRequest && op.id && (
+        <CreateEditRequestModal
+          entity="exchange"
+          parentId={op.id}
+          documentNo={e?.exchange_no ?? op.number}
+          onClose={() => setShowEditRequest(false)}
+          onSuccess={() => setShowEditRequest(false)}
+        />
+      )}
     </div>
   );
 }
@@ -1198,6 +1227,10 @@ function ReturnDetailsPanel({
   const [action, setAction] = useState<
     'approve' | 'refund' | 'reject' | 'cancel' | null
   >(null);
+  // PR-FIN-RETURNS-EXCHANGES-EDIT-REQUEST — Phase 1 create-only.
+  // Submitting a request does NOT mutate the return; it queues a
+  // pending row for admin review (BE: POST /returns/:id/edit-requests).
+  const [showEditRequest, setShowEditRequest] = useState(false);
   // PR-FIN-RETURNS-UX-1E — admin cancel UI is gated client-side on
   // (role=admin) AND (permission=returns.cancel) AND (status in
   // approved/refunded). The BE re-checks all three; this gate is
@@ -1646,11 +1679,40 @@ function ReturnDetailsPanel({
             </button>
           )}
 
+        {/* PR-FIN-RETURNS-EXCHANGES-EDIT-REQUEST — entry to the
+            create-only edit-request modal.  Visible to anyone viewing
+            this details panel; the BE re-checks permissions on POST. */}
+        <button
+          type="button"
+          onClick={() => setShowEditRequest(true)}
+          className="w-full bg-amber-50 hover:bg-amber-100 text-amber-800 border-2 border-dashed border-amber-300 font-bold py-2.5 rounded-lg text-sm flex items-center justify-center gap-2"
+          data-testid="returns-action-edit-request"
+        >
+          ✎ طلب تعديل
+        </button>
+
         {/* PR-FIN-RETURNS-EXCHANGES-AUDIT — read-only audit history.
             Phase 1: composes audit_logs row diffs + activity_logs +
             (Phase-4 placeholder) amendments.  No edit surface. */}
         <ReturnsAuditPanel entity="return" id={r.id} />
       </div>
+
+      {showEditRequest && (
+        <CreateEditRequestModal
+          entity="return"
+          parentId={r.id}
+          documentNo={r.return_no}
+          onClose={() => setShowEditRequest(false)}
+          onSuccess={() => {
+            setShowEditRequest(false);
+            // Audit panel refetches via its own ['audit', ...] key,
+            // which the modal already invalidates.  Refresh the
+            // parent return query too so any future fields that read
+            // from /returns/:id stay fresh.
+            refresh();
+          }}
+        />
+      )}
 
       {action === 'approve' && (
         <ApproveModal

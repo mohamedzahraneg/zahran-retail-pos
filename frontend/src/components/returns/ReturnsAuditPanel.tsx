@@ -256,12 +256,14 @@ export function ReturnsAuditPanel({ entity, id }: AuditPanelProps) {
         </ul>
       )}
 
-        {/* Phase-1 informational note: request creation UI is deferred. */}
+        {/* Phase-1 informational note: request entry lives on the
+            details panel; admin approval is required before any
+            payload is applied to the parent document. */}
         <div
           className="text-[11px] text-slate-500 italic"
           data-testid="audit-edit-request-deferred"
         >
-          إنشاء طلب تعديل سيتم تفعيله في المرحلة التالية.
+          يمكنك إنشاء طلب تعديل من زر طلب تعديل، وسيظل بانتظار موافقة الأدمن.
         </div>
       </div>
     </details>

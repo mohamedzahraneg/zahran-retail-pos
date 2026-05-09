@@ -377,7 +377,7 @@ describe('<ReturnsAuditPanel />', () => {
     );
   });
 
-  it('shows the deferred-creation informational note', async () => {
+  it('shows the request-entry informational note pointing at the panel button', async () => {
     (returnsApi.getReturnAudit as any).mockResolvedValueOnce(empty);
     renderPanel('return');
     await waitFor(() =>
@@ -387,7 +387,9 @@ describe('<ReturnsAuditPanel />', () => {
     );
     expect(
       screen.getByTestId('audit-edit-request-deferred').textContent,
-    ).toMatch(/إنشاء طلب تعديل سيتم تفعيله في المرحلة التالية/);
+    ).toMatch(
+      /يمكنك إنشاء طلب تعديل من زر طلب تعديل، وسيظل بانتظار موافقة الأدمن/,
+    );
   });
 
   it('renders amendments (Phase 4 forward-compatible)', async () => {

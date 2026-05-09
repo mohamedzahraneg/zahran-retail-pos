@@ -345,7 +345,41 @@ export const returnsApi = {
 
   getExchangeAudit: (id: string) =>
     unwrap<DocumentAuditResult>(api.get(`/exchanges/${id}/audit`)),
+
+  // ── Edit-request CREATE (Phase 1 — create only) ─────────────────
+  // POST /returns/:id/edit-requests + POST /exchanges/:id/edit-requests
+  //
+  // Strict scope: this wrapper exposes ONLY the create endpoint.
+  // Approve / reject remain backend-only in this phase.  A submitted
+  // request is `pending` until an admin reviews it via the BE
+  // endpoints; the requested_payload is NEVER applied to the parent
+  // document by either side.  See PR-FIN-RETURNS-EXCHANGES-EDIT-
+  // REQUESTS for the workflow design.
+  createReturnEditRequest: (id: string, body: CreateEditRequestBody) =>
+    unwrap<AuditEditRequestRow>(
+      api.post(`/returns/${id}/edit-requests`, body),
+    ),
+
+  createExchangeEditRequest: (id: string, body: CreateEditRequestBody) =>
+    unwrap<AuditEditRequestRow>(
+      api.post(`/exchanges/${id}/edit-requests`, body),
+    ),
 };
+
+export type RequestedAction =
+  | 'update_header'
+  | 'update_item'
+  | 'remove_item'
+  | 'replace_item'
+  | 'price_change'
+  | 'quantity_change'
+  | 'reason_change';
+
+export interface CreateEditRequestBody {
+  requested_action: RequestedAction;
+  requested_payload: Record<string, unknown>;
+  reason_text: string;
+}
 
 // ── Audit response types (mirror the BE shape) ─────────────────────
 
