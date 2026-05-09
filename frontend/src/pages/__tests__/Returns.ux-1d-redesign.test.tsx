@@ -393,19 +393,17 @@ describe('Returns — row enrichment', () => {
 // ─────────────────────────────────────────────────────────────────────
 
 describe('Returns — details panel', () => {
-  it('selecting a row renders all 5 detail sections', async () => {
+  it('selecting a row renders the 4 detail sections (post-cleanup)', async () => {
+    // PR-FIN-RETURNS-UX-CLEANUP — the previous 5-section layout had
+    // "المنفّذ والأوقات" duplicating the timestamps surfaced by the
+    // timeline below.  The operator/timestamps section was dropped;
+    // the timeline now carries the actor names per state change.
     renderPage();
     const r = await screen.findByTestId('returns-row-r1');
     fireEvent.click(r);
-    // Wait for the detail data fetch.
-    await waitFor(() =>
-      expect(getMock).toHaveBeenCalledWith('r1'),
-    );
+    await waitFor(() => expect(getMock).toHaveBeenCalledWith('r1'));
     expect(
-      await screen.findByTestId('returns-detail-operator-timestamps'),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByTestId('returns-detail-refund-section'),
+      await screen.findByTestId('returns-detail-refund-section'),
     ).toBeInTheDocument();
     expect(
       screen.getByTestId('returns-detail-inventory-section'),
@@ -414,6 +412,10 @@ describe('Returns — details panel', () => {
       screen.getByTestId('returns-detail-accounting-section'),
     ).toBeInTheDocument();
     expect(screen.getByTestId('returns-detail-timeline')).toBeInTheDocument();
+    // The dropped operator/timestamps section MUST NOT come back.
+    expect(
+      screen.queryByTestId('returns-detail-operator-timestamps'),
+    ).not.toBeInTheDocument();
   });
 
   it('details panel shows JE number + cashbox name + accounting badges (diagnostic only)', async () => {
@@ -448,6 +450,9 @@ describe('Returns — details panel', () => {
   });
 
   it('details panel renders غير معروف for missing user names', async () => {
+    // After PR-FIN-RETURNS-UX-CLEANUP the timeline carries the per-
+    // state actor + timestamp; missing names fall through to the
+    // shared `nameOr()` placeholder.
     getMock.mockResolvedValueOnce({
       ...detail(),
       requested_by_name: null,
@@ -456,10 +461,8 @@ describe('Returns — details panel', () => {
     });
     renderPage();
     fireEvent.click(await screen.findByTestId('returns-row-r1'));
-    const ts = await screen.findByTestId(
-      'returns-detail-operator-timestamps',
-    );
-    expect(ts.textContent).toContain('غير معروف');
+    const tl = await screen.findByTestId('returns-detail-timeline');
+    expect(tl.textContent).toContain('غير معروف');
   });
 });
 

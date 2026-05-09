@@ -141,14 +141,17 @@ export function ReturnsAuditPanel({ entity, id }: AuditPanelProps) {
     editRequests.length === 0;
 
   return (
-    <section
-      className="rounded-2xl border border-slate-200 bg-white p-5 space-y-3"
+    <details
+      className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
       data-testid={`audit-panel-${entity}`}
       dir="rtl"
+      open={!isEmpty}
     >
-      {/* Header */}
-      <div className="flex items-start gap-2 flex-wrap">
-        <History size={18} className="text-slate-500 mt-0.5 shrink-0" />
+      {/* Header — collapsed-by-default when there are no entries; opens
+          automatically once the BE returns any audit row.  Avoids the
+          empty audit panel taking a full vertical card slot. */}
+      <summary className="cursor-pointer list-none flex items-start gap-2 flex-wrap">
+        <History size={14} className="text-slate-500 mt-0.5 shrink-0" />
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
             <h3 className="text-sm font-black text-slate-800">
@@ -161,20 +164,21 @@ export function ReturnsAuditPanel({ entity, id }: AuditPanelProps) {
               قراءة فقط
             </span>
           </div>
-          <p className="text-[11px] text-slate-500 mt-1">{subtitle}</p>
+          <p className="text-[11px] text-slate-500 mt-0.5">{subtitle}</p>
         </div>
-      </div>
+      </summary>
+      <div className="mt-2 space-y-2">
 
-      {/* Admin-approval informational note (non-functional copy only) */}
+      {/* Admin-approval informational note — compact form (smaller
+          padding/icon, same literal Arabic copy as before). */}
       <div
-        className="rounded-xl border border-indigo-200 bg-indigo-50/60 p-3 flex items-start gap-2"
+        className="text-[11px] text-indigo-700 bg-indigo-50/60 border border-indigo-100 rounded-md px-2 py-1 flex items-start gap-1.5"
         data-testid="audit-admin-approval-note"
       >
-        <Info size={14} className="text-indigo-600 mt-0.5 shrink-0" />
-        <div className="text-[11px] text-indigo-900 leading-relaxed">
-          أي تعديل على مرتجع أو استبدال بعد الاعتماد أو الترحيل المالي سيُرسل
-          كطلب تعديل وينتظر موافقة الأدمن.
-        </div>
+        <Info size={12} className="text-indigo-500 mt-0.5 shrink-0" />
+        <span className="leading-relaxed">
+          أي تعديل على مرتجع أو استبدال بعد الاعتماد أو الترحيل المالي سيُرسل كطلب تعديل وينتظر موافقة الأدمن.
+        </span>
       </div>
 
       {/* States */}
@@ -219,13 +223,11 @@ export function ReturnsAuditPanel({ entity, id }: AuditPanelProps) {
 
       {data && isEmpty && (
         <div
-          className="rounded-xl border border-dashed border-slate-300 bg-slate-50/40 p-8 text-center"
+          className="text-[11px] text-slate-500 italic flex items-center gap-1.5"
           data-testid="audit-empty"
         >
-          <Layers size={20} className="mx-auto text-slate-400" />
-          <div className="mt-2 text-[12px] font-bold text-slate-700">
-            لا توجد تعديلات مسجلة حتى الآن
-          </div>
+          <Layers size={12} className="text-slate-400 shrink-0" />
+          <span>لا توجد تعديلات مسجلة حتى الآن</span>
         </div>
       )}
 
@@ -254,14 +256,15 @@ export function ReturnsAuditPanel({ entity, id }: AuditPanelProps) {
         </ul>
       )}
 
-      {/* Phase-1 informational note: request creation UI is deferred. */}
-      <div
-        className="text-[11px] text-slate-500 italic"
-        data-testid="audit-edit-request-deferred"
-      >
-        إنشاء طلب تعديل سيتم تفعيله في المرحلة التالية.
+        {/* Phase-1 informational note: request creation UI is deferred. */}
+        <div
+          className="text-[11px] text-slate-500 italic"
+          data-testid="audit-edit-request-deferred"
+        >
+          إنشاء طلب تعديل سيتم تفعيله في المرحلة التالية.
+        </div>
       </div>
-    </section>
+    </details>
   );
 }
 

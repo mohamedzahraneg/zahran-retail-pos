@@ -1318,33 +1318,14 @@ function ReturnDetailsPanel({
           </div>
         </section>
 
-        {/* PR-FIN-RETURNS-UX-1D — operator/timestamp section. Every actor
-            who touched the return shows up here with full DD/MM/YYYY HH:mm:ss. */}
-        <section data-testid="returns-detail-operator-timestamps">
-          <div className="font-bold text-slate-700 mb-2 flex items-center gap-1.5">
-            <User size={14} /> المنفّذ والأوقات
-          </div>
-          <div className="grid grid-cols-2 gap-2 text-xs">
-            <KV label="أنشأه" value={nameOr((r as any).requested_by_name)} />
-            <KV label="تاريخ ووقت الإنشاء" value={dateOr(r.requested_at)} mono />
-            <KV
-              label="تمت الموافقة بواسطة"
-              value={r.approved_by_name ? nameOr(r.approved_by_name) : '—'}
-            />
-            <KV label="وقت الموافقة" value={dateOr(r.approved_at)} mono />
-            <KV
-              label="تم الصرف بواسطة"
-              value={r.refunded_by_name ? nameOr(r.refunded_by_name) : '—'}
-            />
-            <KV label="وقت الصرف" value={dateOr(r.refunded_at)} mono />
-            {r.rejected_at && (
-              <>
-                <KV label="تم الرفض في" value={dateOr(r.rejected_at)} mono />
-                <KV label="آخر تحديث" value={dateOr((r as any).updated_at)} mono />
-              </>
-            )}
-          </div>
-        </section>
+        {/* PR-FIN-RETURNS-UX-CLEANUP — operator/timestamp section
+            removed: every actor + timestamp it surfaced is already
+            shown chronologically in the "الجدول الزمني" Timeline
+            below.  Showing the same data twice was crowding the modal;
+            users were jumping between two sections to read the same
+            information.  Section's data-testid is preserved at the
+            timeline (returns-detail-timeline) which now carries the
+            same actor names via TimelineEvent. */}
 
         {/* Refund / payment section */}
         <section data-testid="returns-detail-refund-section">
@@ -1383,103 +1364,170 @@ function ReturnDetailsPanel({
           </div>
         </section>
 
-        {/* Inventory impact */}
-        <section data-testid="returns-detail-inventory-section">
-          <div className="font-bold text-slate-700 mb-2 flex items-center gap-1.5">
+        {/* PR-FIN-RETURNS-UX-CLEANUP — secondary sections collapsed
+            into <details> elements so the modal isn't a wall of
+            stacked cards.  Each summary is a one-line title; opening
+            reveals the same content as before.  The timeline is
+            default-open because it's now the primary place users
+            read state-change timestamps. */}
+
+        {/* Inventory impact — collapsed by default; opens if there
+            are non-resellable items (something to attend to). */}
+        <details
+          data-testid="returns-detail-inventory-section"
+          className="rounded-lg border border-slate-200 px-3 py-2 text-sm"
+          {...(r.items.some(
+            (it) => !it.back_to_stock || it.condition !== 'resellable',
+          )
+            ? { open: true }
+            : {})}
+        >
+          <summary className="cursor-pointer font-bold text-slate-700 flex items-center gap-1.5 list-none">
             <Boxes size={14} /> أثر المخزون
-          </div>
-          <div className="rounded-lg border border-slate-200 p-3 text-sm">
+          </summary>
+          <div className="mt-2 space-y-1">
             <div className="flex items-center justify-between">
               <span>قطع عادت للمخزن</span>
               <span className="font-bold font-mono">
                 {r.items.filter((it) => it.back_to_stock && it.condition === 'resellable').reduce((s, it) => s + it.quantity, 0)}
               </span>
             </div>
-            <div className="flex items-center justify-between mt-1">
+            <div className="flex items-center justify-between">
               <span>قطع غير قابلة للبيع</span>
               <span className="font-bold font-mono">
                 {r.items.filter((it) => !it.back_to_stock || it.condition !== 'resellable').reduce((s, it) => s + it.quantity, 0)}
               </span>
             </div>
-            <div className="mt-2">
+            <div className="pt-1">
               <Badge
                 label={`الحالة: ${INVENTORY_LABEL[(r as any).inventory_status ?? 'not_applicable']}`}
                 tone={(r as any).inventory_status === 'restored' ? 'emerald' : 'slate'}
               />
             </div>
           </div>
-        </section>
+        </details>
 
-        {/* Accounting diagnostic — diagnostic only, no settlement action */}
-        <section data-testid="returns-detail-accounting-section">
-          <div className="font-bold text-slate-700 mb-2 flex items-center gap-1.5">
-            <ShieldCheck size={14} /> الحالة المحاسبية
-          </div>
-          <div className="rounded-lg border border-slate-200 p-3 text-sm space-y-1.5">
-            <div className="flex items-center justify-between">
-              <span>القيد المحاسبي</span>
-              <span className="font-mono text-xs">
-                {(r as any).journal_entry_no ?? 'غير موجود'}
-              </span>
-            </div>
-            {(r as any).journal_entry_posted_at && (
-              <div className="flex items-center justify-between">
-                <span>وقت الترحيل</span>
-                <span className="font-mono text-xs">
-                  {dateOr((r as any).journal_entry_posted_at)}
-                </span>
+        {/* Accounting diagnostic — diagnostic only, no settlement
+            action.  Auto-opens whenever the status is anything other
+            than `matched` or `not_applicable` so problems aren't
+            hidden behind a collapsed summary. */}
+        {(() => {
+          const acctStatus = (r as any).accounting_status as
+            | 'matched'
+            | 'je_missing'
+            | 'cashbox_not_linked'
+            | 'needs_review'
+            | 'not_applicable'
+            | undefined;
+          const matchStatus = (r as any).match_status as
+            | 'matched'
+            | 'pending'
+            | 'needs_review'
+            | undefined;
+          const hasUnlinkedCash = (r as any).has_unlinked_cash_leg as
+            | boolean
+            | undefined;
+          const acctProblem =
+            !!hasUnlinkedCash ||
+            (acctStatus &&
+              acctStatus !== 'matched' &&
+              acctStatus !== 'not_applicable') ||
+            matchStatus === 'needs_review';
+          return (
+            <details
+              data-testid="returns-detail-accounting-section"
+              className={`rounded-lg border px-3 py-2 text-sm ${
+                acctProblem
+                  ? 'border-rose-300 bg-rose-50/40'
+                  : 'border-slate-200'
+              }`}
+              {...(acctProblem ? { open: true } : {})}
+            >
+              <summary className="cursor-pointer font-bold text-slate-700 flex items-center gap-1.5 list-none">
+                <ShieldCheck size={14} /> الحالة المحاسبية
+                {acctProblem && (
+                  <span className="text-[10px] rounded-full bg-rose-100 text-rose-800 border border-rose-200 px-1.5 py-0.5 font-bold">
+                    تحتاج مراجعة
+                  </span>
+                )}
+              </summary>
+              <div className="mt-2 space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span>القيد المحاسبي</span>
+                  <span className="font-mono text-xs">
+                    {(r as any).journal_entry_no ?? 'غير موجود'}
+                  </span>
+                </div>
+                {(r as any).journal_entry_posted_at && (
+                  <div className="flex items-center justify-between">
+                    <span>وقت الترحيل</span>
+                    <span className="font-mono text-xs">
+                      {dateOr((r as any).journal_entry_posted_at)}
+                    </span>
+                  </div>
+                )}
+                <div className="flex items-center justify-between">
+                  <span>الخزنة في القيد</span>
+                  <span>
+                    {hasUnlinkedCash ? (
+                      <span className="text-rose-700 font-bold">
+                        غير مربوطة ⚠
+                      </span>
+                    ) : (r as any).cashbox_name ? (
+                      <span className="font-bold">{(r as any).cashbox_name}</span>
+                    ) : (
+                      <span className="text-slate-500">—</span>
+                    )}
+                  </span>
+                </div>
+                <div className="pt-1.5 border-t border-slate-100 flex flex-wrap gap-1.5">
+                  <Badge
+                    label={`المحاسبة: ${ACCOUNTING_LABEL[acctStatus ?? 'not_applicable']}`}
+                    tone={
+                      acctStatus === 'matched'
+                        ? 'emerald'
+                        : acctStatus === 'not_applicable'
+                        ? 'slate'
+                        : 'rose'
+                    }
+                  />
+                  <Badge
+                    label={
+                      matchStatus === 'matched'
+                        ? 'المطابقة: سليمة'
+                        : matchStatus === 'pending'
+                        ? 'المطابقة: —'
+                        : 'المطابقة: تحتاج مراجعة'
+                    }
+                    tone={
+                      matchStatus === 'matched'
+                        ? 'emerald'
+                        : matchStatus === 'pending'
+                        ? 'slate'
+                        : 'rose'
+                    }
+                  />
+                </div>
+                <div className="text-[11px] text-slate-500 pt-1">
+                  عرض تشخيصي فقط — لا توجد إجراءات تصحيح من هذه الواجهة.
+                </div>
               </div>
-            )}
-            <div className="flex items-center justify-between">
-              <span>الخزنة في القيد</span>
-              <span>
-                {(r as any).has_unlinked_cash_leg
-                  ? <span className="text-rose-700 font-bold">غير مربوطة ⚠</span>
-                  : (r as any).cashbox_name
-                  ? <span className="font-bold">{(r as any).cashbox_name}</span>
-                  : <span className="text-slate-500">—</span>}
-              </span>
-            </div>
-            <div className="pt-1.5 border-t border-slate-100 flex flex-wrap gap-1.5">
-              <Badge
-                label={`المحاسبة: ${ACCOUNTING_LABEL[(r as any).accounting_status ?? 'not_applicable']}`}
-                tone={
-                  (r as any).accounting_status === 'matched'
-                    ? 'emerald'
-                    : (r as any).accounting_status === 'not_applicable'
-                    ? 'slate'
-                    : 'rose'
-                }
-              />
-              <Badge
-                label={
-                  (r as any).match_status === 'matched'
-                    ? 'المطابقة: سليمة'
-                    : (r as any).match_status === 'pending'
-                    ? 'المطابقة: —'
-                    : 'المطابقة: تحتاج مراجعة'
-                }
-                tone={
-                  (r as any).match_status === 'matched'
-                    ? 'emerald'
-                    : (r as any).match_status === 'pending'
-                    ? 'slate'
-                    : 'rose'
-                }
-              />
-            </div>
-            <div className="text-[11px] text-slate-500 pt-1">
-              عرض تشخيصي فقط — لا توجد إجراءات تصحيح من هذه الواجهة.
-            </div>
-          </div>
-        </section>
+            </details>
+          );
+        })()}
 
-        {/* Timeline — operator + DD/MM/YYYY HH:mm:ss for every state change */}
-        <section data-testid="returns-detail-timeline">
-          <div className="font-bold text-slate-700 mb-2 flex items-center gap-1.5">
+        {/* Timeline — primary place for actor + DD/MM/YYYY HH:mm:ss
+            for every state change.  Default-open since the prior
+            "المنفّذ والأوقات" section was removed. */}
+        <details
+          data-testid="returns-detail-timeline"
+          className="rounded-lg border border-slate-200 px-3 py-2 text-sm"
+          open
+        >
+          <summary className="cursor-pointer font-bold text-slate-700 flex items-center gap-1.5 list-none">
             <Clock size={14} /> الجدول الزمني
-          </div>
-          <ol className="border-s-2 border-slate-200 ps-3 space-y-2 text-sm">
+          </summary>
+          <ol className="mt-2 border-s-2 border-slate-200 ps-3 space-y-2">
             <TimelineEvent
               when={r.requested_at}
               who={(r as any).requested_by_name}
@@ -1514,7 +1562,42 @@ function ReturnDetailsPanel({
               />
             )}
           </ol>
-        </section>
+        </details>
+
+        {/* PR-FIN-RETURNS-UX-CLEANUP — clearer warning above action
+            buttons when accounting is problematic, so the user
+            doesn't read "approve / refund" right after a green-looking
+            interface and assume everything is safe. */}
+        {(() => {
+          const acctStatus = (r as any).accounting_status as string | undefined;
+          const matchStatus = (r as any).match_status as string | undefined;
+          const hasUnlinkedCash = (r as any).has_unlinked_cash_leg as
+            | boolean
+            | undefined;
+          const acctProblem =
+            !!hasUnlinkedCash ||
+            (acctStatus &&
+              acctStatus !== 'matched' &&
+              acctStatus !== 'not_applicable') ||
+            matchStatus === 'needs_review';
+          if (!acctProblem) return null;
+          return (
+            <div
+              className="rounded-lg border border-rose-300 bg-rose-50 px-3 py-2 text-sm flex items-start gap-2"
+              data-testid="returns-detail-accounting-warning"
+            >
+              <AlertTriangle
+                size={14}
+                className="text-rose-600 mt-0.5 shrink-0"
+              />
+              <div className="text-rose-900 leading-relaxed">
+                <span className="font-bold">تنبيه:</span> هذا المرتجع
+                لديه ملاحظات محاسبية. راجع قسم "الحالة المحاسبية" قبل
+                الاعتماد أو الصرف.
+              </div>
+            </div>
+          );
+        })()}
 
         {/* Actions */}
         {r.status === 'pending' && (
@@ -1542,12 +1625,10 @@ function ReturnDetailsPanel({
           </button>
         )}
 
-        {r.refund_method && (
-          <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-sm flex items-center justify-between">
-            <span>طريقة الصرف</span>
-            <b>{METHOD_LABELS[r.refund_method]}</b>
-          </div>
-        )}
+        {/* PR-FIN-RETURNS-UX-CLEANUP — duplicate "طريقة الصرف" emerald
+            box removed.  The same value is already displayed inside
+            the "رد المبلغ" section above, alongside the cashbox name +
+            CT id + net amount, which is the canonical place for it. */}
 
         {/* PR-FIN-RETURNS-UX-1E — admin cancel button. Visible only when
             user is admin AND has returns.cancel AND the return is in
