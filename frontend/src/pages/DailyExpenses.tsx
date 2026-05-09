@@ -27,7 +27,7 @@
  */
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import {
   AlertTriangle,
@@ -650,6 +650,12 @@ function ExpensesRegisterTab({ ctx }: { ctx: ExpenseTabContext }) {
   const hasPermission = useAuthStore((s) => s.hasPermission);
   const canRequestEdit = hasPermission('expenses.daily.edit.request');
   const canApproveEdit = hasPermission('expenses.daily.edit.approve');
+  // PR-FIX-EXPENSE-APPROVALS-DISCOVERABILITY — same idea as
+  // canApproveEdit (above), but for the *new-expense* approval inbox
+  // (rows in `expense_approvals` that gate is_approved=TRUE).  Without
+  // this surface, a pending row's only signal was the silent `معلّق`
+  // chip with no entry-point to /financial-controls.
+  const canDecideApproval = hasPermission('accounts.approval.decide');
   const [editTarget, setEditTarget] = useState<Expense | null>(null);
   const [historyTarget, setHistoryTarget] = useState<Expense | null>(null);
   const [showEditInbox, setShowEditInbox] = useState(false);
@@ -663,6 +669,17 @@ function ExpensesRegisterTab({ ctx }: { ctx: ExpenseTabContext }) {
     refetchInterval: 30_000,
   });
   const pendingCount = pendingInbox.length;
+
+  // PR-FIX-EXPENSE-APPROVALS-DISCOVERABILITY — pending new-expense
+  // approval count.  Read-only; the alert links to /financial-controls
+  // (the existing inbox page) and never approves/rejects from here.
+  const { data: approvalInbox = [] } = useQuery({
+    queryKey: ['expense-approval-inbox'],
+    queryFn: () => accountingApi.approvalInbox(),
+    enabled: canDecideApproval,
+    refetchInterval: 30_000,
+  });
+  const approvalCount = approvalInbox.length;
 
   return (
     <div className="space-y-5">
@@ -687,6 +704,41 @@ function ExpensesRegisterTab({ ctx }: { ctx: ExpenseTabContext }) {
           >
             عرض الطلبات
           </button>
+        </div>
+      )}
+
+      {/* PR-FIX-EXPENSE-APPROVALS-DISCOVERABILITY — top alert when
+          pending NEW-expense approvals exist.  Mirrors the edit-
+          requests alert above but lives on a different permission
+          (accounts.approval.decide) and routes to the existing
+          /financial-controls page instead of opening a local
+          modal — the approval workflow lives on that page. */}
+      {canDecideApproval && approvalCount > 0 && (
+        <div
+          className="rounded-2xl border border-amber-300 bg-amber-50 dark:border-amber-500/30 dark:bg-amber-500/10 p-3 flex items-center justify-between gap-3 flex-wrap"
+          data-testid="expense-approvals-alert"
+        >
+          <div className="flex items-center gap-2 text-sm">
+            <span className="p-1.5 rounded-lg bg-amber-100 dark:bg-amber-500/20 text-amber-700 dark:text-amber-300">
+              <AlertTriangle size={16} />
+            </span>
+            <span className="text-amber-900 dark:text-amber-200 font-bold">
+              اعتمادات مصروفات معلقة
+            </span>
+            <span
+              className="px-2 py-0.5 rounded-full bg-rose-600 text-white text-[11px] font-extrabold tabular-nums"
+              data-testid="expense-approvals-alert-count"
+            >
+              {approvalCount}
+            </span>
+          </div>
+          <Link
+            to="/financial-controls"
+            className="px-3 py-1.5 rounded-lg text-xs font-bold bg-amber-600 text-white hover:bg-amber-700"
+            data-testid="expense-approvals-alert-cta"
+          >
+            عرض الاعتمادات
+          </Link>
         </div>
       )}
 
@@ -962,6 +1014,31 @@ function ExpensesRegisterTab({ ctx }: { ctx: ExpenseTabContext }) {
                         <span className="block mt-1 chip text-[9px] bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-500/15 dark:text-rose-300 dark:border-rose-500/30">
                           تعديل مرفوض
                         </span>
+                      ) : null}
+                      {/* PR-FIX-EXPENSE-APPROVALS-DISCOVERABILITY —
+                          row-level entry-point to /financial-controls.
+                          Only shown for genuinely-pending rows (not
+                          approved, not voided JE).  Users with the
+                          decide permission see a deep link; users
+                          without it see the static caption naming
+                          who can approve. */}
+                      {!e.is_approved && !e.je_is_void ? (
+                        canDecideApproval ? (
+                          <Link
+                            to="/financial-controls"
+                            className="block mt-1 text-[10px] text-indigo-600 hover:text-indigo-800 hover:underline dark:text-indigo-400"
+                            data-testid={`expense-row-${e.id}-approvals-link`}
+                          >
+                            عرض الاعتمادات →
+                          </Link>
+                        ) : (
+                          <span
+                            className="block mt-1 text-[10px] text-slate-500 dark:text-slate-400"
+                            data-testid={`expense-row-${e.id}-awaiting-approval`}
+                          >
+                            بانتظار موافقة مدير
+                          </span>
+                        )
                       ) : null}
                     </td>
                     <td className="p-2 text-center whitespace-nowrap">

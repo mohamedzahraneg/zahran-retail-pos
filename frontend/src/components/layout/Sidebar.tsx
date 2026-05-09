@@ -50,6 +50,9 @@ import {
   PieChart,
   ListChecks,
   HandCoins,
+  // PR-FIX-EXPENSE-APPROVALS-DISCOVERABILITY — sidebar entry for the
+  // existing /financial-controls page (approval inbox lives there).
+  Inbox,
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import clsx from 'clsx';
@@ -145,6 +148,12 @@ const groups: NavGroup[] = [
       { kind: 'subheader', to: 'subhdr:fin:expenses', label: 'المصروفات', icon: Receipt, roles: ['admin', 'manager', 'accountant', 'cashier'], permission: 'expenses.daily.create' },
       { to: '/daily-expenses', label: 'المصروفات اليومية', icon: Receipt, roles: ['admin', 'manager', 'accountant', 'cashier'], permission: 'expenses.daily.create' },
       { to: '/recurring-expenses', label: 'المصاريف الدورية', icon: Repeat, roles: ['admin', 'manager', 'accountant'], permission: 'recurring_expenses.manage' },
+      // PR-FIX-EXPENSE-APPROVALS-DISCOVERABILITY — surface the existing
+      // /financial-controls page (approval inbox tab) so users with
+      // accounts.approval.decide / accounts.approval.manage can find
+      // pending expense approvals from the sidebar.  Previously the
+      // route was reachable only by typing the URL.
+      { to: '/financial-controls', label: 'موافقات المصاريف', icon: Inbox, roles: ['admin', 'manager', 'accountant'], permission: ['accounts.approval.decide', 'accounts.approval.manage'] },
 
       // ─── 5. المراقبة والتقارير ────────────────────────────
       // PR-FIN-SIDEBAR-2 Q1A — Analytics moves here (semantic fit:
@@ -180,10 +189,13 @@ const groups: NavGroup[] = [
       // placeholder.
       { to: '/finance/zakat', label: 'الزكاة', icon: HandCoins, roles: ['admin', 'manager', 'accountant'], permission: 'finance.dashboard.view' },
 
-      // /accounting (legacy), /budgets, /financial-controls,
-      // /bank-reconciliation, /accounts-audit — all routes still work
-      // but stay hidden (Q3) to keep "قسم الحسابات واضح ومختصر".
-      // Power users can still reach them by URL.
+      // /accounting (legacy), /budgets, /bank-reconciliation,
+      // /accounts-audit — all routes still work but stay hidden (Q3)
+      // to keep "قسم الحسابات واضح ومختصر". Power users can still
+      // reach them by URL. /financial-controls graduated back to the
+      // sidebar (above, under المصروفات) once we shipped the expense
+      // approval workflow — users with accounts.approval.decide /
+      // accounts.approval.manage need a discoverable entry-point.
     ],
   },
   {

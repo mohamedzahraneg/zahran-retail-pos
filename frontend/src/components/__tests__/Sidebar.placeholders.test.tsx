@@ -97,7 +97,7 @@ describe('<Sidebar /> — financial group placeholders (post-flip regression gua
     },
   );
 
-  it('all 12 active items in the financial group render as <a> (regression guard)', () => {
+  it('all 13 active items in the financial group render as <a> (regression guard)', () => {
     renderSidebar();
     // The complete set of active items in the "الحسابات والمالية"
     // top-level group after the four flips above. If ANY of these
@@ -117,11 +117,85 @@ describe('<Sidebar /> — financial group placeholders (post-flip regression gua
       'التقارير المالية',
       // PR-FE-ACCOUNTING-FINANCIAL-MOVEMENTS-FRAMING — also active.
       'تتبع الحركات المالية',
+      // PR-FIX-EXPENSE-APPROVALS-DISCOVERABILITY — graduated back into
+      // the sidebar so users with accounts.approval.decide /
+      // accounts.approval.manage can find pending expense approvals.
+      'موافقات المصاريف',
     ];
     for (const label of active) {
       const els = screen.getAllByText(label);
       const link = els.find((el) => el.closest('a'));
       expect(link, `expected "${label}" to be a router link`).toBeDefined();
     }
+  });
+});
+
+// ─── PR-FIX-EXPENSE-APPROVALS-DISCOVERABILITY — sidebar visibility ──
+//
+// The موافقات المصاريف entry routes to /financial-controls and is
+// gated on (accounts.approval.decide OR accounts.approval.manage).
+// Previously the route was reachable only by typing the URL, which is
+// why pending approvals were invisible to managers/accountants.
+
+describe('<Sidebar /> — موافقات المصاريف visibility', () => {
+  function loginWith(permissions: string[]) {
+    useAuthStore.setState({
+      accessToken: 'tok',
+      refreshToken: 'tok',
+      user: {
+        id: 'u-1',
+        username: 'tester',
+        role: 'manager',
+        permissions,
+      } as any,
+    });
+  }
+
+  it('renders the link when user has accounts.approval.decide', () => {
+    loginWith([
+      'expenses.daily.create', // gates the المصروفات subheader
+      'accounts.approval.decide',
+    ]);
+    renderSidebar();
+    const anchor = document.querySelector(
+      'a[href="/financial-controls"]',
+    ) as HTMLAnchorElement | null;
+    expect(anchor).not.toBeNull();
+    expect(anchor!.textContent).toContain('موافقات المصاريف');
+  });
+
+  it('renders the link when user has accounts.approval.manage', () => {
+    loginWith([
+      'expenses.daily.create',
+      'accounts.approval.manage',
+    ]);
+    renderSidebar();
+    const anchor = document.querySelector(
+      'a[href="/financial-controls"]',
+    ) as HTMLAnchorElement | null;
+    expect(anchor).not.toBeNull();
+    expect(anchor!.textContent).toContain('موافقات المصاريف');
+  });
+
+  it('hides the link when user lacks both approval permissions', () => {
+    loginWith([
+      'expenses.daily.create', // sees the subheader but NOT the new item
+      'expenses.daily.edit.request',
+    ]);
+    renderSidebar();
+    expect(
+      document.querySelector('a[href="/financial-controls"]'),
+    ).toBeNull();
+    expect(screen.queryByText('موافقات المصاريف')).toBeNull();
+  });
+
+  it('renders the link for admin (wildcard permission)', () => {
+    loginWith(['*']);
+    renderSidebar();
+    const anchor = document.querySelector(
+      'a[href="/financial-controls"]',
+    ) as HTMLAnchorElement | null;
+    expect(anchor).not.toBeNull();
+    expect(anchor!.getAttribute('href')).toBe('/financial-controls');
   });
 });
