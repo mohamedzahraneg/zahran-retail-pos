@@ -426,7 +426,10 @@ describe('applyApprovedReturn — guards', () => {
     expect(posting.reverseByReference).not.toHaveBeenCalled();
   });
 
-  it('rejects added line whose variant_id is not in the database', async () => {
+  it('rejects added line whose variant_id is UUID-shaped but not in the database', async () => {
+    // PR-FIX-EDIT-REQUEST-APPLY-VARIANT-UUID — using a UUID-shaped
+    // string here so the test exercises the DB-existence path
+    // specifically, not the new UUID-shape gate.
     const reqWithGhostVariant = approvedRequestRow({
       requested_payload: {
         kind: 'line_changes',
@@ -435,7 +438,7 @@ describe('applyApprovedReturn — guards', () => {
           removed: [],
           added: [
             {
-              variant_id: 'ghost-variant',
+              variant_id: '99999999-9999-9999-9999-999999999999',
               sku: 'GHOST',
               name: 'ghost',
               quantity: 1,
@@ -465,6 +468,159 @@ describe('applyApprovedReturn — guards', () => {
         user_id: USER_ID,
       }),
     ).rejects.toThrow(BadRequestException);
+  });
+
+  // ─── PR-FIX-EDIT-REQUEST-APPLY-VARIANT-UUID — new UUID-shape gate
+  //     fires BEFORE any SQL.  Reproduces the live RET-2026-000006
+  //     scenario: payload with variant_id that's a SKU-shaped string
+  //     (e.g. "1640") instead of a UUID.
+
+  it('rejects added line whose variant_id is not UUID-shaped (e.g. typed SKU "1640")', async () => {
+    const reqBadVid = approvedRequestRow({
+      requested_payload: {
+        kind: 'line_changes',
+        lines: {
+          updated: [],
+          removed: [],
+          added: [
+            {
+              variant_id: '1640', // SKU, not a uuid
+              sku: '1640',
+              name: 'فاكي',
+              quantity: 1,
+              unit_price: 100,
+            },
+          ],
+        },
+        summary: { old_total: 0, new_total: 100, delta: 100 },
+      },
+    });
+    const { ds, calls } = makeRouter(baseRoutes({ request: reqBadVid }));
+    const posting: any = {
+      reverseByReference: jest.fn(),
+      postReturn: jest.fn(),
+    };
+    const svc = await buildSvc(ds, posting);
+    await expect(
+      svc.applyApprovedReturn({
+        entity: 'return',
+        parent_id: RET_ID,
+        request_id: REQ_ID,
+        user_id: USER_ID,
+      }),
+    ).rejects.toThrow(
+      /معرّف المنتج غير صالح — يجب اختيار منتج من نتائج البحث/,
+    );
+    // The reject fires BEFORE the product_variants SELECT runs.
+    const variantLookup = calls.find((c) =>
+      /SELECT\s+id\s+FROM\s+product_variants/i.test(c.sql),
+    );
+    expect(variantLookup).toBeUndefined();
+    // And before any mutating SQL touches return_items / stock /
+    // stock_movements / returns.  The regex below is anchored on
+    // verb-leading patterns so it doesn't false-positive on `FOR
+    // UPDATE` inside a SELECT lock query.
+    const itemMutation = calls.find((c) =>
+      /\bINSERT\s+INTO\s+(stock|stock_movements|return_items)\b/i.test(
+        c.sql,
+      ) ||
+      /\bUPDATE\s+(stock|return_items|returns)\s+SET\b/i.test(c.sql) ||
+      /\bDELETE\s+FROM\s+return_items\b/i.test(c.sql),
+    );
+    expect(itemMutation).toBeUndefined();
+  });
+
+  it('rejects updated line whose after.variant_id is not UUID-shaped', async () => {
+    const reqBadAfterVid = approvedRequestRow({
+      requested_payload: {
+        kind: 'line_changes',
+        lines: {
+          updated: [
+            {
+              item_id: ITEM_ID,
+              before: {
+                variant_id: VAR_OLD,
+                sku: 'OLD',
+                name: 'old',
+                quantity: 1,
+                unit_price: 450,
+              },
+              after: {
+                variant_id: '1640', // typed SKU instead of a real variant uuid
+                sku: '1640',
+                name: 'wrong',
+                quantity: 1,
+                unit_price: 450,
+              },
+            },
+          ],
+          removed: [],
+          added: [],
+        },
+        summary: { old_total: 450, new_total: 450, delta: 0 },
+      },
+    });
+    const { ds } = makeRouter(baseRoutes({ request: reqBadAfterVid }));
+    const posting: any = {
+      reverseByReference: jest.fn(),
+      postReturn: jest.fn(),
+    };
+    const svc = await buildSvc(ds, posting);
+    await expect(
+      svc.applyApprovedReturn({
+        entity: 'return',
+        parent_id: RET_ID,
+        request_id: REQ_ID,
+        user_id: USER_ID,
+      }),
+    ).rejects.toThrow(
+      /معرّف المنتج غير صالح — يجب اختيار منتج من نتائج البحث/,
+    );
+  });
+
+  it('passes UUID-shape gate when variant_id is a real UUID (positive case)', async () => {
+    // VAR_NEW is UUID-shaped; the existing payload-coverage test
+    // already exercises this path via "added line issues an INSERT
+    // INTO return_items with the resolved variant_id".  Restated
+    // here for explicit positive coverage of the new gate.
+    const reqGoodVid = approvedRequestRow({
+      requested_payload: {
+        kind: 'line_changes',
+        lines: {
+          updated: [],
+          removed: [],
+          added: [
+            {
+              variant_id: VAR_NEW,
+              sku: 'OK',
+              name: 'ok',
+              quantity: 1,
+              unit_price: 100,
+            },
+          ],
+        },
+        summary: { old_total: 0, new_total: 100, delta: 100 },
+      },
+    });
+    const { ds, calls } = makeRouter(baseRoutes({ request: reqGoodVid }));
+    const posting: any = {
+      reverseByReference: jest.fn(),
+      postReturn: jest.fn(),
+    };
+    const svc = await buildSvc(ds, posting);
+    await svc.applyApprovedReturn({
+      entity: 'return',
+      parent_id: RET_ID,
+      request_id: REQ_ID,
+      user_id: USER_ID,
+    });
+    // The variant SELECT runs (proves we passed the UUID gate and
+    // moved on to the DB-existence check).
+    const variantLookup = calls.find((c) =>
+      /SELECT\s+id\s+FROM\s+product_variants/i.test(c.sql),
+    );
+    expect(variantLookup).toBeDefined();
+    expect(variantLookup!.params).toContain(VAR_NEW);
   });
 
   it('rejects payloads that are not kind="line_changes"', async () => {
@@ -881,6 +1037,55 @@ describe('applyApprovedReturn — numeric SQL casts (source-grep)', () => {
     expect(code).not.toMatch(/DELETE\s+FROM\s+stock_movements\b/i);
     expect(code).not.toMatch(/\baccounting_only\b/);
   });
+
+  // ─── PR-FIX-EDIT-REQUEST-APPLY-SM-IDS-COLUMN-TYPE — pins the cast
+  //     fix that goes alongside migration 127.
+  it('apply_stock_movement_ids cast is bigint[] (not uuid[])', () => {
+    expect(code).toMatch(/apply_stock_movement_ids\s*=\s*\$\d+::bigint\[\]/);
+    expect(code).not.toMatch(/apply_stock_movement_ids\s*=\s*\$\d+::uuid\[\]/);
+  });
+
+  // ─── PR-FIX-EDIT-REQUEST-APPLY-VARIANT-UUID — pins the UUID-shape
+  //     guard that fires before any SQL touches a uuid column.
+  it('UUID_RE / VARIANT_ID_INVALID_MSG are defined and used in the apply path', () => {
+    expect(code).toMatch(/UUID_RE\s*=/);
+    expect(code).toMatch(/VARIANT_ID_INVALID_MSG\s*=/);
+    expect(code).toMatch(
+      /معرّف المنتج غير صالح — يجب اختيار منتج من نتائج البحث/,
+    );
+    // Both apply-path validation blocks reference the regex.
+    const matches = code.match(/UUID_RE\.test\(/g) ?? [];
+    expect(matches.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe('applyApprovedReturn — emits bigint[] cast on the wire (regression for the live "1640" error)', () => {
+  it('successful apply UPDATE emits apply_stock_movement_ids = $5::bigint[]', async () => {
+    const { ds, calls } = makeRouter(baseRoutes({}));
+    const posting: any = {
+      reverseByReference: jest.fn(),
+      postReturn: jest.fn(),
+    };
+    const svc = await buildSvc(ds, posting);
+    await svc.applyApprovedReturn({
+      entity: 'return',
+      parent_id: RET_ID,
+      request_id: REQ_ID,
+      user_id: USER_ID,
+    });
+    const stampCall = calls.find((c) =>
+      /UPDATE\s+return_edit_requests[\s\S]+applied_at\s*=\s*NOW\(\)/i.test(
+        c.sql,
+      ),
+    );
+    expect(stampCall).toBeDefined();
+    expect(stampCall!.sql).toMatch(
+      /apply_stock_movement_ids\s*=\s*\$\d+::bigint\[\]/,
+    );
+    expect(stampCall!.sql).not.toMatch(
+      /apply_stock_movement_ids\s*=\s*\$\d+::uuid\[\]/,
+    );
+  });
 });
 
 describe('applyApprovedReturn — finite-number rejection (behavioural)', () => {
@@ -1096,6 +1301,56 @@ describe('migration 126 — additive + idempotent', () => {
     );
     expect(sql).toMatch(
       /ALTER\s+TABLE\s+exchange_edit_requests[\s\S]+applied_at[\s\S]+applied_by/i,
+    );
+  });
+});
+
+// ─── Migration 127 — fixes the column-type mismatch from 126 ──────
+
+describe('migration 127 — fixes apply_stock_movement_ids type', () => {
+  const rawSql = require('node:fs')
+    .readFileSync(
+      require('node:path').resolve(
+        __dirname,
+        '../../../database/migrations/127_pr_fix_apply_stock_movement_ids_bigint.sql',
+      ),
+      'utf-8',
+    ) as string;
+  // Strip SQL line-comments before grepping so the rollback
+  // documentation block (which contains commented-out ALTERs for
+  // human reference) doesn't false-positive.
+  const sql = rawSql.replace(/--[^\n]*/g, '');
+
+  it('changes apply_stock_movement_ids to bigint[] on BOTH tables', () => {
+    expect(sql).toMatch(
+      /ALTER\s+TABLE\s+return_edit_requests[\s\S]+ALTER\s+COLUMN\s+apply_stock_movement_ids\s+TYPE\s+bigint\[\]/i,
+    );
+    expect(sql).toMatch(
+      /ALTER\s+TABLE\s+exchange_edit_requests[\s\S]+ALTER\s+COLUMN\s+apply_stock_movement_ids\s+TYPE\s+bigint\[\]/i,
+    );
+  });
+
+  it('is idempotent — guarded by information_schema udt_name lookup', () => {
+    // Both ALTERs run only when the current type is still _uuid.
+    expect(sql).toMatch(
+      /information_schema\.columns[\s\S]+udt_name[\s\S]+'_uuid'/i,
+    );
+  });
+
+  it('only touches the two edit-request tables (no financial/inventory schema changes)', () => {
+    expect(sql).not.toMatch(
+      /ALTER\s+TABLE\s+(returns|return_items|exchanges|exchange_items|journal_entries|journal_lines|cashbox_transactions|stock_movements)\b/i,
+    );
+    // No data DML.
+    expect(sql).not.toMatch(/\bDELETE\s+FROM\b/i);
+    expect(sql).not.toMatch(/\bINSERT\s+INTO\b/i);
+    expect(sql).not.toMatch(/\bUPDATE\s+\w+\s+SET\b/i);
+    expect(sql).not.toMatch(/\bTRUNCATE\b/i);
+  });
+
+  it('uses a safe USING clause that handles empty / null arrays', () => {
+    expect(sql).toMatch(
+      /USING\s+apply_stock_movement_ids::text\[\]::bigint\[\]/i,
     );
   });
 });

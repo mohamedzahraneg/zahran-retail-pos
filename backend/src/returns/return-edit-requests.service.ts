@@ -74,6 +74,20 @@ const ALLOWED_ACTIONS: RequestedAction[] = [
   'reason_change',
 ];
 
+// PR-FIX-EDIT-REQUEST-APPLY-VARIANT-UUID — defense-in-depth guard.
+// Every variant_id reaching SQL must be a UUID-shaped string before
+// it touches a uuid column on `return_items.variant_id` or the
+// `product_variants` FK lookup.  The FE already enforces this via
+// the productLookup component, but a tampered direct API call (or a
+// future regression) could otherwise crash with the raw Postgres
+// "invalid input syntax for type uuid: <bad>" error.  We instead
+// throw a clean Arabic `BadRequestException` BEFORE any SQL fires.
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const VARIANT_ID_INVALID_MSG =
+  'معرّف المنتج غير صالح — يجب اختيار منتج من نتائج البحث';
+
 export type RequestStatus =
   | 'pending'
   | 'approved'
@@ -366,6 +380,13 @@ export class ReturnEditRequestsService {
             'لا يمكن إضافة بند بدون variant_id حقيقي',
           );
         }
+        // PR-FIX-EDIT-REQUEST-APPLY-VARIANT-UUID — UUID-shape gate
+        // BEFORE the product_variants SELECT (and BEFORE any other
+        // SQL).  A non-UUID value (typed SKU, code, anything else)
+        // gets a clean Arabic error instead of crashing inside pg.
+        if (!UUID_RE.test(vid)) {
+          throw new BadRequestException(VARIANT_ID_INVALID_MSG);
+        }
         // PR-FIX-EDIT-REQUEST-APPLY-NUMERIC-CAST — finite-number guard
         // (NaN / Infinity slip past `> 0` and `>= 0`).
         const qty = Number(a?.quantity ?? 0);
@@ -398,6 +419,20 @@ export class ReturnEditRequestsService {
           throw new BadRequestException(
             `بند غير موجود في المرتجع: ${itemId}`,
           );
+        }
+        // PR-FIX-EDIT-REQUEST-APPLY-VARIANT-UUID — when an updated
+        // line carries an `after.variant_id`, validate it as a UUID
+        // BEFORE the mutation step writes it to a uuid column.  An
+        // empty / missing after.variant_id means "keep the current
+        // variant" (handled later in the mutation block).
+        const afterVid = u?.after?.variant_id;
+        if (
+          afterVid !== undefined &&
+          afterVid !== null &&
+          String(afterVid).trim().length > 0 &&
+          !UUID_RE.test(String(afterVid).trim())
+        ) {
+          throw new BadRequestException(VARIANT_ID_INVALID_MSG);
         }
         // PR-FIX-EDIT-REQUEST-APPLY-NUMERIC-CAST — `> 0` / `>= 0` alone
         // accept Infinity, so we explicitly require a finite number
@@ -740,13 +775,21 @@ export class ReturnEditRequestsService {
       // The WHERE applied_at IS NULL clause is the second layer of
       // double-apply protection (FOR UPDATE was the first).  If
       // someone races us, RETURNING comes back empty → throw.
+      //
+      // PR-FIX-EDIT-REQUEST-APPLY-SM-IDS-COLUMN-TYPE — migration 127
+      // changed `apply_stock_movement_ids` from uuid[] to bigint[]
+      // (stock_movements.id is bigint).  The cast on $5 must match.
+      // Same shape as `apply_cashbox_transaction_ids bigint[]` since
+      // mig 126.  The id values were already captured as strings via
+      // `String(smRow.id)`; pg accepts numeric-string array elements
+      // for ::bigint[] coercion.
       const [stamped] = await em.query(
         `UPDATE return_edit_requests
             SET applied_at                    = NOW(),
                 applied_by                    = $2,
                 apply_journal_entry_ids       = $3::uuid[],
                 apply_cashbox_transaction_ids = $4::bigint[],
-                apply_stock_movement_ids      = $5::uuid[],
+                apply_stock_movement_ids      = $5::bigint[],
                 apply_summary                 = $6::jsonb,
                 updated_at                    = NOW()
           WHERE id = $1
