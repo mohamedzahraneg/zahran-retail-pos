@@ -52,6 +52,7 @@ import {
 import { DataSource } from 'typeorm';
 import { AuditService } from '../audit/audit.service';
 import { AccountingPostingService } from '../chart-of-accounts/posting.service';
+import { FinancialEngineService } from '../chart-of-accounts/financial-engine.service';
 
 export type EditRequestEntity = 'return' | 'exchange';
 
@@ -158,6 +159,17 @@ export class ReturnEditRequestsService {
     private readonly ds: DataSource,
     @Optional() private readonly audit?: AuditService,
     @Optional() private readonly posting?: AccountingPostingService,
+    // PR-FIX-RETURNS-EXCHANGES-EDIT-REQUEST-APPLY-PHASE-2B — exchange
+    // apply uses `engine.recordCashOnlyMovement` directly for the
+    // cash leg of the price difference (creation also uses this
+    // primitive at returns.service.ts:1504).  No JE is posted at
+    // exchange time, so `posting.reverseByReference` cannot reverse
+    // the cash-only CT — we route reverse + replay through the same
+    // engine primitive with `category='reversal_refund'` for
+    // reversals, mirroring the convention `posting.reverseByReference`
+    // uses for paired CTs of reversed JEs.
+    @Optional()
+    private readonly engine?: FinancialEngineService,
   ) {}
 
   // ─── public API ───────────────────────────────────────────────
@@ -289,10 +301,15 @@ export class ReturnEditRequestsService {
 
   async applyApprovedReturn(input: ApplyInput): Promise<ApplyResult> {
     if (input.entity !== 'return') {
-      // Defense-in-depth: this method is return-only.  Phase 2B will
-      // ship the exchange variant in a separate PR.
-      throw new NotImplementedException(
-        'تطبيق طلب تعديل الاستبدال غير متاح بعد — قيد الإعداد',
+      // PR-FIX-RETURNS-EXCHANGES-EDIT-REQUEST-APPLY-PHASE-2B — this
+      // method handles RETURNs only; the exchange variant is
+      // implemented separately in `applyApprovedExchange()`.  The
+      // controller routes to the correct method by URL, so reaching
+      // this guard is a developer error rather than an end-user
+      // request.  Throwing 400 keeps the message honest (the feature
+      // exists; you just called the wrong method).
+      throw new BadRequestException(
+        'هذه الدالة مخصصة للمرتجعات — استخدم applyApprovedExchange للاستبدال',
       );
     }
     if (!this.posting) {
@@ -844,16 +861,586 @@ export class ReturnEditRequestsService {
   }
 
   /**
-   * Phase 2A scope guard — the controller calls this for the
-   * exchange apply endpoint.  Always 501.  When Phase 2B lands the
-   * implementation will replace the throw.  `async` so the throw
-   * surfaces as a rejected promise (Nest converts it into the
-   * proper HTTP exception on the controller boundary).
+   * Phase 2B — apply an approved exchange edit request.
+   *
+   * Reverse-and-replay strategy mirroring `applyApprovedReturn`, with
+   * three structural differences specific to exchanges:
+   *
+   *   1. Exchanges post NO journal_entries at creation time (only a
+   *      cash-only CT for the price-difference cash leg, via
+   *      `engine.recordCashOnlyMovement`).  So `apply_journal_entry_ids`
+   *      is always [].  We do NOT call `posting.reverseByReference` —
+   *      it short-circuits when no JE exists for the reference and
+   *      would not touch the cash CT anyway.
+   *   2. Stock effects flow through `fn_adjust_stock` at creation
+   *      (with `notes='exchange:<exc_no>'`); we follow the same
+   *      INSERT-only `stock_movements` pattern as `applyApprovedReturn`
+   *      for reverse + replay.
+   *   3. Phase 2B SCOPE: returned-side items only.  Modifications to
+   *      `kind='new'` lines are rejected with a Phase-2C marker —
+   *      editing those would require cascading into the linked sales
+   *      invoice's `invoice_items` + `invoice_payments` + the
+   *      invoice's stock + GL flow, which is a separate PR.
+   *
+   * Hard guarantees:
+   *   · No raw INSERT/UPDATE/DELETE on journal_entries / journal_lines /
+   *     cashbox_transactions.
+   *   · No UPDATE/DELETE on stock_movements; new SM rows only.
+   *   · Cash-leg reversal goes through `engine.recordCashOnlyMovement`
+   *     with `category='reversal_refund'` and `reference_type='other'`,
+   *     `reference_id=<orig_CT_id>` — the established convention used
+   *     by `posting.reverseByReference` for paired-CT reversals.
+   *   · Idempotency: SELECT FOR UPDATE on the request + parent +
+   *     `WHERE applied_at IS NULL` clause on the stamping UPDATE.
+   *     The route is also wrapped by `IdempotencyInterceptor`.
+   *   · No `accounting_only`, no engine-error swallowing.
    */
-  async applyApprovedExchange(_input: ApplyInput): Promise<ApplyResult> {
-    throw new NotImplementedException(
-      'تطبيق طلب تعديل الاستبدال غير متاح بعد — قيد الإعداد',
-    );
+  async applyApprovedExchange(input: ApplyInput): Promise<ApplyResult> {
+    if (input.entity !== 'exchange') {
+      throw new BadRequestException(
+        'هذه الدالة مخصصة للاستبدال — استخدم applyApprovedReturn للمرتجع',
+      );
+    }
+    if (!this.engine) {
+      // The cash-leg reverse + replay needs the engine.  Without it
+      // we'd have to write CTs directly — explicitly forbidden.
+      throw new BadRequestException(
+        'FinancialEngineService غير متاح — لا يمكن تطبيق طلب التعديل',
+      );
+    }
+
+    return this.ds.transaction(async (em) => {
+      // ── 1. Lock the edit request row and validate state. ─────────
+      const [er] = await em.query(
+        `SELECT *
+           FROM exchange_edit_requests
+          WHERE id = $1 AND exchange_id = $2
+          FOR UPDATE`,
+        [input.request_id, input.parent_id],
+      );
+      if (!er) {
+        throw new NotFoundException('طلب التعديل غير موجود');
+      }
+      if (er.status !== 'approved') {
+        throw new ConflictException(
+          `لا يمكن تطبيق الطلب لأن حالته "${er.status}" — التطبيق يتطلب حالة approved`,
+        );
+      }
+      if (er.applied_at) {
+        throw new ConflictException(
+          'تم تطبيق هذا الطلب بالفعل — لا يمكن تطبيقه مرة أخرى',
+        );
+      }
+
+      const payload = (er.requested_payload ?? {}) as Record<string, any>;
+      if (payload?.kind !== 'line_changes') {
+        throw new BadRequestException(
+          'نوع طلب التعديل غير مدعوم للتطبيق — يجب أن يكون kind="line_changes"',
+        );
+      }
+
+      const updatedLines: any[] = Array.isArray(payload?.lines?.updated)
+        ? payload.lines.updated
+        : [];
+      const removedLines: any[] = Array.isArray(payload?.lines?.removed)
+        ? payload.lines.removed
+        : [];
+      const addedLines: any[] = Array.isArray(payload?.lines?.added)
+        ? payload.lines.added
+        : [];
+
+      if (
+        updatedLines.length === 0 &&
+        removedLines.length === 0 &&
+        addedLines.length === 0
+      ) {
+        throw new BadRequestException(
+          'payload فارغ — لا توجد تغييرات للتطبيق',
+        );
+      }
+
+      // ── 2. Lock the parent exchange row and validate. ─────────────
+      const [exc] = await em.query(
+        `SELECT id, exchange_no, status,
+                returned_value, new_items_value, price_difference,
+                payment_method, refund_method,
+                cashbox_id, shift_id, warehouse_id
+           FROM exchanges
+          WHERE id = $1
+          FOR UPDATE`,
+        [input.parent_id],
+      );
+      if (!exc) {
+        throw new NotFoundException('الاستبدال غير موجود');
+      }
+      if (exc.status === 'cancelled' || exc.status === 'rejected') {
+        throw new ConflictException(
+          `لا يمكن تطبيق التعديل لأن حالة الاستبدال "${exc.status}"`,
+        );
+      }
+
+      // ── 3. Capture before-state. ──────────────────────────────────
+      const beforeItems: any[] = await em.query(
+        `SELECT * FROM exchange_items WHERE exchange_id = $1 ORDER BY id`,
+        [input.parent_id],
+      );
+      const beforeReturnedItems = beforeItems.filter(
+        (it) => it.kind === 'returned',
+      );
+      const beforeItemsById = new Map<string, any>(
+        beforeItems.map((it) => [String(it.id), it]),
+      );
+      const oldReturnedValue = Number(exc.returned_value || 0);
+      const oldNewItemsValue = Number(exc.new_items_value || 0);
+      const oldPriceDiff = Number(exc.price_difference || 0);
+
+      // ── 4. PHASE 2B SCOPE GUARD — reject any payload that touches
+      //       a `kind='new'` line.  Editing the new side requires
+      //       cascading into the linked sales invoice and is out of
+      //       scope (Phase 2C).
+      const ensureReturnedLine = (itemId: string) => {
+        const row = beforeItemsById.get(itemId);
+        if (!row) {
+          throw new BadRequestException(
+            `بند غير موجود في الاستبدال: ${itemId}`,
+          );
+        }
+        if (row.kind !== 'returned') {
+          throw new BadRequestException(
+            'تعديل البنود الجديدة في الاستبدال غير مدعوم في هذه المرحلة — Phase 2C',
+          );
+        }
+      };
+      for (const u of updatedLines) {
+        ensureReturnedLine(String(u?.item_id ?? ''));
+      }
+      for (const r of removedLines) {
+        ensureReturnedLine(String(r?.item_id ?? ''));
+      }
+
+      // ── 5. Validate payload — same UUID + finite-number guards as
+      //       the return-apply path so a tampered payload can't reach
+      //       SQL.
+      for (const a of addedLines) {
+        const vid = String(a?.variant_id ?? '').trim();
+        if (vid.length === 0) {
+          throw new BadRequestException(
+            'لا يمكن إضافة بند بدون variant_id حقيقي',
+          );
+        }
+        if (!UUID_RE.test(vid)) {
+          throw new BadRequestException(VARIANT_ID_INVALID_MSG);
+        }
+        const qty = Number(a?.quantity ?? 0);
+        if (!Number.isFinite(qty) || qty <= 0) {
+          throw new BadRequestException(
+            'الكمية يجب أن تكون أكبر من صفر للبنود المضافة',
+          );
+        }
+        const price = Number(a?.unit_price ?? 0);
+        if (!Number.isFinite(price) || price < 0) {
+          throw new BadRequestException(
+            'سعر البند المضاف لا يمكن أن يكون سالباً',
+          );
+        }
+        const [v] = await em.query(
+          `SELECT id FROM product_variants WHERE id = $1`,
+          [vid],
+        );
+        if (!v) {
+          throw new BadRequestException(
+            `variant_id غير موجود في قاعدة البيانات: ${vid}`,
+          );
+        }
+      }
+      for (const u of updatedLines) {
+        const afterVid = u?.after?.variant_id;
+        if (
+          afterVid !== undefined &&
+          afterVid !== null &&
+          String(afterVid).trim().length > 0 &&
+          !UUID_RE.test(String(afterVid).trim())
+        ) {
+          throw new BadRequestException(VARIANT_ID_INVALID_MSG);
+        }
+        const newQty = Number(u?.after?.quantity ?? 0);
+        if (!Number.isFinite(newQty) || newQty <= 0) {
+          throw new BadRequestException(
+            'الكمية يجب أن تكون أكبر من صفر للبنود المعدلة',
+          );
+        }
+        const newPrice = Number(u?.after?.unit_price ?? 0);
+        if (!Number.isFinite(newPrice) || newPrice < 0) {
+          throw new BadRequestException(
+            'السعر لا يمكن أن يكون سالباً',
+          );
+        }
+      }
+
+      const ctIds: string[] = [];
+      const reversedSmIds: string[] = [];
+      const newSmIds: string[] = [];
+
+      // ── 6. Reverse the OLD cash leg (if any).  Locate the active
+      //       cash CT keyed off (reference_type='exchange',
+      //       reference_id=exchange_id), then post a counter-direction
+      //       CT through the engine with `category='reversal_refund'`
+      //       and `reference_type='other'` / `reference_id=<orig_CT_id>`.
+      //       This mirrors the convention `posting.reverseByReference`
+      //       uses for paired-CT reversals (lines 1117-1123 of
+      //       posting.service.ts) so the audit panel can pair the rows.
+      const [origCt] = await em.query(
+        `SELECT id::text AS id, cashbox_id::text AS cashbox_id,
+                direction::text AS direction, amount, category::text AS category,
+                notes
+           FROM cashbox_transactions
+          WHERE reference_type::text = 'exchange'
+            AND reference_id::text   = $1
+            AND is_void = FALSE
+          ORDER BY id DESC
+          LIMIT 1`,
+        [input.parent_id],
+      );
+      if (origCt) {
+        const reverseDirection: 'in' | 'out' =
+          origCt.direction === 'in' ? 'out' : 'in';
+        const reverseRes = await this.engine!.recordCashOnlyMovement({
+          cashbox_id: String(origCt.cashbox_id),
+          direction: reverseDirection,
+          amount: Number(origCt.amount),
+          category: 'reversal_refund',
+          reference_type: 'other',
+          reference_id: String(origCt.id),
+          user_id: input.user_id,
+          notes: `عكس فرق استبدال — ${exc.exchange_no} (تطبيق طلب تعديل)`,
+          em,
+        });
+        if (!reverseRes.ok) {
+          throw new BadRequestException(
+            `فشل عكس فرق الاستبدال نقدياً: ${reverseRes.error}`,
+          );
+        }
+        if ((reverseRes as any).cashbox_transaction_id) {
+          ctIds.push(String((reverseRes as any).cashbox_transaction_id));
+        }
+      }
+
+      // ── 7. Reverse stock for resellable RETURNED items in the
+      //       BEFORE state.  Mirror of return-apply: inline UPDATE
+      //       stock + INSERT stock_movements with
+      //       reference_type='exchange', reference_id=<exchange_id>,
+      //       notes prefix 'edit_request_apply_stock_reversal:'.
+      for (const it of beforeReturnedItems) {
+        if (it.condition !== 'resellable') continue;
+        const qty = Number(it.quantity);
+        if (!(qty > 0)) continue;
+        const [costRow] = await em.query(
+          `SELECT cost_price FROM product_variants WHERE id = $1`,
+          [it.variant_id],
+        );
+        const unitCost = Number(costRow?.cost_price ?? 0);
+
+        await em.query(
+          `UPDATE stock
+              SET quantity_on_hand = quantity_on_hand - $1,
+                  updated_at = NOW()
+            WHERE variant_id = $2 AND warehouse_id = $3`,
+          [qty, it.variant_id, exc.warehouse_id],
+        );
+        const [smRow] = await em.query(
+          `INSERT INTO stock_movements
+              (variant_id, warehouse_id, movement_type, direction,
+               quantity, unit_cost, reference_type, reference_id,
+               notes, user_id)
+           VALUES ($1, $2,
+                   'adjustment_out'::stock_movement_type,
+                   'out'::txn_direction,
+                   $3, $4,
+                   'exchange'::entity_type, $5, $6, $7)
+           RETURNING id`,
+          [
+            it.variant_id,
+            exc.warehouse_id,
+            qty,
+            unitCost,
+            input.parent_id,
+            `edit_request_apply_stock_reversal:${exc.exchange_no}`,
+            input.user_id,
+          ],
+        );
+        reversedSmIds.push(String(smRow.id));
+      }
+
+      // ── 8. Mutate exchange_items per payload (returned-side only).
+      let updatedCount = 0;
+      let removedCount = 0;
+      let addedCount = 0;
+
+      for (const u of updatedLines) {
+        const itemId = String(u.item_id);
+        const after = u.after ?? {};
+        const newQty = Number(after.quantity || 0);
+        const newPrice = Number(after.unit_price || 0);
+        const newNotes = after.notes == null ? null : String(after.notes);
+        const newVariantId =
+          after.variant_id && String(after.variant_id).trim().length > 0
+            ? String(after.variant_id)
+            : null;
+        // Same `::numeric` casts as return-apply to avoid the live
+        // "operator is not unique: unknown * unknown" pg error.
+        if (newVariantId) {
+          await em.query(
+            `UPDATE exchange_items
+                SET variant_id = $2,
+                    quantity   = $3::int,
+                    unit_price = $4::numeric,
+                    line_total = ($3::numeric * $4::numeric)::numeric(14,2),
+                    notes      = $5
+              WHERE id = $1 AND exchange_id = $6 AND kind = 'returned'`,
+            [itemId, newVariantId, newQty, newPrice, newNotes, input.parent_id],
+          );
+        } else {
+          await em.query(
+            `UPDATE exchange_items
+                SET quantity   = $2::int,
+                    unit_price = $3::numeric,
+                    line_total = ($2::numeric * $3::numeric)::numeric(14,2),
+                    notes      = $4
+              WHERE id = $1 AND exchange_id = $5 AND kind = 'returned'`,
+            [itemId, newQty, newPrice, newNotes, input.parent_id],
+          );
+        }
+        updatedCount++;
+      }
+
+      for (const r of removedLines) {
+        const itemId = String(r.item_id);
+        if (!beforeItemsById.has(itemId)) continue;
+        await em.query(
+          `DELETE FROM exchange_items
+            WHERE id = $1 AND exchange_id = $2 AND kind = 'returned'`,
+          [itemId, input.parent_id],
+        );
+        removedCount++;
+      }
+
+      for (const a of addedLines) {
+        const variantId = String(a.variant_id);
+        const qty = Number(a.quantity || 0);
+        const price = Number(a.unit_price || 0);
+        const notes = a.notes == null ? null : String(a.notes);
+        await em.query(
+          `INSERT INTO exchange_items
+              (exchange_id, variant_id, kind, quantity, unit_price,
+               line_total, condition, notes)
+           VALUES ($1, $2, 'returned',
+                   $3::int, $4::numeric,
+                   ($3::numeric * $4::numeric)::numeric(14,2),
+                   'resellable', $5)`,
+          [input.parent_id, variantId, qty, price, notes],
+        );
+        addedCount++;
+      }
+
+      // ── 9. Recompute exchange totals + price_difference.
+      const [tot] = await em.query(
+        `SELECT
+           COALESCE(SUM(CASE WHEN kind='returned' THEN line_total END), 0)::numeric(14,2) AS rv,
+           COALESCE(SUM(CASE WHEN kind='new'      THEN line_total END), 0)::numeric(14,2) AS nv
+         FROM exchange_items
+         WHERE exchange_id = $1`,
+        [input.parent_id],
+      );
+      const newReturnedValue = Number(tot?.rv ?? 0);
+      const newNewItemsValue = Number(tot?.nv ?? 0);
+      const newPriceDiff = Number(
+        (newNewItemsValue - newReturnedValue).toFixed(2),
+      );
+      await em.query(
+        `UPDATE exchanges
+            SET returned_value   = $2::numeric,
+                new_items_value  = $3::numeric,
+                price_difference = $4::numeric,
+                updated_at       = NOW()
+          WHERE id = $1`,
+        [
+          input.parent_id,
+          newReturnedValue,
+          newNewItemsValue,
+          newPriceDiff,
+        ],
+      );
+
+      // ── 10. Replay stock for resellable RETURNED items in the
+      //        AFTER state.
+      const afterReturnedItems: any[] = await em.query(
+        `SELECT ei.id, ei.variant_id, ei.quantity, ei.condition,
+                COALESCE(
+                  (SELECT cost_price FROM product_variants WHERE id = ei.variant_id),
+                  0
+                )::numeric(14,2) AS unit_cost
+           FROM exchange_items ei
+          WHERE ei.exchange_id = $1
+            AND ei.kind = 'returned'
+            AND ei.condition = 'resellable'`,
+        [input.parent_id],
+      );
+      for (const it of afterReturnedItems) {
+        const qty = Number(it.quantity);
+        if (!(qty > 0)) continue;
+        await em.query(
+          `INSERT INTO stock (variant_id, warehouse_id, quantity_on_hand)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (variant_id, warehouse_id)
+           DO UPDATE SET quantity_on_hand = stock.quantity_on_hand + EXCLUDED.quantity_on_hand,
+                         updated_at = NOW()`,
+          [it.variant_id, exc.warehouse_id, qty],
+        );
+        const [smRow] = await em.query(
+          `INSERT INTO stock_movements
+              (variant_id, warehouse_id, movement_type, direction,
+               quantity, unit_cost, reference_type, reference_id,
+               notes, user_id)
+           VALUES ($1, $2,
+                   'adjustment_in'::stock_movement_type,
+                   'in'::txn_direction,
+                   $3, $4,
+                   'exchange'::entity_type, $5, $6, $7)
+           RETURNING id`,
+          [
+            it.variant_id,
+            exc.warehouse_id,
+            qty,
+            Number(it.unit_cost),
+            input.parent_id,
+            `edit_request_apply_stock:${exc.exchange_no}`,
+            input.user_id,
+          ],
+        );
+        newSmIds.push(String(smRow.id));
+      }
+
+      // ── 11. Replay the cash leg for the NEW price difference.
+      //        Direction follows the same rule as createExchange:
+      //          newPriceDiff > 0  → customer owes more → IN
+      //          newPriceDiff < 0  → store owes customer → OUT
+      //        Method is read from the exchange row (set at creation).
+      const newCashIn  = newPriceDiff > 0 && exc.payment_method === 'cash';
+      const newCashOut = newPriceDiff < 0 && exc.refund_method  === 'cash';
+      let cashLegReplayed = false;
+      if (newCashIn || newCashOut) {
+        if (!exc.cashbox_id) {
+          throw new BadRequestException(
+            'تعذر تطبيق فرق الاستبدال نقدياً — الخزنة غير محددة على عملية الاستبدال',
+          );
+        }
+        const direction: 'in' | 'out' = newCashOut ? 'out' : 'in';
+        const replayRes = await this.engine!.recordCashOnlyMovement({
+          cashbox_id: String(exc.cashbox_id),
+          direction,
+          amount: Math.abs(newPriceDiff),
+          category: 'refund',
+          reference_type: 'exchange',
+          reference_id: input.parent_id,
+          user_id: input.user_id,
+          notes:
+            `${direction === 'out' ? 'صرف' : 'تحصيل'} فرق استبدال — ${exc.exchange_no} (تطبيق طلب تعديل)`,
+          em,
+        });
+        if (!replayRes.ok) {
+          throw new BadRequestException(
+            `فشل تسجيل فرق الاستبدال نقدياً: ${replayRes.error}`,
+          );
+        }
+        if ((replayRes as any).cashbox_transaction_id) {
+          ctIds.push(String((replayRes as any).cashbox_transaction_id));
+        }
+        cashLegReplayed = true;
+      }
+
+      // ── 12. Stamp the request as applied.  Layered idempotency:
+      //         · SELECT FOR UPDATE in step 1 holds the row lock.
+      //         · The WHERE applied_at IS NULL clause below races
+      //           cleanly: a concurrent stamp returns empty.
+      const allSmIds = [...reversedSmIds, ...newSmIds];
+      const summary = {
+        status_at_apply: exc.status,
+        was_completed: exc.status === 'completed',
+        old_returned_value: oldReturnedValue,
+        new_returned_value: newReturnedValue,
+        delta_returned_value: Number(
+          (newReturnedValue - oldReturnedValue).toFixed(2),
+        ),
+        old_new_items_value: oldNewItemsValue,
+        new_new_items_value: newNewItemsValue,
+        delta_new_items_value: Number(
+          (newNewItemsValue - oldNewItemsValue).toFixed(2),
+        ),
+        old_price_difference: oldPriceDiff,
+        new_price_difference: newPriceDiff,
+        delta_price_difference: Number(
+          (newPriceDiff - oldPriceDiff).toFixed(2),
+        ),
+        lines_updated: updatedCount,
+        lines_removed: removedCount,
+        lines_added: addedCount,
+        cash_leg_reversed: Boolean(origCt),
+        cash_leg_replayed: cashLegReplayed,
+        notes: input.notes ?? null,
+      };
+      const [stamped] = await em.query(
+        `UPDATE exchange_edit_requests
+            SET applied_at                    = NOW(),
+                applied_by                    = $2,
+                apply_journal_entry_ids       = $3::uuid[],
+                apply_cashbox_transaction_ids = $4::bigint[],
+                apply_stock_movement_ids      = $5::bigint[],
+                apply_summary                 = $6::jsonb,
+                updated_at                    = NOW()
+          WHERE id = $1
+            AND applied_at IS NULL
+            AND status = 'approved'
+          RETURNING *`,
+        [
+          input.request_id,
+          input.user_id,
+          [],                              // exchanges post no JE
+          ctIds.map((s) => Number(s)),
+          allSmIds,
+          JSON.stringify(summary),
+        ],
+      );
+      if (!stamped) {
+        throw new ConflictException(
+          'تعذّر ختم طلب التعديل كمُطبَّق — قد يكون تم تطبيقه بالتزامن',
+        );
+      }
+
+      // ── 13. Activity log (best-effort).
+      if (this.audit) {
+        try {
+          await this.audit.writeActivity({
+            user_id: input.user_id,
+            action: 'update',
+            entity: 'exchange',
+            entity_id: input.parent_id,
+            summary: `تم تطبيق طلب تعديل استبدال ${exc.exchange_no}`,
+            extra: {
+              kind: 'edit_request_apply',
+              edit_request_id: input.request_id,
+              ...summary,
+              journal_entry_ids: [],
+              cashbox_transaction_ids: ctIds,
+              stock_movement_ids: allSmIds,
+            },
+          });
+        } catch {
+          /* swallowed — audit is best-effort */
+        }
+      }
+
+      return this.toApplyResult(stamped, 'exchange_id');
+    });
   }
 
   // ─── private helpers ──────────────────────────────────────────

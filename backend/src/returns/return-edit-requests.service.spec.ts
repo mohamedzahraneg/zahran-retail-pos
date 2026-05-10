@@ -448,35 +448,27 @@ describe('ReturnEditRequestsService — Phase 2A safety contract (source-grep)',
     expect(code).not.toMatch(/DELETE\s+FROM\s+stock_movements\b/i);
   });
 
-  it('never writes to exchanges or exchange_items (Phase 2A is return-only)', () => {
-    expect(code).not.toMatch(/INSERT\s+INTO\s+exchanges\b/i);
-    expect(code).not.toMatch(/INSERT\s+INTO\s+exchange_items\b/i);
-    expect(code).not.toMatch(/UPDATE\s+exchanges\b/i);
-    expect(code).not.toMatch(/UPDATE\s+exchange_items\b/i);
-    expect(code).not.toMatch(/DELETE\s+FROM\s+exchange_items\b/i);
-  });
-
   it('does not bypass the financial engine', () => {
     expect(code).not.toMatch(/\baccounting_only\b/);
     // engine_context is set by the engine itself; nobody else should
     // SET LOCAL it here.
     expect(code).not.toMatch(/SET\s+LOCAL\s+app\.engine_context/i);
     expect(code).not.toMatch(/\brecordTransaction\b/);
-    expect(code).not.toMatch(/\bFinancialEngineService\b/);
   });
 
-  it('only financial-side primitives used are reverseByReference + postReturn', () => {
-    // These two are the ALLOWED indirect paths for Phase 2A apply.
-    // The `!?` allows for `this.posting!.reverseByReference(` (non-null
-    // assertion present because the guard at the top of the method
-    // already throws when `this.posting` is undefined).
+  it('only financial-side primitives used are reverseByReference + postReturn (return path) and recordCashOnlyMovement (exchange path)', () => {
+    // Phase 2A return apply: reverseByReference + postReturn.
+    // Phase 2B exchange apply: recordCashOnlyMovement (twice — reverse
+    // + replay legs).  The `!?` allows the non-null assertion since
+    // the apply paths have already validated `this.posting` /
+    // `this.engine` at entry.
     expect(code).toMatch(/\bposting!?\.reverseByReference\(/);
     expect(code).toMatch(/\bposting!?\.postReturn\(/);
+    expect(code).toMatch(/\bengine!?\.recordCashOnlyMovement\(/);
     // Other engine/posting primitives must NOT be called from this file.
     expect(code).not.toMatch(/\bpostInvoice\b/);
     expect(code).not.toMatch(/\bpostInvoiceEdit\b/);
     expect(code).not.toMatch(/\bpostInvoicePayment\b/);
-    expect(code).not.toMatch(/\brecordCashOnlyMovement\b/);
     expect(code).not.toMatch(/\bpostExchange\b/);
   });
 

@@ -1,17 +1,21 @@
 /**
- * ApplyEditRequestModal — Phase 2A admin action that EXECUTES an
- * already-approved RETURN edit request.
+ * ApplyEditRequestModal — admin action that EXECUTES an
+ * already-approved edit request.
+ *
+ * Phase 2A: returns.   Calls `returnsApi.applyReturnEditRequest`.
+ * Phase 2B: exchanges. Calls `returnsApi.applyExchangeEditRequest`.
  *
  * Strict scope (mirrors the BE service contract):
- *   · Calls ONLY `returnsApi.applyReturnEditRequest` (POST).
- *   · NEVER invoked for `entity='exchange'` — the parent component
- *     gates this via `entity === 'return'`, and this component
- *     defends in depth by refusing to mount its inner content for
- *     anything other than 'return'.
+ *   · Calls ONLY the matching `apply*EditRequest` POST.
  *   · NEVER calls approve / reject / amendment / reverse / replay
  *     endpoints from the FE.
  *   · No PATCH / PUT / DELETE.
  *   · No direct cache mutation — only `qc.invalidateQueries(...)`.
+ *
+ * Phase 2B exchange scope:
+ *   · The BE rejects edits to `kind='new'` exchange lines with the
+ *     literal Phase 2C marker copy.  The modal does not pre-validate
+ *     this — it relays the BE error message to the toast.
  *
  * Confirmation phrase guard:
  *   The confirm button stays disabled until the admin types the
@@ -21,7 +25,7 @@
  *   that forces the admin to acknowledge the financial side effect
  *   before the request fires.
  */
-import { useMemo, useState } from 'react';
+import { useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
@@ -47,7 +51,6 @@ const ACTION_LABELS_AR: Record<string, string> = {
 };
 
 export interface ApplyEditRequestModalProps {
-  /** Always 'return' for Phase 2A — defense in depth refuses anything else. */
   entity: 'return' | 'exchange';
   parentId: string;
   request: AuditEditRequestRow;
@@ -62,8 +65,6 @@ export function ApplyEditRequestModal({
   onClose,
   onSuccess,
 }: ApplyEditRequestModalProps) {
-  // All hooks called UNCONDITIONALLY at the top — rules of hooks.
-  // The exchange branch is handled in the JSX below.
   const qc = useQueryClient();
   const [notes, setNotes] = useState('');
   const [phrase, setPhrase] = useState('');
@@ -79,17 +80,20 @@ export function ApplyEditRequestModal({
 
   const mut = useMutation({
     mutationFn: (body: ApplyEditRequestBody) =>
-      returnsApi.applyReturnEditRequest(parentId, request.id, body),
+      entity === 'exchange'
+        ? returnsApi.applyExchangeEditRequest(parentId, request.id, body)
+        : returnsApi.applyReturnEditRequest(parentId, request.id, body),
     onSuccess: () => {
       toast.success('تم تطبيق طلب التعديل بنجاح');
       // Refetch the audit panel so the entry flips to "applied" with
-      // the artifact ids visible.
-      qc.invalidateQueries({ queryKey: ['audit', 'return', parentId] });
-      // The parent return's totals + items have changed too, so the
+      // the artifact ids visible.  Audit query key is keyed off the
+      // entity so return + exchange views invalidate independently.
+      qc.invalidateQueries({ queryKey: ['audit', entity, parentId] });
+      // The parent record's totals + items have changed too, so the
       // details panel + list need a refetch.  Same query keys the
-      // existing ApproveModal / RefundModal use after a status flip.
-      qc.invalidateQueries({ queryKey: ['return', parentId] });
-      qc.invalidateQueries({ queryKey: ['returns'] });
+      // existing Approve / Refund flows use after a status flip.
+      qc.invalidateQueries({ queryKey: [entity, parentId] });
+      qc.invalidateQueries({ queryKey: [entity === 'exchange' ? 'exchanges' : 'returns'] });
       onSuccess?.();
       onClose();
     },
@@ -113,34 +117,13 @@ export function ApplyEditRequestModal({
     mut.mutate(body);
   }
 
-  // Defense in depth — refuse to render the apply form for an
-  // exchange even if the parent forgets to gate the call.
-  if (entity !== 'return') {
-    return (
-      <ModalShell
-        title="تطبيق طلب التعديل"
-        onClose={onClose}
-        testId="apply-edit-request-modal"
-      >
-        <div
-          className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[12px] text-amber-900"
-          data-testid="apply-edit-request-not-supported"
-        >
-          تطبيق تعديلات الاستبدال قيد الإعداد — غير متاح في هذه المرحلة.
-        </div>
-        <div className="flex justify-end pt-2 border-t border-slate-100">
-          <button
-            type="button"
-            onClick={onClose}
-            className="text-[12px] font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 px-3 py-2 rounded-lg"
-            data-testid="apply-edit-request-cancel"
-          >
-            إغلاق
-          </button>
-        </div>
-      </ModalShell>
-    );
-  }
+  const isExchange = entity === 'exchange';
+  const warningCopy = isExchange
+    ? 'سيتم تعديل عملية الاستبدال فعليًا وإعادة احتساب فرق السعر النقدي والأثر المخزني. لا يمكن تنفيذ هذه الخطوة مرتين.'
+    : 'سيتم تعديل المرتجع فعليًا وتسجيل الأثر المخزني والمحاسبي. لا يمكن تنفيذ هذه الخطوة مرتين.';
+  const infoCopy = isExchange
+    ? 'سيتم عكس الحركة النقدية القديمة (إن وُجدت) وإعادة قيدها بالقيم الجديدة، وكذلك تعديل أثر المخزون عند الحاجة. هذه العملية تتم في معاملة واحدة. لا يدعم هذا الإصدار تعديل البنود الجديدة في الاستبدال.'
+    : 'سيتم عكس القيد المالي القديم وإعادة قيده بالقيم الجديدة، وكذلك تعديل أثر المخزون عند الحاجة. هذه العملية تتم في معاملة واحدة.';
 
   return (
     <ModalShell
@@ -159,8 +142,7 @@ export function ApplyEditRequestModal({
           className="text-rose-700 mt-0.5 shrink-0"
         />
         <div className="text-rose-900 leading-relaxed font-bold">
-          سيتم تعديل المرتجع فعليًا وتسجيل الأثر المخزني والمحاسبي. لا يمكن
-          تنفيذ هذه الخطوة مرتين.
+          {warningCopy}
         </div>
       </div>
 
@@ -225,10 +207,7 @@ export function ApplyEditRequestModal({
 
       <div className="flex items-start gap-1.5 text-[11px] text-slate-500">
         <Info size={12} className="mt-0.5 shrink-0" />
-        <span>
-          سيتم عكس القيد المالي القديم وإعادة قيده بالقيم الجديدة، وكذلك
-          تعديل أثر المخزون عند الحاجة. هذه العملية تتم في معاملة واحدة.
-        </span>
+        <span>{infoCopy}</span>
       </div>
 
       <div className="flex gap-2 justify-end pt-2 border-t border-slate-100">

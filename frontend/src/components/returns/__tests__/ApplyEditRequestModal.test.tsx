@@ -1,24 +1,26 @@
 /**
- * ApplyEditRequestModal.test.tsx — Phase 2A admin-apply UI.
+ * ApplyEditRequestModal.test.tsx — admin-apply UI for both
+ * Phase 2A (returns) and Phase 2B (exchanges).
  *
  * Pins:
  *   1. Modal renders the strong-warning banner + summary + diff.
  *   2. Confirm button is disabled until the user types EXACTLY
  *      "تطبيق التعديل" into the verification input.
- *   3. Confirm calls ONLY `returnsApi.applyReturnEditRequest` with the
- *      typed body (notes optional, omitted when empty).
- *   4. Success → toast + invalidates `['audit', 'return', id]` AND
- *      `['return', id]` AND `['returns']` so the parent page totals
- *      refresh — never `applyExchangeEditRequest` (which doesn't
- *      exist on the wrapper) and never approve/reject endpoints.
+ *   3. For entity='return' the confirm calls ONLY
+ *      `returnsApi.applyReturnEditRequest`; for entity='exchange'
+ *      it calls ONLY `returnsApi.applyExchangeEditRequest`.
+ *      Cross-entity wrappers are never invoked.
+ *   4. Success → toast + invalidates the entity-scoped query keys
+ *      so the parent page totals refresh.  Never approve/reject.
  *   5. BE error → toast.error with BE message; no close.
  *   6. Cancel button closes without firing any API call.
- *   7. entity='exchange' renders the "قيد الإعداد" content and the
- *      apply confirm button is gone (defense in depth).
+ *   7. Exchange flow uses entity-aware copy mentioning الاستبدال
+ *      and surfaces the Phase 2B `kind='new'` BE rejection as a
+ *      plain toast.error (no FE pre-validation).
  *   8. Source-grep:
  *      · No PATCH/PUT/DELETE direct.
- *      · Only `returnsApi.applyReturnEditRequest` called.
- *      · No exchange apply call from the modal.
+ *      · Only `applyReturnEditRequest` + `applyExchangeEditRequest`
+ *        on `returnsApi`.
  *      · No JE/CT/SM literals or reverse/replay/amendment terms.
  */
 import { describe, expect, it, vi, beforeEach } from 'vitest';
@@ -45,6 +47,7 @@ vi.mock('react-hot-toast', () => ({
 vi.mock('@/api/returns.api', () => ({
   returnsApi: {
     applyReturnEditRequest: vi.fn(),
+    applyExchangeEditRequest: vi.fn(),
     // Other wrappers exist on the real module but are deliberately
     // NOT exposed via this mock — if the modal references them by
     // mistake, the test will throw a clear "is not a function" error.
@@ -53,7 +56,7 @@ vi.mock('@/api/returns.api', () => ({
 
 import { returnsApi } from '@/api/returns.api';
 
-const APPROVED_REQUEST = {
+const APPROVED_RETURN_REQUEST = {
   id: 'er-1',
   parent_id: 'ret-1',
   document_no: 'RET-2026-000001',
@@ -106,10 +109,18 @@ const APPROVED_REQUEST = {
   source: 'edit_request' as const,
 };
 
+const APPROVED_EXCHANGE_REQUEST = {
+  ...APPROVED_RETURN_REQUEST,
+  id: 'er-x',
+  parent_id: 'exc-1',
+  document_no: 'EXC-2026-000001',
+};
+
 function renderModal(
   overrides: Partial<{
     entity: 'return' | 'exchange';
     parentId: string;
+    request: any;
     onClose: () => void;
     onSuccess: () => void;
     qc: QueryClient;
@@ -125,12 +136,20 @@ function renderModal(
     });
   const onClose = overrides.onClose ?? vi.fn();
   const onSuccess = overrides.onSuccess ?? vi.fn();
+  const entity = overrides.entity ?? 'return';
+  const request =
+    overrides.request ??
+    (entity === 'exchange'
+      ? APPROVED_EXCHANGE_REQUEST
+      : APPROVED_RETURN_REQUEST);
+  const parentId =
+    overrides.parentId ?? (entity === 'exchange' ? 'exc-1' : 'ret-1');
   const utils = render(
     <QueryClientProvider client={qc}>
       <ApplyEditRequestModal
-        entity={overrides.entity ?? 'return'}
-        parentId={overrides.parentId ?? 'ret-1'}
-        request={APPROVED_REQUEST as any}
+        entity={entity}
+        parentId={parentId}
+        request={request as any}
         onClose={onClose}
         onSuccess={onSuccess}
       />
@@ -145,14 +164,14 @@ beforeEach(() => {
 
 // ─── Render shape ─────────────────────────────────────────────────
 
-describe('ApplyEditRequestModal — render', () => {
+describe('ApplyEditRequestModal — render (return)', () => {
   it('renders the strong-warning banner + request summary + diff + notes + phrase guard', () => {
     renderModal();
     expect(screen.getByTestId('apply-edit-request-modal')).toBeInTheDocument();
     expect(screen.getByText('تطبيق طلب التعديل')).toBeInTheDocument();
     expect(screen.getByText(/RET-2026-000001/)).toBeInTheDocument();
 
-    // Strong-warning banner.
+    // Strong-warning banner — return copy.
     expect(
       screen.getByTestId('apply-edit-request-warning').textContent,
     ).toMatch(
@@ -174,6 +193,28 @@ describe('ApplyEditRequestModal — render', () => {
     ).toBeInTheDocument();
     expect(
       screen.getByTestId('apply-edit-request-cancel'),
+    ).toBeInTheDocument();
+  });
+});
+
+describe('ApplyEditRequestModal — render (exchange)', () => {
+  it('renders an exchange-specific warning + info that mentions الاستبدال', () => {
+    renderModal({ entity: 'exchange' });
+    expect(screen.getByTestId('apply-edit-request-modal')).toBeInTheDocument();
+    expect(screen.getByText(/EXC-2026-000001/)).toBeInTheDocument();
+    expect(
+      screen.getByTestId('apply-edit-request-warning').textContent,
+    ).toMatch(/سيتم تعديل عملية الاستبدال فعليًا/);
+    // Info hint mentions Phase 2B scope.
+    expect(
+      screen.getByTestId('apply-edit-request-modal').textContent,
+    ).toMatch(/لا يدعم هذا الإصدار تعديل البنود الجديدة في الاستبدال/);
+    // Same confirm + cancel + phrase guard surface as the return flow.
+    expect(
+      screen.getByTestId('apply-edit-request-confirm-phrase'),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTestId('apply-edit-request-confirm'),
     ).toBeInTheDocument();
   });
 });
@@ -213,15 +254,16 @@ describe('ApplyEditRequestModal — confirmation phrase guard', () => {
     renderModal();
     fireEvent.click(screen.getByTestId('apply-edit-request-confirm'));
     expect(returnsApi.applyReturnEditRequest).not.toHaveBeenCalled();
+    expect(returnsApi.applyExchangeEditRequest).not.toHaveBeenCalled();
   });
 });
 
-// ─── Submit happy path ────────────────────────────────────────────
+// ─── Submit happy path — return ──────────────────────────────────
 
-describe('ApplyEditRequestModal — confirm', () => {
+describe('ApplyEditRequestModal — confirm (return)', () => {
   it('calls applyReturnEditRequest only, fires success toast, and invalidates the right query keys', async () => {
     (returnsApi.applyReturnEditRequest as any).mockResolvedValueOnce({
-      ...APPROVED_REQUEST,
+      ...APPROVED_RETURN_REQUEST,
       applied_at: '2026-05-09T14:00:00Z',
       applied_by: 'u-3',
     });
@@ -251,13 +293,13 @@ describe('ApplyEditRequestModal — confirm', () => {
       'er-1',
       { notes: 'تم التطبيق بعد المراجعة' },
     );
+    expect(returnsApi.applyExchangeEditRequest).not.toHaveBeenCalled();
 
     await waitFor(() =>
       expect(toastMocks.success).toHaveBeenCalledWith(
         'تم تطبيق طلب التعديل بنجاح',
       ),
     );
-    // All three query keys invalidated.
     await waitFor(() =>
       expect(invalidateSpy).toHaveBeenCalledWith({
         queryKey: ['audit', 'return', 'ret-1'],
@@ -312,29 +354,88 @@ describe('ApplyEditRequestModal — confirm', () => {
     fireEvent.click(screen.getByTestId('apply-edit-request-cancel'));
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(returnsApi.applyReturnEditRequest).not.toHaveBeenCalled();
+    expect(returnsApi.applyExchangeEditRequest).not.toHaveBeenCalled();
   });
 });
 
-// ─── Exchange defense in depth ────────────────────────────────────
+// ─── Submit happy path — exchange (Phase 2B) ─────────────────────
 
-describe('ApplyEditRequestModal — entity="exchange"', () => {
-  it('renders the "قيد الإعداد" content and offers no confirm button', () => {
-    renderModal({ entity: 'exchange' });
-    expect(
-      screen.getByTestId('apply-edit-request-not-supported').textContent,
-    ).toMatch(/تطبيق تعديلات الاستبدال قيد الإعداد/);
-    // No confirm button — only a close button.
-    expect(
-      screen.queryByTestId('apply-edit-request-confirm'),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByTestId('apply-edit-request-confirm-phrase'),
-    ).not.toBeInTheDocument();
+describe('ApplyEditRequestModal — confirm (exchange)', () => {
+  it('calls applyExchangeEditRequest only, fires success toast, and invalidates exchange-scoped query keys', async () => {
+    (returnsApi.applyExchangeEditRequest as any).mockResolvedValueOnce({
+      ...APPROVED_EXCHANGE_REQUEST,
+      applied_at: '2026-05-10T04:00:00Z',
+      applied_by: 'u-3',
+    });
+    const qc = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false },
+        mutations: { retry: false },
+      },
+    });
+    const invalidateSpy = vi.spyOn(qc, 'invalidateQueries');
+    const { onClose, onSuccess } = renderModal({ entity: 'exchange', qc });
+
+    fireEvent.change(screen.getByTestId('apply-edit-request-notes'), {
+      target: { value: 'تم التطبيق' },
+    });
+    fireEvent.change(
+      screen.getByTestId('apply-edit-request-confirm-phrase'),
+      { target: { value: 'تطبيق التعديل' } },
+    );
+    fireEvent.click(screen.getByTestId('apply-edit-request-confirm'));
+
+    await waitFor(() =>
+      expect(returnsApi.applyExchangeEditRequest).toHaveBeenCalledTimes(1),
+    );
+    expect(returnsApi.applyExchangeEditRequest).toHaveBeenCalledWith(
+      'exc-1',
+      'er-x',
+      { notes: 'تم التطبيق' },
+    );
+    expect(returnsApi.applyReturnEditRequest).not.toHaveBeenCalled();
+
+    await waitFor(() =>
+      expect(toastMocks.success).toHaveBeenCalledWith(
+        'تم تطبيق طلب التعديل بنجاح',
+      ),
+    );
+    await waitFor(() =>
+      expect(invalidateSpy).toHaveBeenCalledWith({
+        queryKey: ['audit', 'exchange', 'exc-1'],
+      }),
+    );
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: ['exchange', 'exc-1'],
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: ['exchanges'],
+    });
+    expect(onSuccess).toHaveBeenCalledTimes(1);
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it('does not call any API even if a regression bypasses the parent gate', () => {
-    renderModal({ entity: 'exchange' });
-    expect(returnsApi.applyReturnEditRequest).not.toHaveBeenCalled();
+  it('surfaces the BE Phase 2C scope error verbatim and does not close', async () => {
+    (returnsApi.applyExchangeEditRequest as any).mockRejectedValueOnce({
+      response: {
+        data: {
+          message:
+            'تعديل البنود الجديدة في الاستبدال غير مدعوم في هذه المرحلة — Phase 2C',
+        },
+      },
+    });
+    const { onClose } = renderModal({ entity: 'exchange' });
+    fireEvent.change(
+      screen.getByTestId('apply-edit-request-confirm-phrase'),
+      { target: { value: 'تطبيق التعديل' } },
+    );
+    fireEvent.click(screen.getByTestId('apply-edit-request-confirm'));
+    await waitFor(() =>
+      expect(toastMocks.error).toHaveBeenCalledWith(
+        'تعديل البنود الجديدة في الاستبدال غير مدعوم في هذه المرحلة — Phase 2C',
+      ),
+    );
+    expect(onClose).not.toHaveBeenCalled();
   });
 });
 
@@ -359,17 +460,22 @@ describe('ApplyEditRequestModal — strict-contract source-grep', () => {
     expect(code).not.toMatch(/api\.post\(/);
   });
 
-  it('only API surface is applyReturnEditRequest', () => {
+  it('only API surfaces are applyReturnEditRequest + applyExchangeEditRequest', () => {
     const calls = code.match(/returnsApi\.\w+/g) ?? [];
+    const allowed = new Set([
+      'returnsApi.applyReturnEditRequest',
+      'returnsApi.applyExchangeEditRequest',
+    ]);
     for (const call of calls) {
-      expect(call).toBe('returnsApi.applyReturnEditRequest');
+      expect(allowed.has(call)).toBe(true);
     }
   });
 
   it('does not invoke any approve / reject / amendment / reverse / replay path', () => {
     expect(code).not.toMatch(/approveReturnEditRequest/);
     expect(code).not.toMatch(/rejectReturnEditRequest/);
-    expect(code).not.toMatch(/applyExchangeEditRequest/);
+    expect(code).not.toMatch(/approveExchangeEditRequest/);
+    expect(code).not.toMatch(/rejectExchangeEditRequest/);
     expect(code).not.toMatch(/Amendment/i);
     expect(code).not.toMatch(/\breverse\b/i);
     expect(code).not.toMatch(/\breplay\b/i);

@@ -32,7 +32,6 @@ import {
   BadRequestException,
   ConflictException,
   NotFoundException,
-  NotImplementedException,
 } from '@nestjs/common';
 
 import { ReturnEditRequestsService } from './return-edit-requests.service';
@@ -948,41 +947,39 @@ describe('applyApprovedReturn — payload coverage', () => {
   });
 });
 
-describe('applyApprovedExchange — Phase 2A scope guard', () => {
-  it('throws NotImplemented (501) regardless of input', async () => {
+// PR-FIX-RETURNS-EXCHANGES-EDIT-REQUEST-APPLY-PHASE-2B — exchange apply
+// is now implemented; the Phase 2A 501 scope-guard tests have been
+// retired.  The cross-method guard (applyApprovedReturn called with
+// entity='exchange') still exists, but now throws BadRequestException
+// pointing the caller at applyApprovedExchange instead of the deferred
+// "قيد الإعداد" message.  Full happy-path + validation coverage for
+// the exchange apply flow lives in the dedicated spec file
+// `return-edit-requests.apply-exchange.spec.ts`.
+describe('applyApprovedReturn — defense in depth (cross-entity guard)', () => {
+  it('applyApprovedReturn called with entity="exchange" rejects with a clear router-hint message', async () => {
     const { ds } = makeRouter([]);
     const posting: any = {
       reverseByReference: jest.fn(),
       postReturn: jest.fn(),
     };
     const svc = await buildSvc(ds, posting);
-    await expect(
-      svc.applyApprovedExchange({
+    let caught: any;
+    try {
+      await svc.applyApprovedReturn({
         entity: 'exchange',
         parent_id: 'exch-1',
         request_id: 'req-1',
         user_id: USER_ID,
-      }),
-    ).rejects.toThrow(NotImplementedException);
+      });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(BadRequestException);
+    expect(caught.message).toBe(
+      'هذه الدالة مخصصة للمرتجعات — استخدم applyApprovedExchange للاستبدال',
+    );
     expect(posting.reverseByReference).not.toHaveBeenCalled();
     expect(posting.postReturn).not.toHaveBeenCalled();
-  });
-
-  it('applyApprovedReturn called with entity="exchange" also throws 501 (defense in depth)', async () => {
-    const { ds } = makeRouter([]);
-    const posting: any = {
-      reverseByReference: jest.fn(),
-      postReturn: jest.fn(),
-    };
-    const svc = await buildSvc(ds, posting);
-    await expect(
-      svc.applyApprovedReturn({
-        entity: 'exchange',
-        parent_id: 'exch-1',
-        request_id: 'req-1',
-        user_id: USER_ID,
-      }),
-    ).rejects.toThrow(NotImplementedException);
   });
 });
 

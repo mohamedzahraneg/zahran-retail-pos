@@ -718,21 +718,21 @@ describe('<ReturnsAuditPanel />', () => {
     expect(artifacts.textContent).toMatch(/sm-1/);
   });
 
-  it('shows "قيد الإعداد" hint and no active button for an EXCHANGE approved-unapplied request', async () => {
+  it('shows the apply button (no deferred chip) for an EXCHANGE approved-unapplied request — Phase 2B', async () => {
     loginAdmin();
     (returnsApi.getExchangeAudit as any).mockResolvedValueOnce(
       fixtureWithRequest(approvedNotAppliedRow()),
     );
     renderPanel('exchange');
-    const deferred = await screen.findByTestId(
-      'audit-edit-request-req-approved-unapplied-apply-deferred',
+    const applyBtn = await screen.findByTestId(
+      'audit-edit-request-req-approved-unapplied-apply',
     );
-    expect(deferred.textContent).toMatch(
-      /تطبيق تعديلات الاستبدال قيد الإعداد/,
-    );
+    expect(applyBtn).toBeInTheDocument();
+    expect(applyBtn.textContent).toMatch(/تطبيق التعديل/);
+    // The Phase 2A "قيد الإعداد" deferred chip is gone.
     expect(
       screen.queryByTestId(
-        'audit-edit-request-req-approved-unapplied-apply',
+        'audit-edit-request-req-approved-unapplied-apply-deferred',
       ),
     ).not.toBeInTheDocument();
   });

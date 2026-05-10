@@ -441,15 +441,13 @@ export const returnsApi = {
       ),
     ),
 
-  // ── Edit-request APPLY (Phase 2A — return-only) ────────────────
-  // POST /returns/:id/edit-requests/:requestId/apply
+  // ── Edit-request APPLY ─────────────────────────────────────────
+  // POST /returns/:id/edit-requests/:requestId/apply        (Phase 2A)
+  // POST /exchanges/:id/edit-requests/:requestId/apply      (Phase 2B)
   //
-  // Strict scope: this wrapper exposes ONLY the return apply endpoint.
-  // Exchange apply is intentionally NOT exposed via the FE API
-  // wrapper — the BE endpoint exists and returns 501, but the FE
-  // surface deliberately keeps it un-callable so a future regression
-  // can't accidentally invoke the unimplemented path.  When Phase 2B
-  // ships, the exchange wrapper lands alongside the new BE.
+  // Phase 2B note: the exchange wrapper only exposes the returned-side
+  // edit flow.  Editing `kind='new'` exchange lines is rejected by
+  // the BE with an explicit Phase 2C marker.
   applyReturnEditRequest: (
     returnId: string,
     requestId: string,
@@ -458,6 +456,18 @@ export const returnsApi = {
     unwrap<AuditEditRequestRow>(
       api.post(
         `/returns/${returnId}/edit-requests/${requestId}/apply`,
+        body ?? {},
+      ),
+    ),
+
+  applyExchangeEditRequest: (
+    exchangeId: string,
+    requestId: string,
+    body?: ApplyEditRequestBody,
+  ) =>
+    unwrap<AuditEditRequestRow>(
+      api.post(
+        `/exchanges/${exchangeId}/edit-requests/${requestId}/apply`,
         body ?? {},
       ),
     ),

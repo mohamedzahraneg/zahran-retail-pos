@@ -755,14 +755,11 @@ function EditRequestEntry({
   const canReview = isAdmin && row.status === 'pending';
   // PR-FIN-RETURNS-EXCHANGES-EDIT-REQUESTS-APPLY — admin can apply an
   // already-approved request that hasn't been applied yet.  Phase 2A
-  // ships RETURN apply only; exchange shows a disabled "قيد الإعداد"
-  // hint instead of the button.
+  // ships RETURN apply, Phase 2B ships EXCHANGE apply (returned-side
+  // lines only — `kind='new'` edits are rejected by the BE).
   const isApproved = row.status === 'approved';
   const isApplied = Boolean(row.applied_at);
-  const canApplyReturn =
-    isAdmin && entity === 'return' && isApproved && !isApplied;
-  const showExchangeApplyDeferred =
-    entity === 'exchange' && isApproved && !isApplied;
+  const canApply = isAdmin && isApproved && !isApplied;
   return (
     <li
       className="rounded-xl border border-indigo-200 bg-indigo-50/50 p-3 space-y-2"
@@ -907,11 +904,11 @@ function EditRequestEntry({
       )}
 
       {/* PR-FIN-RETURNS-EXCHANGES-EDIT-REQUESTS-APPLY — admin button to
-          apply an already-approved RETURN request.  Strong-warning
-          styling because this is the financial side-effect step.
-          Visibility: admin AND entity='return' AND status='approved'
-          AND not yet applied. */}
-      {canApplyReturn && (
+          apply an already-approved request.  Strong-warning styling
+          because this is the financial side-effect step.  Visibility:
+          admin AND status='approved' AND not yet applied — covers
+          both returns (Phase 2A) and exchanges (Phase 2B). */}
+      {canApply && (
         <div
           className="flex gap-2 pt-2 border-t border-indigo-100"
           data-testid={`audit-edit-request-${row.id}-apply-actions`}
@@ -924,18 +921,6 @@ function EditRequestEntry({
           >
             <AlertTriangle size={12} /> تطبيق التعديل
           </button>
-        </div>
-      )}
-
-      {/* Phase 2A — exchange apply is intentionally not shipped.  Show
-          a small disabled "قيد الإعداد" hint when an exchange request
-          is approved but not applied. */}
-      {showExchangeApplyDeferred && (
-        <div
-          className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1.5"
-          data-testid={`audit-edit-request-${row.id}-apply-deferred`}
-        >
-          تطبيق تعديلات الاستبدال قيد الإعداد
         </div>
       )}
 
