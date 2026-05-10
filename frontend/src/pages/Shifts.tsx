@@ -413,7 +413,13 @@ function CurrentShiftCard({ shift }: { shift: Shift }) {
           />
           <MiniChip
             label="↩ مرتجعات/استبدالات"
-            amount={-(s.total_refund_cash_out || 0)}
+            // PR-FIX-SHIFTS-CASHOUT-NET — display the NET cash impact
+            // (out − in) so reverse-and-replay refunds (e.g.
+            // RET-2026-000006) show the operational 450 instead of
+            // the gross 900.  The labeled gross/net breakdown
+            // elsewhere on this page keeps surfacing both audit
+            // numbers separately for treasury reconciliation.
+            amount={-(s.net_refund_cash_impact || 0)}
             count={s.refund_cash_movements?.length ?? 0}
             tone="rose"
           />
@@ -837,7 +843,8 @@ function CloseShiftModal({
           />
           <Row
             label={`مرتجعات/استبدالات (${s?.refund_cash_movements?.length ?? 0})`}
-            value={'- ' + EGP(s?.total_refund_cash_out || 0)}
+            // PR-FIX-SHIFTS-CASHOUT-NET — show NET refund impact (out − in).
+            value={'- ' + EGP(s?.net_refund_cash_impact || 0)}
             color="text-rose-600"
           />
           <Row
@@ -1136,7 +1143,8 @@ function ShiftDetailModal({ shift, onClose }: { shift: Shift; onClose: () => voi
               />
               <Row
                 label={`↩ مرتجعات/استبدالات (${s.refund_cash_movements?.length ?? 0})`}
-                value={'- ' + EGP(s.total_refund_cash_out || 0)}
+                // PR-FIX-SHIFTS-CASHOUT-NET — show NET refund impact (out − in).
+                value={'- ' + EGP(s.net_refund_cash_impact || 0)}
                 color="text-rose-600"
               />
               <Row
@@ -1509,7 +1517,18 @@ function ShiftDetailModal({ shift, onClose }: { shift: Shift; onClose: () => voi
                 <CashOutLine label="سلف الموظفين" value={s.total_employee_advances} />
                 <CashOutLine label="صرف مستحقات الموظفين" value={s.total_employee_settlements} />
                 <CashOutLine label="مدفوعات للموردين" value={s.supplier_payments} />
-                <CashOutLine label="مرتجعات نقدية / استبدالات" value={s.total_refund_cash_out} />
+                {/*
+                 * PR-FIX-SHIFTS-CASHOUT-NET — "ملخص الخروج النقدي"
+                 * (the user-facing cash-out tally) must use NET refund
+                 * impact so an edit-and-replayed refund shows 450, not
+                 * 900.  This line item now matches the operational
+                 * total at "إجمالي الخروج النقدي من الدرج" below — the
+                 * BE-side `total_cash_out` is also derived from
+                 * `netRefundCashImpact` after PR-FIX-SHIFT-CLOSE-NET-
+                 * REFUND-IMPACT.  Gross out/in stay visible in the
+                 * labeled breakdown above the refund movements table.
+                 */}
+                <CashOutLine label="مرتجعات نقدية / استبدالات" value={s.net_refund_cash_impact} />
                 <CashOutLine label="حركات نقدية أخرى" value={s.other_cash_out} />
               </div>
               <div className="border-t border-slate-300 mt-2 pt-2 flex items-center justify-between">

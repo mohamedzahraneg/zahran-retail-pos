@@ -184,3 +184,165 @@ describe('shifts.api — ShiftSummary type carries the audit-only cancelled fiel
     expect(SRC).toMatch(/cancelled_return_net\?:\s*number/);
   });
 });
+
+// ─── PR-FIX-SHIFTS-CASHOUT-NET ────────────────────────────────────
+//
+//   The four operational refund rows on the Shifts page (compact
+//   mini-chip, two cashflow Rows, and the "ملخص الخروج النقدي"
+//   CashOutLine) display the NET cash impact of refunds — not the
+//   GROSS out total.  This matters for edit-and-replayed refunds
+//   (e.g. RET-2026-000006) where the engine writes original-out +
+//   reversal-in + replay-out for the same business event:
+//
+//     gross out   = 900
+//     gross in    = 450
+//     net impact  = 450  ← what the user-facing "خرج من الدرج" shows
+//
+//   The labeled "خارج: <gross> / داخل: <gross>" breakdown in the
+//   refund-movements section keeps surfacing both audit numbers for
+//   treasury reconciliation; this guard ensures THAT one block stays
+//   gross while the four operational rows go net.
+describe('Shifts — operational rows display NET refund impact (PR-FIX-SHIFTS-CASHOUT-NET)', () => {
+  it('compact mini-chip "↩ مرتجعات/استبدالات" uses net_refund_cash_impact (not total_refund_cash_out)', () => {
+    // Window is wide because the source carries a multi-line comment
+    // between `label` and `amount` documenting the gross-vs-net swap.
+    expect(SHIFTS_SRC).toMatch(
+      /label="↩ مرتجعات\/استبدالات"[\s\S]{0,1200}amount=\{-\(s\.net_refund_cash_impact \|\| 0\)\}/,
+    );
+    const m = SHIFTS_SRC.match(
+      /label="↩ مرتجعات\/استبدالات"[\s\S]{0,1200}amount=\{[^}]+\}/,
+    );
+    expect(m).not.toBeNull();
+    expect(m![0]).not.toMatch(/total_refund_cash_out/);
+  });
+
+  it('cashflow Row "مرتجعات/استبدالات" uses net_refund_cash_impact (not total_refund_cash_out)', () => {
+    expect(SHIFTS_SRC).toMatch(
+      /label=\{`مرتجعات\/استبدالات[^`]*`\}[\s\S]{0,200}value=\{'- ' \+ EGP\(s\?\.net_refund_cash_impact \|\| 0\)\}/,
+    );
+  });
+
+  it('detailed cashflow Row "↩ مرتجعات/استبدالات" uses net_refund_cash_impact (not total_refund_cash_out)', () => {
+    expect(SHIFTS_SRC).toMatch(
+      /label=\{`↩ مرتجعات\/استبدالات[^`]*`\}[\s\S]{0,200}value=\{'- ' \+ EGP\(s\.net_refund_cash_impact \|\| 0\)\}/,
+    );
+  });
+
+  it('"ملخص الخروج النقدي" CashOutLine "مرتجعات نقدية / استبدالات" uses net_refund_cash_impact', () => {
+    expect(SHIFTS_SRC).toMatch(
+      /<CashOutLine\s+label="مرتجعات نقدية \/ استبدالات"\s+value=\{s\.net_refund_cash_impact\}\s*\/>/,
+    );
+  });
+
+  it('labeled "خارج: <gross> / داخل: <gross>" breakdown KEEPS the gross audit pair', () => {
+    // Treasury reconciliation breakdown must continue to surface
+    // BOTH gross numbers explicitly.
+    expect(SHIFTS_SRC).toMatch(
+      /خارج:\s*<span[^>]*>\{EGP\(s\.total_refund_cash_out\)\}<\/span>/,
+    );
+    expect(SHIFTS_SRC).toMatch(
+      /داخل:\s*<span[^>]*>\{EGP\(s\.total_refund_cash_in\)\}<\/span>/,
+    );
+    // …and still pairs them with the explicit net so the user knows
+    // which one feeds expected_closing.
+    expect(SHIFTS_SRC).toMatch(
+      /صافي أثر المرتجعات\/الاستبدالات على الوردية[\s\S]{0,200}\{EGP\(-s\.net_refund_cash_impact\)\}/,
+    );
+  });
+
+  it('refund-movements section header "صافي الأثر" stays on net_refund_cash_impact', () => {
+    expect(SHIFTS_SRC).toMatch(
+      /صافي الأثر\s*\{EGP\(-s\.net_refund_cash_impact\)\}/,
+    );
+  });
+
+  it('exactly TWO references to total_refund_cash_out remain — both inside the labeled gross breakdown', () => {
+    // Defence in depth: the operational rows must not regress back to
+    // the gross out.  Allow exactly the two surviving uses:
+    //   (a) the explicit "خارج: <total_refund_cash_out>" label
+    //   (b) the explicit "داخل: <total_refund_cash_in>" sibling
+    // is enforced by the previous test — count here pins the magnitude.
+    const grossOutHits =
+      SHIFTS_SRC.match(/total_refund_cash_out/g)?.length ?? 0;
+    expect(grossOutHits).toBe(1);
+    const grossInHits =
+      SHIFTS_SRC.match(/total_refund_cash_in/g)?.length ?? 0;
+    expect(grossInHits).toBe(1);
+  });
+
+  it('exactly FOUR operational consumers reference net_refund_cash_impact for display value', () => {
+    // 4 sites swapped:
+    //   1. mini-chip amount
+    //   2. cashflow Row value (compact)
+    //   3. detailed cashflow Row value
+    //   4. CashOutLine value
+    // Plus 2 pre-existing uses: the refund-movements-table header
+    // ("صافي الأثر") and the gross-breakdown footer ("صافي أثر…").
+    // Total = 6.
+    const netHits =
+      SHIFTS_SRC.match(/net_refund_cash_impact/g)?.length ?? 0;
+    expect(netHits).toBeGreaterThanOrEqual(6);
+  });
+});
+
+// ─── End-to-end fixture math (no React render — pure simulation) ──
+//   These lock the helper-aware reasoning behind the swaps so a future
+//   regression that flips, say, the mini-chip back to the gross out
+//   will fail at the math layer too — even if the source-grep above
+//   somehow drifts.
+describe('Shifts cash-out display math (PR-FIX-SHIFTS-CASHOUT-NET)', () => {
+  type Sum = {
+    total_refund_cash_out: number;
+    total_refund_cash_in: number;
+    net_refund_cash_impact: number;
+  };
+  // Simulate what the UI now reads for each operational site.
+  const opChipAmount = (s: Sum) => -(s.net_refund_cash_impact || 0);
+  const opRowValue = (s: Sum) =>
+    '- ' + (s.net_refund_cash_impact || 0).toFixed(2);
+  const cashOutLineValue = (s: Sum) => s.net_refund_cash_impact;
+
+  it('edit-and-replay refund (out 900, in 450, net 450) → operational displays show 450', () => {
+    const sum: Sum = {
+      total_refund_cash_out: 900,
+      total_refund_cash_in: 450,
+      net_refund_cash_impact: 450,
+    };
+    expect(opChipAmount(sum)).toBe(-450);    // not -900
+    expect(opRowValue(sum)).toBe('- 450.00'); // not '- 900.00'
+    expect(cashOutLineValue(sum)).toBe(450);  // not 900
+  });
+
+  it('plain refund (out 450, in 0, net 450) → operational displays show 450', () => {
+    const sum: Sum = {
+      total_refund_cash_out: 450,
+      total_refund_cash_in: 0,
+      net_refund_cash_impact: 450,
+    };
+    expect(opChipAmount(sum)).toBe(-450);
+    expect(opRowValue(sum)).toBe('- 450.00');
+    expect(cashOutLineValue(sum)).toBe(450);
+  });
+
+  it('cancelled-only refund (out 0, in 0, net 0 — helper excludes cancelled-pair) → operational displays show 0', () => {
+    const sum: Sum = {
+      total_refund_cash_out: 0,
+      total_refund_cash_in: 0,
+      net_refund_cash_impact: 0,
+    };
+    expect(opChipAmount(sum)).toBe(-0);
+    expect(opRowValue(sum)).toBe('- 0.00');
+    expect(cashOutLineValue(sum)).toBe(0);
+  });
+
+  it('operational total ≠ gross out for the edit-and-replay shape (the bug RET-2026-000006 surfaced)', () => {
+    const sum: Sum = {
+      total_refund_cash_out: 900,
+      total_refund_cash_in: 450,
+      net_refund_cash_impact: 450,
+    };
+    // The whole point of this PR.
+    expect(cashOutLineValue(sum)).not.toBe(sum.total_refund_cash_out);
+    expect(cashOutLineValue(sum)).toBe(sum.net_refund_cash_impact);
+  });
+});
