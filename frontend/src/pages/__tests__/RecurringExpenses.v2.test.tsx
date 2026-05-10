@@ -1,0 +1,478 @@
+/**
+ * RecurringExpenses.v2.test.tsx — PR-A
+ *
+ * Pins the Recurring Expenses v2 UX/RTL cleanup:
+ *
+ *   1. Header — title appears BEFORE the actions cluster in DOM
+ *      order so RTL flex puts the title on the right at every
+ *      breakpoint (no `lg:order-*` swap that flipped it left).
+ *   2. Empty state — three numbered Arabic steps + CTA when zero
+ *      templates exist.
+ *   3. Generation-behavior radio group — collapses the three
+ *      booleans (auto_post / auto_paid / require_approval) into one
+ *      self-describing choice; pure helpers `flagsToBehavior` and
+ *      `behaviorToFlags` round-trip cleanly.
+ *   4. Due-status filter pills — 6 named filters; client-side
+ *      `filterRowsByDue` helper covers each case.
+ *   5. Runs history drawer — opens for a row, fetches via
+ *      `GET /recurring-expenses/:id`, renders runs.
+ *   6. Source-grep — RecurringExpenses.tsx no longer uses
+ *      `lg:order-1` / `lg:order-2`.
+ */
+
+import { describe, expect, it, vi } from 'vitest';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { MemoryRouter } from 'react-router-dom';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import RecurringExpenses, {
+  flagsToBehavior,
+  behaviorToFlags,
+  filterRowsByDue,
+} from '@/pages/RecurringExpenses';
+import type { RecurringExpense } from '@/api/recurringExpenses.api';
+
+// ─── Mocks ──────────────────────────────────────────────────────────
+
+let listFixture: RecurringExpense[] = [];
+let statsFixture: any = {
+  active_templates: 0,
+  paused_templates: 0,
+  due_now: 0,
+  due_next_7_days: 0,
+  monthly_commitment_estimate: 0,
+  due_amount: 0,
+};
+let getFixture: any = null;
+
+vi.mock('@/api/recurringExpenses.api', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return {
+    ...actual,
+    recurringExpensesApi: {
+      list: vi.fn(async () => listFixture),
+      stats: vi.fn(async () => statsFixture),
+      get: vi.fn(async (id: string) => getFixture ?? { id, runs: [] }),
+      create: vi.fn(),
+      update: vi.fn(),
+      remove: vi.fn(),
+      pause: vi.fn(),
+      resume: vi.fn(),
+      run: vi.fn(),
+      processDue: vi.fn(),
+    },
+  };
+});
+
+vi.mock('@/api/accounting.api', () => ({
+  accountingApi: {
+    categories: vi.fn(async () => [
+      { id: 'cat-1', name_ar: 'إيجار' },
+      { id: 'cat-2', name_ar: 'كهرباء' },
+    ]),
+  },
+}));
+
+vi.mock('@/api/settings.api', () => ({
+  settingsApi: {
+    listWarehouses: vi.fn(async () => [
+      { id: 'wh-1', name: 'المخزن الرئيسي' },
+    ]),
+  },
+}));
+
+vi.mock('react-hot-toast', () => {
+  const fn = vi.fn();
+  return {
+    default: Object.assign(fn, { success: vi.fn(), error: vi.fn() }),
+    toast: Object.assign(fn, { success: vi.fn(), error: vi.fn() }),
+  };
+});
+
+function buildTemplate(o: Partial<RecurringExpense> = {}): RecurringExpense {
+  return {
+    id: 'tpl-1',
+    code: 'RENT-01',
+    name_ar: 'إيجار',
+    category_id: 'cat-1',
+    category_name: 'إيجار',
+    warehouse_id: 'wh-1',
+    cashbox_id: 'cb-1',
+    amount: 5000,
+    payment_method: 'cash',
+    vendor_name: 'مالك العقار',
+    description: undefined,
+    frequency: 'monthly',
+    custom_interval_days: undefined,
+    day_of_month: 1,
+    start_date: '2026-01-01',
+    end_date: undefined,
+    next_run_date: '2026-06-01',
+    last_run_date: '2026-05-01',
+    auto_post: true,
+    auto_paid: true,
+    notify_days_before: 3,
+    require_approval: false,
+    status: 'active',
+    runs_count: 4,
+    last_error: undefined,
+    due_status: 'scheduled',
+    days_overdue: -21,
+    ...o,
+  };
+}
+
+function renderPage() {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(
+    <QueryClientProvider client={qc}>
+      <MemoryRouter>
+        <RecurringExpenses />
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+}
+
+// ─── Pure helpers ───────────────────────────────────────────────────
+
+describe('flagsToBehavior / behaviorToFlags — round trip (PR-A)', () => {
+  it('maps each behavior to the expected boolean triplet', () => {
+    expect(behaviorToFlags('draft')).toEqual({
+      auto_post: false,
+      auto_paid: false,
+      require_approval: false,
+    });
+    expect(behaviorToFlags('auto_post')).toEqual({
+      auto_post: true,
+      auto_paid: false,
+      require_approval: false,
+    });
+    expect(behaviorToFlags('auto_paid')).toEqual({
+      auto_post: true,
+      auto_paid: true,
+      require_approval: false,
+    });
+    expect(behaviorToFlags('approval')).toEqual({
+      auto_post: false,
+      auto_paid: false,
+      require_approval: true,
+    });
+  });
+
+  it('flagsToBehavior is the inverse: any behavior round-trips', () => {
+    for (const b of ['draft', 'auto_post', 'auto_paid', 'approval'] as const) {
+      expect(flagsToBehavior(behaviorToFlags(b))).toBe(b);
+    }
+  });
+
+  it('flagsToBehavior treats require_approval=TRUE as the dominant flag', () => {
+    // Even if a legacy row has auto_post=true AND require_approval=true,
+    // it must classify as "approval" — that's the path that wires up
+    // the expense_approvals inbox.
+    expect(
+      flagsToBehavior({ auto_post: true, auto_paid: true, require_approval: true }),
+    ).toBe('approval');
+  });
+});
+
+// ─── filterRowsByDue ────────────────────────────────────────────────
+
+describe('filterRowsByDue — client-side due-status slicing (PR-A)', () => {
+  const rows: RecurringExpense[] = [
+    buildTemplate({ id: 'A', status: 'active', due_status: 'due', days_overdue: 3 }),  // overdue
+    buildTemplate({ id: 'B', status: 'active', due_status: 'due', days_overdue: 0 }),  // due now
+    buildTemplate({ id: 'C', status: 'active', due_status: 'upcoming', days_overdue: -2 }), // within 7d
+    buildTemplate({ id: 'D', status: 'active', due_status: 'scheduled', days_overdue: -30 }), // far future
+    buildTemplate({ id: 'E', status: 'paused', due_status: 'scheduled' }),
+    buildTemplate({ id: 'F', status: 'ended', due_status: 'scheduled' }),
+  ];
+
+  it('"all" excludes ended templates', () => {
+    const ids = filterRowsByDue(rows, 'all').map((r) => r.id);
+    expect(ids).toEqual(['A', 'B', 'C', 'D', 'E']);
+  });
+
+  it('"due_now" returns active rows due today (days_overdue <= 0)', () => {
+    const ids = filterRowsByDue(rows, 'due_now').map((r) => r.id);
+    expect(ids).toEqual(['B']);
+  });
+
+  it('"overdue" returns active rows whose due date is in the past', () => {
+    const ids = filterRowsByDue(rows, 'overdue').map((r) => r.id);
+    expect(ids).toEqual(['A']);
+  });
+
+  it('"due_7d" returns upcoming + due-today (not overdue)', () => {
+    const ids = filterRowsByDue(rows, 'due_7d').map((r) => r.id);
+    expect(ids.sort()).toEqual(['B', 'C']);
+  });
+
+  it('"paused" / "ended" return only that bucket', () => {
+    expect(filterRowsByDue(rows, 'paused').map((r) => r.id)).toEqual(['E']);
+    expect(filterRowsByDue(rows, 'ended').map((r) => r.id)).toEqual(['F']);
+  });
+});
+
+// ─── Header layout ──────────────────────────────────────────────────
+
+describe('RecurringExpenses — header layout (PR-A)', () => {
+  it('title appears before the action cluster in DOM order (RTL → right)', async () => {
+    listFixture = [];
+    renderPage();
+    const header = await screen.findByTestId('recurring-expenses-header');
+    const title = screen.getByText('المصروفات الدورية');
+    const action = screen.getByTestId('recurring-new-template-btn');
+
+    expect(header.contains(title)).toBe(true);
+    expect(header.contains(action)).toBe(true);
+    // RTL ordering invariant — title's DOM position precedes the action.
+    expect(
+      title.compareDocumentPosition(action) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it('source no longer contains `lg:order-1` / `lg:order-2` swap classes', () => {
+    const src = readFileSync(
+      resolve(__dirname, '../RecurringExpenses.tsx'),
+      'utf-8',
+    );
+    expect(src).not.toMatch(/\blg:order-1\b/);
+    expect(src).not.toMatch(/\blg:order-2\b/);
+    expect(src).toMatch(/dir="rtl"/);
+  });
+});
+
+// ─── Empty state ────────────────────────────────────────────────────
+
+describe('RecurringExpenses — empty state guidance (PR-A)', () => {
+  it('renders the 3-step Arabic guide when zero templates exist', async () => {
+    listFixture = [];
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByTestId('recurring-empty')).toBeInTheDocument(),
+    );
+    expect(screen.getByText('ابدأ بإضافة قالب مصروف دوري')).toBeInTheDocument();
+    expect(screen.getByTestId('recurring-empty-step-1')).toHaveTextContent(
+      'أضف قالب مصروف دوري',
+    );
+    expect(screen.getByTestId('recurring-empty-step-2')).toHaveTextContent(
+      'راجع الاستحقاق القادم',
+    );
+    expect(screen.getByTestId('recurring-empty-step-3')).toHaveTextContent(
+      'ولّد المصروف أو اتركه تلقائيًا',
+    );
+  });
+
+  it('empty state mentions the integration with the normal expense workflow', async () => {
+    listFixture = [];
+    renderPage();
+    const empty = await screen.findByTestId('recurring-empty');
+    // "تتحول إلى مصروفات عادية" — sets the expectation that there's
+    // no parallel accounting pipeline.
+    expect(empty.textContent).toMatch(/مصروفات عادية/);
+  });
+
+  it('"قالب جديد" CTA inside the empty state opens the form modal', async () => {
+    listFixture = [];
+    renderPage();
+    const cta = await screen.findByTestId('recurring-empty-cta');
+    fireEvent.click(cta);
+    expect(screen.getByText('قالب مصروف دوري جديد')).toBeInTheDocument();
+  });
+});
+
+// ─── Filter pills ───────────────────────────────────────────────────
+
+describe('RecurringExpenses — due-status filter pills (PR-A)', () => {
+  it('renders all six pills with the expected Arabic labels', async () => {
+    listFixture = [buildTemplate()];
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByTestId('recurring-filters')).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId('recurring-filter-all')).toHaveTextContent('الكل');
+    expect(screen.getByTestId('recurring-filter-due_now')).toHaveTextContent(
+      'مستحقة الآن',
+    );
+    expect(screen.getByTestId('recurring-filter-due_7d')).toHaveTextContent(
+      'خلال 7 أيام',
+    );
+    expect(screen.getByTestId('recurring-filter-overdue')).toHaveTextContent('متأخرة');
+    expect(screen.getByTestId('recurring-filter-paused')).toHaveTextContent('موقوفة');
+    expect(screen.getByTestId('recurring-filter-ended')).toHaveTextContent('منتهية');
+  });
+
+  it('clicking "متأخرة" narrows the table to overdue rows only', async () => {
+    listFixture = [
+      buildTemplate({
+        id: 'A',
+        code: 'OVR-01',
+        name_ar: 'متأخر',
+        status: 'active',
+        due_status: 'due',
+        days_overdue: 5,
+      }),
+      buildTemplate({
+        id: 'B',
+        code: 'SCH-01',
+        name_ar: 'مجدول',
+        status: 'active',
+        due_status: 'scheduled',
+        days_overdue: -10,
+      }),
+    ];
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByTestId('recurring-table')).toBeInTheDocument(),
+    );
+    // Both rows visible by default
+    expect(screen.getByText('متأخر')).toBeInTheDocument();
+    expect(screen.getByText('مجدول')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('recurring-filter-overdue'));
+    // Only the overdue row remains
+    expect(screen.getByText('متأخر')).toBeInTheDocument();
+    expect(screen.queryByText('مجدول')).toBeNull();
+  });
+});
+
+// ─── Behavior radio group ───────────────────────────────────────────
+
+describe('RecurringExpenses — generation-behavior radio (PR-A)', () => {
+  it('renders all four radio options inside the fieldset', async () => {
+    listFixture = [];
+    renderPage();
+    fireEvent.click(await screen.findByTestId('recurring-new-template-btn'));
+    expect(screen.getByTestId('recurring-behavior-fieldset')).toBeInTheDocument();
+    expect(screen.getByTestId('recurring-behavior-draft')).toBeInTheDocument();
+    expect(screen.getByTestId('recurring-behavior-auto_post')).toBeInTheDocument();
+    expect(screen.getByTestId('recurring-behavior-auto_paid')).toBeInTheDocument();
+    expect(screen.getByTestId('recurring-behavior-approval')).toBeInTheDocument();
+  });
+
+  it('default selection for a brand-new template is "اعتماد ودفع تلقائي"', async () => {
+    listFixture = [];
+    renderPage();
+    fireEvent.click(await screen.findByTestId('recurring-new-template-btn'));
+    const autoPaidRadio = screen.getByTestId(
+      'recurring-behavior-auto_paid',
+    ) as HTMLInputElement;
+    expect(autoPaidRadio.checked).toBe(true);
+  });
+
+  it('switching to "مسودة للمراجعة" deselects the previous option', async () => {
+    listFixture = [];
+    renderPage();
+    fireEvent.click(await screen.findByTestId('recurring-new-template-btn'));
+    const draft = screen.getByTestId('recurring-behavior-draft') as HTMLInputElement;
+    const autoPaid = screen.getByTestId(
+      'recurring-behavior-auto_paid',
+    ) as HTMLInputElement;
+
+    fireEvent.click(draft);
+    expect(draft.checked).toBe(true);
+    expect(autoPaid.checked).toBe(false);
+  });
+
+  it('does NOT render the legacy three-checkbox cluster', () => {
+    const src = readFileSync(
+      resolve(__dirname, '../RecurringExpenses.tsx'),
+      'utf-8',
+    );
+    // The old form had three separate <input type="checkbox"> for
+    // auto_post / auto_paid / require_approval inside one flex row.
+    // The new fieldset uses radios bound to GenerationBehavior.
+    const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+    // Sanity: a `<input type="checkbox" ...form.auto_post... >` shape
+    // should be gone.
+    expect(code).not.toMatch(/checked=\{form\.auto_post\}/);
+    expect(code).not.toMatch(/checked=\{form\.auto_paid\}/);
+    expect(code).not.toMatch(/checked=\{form\.require_approval\}/);
+  });
+});
+
+// ─── Runs history drawer ────────────────────────────────────────────
+
+describe('RecurringExpenses — runs history drawer (PR-A)', () => {
+  it('clicking the history icon opens the drawer and renders mocked runs', async () => {
+    const tpl = buildTemplate({ id: 'tpl-99', name_ar: 'إيجار محل' });
+    listFixture = [tpl];
+    getFixture = {
+      ...tpl,
+      runs: [
+        {
+          id: 'run-1',
+          recurring_id: 'tpl-99',
+          expense_id: 'exp-1',
+          expense_no: 'EXP-2026-00012345',
+          scheduled_for: '2026-05-01',
+          generated_at: '2026-05-01T08:00:00Z',
+          amount: 5000,
+          status: 'generated',
+        },
+        {
+          id: 'run-2',
+          recurring_id: 'tpl-99',
+          expense_id: null,
+          expense_no: null,
+          scheduled_for: '2026-04-01',
+          generated_at: '2026-04-01T08:00:00Z',
+          amount: 5000,
+          status: 'failed',
+          error_message: 'الفئة لا تحتوي على حساب محاسبي مرتبط.',
+        },
+      ],
+    };
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByTestId('recurring-table')).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByTestId('recurring-history-tpl-99'));
+
+    await waitFor(() =>
+      expect(screen.getByTestId('recurring-history-drawer')).toBeInTheDocument(),
+    );
+    const runs = await screen.findAllByTestId('recurring-history-run');
+    expect(runs).toHaveLength(2);
+    // First run shows the expense_no
+    expect(runs[0]!.textContent).toMatch(/EXP-2026-00012345/);
+    expect(runs[0]!.textContent).toMatch(/تم التوليد/);
+    // Second run shows the failure reason
+    expect(runs[1]!.textContent).toMatch(/فشل/);
+    expect(runs[1]!.textContent).toMatch(/حساب محاسبي مرتبط/);
+  });
+
+  it('clicking the close button dismisses the drawer', async () => {
+    const tpl = buildTemplate({ id: 'tpl-77' });
+    listFixture = [tpl];
+    getFixture = { ...tpl, runs: [] };
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByTestId('recurring-table')).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByTestId('recurring-history-tpl-77'));
+    await waitFor(() =>
+      expect(screen.getByTestId('recurring-history-drawer')).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByTestId('recurring-history-close'));
+    await waitFor(() =>
+      expect(screen.queryByTestId('recurring-history-drawer')).toBeNull(),
+    );
+  });
+
+  it('empty runs list shows the "لم يُنفَّذ هذا القالب بعد" hint', async () => {
+    const tpl = buildTemplate({ id: 'tpl-empty' });
+    listFixture = [tpl];
+    getFixture = { ...tpl, runs: [] };
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByTestId('recurring-table')).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByTestId('recurring-history-tpl-empty'));
+    await waitFor(() =>
+      expect(screen.getByTestId('recurring-history-runs')).toBeInTheDocument(),
+    );
+    expect(screen.getByText(/لم يُنفَّذ هذا القالب بعد/)).toBeInTheDocument();
+  });
+});

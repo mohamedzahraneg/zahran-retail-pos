@@ -8,6 +8,7 @@ import { DataSource } from 'typeorm';
 import { AccountingPostingService } from '../chart-of-accounts/posting.service';
 import { FinancialEngineService } from '../chart-of-accounts/financial-engine.service';
 import { assertExpenseInvariants } from '../accounting/expense-invariants';
+import { ExpenseApprovalService } from '../accounting/approval.service';
 
 export type Frequency =
   | 'daily'
@@ -51,6 +52,13 @@ export class RecurringExpensesService {
     private readonly ds: DataSource,
     @Optional() private readonly posting?: AccountingPostingService,
     @Optional() private readonly engine?: FinancialEngineService,
+    // PR-A — when `require_approval=true` on a template, the generated
+    // expense must land in the approval inbox the same way a manual
+    // expense from `accounting.createExpense()` does.  Optional so
+    // existing test fixtures + minimal-module bootstraps keep working;
+    // when wired, the service spawns expense_approvals rows from
+    // active `expense_approval_rules` matching the amount.
+    @Optional() private readonly approvals?: ExpenseApprovalService,
   ) {}
 
   async list(opts: {
@@ -116,6 +124,17 @@ export class RecurringExpensesService {
 
   async create(dto: CreateRecurringExpenseDto, userId: string) {
     this.validateDto(dto);
+    // PR-A — if the template will auto-post on generation, the
+    // category MUST resolve to an active chart-of-accounts row.
+    // The engine silently falls back to GL 529 (General Expense)
+    // otherwise, which masks template-config errors until the daily
+    // 08:00 cron runs and operators see odd P&L lines.  Fail at
+    // template-create time so the misconfiguration is fixable
+    // immediately in the same form.
+    const autoPost = dto.auto_post ?? true;
+    if (autoPost) {
+      await this.assertCategoryHasGlMapping(dto.category_id);
+    }
     const [r] = await this.ds.query(
       `
       INSERT INTO recurring_expenses
@@ -160,6 +179,17 @@ export class RecurringExpensesService {
       [id],
     );
     if (!cur) throw new NotFoundException('not found');
+    // PR-A — same category-GL guard as create().  Triggered when
+    // either the caller flips auto_post=true OR changes the category
+    // while auto_post is already true on the existing row.
+    const effectiveAutoPost = dto.auto_post ?? cur.auto_post;
+    const effectiveCategory = dto.category_id ?? cur.category_id;
+    if (
+      effectiveAutoPost &&
+      (dto.auto_post === true || dto.category_id !== undefined)
+    ) {
+      await this.assertCategoryHasGlMapping(effectiveCategory);
+    }
 
     const fields: string[] = [];
     const vals: any[] = [id];
@@ -321,6 +351,26 @@ export class RecurringExpensesService {
           `,
           [tpl.id, expenseId, scheduledFor, tpl.amount, userId],
         );
+
+        // PR-A — when the template requires approval, the generated
+        // expense must land in the same approval inbox a manual
+        // expense from accounting.createExpense() would.  Spawning is
+        // idempotent in practice because:
+        //   1. Each runOne() inserts a brand-new expenses row, so the
+        //      expenseId never repeats across runs (no twin-row
+        //      collision possible).
+        //   2. Two parallel runOne() calls on the same template are
+        //      blocked higher up by the IdempotencyInterceptor on
+        //      `/recurring-expenses/:id/run`.
+        //   3. Once the run advances `next_run_date` past today, any
+        //      retry short-circuits at the `not yet due` check.
+        // If no rules match the amount, spawnForExpense() returns
+        // `{spawned: 0}` and the expense stays as `is_approved=FALSE`
+        // — operator can still approve manually via the existing
+        // PATCH /expenses/:id/approve route.
+        if (tpl.require_approval && this.approvals && expenseId) {
+          await this.approvals.spawnForExpense(expenseId, Number(tpl.amount), em);
+        }
       } catch (err: any) {
         await em.query(
           `
@@ -453,6 +503,30 @@ export class RecurringExpensesService {
     }
     if (dto.day_of_month != null && (dto.day_of_month < 1 || dto.day_of_month > 31)) {
       throw new BadRequestException('day_of_month must be 1..31');
+    }
+  }
+
+  /**
+   * PR-A — pre-create / pre-update guard for templates that will
+   * auto-post.  The expense pipeline tolerates a NULL
+   * `expense_categories.account_id` at runtime (engine falls back to
+   * GL 529 generic), but for a recurring template we want operators
+   * to wire the GL mapping up-front so the generated JE lines are
+   * predictable.  Looks up the category and rejects if it doesn't
+   * exist OR has no `account_id`.
+   */
+  private async assertCategoryHasGlMapping(categoryId: string): Promise<void> {
+    const [cat] = await this.ds.query(
+      `SELECT id, account_id FROM expense_categories WHERE id = $1`,
+      [categoryId],
+    );
+    if (!cat) {
+      throw new BadRequestException('فئة المصروف غير موجودة.');
+    }
+    if (!cat.account_id) {
+      throw new BadRequestException(
+        'الفئة لا تحتوي على حساب محاسبي مرتبط. اربط الفئة بحساب من شجرة الحسابات قبل تفعيل الاعتماد التلقائي، أو أوقف خيار "اعتماد تلقائي".',
+      );
     }
   }
 }

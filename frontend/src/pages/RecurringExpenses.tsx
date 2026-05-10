@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 // PR-FE-IDEM-FINAL-OPS (Sprint 5 / FE-IDEM PR 8) — per-click reset
@@ -25,10 +25,15 @@ import {
   Clock,
   X,
   DollarSign,
+  History,
+  FileText,
+  CalendarClock,
+  CalendarOff,
 } from 'lucide-react';
 import {
   recurringExpensesApi,
   RecurringExpense,
+  RecurringExpenseRun,
   CreateRecurringExpenseInput,
   Frequency,
 } from '@/api/recurringExpenses.api';
@@ -46,17 +51,146 @@ const FREQUENCY_LABEL: Record<Frequency, string> = {
   custom_days: 'مخصص',
 };
 
+// ─── Generation-behavior model ──────────────────────────────────────
+//
+// PR-A v2 — collapse the three confusing booleans
+//   (auto_post · auto_paid · require_approval)
+// into one "سلوك التوليد" radio with four self-describing options.
+// The radio value is FE-only; the payload sent to the BE keeps the
+// existing three flags so no schema / API change is needed.
+
+type GenerationBehavior =
+  | 'draft'        // مسودة للمراجعة — operator opens + approves manually
+  | 'auto_post'    // اعتماد تلقائي بدون دفع — JE posted DR-expense / CR-AP
+  | 'auto_paid'    // اعتماد ودفع تلقائي — JE posted + cash leg fires
+  | 'approval';    // يحتاج اعتماد ثم دفع — lands in approval inbox
+
+interface BehaviorFlags {
+  auto_post: boolean;
+  auto_paid: boolean;
+  require_approval: boolean;
+}
+
+const BEHAVIOR_LABEL: Record<GenerationBehavior, string> = {
+  draft: 'مسودة للمراجعة',
+  auto_post: 'اعتماد تلقائي بدون دفع',
+  auto_paid: 'اعتماد ودفع تلقائي',
+  approval: 'يحتاج اعتماد ثم دفع',
+};
+
+const BEHAVIOR_HINT: Record<GenerationBehavior, string> = {
+  draft:
+    'يُولَّد المصروف كمسودة بدون اعتماد ولا حركة نقدية. تظهر في قائمة المصروفات لمراجعتها يدويًا.',
+  auto_post:
+    'يُولَّد ويُعتمد آليًا. يُسجَّل القيد المحاسبي (مدين: المصروف / دائن: حساب الموردين) دون خصم نقدية.',
+  auto_paid:
+    'يُولَّد ويُعتمد آليًا ويُخصم من الخزنة المحددة فورًا (مدين: المصروف / دائن: الخزنة).',
+  approval:
+    'يُولَّد كطلب اعتماد ويظهر في صندوق الاعتمادات. عند الاعتماد يُسجَّل القيد ويُخصم من الخزنة إن كان نقديًا.',
+};
+
+export function flagsToBehavior(f: Pick<RecurringExpense, 'auto_post' | 'auto_paid' | 'require_approval'>): GenerationBehavior {
+  if (f.require_approval) return 'approval';
+  if (f.auto_post && f.auto_paid) return 'auto_paid';
+  if (f.auto_post) return 'auto_post';
+  return 'draft';
+}
+
+export function behaviorToFlags(b: GenerationBehavior): BehaviorFlags {
+  switch (b) {
+    case 'draft':
+      return { auto_post: false, auto_paid: false, require_approval: false };
+    case 'auto_post':
+      return { auto_post: true, auto_paid: false, require_approval: false };
+    case 'auto_paid':
+      return { auto_post: true, auto_paid: true, require_approval: false };
+    case 'approval':
+      // Stay false on auto_post so runOne() does not try to bypass
+      // the approval inbox; the inserted expense row preserves the
+      // template's cashbox so the post-approval engine call posts
+      // the cash leg correctly.
+      return { auto_post: false, auto_paid: false, require_approval: true };
+  }
+}
+
+// ─── Due-status filter ──────────────────────────────────────────────
+
+type DueFilter =
+  | 'all'
+  | 'due_now'
+  | 'due_7d'
+  | 'overdue'
+  | 'paused'
+  | 'ended';
+
+const DUE_FILTER_LABEL: Record<DueFilter, string> = {
+  all: 'الكل',
+  due_now: 'مستحقة الآن',
+  due_7d: 'خلال 7 أيام',
+  overdue: 'متأخرة',
+  paused: 'موقوفة',
+  ended: 'منتهية',
+};
+
+/** Pure helper — applied client-side to the rows returned by the list
+ *  endpoint.  Operates on `due_status` + `days_overdue` + `status`
+ *  fields the BE already exposes, so no schema change is required. */
+export function filterRowsByDue(
+  rows: ReadonlyArray<RecurringExpense>,
+  filter: DueFilter,
+): RecurringExpense[] {
+  if (filter === 'all') return rows.filter((r) => r.status !== 'ended');
+  if (filter === 'paused') return rows.filter((r) => r.status === 'paused');
+  if (filter === 'ended') return rows.filter((r) => r.status === 'ended');
+  if (filter === 'overdue')
+    return rows.filter(
+      (r) =>
+        r.status === 'active' &&
+        r.due_status === 'due' &&
+        (r.days_overdue ?? 0) > 0,
+    );
+  if (filter === 'due_now')
+    return rows.filter(
+      (r) =>
+        r.status === 'active' &&
+        r.due_status === 'due' &&
+        (r.days_overdue ?? 0) <= 0,
+    );
+  // due_7d — upcoming OR due-but-not-overdue
+  return rows.filter(
+    (r) =>
+      r.status === 'active' &&
+      (r.due_status === 'upcoming' ||
+        (r.due_status === 'due' && (r.days_overdue ?? 0) <= 0)),
+  );
+}
+
+// ─── Page ────────────────────────────────────────────────────────────
+
 export default function RecurringExpenses() {
   const qc = useQueryClient();
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<RecurringExpense | null>(null);
-  const [statusFilter, setStatusFilter] = useState<string>('');
+  const [dueFilter, setDueFilter] = useState<DueFilter>('all');
+  const [drawerId, setDrawerId] = useState<string | null>(null);
 
-  const { data: items = [], isLoading } = useQuery({
-    queryKey: ['recurring-expenses', statusFilter],
-    queryFn: () =>
-      recurringExpensesApi.list(statusFilter ? { status: statusFilter } : {}),
+  // The list query always fetches non-ended templates; client-side
+  // filter pills slice further (avoids a query-key explosion).  The
+  // `ended` filter triggers a separate query with `status=ended` so
+  // the list still works for historical templates.
+  const listParams =
+    dueFilter === 'ended'
+      ? { status: 'ended' as const }
+      : ({} as Record<string, never>);
+  const { data: itemsRaw = [], isLoading } = useQuery({
+    queryKey: ['recurring-expenses', dueFilter === 'ended' ? 'ended' : 'active'],
+    queryFn: () => recurringExpensesApi.list(listParams),
   });
+
+  const items = useMemo(
+    () => filterRowsByDue(itemsRaw, dueFilter),
+    [itemsRaw, dueFilter],
+  );
 
   const { data: stats } = useQuery({
     queryKey: ['recurring-expenses-stats'],
@@ -66,28 +200,20 @@ export default function RecurringExpenses() {
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ['recurring-expenses'] });
     qc.invalidateQueries({ queryKey: ['recurring-expenses-stats'] });
+    if (drawerId) qc.invalidateQueries({ queryKey: ['recurring-expense', drawerId] });
   };
 
   const pauseM = useMutation({
     mutationFn: (id: string) => recurringExpensesApi.pause(id),
-    onSuccess: () => {
-      toast.success('تم الإيقاف المؤقت');
-      invalidate();
-    },
+    onSuccess: () => { toast.success('تم الإيقاف المؤقت'); invalidate(); },
   });
   const resumeM = useMutation({
     mutationFn: (id: string) => recurringExpensesApi.resume(id),
-    onSuccess: () => {
-      toast.success('تم الاستئناف');
-      invalidate();
-    },
+    onSuccess: () => { toast.success('تم الاستئناف'); invalidate(); },
   });
   const removeM = useMutation({
     mutationFn: (id: string) => recurringExpensesApi.remove(id),
-    onSuccess: () => {
-      toast.success('تم الإنهاء');
-      invalidate();
-    },
+    onSuccess: () => { toast.success('تم الإنهاء'); invalidate(); },
   });
   const runM = useMutation({
     mutationFn: (id: string) => recurringExpensesApi.run(id),
@@ -107,21 +233,35 @@ export default function RecurringExpenses() {
   });
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between flex-wrap gap-3">
-        <div>
-          <h2 className="text-2xl font-black text-slate-800 flex items-center gap-2">
-            <Repeat className="text-brand-600" /> المصروفات الدورية
-          </h2>
-          <p className="text-sm text-slate-500 mt-1">
-            قوالب المصروفات المتكررة (إيجار، رواتب، اشتراكات، كهرباء…) — تُولَّد تلقائياً
-            عند حلول الموعد.
-          </p>
+    <div className="space-y-6" dir="rtl" data-testid="recurring-expenses-page">
+      {/* Header — title pinned to the right at all breakpoints (RTL).
+          PR-A: no lg:order-* swap that flipped the title left on
+          desktop. */}
+      <header
+        className="flex items-start justify-between gap-3 flex-wrap"
+        data-testid="recurring-expenses-header"
+      >
+        <div className="order-1 flex items-start gap-3">
+          <div className="w-10 h-10 rounded-xl bg-brand-50 dark:bg-brand-900/40 text-brand-700 dark:text-brand-300 flex items-center justify-center shrink-0">
+            <Repeat size={20} />
+          </div>
+          <div className="text-right">
+            <h1 className="text-2xl font-black text-slate-800 dark:text-slate-100">
+              المصروفات الدورية
+            </h1>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5 max-w-2xl leading-relaxed">
+              قوالب المصروفات المتكررة (إيجار، اشتراكات، كهرباء…). كل
+              قالب يولّد مصروفًا عاديًا في الموعد المحدد ويسير في نفس
+              مسار العمل: مسودة / اعتماد / دفع.
+            </p>
+          </div>
         </div>
-        <div className="flex gap-2">
+
+        <div className="order-2 flex items-center gap-2">
           <button
             className="btn-secondary"
             disabled={processDueM.isPending}
+            data-testid="recurring-process-due-btn"
             onClick={() => {
               // PR-FE-IDEM-FINAL-OPS — fresh Idempotency-Key per click
               // intent for the page-level "process all due" batch.
@@ -138,6 +278,7 @@ export default function RecurringExpenses() {
           </button>
           <button
             className="btn-primary"
+            data-testid="recurring-new-template-btn"
             onClick={() => {
               setEditing(null);
               setShowForm(true);
@@ -146,14 +287,14 @@ export default function RecurringExpenses() {
             <Plus size={16} /> قالب جديد
           </button>
         </div>
-      </div>
+      </header>
 
       {/* Stats */}
       {stats && (
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-3" data-testid="recurring-stats">
           <StatCard label="نشطة" value={stats.active_templates} color="bg-emerald-100 text-emerald-800" icon={<CheckCircle2 size={16} />} />
           <StatCard label="متوقفة" value={stats.paused_templates} color="bg-amber-100 text-amber-800" icon={<Pause size={16} />} />
-          <StatCard label="مستحق الآن" value={stats.due_now} color="bg-rose-100 text-rose-800" icon={<AlertTriangle size={16} />} />
+          <StatCard label="مستحقة الآن" value={stats.due_now} color="bg-rose-100 text-rose-800" icon={<AlertTriangle size={16} />} />
           <StatCard label="خلال 7 أيام" value={stats.due_next_7_days} color="bg-sky-100 text-sky-800" icon={<Clock size={16} />} />
           <StatCard
             label="الالتزامات (تقديري)"
@@ -164,27 +305,33 @@ export default function RecurringExpenses() {
         </div>
       )}
 
-      {/* Filters */}
-      <div className="card p-4 flex gap-2 items-center">
-        <span className="text-sm text-slate-500">عرض:</span>
-        {[
-          { v: '', label: 'الكل (غير المنتهية)' },
-          { v: 'active', label: 'نشطة' },
-          { v: 'paused', label: 'متوقفة' },
-          { v: 'ended', label: 'منتهية' },
-        ].map((f) => (
+      {/* Due-status filter pills */}
+      <div
+        className="card p-3 flex flex-wrap items-center gap-2"
+        data-testid="recurring-filters"
+      >
+        <span className="text-xs font-bold text-slate-500 ms-1">عرض:</span>
+        {(Object.keys(DUE_FILTER_LABEL) as DueFilter[]).map((k) => (
           <button
-            key={f.v}
-            onClick={() => setStatusFilter(f.v)}
-            className={`px-3 py-1 rounded-lg text-sm ${
-              statusFilter === f.v
-                ? 'bg-brand-600 text-white'
-                : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+            key={k}
+            type="button"
+            onClick={() => setDueFilter(k)}
+            data-testid={`recurring-filter-${k}`}
+            className={`px-3 py-1 rounded-full text-xs font-semibold transition-colors ${
+              dueFilter === k
+                ? 'bg-brand-600 text-white shadow-sm'
+                : 'bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-200'
             }`}
           >
-            {f.label}
+            {DUE_FILTER_LABEL[k]}
           </button>
         ))}
+        <span
+          className="text-[10px] text-slate-400 dark:text-slate-500 ms-auto"
+          data-testid="recurring-filter-count"
+        >
+          {items.length} عنصر
+        </span>
       </div>
 
       {/* List */}
@@ -195,10 +342,16 @@ export default function RecurringExpenses() {
             جارٍ التحميل…
           </div>
         ) : items.length === 0 ? (
-          <div className="p-10 text-center text-slate-400">لا توجد قوالب</div>
+          <EmptyState
+            isFilterEmpty={itemsRaw.length > 0}
+            onCreate={() => {
+              setEditing(null);
+              setShowForm(true);
+            }}
+          />
         ) : (
-          <table className="min-w-full text-sm">
-            <thead className="bg-slate-50 text-slate-600">
+          <table className="min-w-full text-sm" data-testid="recurring-table">
+            <thead className="bg-slate-50 text-slate-600 dark:bg-slate-800 dark:text-slate-300">
               <tr>
                 <th className="text-right px-3 py-2">الرمز</th>
                 <th className="text-right px-3 py-2">الاسم</th>
@@ -213,7 +366,7 @@ export default function RecurringExpenses() {
             </thead>
             <tbody>
               {items.map((r) => (
-                <tr key={r.id} className="border-t border-slate-100 hover:bg-slate-50">
+                <tr key={r.id} className="border-t border-slate-100 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50">
                   <td className="px-3 py-2 font-mono text-xs">{r.code}</td>
                   <td className="px-3 py-2 font-bold">{r.name_ar}</td>
                   <td className="px-3 py-2">{r.category_name || '—'}</td>
@@ -236,19 +389,35 @@ export default function RecurringExpenses() {
                     <div className="flex gap-1 justify-end">
                       <button
                         className="icon-btn"
+                        title="عرض السجل"
+                        data-testid={`recurring-history-${r.id}`}
+                        onClick={() => setDrawerId(r.id)}
+                      >
+                        <History size={14} />
+                      </button>
+                      <button
+                        className="icon-btn"
                         title="توليد الآن"
+                        data-testid={`recurring-run-${r.id}`}
                         onClick={() => {
                           // PR-FE-IDEM-FINAL-OPS — fresh
-                          // Idempotency-Key per click intent. Retries
-                          // (network blips / 425 IN_PROGRESS) within
-                          // the same click reuse the cached key; a
-                          // new click mints a new key.
+                          // Idempotency-Key per click intent.
                           resetRecurringRunIdempotencyKey();
                           runM.mutate(r.id);
                         }}
                         disabled={r.status !== 'active' || runM.isPending}
                       >
                         <Zap size={14} />
+                      </button>
+                      <button
+                        className="icon-btn"
+                        title="تعديل"
+                        onClick={() => {
+                          setEditing(r);
+                          setShowForm(true);
+                        }}
+                      >
+                        <FileText size={14} />
                       </button>
                       {r.status === 'active' ? (
                         <button
@@ -293,6 +462,13 @@ export default function RecurringExpenses() {
             invalidate();
             setShowForm(false);
           }}
+        />
+      )}
+
+      {drawerId && (
+        <RunsHistoryDrawer
+          templateId={drawerId}
+          onClose={() => setDrawerId(null)}
         />
       )}
     </div>
@@ -367,7 +543,247 @@ function DueBadge({
   );
 }
 
-// --------- Form Modal ---------
+// ─── Empty state ────────────────────────────────────────────────────
+
+function EmptyState({
+  isFilterEmpty,
+  onCreate,
+}: {
+  isFilterEmpty: boolean;
+  onCreate: () => void;
+}) {
+  if (isFilterEmpty) {
+    // Items exist but the current filter eliminated all of them.
+    return (
+      <div
+        className="p-10 text-center text-slate-400"
+        data-testid="recurring-empty-filter"
+      >
+        لا توجد قوالب تطابق هذا الفلتر — جرّب فلترًا آخر.
+      </div>
+    );
+  }
+  return (
+    <div
+      className="p-6 lg:p-8"
+      data-testid="recurring-empty"
+      dir="rtl"
+    >
+      <div className="flex items-start gap-3">
+        <div className="w-10 h-10 rounded-xl bg-brand-50 text-brand-700 flex items-center justify-center shrink-0">
+          <Repeat size={20} />
+        </div>
+        <div className="flex-1">
+          <div className="text-sm font-bold text-slate-700 dark:text-slate-200">
+            ابدأ بإضافة قالب مصروف دوري
+          </div>
+          <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-1 leading-relaxed">
+            قوالب المصروفات الدورية تتحول إلى مصروفات عادية في الموعد
+            المحدد، وتسير في نفس مسار الاعتماد والدفع المعتاد. لا توجد
+            مسارات محاسبية موازية.
+          </div>
+        </div>
+      </div>
+
+      <ol
+        className="mt-5 grid grid-cols-1 sm:grid-cols-3 gap-3 text-right"
+        data-testid="recurring-empty-steps"
+      >
+        <Step n={1} title="أضف قالب مصروف دوري">
+          اختر الفئة والخزنة والمبلغ، ثم حدد التكرار (شهري / أسبوعي /
+          مخصص...). يمكن تعديل القالب أو إيقافه لاحقًا في أي وقت.
+        </Step>
+        <Step n={2} title="راجع الاستحقاق القادم">
+          النظام يحسب التاريخ القادم تلقائيًا ويعرضه هنا. التنبيهات
+          تظهر قبل الاستحقاق بعدد الأيام الذي تحدده.
+        </Step>
+        <Step n={3} title="ولّد المصروف أو اتركه تلقائيًا">
+          اضغط "توليد الآن" يدويًا، أو فعّل "اعتماد تلقائي" ليقوم
+          النظام بالتوليد كل يوم في الساعة 8 صباحًا. المصروف يدخل قائمة
+          المصروفات العادية بنفس مسار الاعتماد والدفع.
+        </Step>
+      </ol>
+
+      <div className="mt-5 flex justify-center">
+        <button
+          type="button"
+          className="btn-primary"
+          data-testid="recurring-empty-cta"
+          onClick={onCreate}
+        >
+          <Plus size={16} /> قالب جديد
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function Step({
+  n,
+  title,
+  children,
+}: {
+  n: number;
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <li
+      className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-3"
+      data-testid={`recurring-empty-step-${n}`}
+    >
+      <div className="flex items-center gap-2">
+        <span className="w-6 h-6 rounded-full bg-brand-100 dark:bg-brand-900/40 text-brand-700 dark:text-brand-300 flex items-center justify-center text-[11px] font-black">
+          {n}
+        </span>
+        <span className="text-xs font-bold text-slate-800 dark:text-slate-100">
+          {title}
+        </span>
+      </div>
+      <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1.5 leading-relaxed">
+        {children}
+      </p>
+    </li>
+  );
+}
+
+// ─── Runs history drawer ────────────────────────────────────────────
+
+function RunsHistoryDrawer({
+  templateId,
+  onClose,
+}: {
+  templateId: string;
+  onClose: () => void;
+}) {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ['recurring-expense', templateId],
+    queryFn: () => recurringExpensesApi.get(templateId),
+  });
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/50 z-50 flex items-start justify-end"
+      onClick={onClose}
+      data-testid="recurring-history-drawer"
+    >
+      <div
+        className="bg-white dark:bg-slate-900 h-full w-full max-w-md overflow-auto shadow-2xl"
+        dir="rtl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between p-4 border-b border-slate-100 dark:border-slate-800 sticky top-0 bg-white dark:bg-slate-900 z-10">
+          <div className="flex items-center gap-2">
+            <History size={18} className="text-brand-600" />
+            <h3 className="font-black text-base">سجل التنفيذ</h3>
+          </div>
+          <button className="icon-btn" onClick={onClose} data-testid="recurring-history-close">
+            <X size={18} />
+          </button>
+        </div>
+
+        {isLoading ? (
+          <div className="p-10 text-center text-slate-400">
+            <RefreshCw className="animate-spin mx-auto mb-2" />
+            جارٍ التحميل…
+          </div>
+        ) : error ? (
+          <div className="p-6 text-center text-rose-700">
+            <AlertTriangle className="mx-auto mb-2" /> تعذّر التحميل
+          </div>
+        ) : data ? (
+          <div>
+            <div className="p-4 border-b border-slate-100 dark:border-slate-800 space-y-2">
+              <div className="text-sm font-bold text-slate-800 dark:text-slate-100">
+                {data.name_ar}
+              </div>
+              <div className="text-xs text-slate-500 dark:text-slate-400 flex flex-wrap gap-3">
+                <span className="inline-flex items-center gap-1">
+                  <CalendarClock size={12} />
+                  القادم: {data.next_run_date}
+                </span>
+                <span className="inline-flex items-center gap-1">
+                  <DollarSign size={12} />
+                  {Number(data.amount).toLocaleString('en-EG')} ج.م
+                </span>
+                <span className="inline-flex items-center gap-1">
+                  <Repeat size={12} />
+                  {FREQUENCY_LABEL[data.frequency]}
+                </span>
+              </div>
+            </div>
+            <div className="p-4" data-testid="recurring-history-runs">
+              {data.runs.length === 0 ? (
+                <div className="py-8 text-center text-slate-400 text-sm flex flex-col items-center gap-2">
+                  <CalendarOff size={20} />
+                  لم يُنفَّذ هذا القالب بعد.
+                </div>
+              ) : (
+                <ul className="space-y-2">
+                  {data.runs.map((run) => (
+                    <RunRow key={run.id} run={run} />
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function RunRow({ run }: { run: RecurringExpenseRun }) {
+  const statusCls =
+    run.status === 'generated'
+      ? 'bg-emerald-100 text-emerald-800'
+      : run.status === 'failed'
+      ? 'bg-rose-100 text-rose-800'
+      : run.status === 'skipped'
+      ? 'bg-amber-100 text-amber-800'
+      : 'bg-slate-100 text-slate-700';
+  const statusLabel =
+    run.status === 'generated'
+      ? 'تم التوليد'
+      : run.status === 'failed'
+      ? 'فشل'
+      : run.status === 'skipped'
+      ? 'تم التخطي'
+      : 'يدوي';
+  return (
+    <li
+      className="rounded-xl border border-slate-200 dark:border-slate-700 p-3"
+      data-testid="recurring-history-run"
+    >
+      <div className="flex items-start justify-between gap-2">
+        <div className="space-y-1">
+          <div className="text-xs font-bold text-slate-700 dark:text-slate-200 flex items-center gap-1">
+            <CalendarClock size={11} /> {run.scheduled_for}
+          </div>
+          {run.expense_no && (
+            <div className="text-[11px] font-mono text-slate-500 dark:text-slate-400">
+              {run.expense_no}
+            </div>
+          )}
+          <div className="text-[11px] text-slate-500 dark:text-slate-400">
+            {Number(run.amount).toLocaleString('en-EG')} ج.م
+          </div>
+        </div>
+        <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${statusCls}`}>
+          {statusLabel}
+        </span>
+      </div>
+      {run.error_message && (
+        <div className="mt-2 text-[11px] text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-900/20 rounded p-2 flex items-start gap-1">
+          <AlertTriangle size={11} className="mt-0.5 flex-shrink-0" />
+          {run.error_message}
+        </div>
+      )}
+    </li>
+  );
+}
+
+// ─── Form Modal ────────────────────────────────────────────────────
 
 function RecurringExpenseFormModal({
   editing,
@@ -400,6 +816,17 @@ function RecurringExpenseFormModal({
     require_approval: editing?.require_approval ?? false,
   });
 
+  // Initialize behavior radio from existing flags (or sensible default
+  // for new templates: "اعتماد ودفع تلقائي" → most common workflow).
+  const [behavior, setBehavior] = useState<GenerationBehavior>(() =>
+    editing ? flagsToBehavior(editing) : 'auto_paid',
+  );
+
+  const onBehaviorChange = (b: GenerationBehavior) => {
+    setBehavior(b);
+    setForm((f) => ({ ...f, ...behaviorToFlags(b) }));
+  };
+
   const { data: categories = [] } = useQuery({
     queryKey: ['expense-categories'],
     queryFn: accountingApi.categories,
@@ -430,8 +857,8 @@ function RecurringExpenseFormModal({
 
   return (
     <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-      <div className="bg-white rounded-2xl w-full max-w-2xl max-h-[90vh] overflow-auto">
-        <div className="flex items-center justify-between p-4 border-b border-slate-100">
+      <div className="bg-white dark:bg-slate-900 rounded-2xl w-full max-w-2xl max-h-[90vh] overflow-auto" dir="rtl">
+        <div className="flex items-center justify-between p-4 border-b border-slate-100 dark:border-slate-800">
           <h3 className="font-black text-lg">
             {editing ? 'تعديل قالب مصروف' : 'قالب مصروف دوري جديد'}
           </h3>
@@ -601,38 +1028,54 @@ function RecurringExpenseFormModal({
             />
           </Field>
 
-          <div className="flex flex-wrap gap-4 text-sm">
-            <label className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                checked={form.auto_post}
-                onChange={(e) => setForm({ ...form, auto_post: e.target.checked })}
-              />
-              اعتماد تلقائي عند التوليد
-            </label>
-            <label className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                checked={form.auto_paid}
-                onChange={(e) => setForm({ ...form, auto_paid: e.target.checked })}
-              />
-              خصم من الصندوق تلقائياً (فورياً)
-            </label>
-            <label className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                checked={form.require_approval}
-                onChange={(e) => setForm({ ...form, require_approval: e.target.checked })}
-              />
-              يتطلب اعتماد يدوي
-            </label>
-          </div>
+          {/* Generation-behavior radio group — collapses the
+              auto_post / auto_paid / require_approval triplet into
+              one self-describing choice. */}
+          <fieldset
+            className="rounded-xl border border-slate-200 dark:border-slate-700 p-3"
+            data-testid="recurring-behavior-fieldset"
+          >
+            <legend className="text-xs font-bold text-slate-600 dark:text-slate-300 px-1">
+              سلوك التوليد
+            </legend>
+            <div className="space-y-2 mt-1">
+              {(Object.keys(BEHAVIOR_LABEL) as GenerationBehavior[]).map((b) => (
+                <label
+                  key={b}
+                  className={`flex items-start gap-2 rounded-lg p-2.5 cursor-pointer border transition-colors ${
+                    behavior === b
+                      ? 'border-brand-300 bg-brand-50 dark:bg-brand-900/30'
+                      : 'border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800'
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="generation-behavior"
+                    value={b}
+                    checked={behavior === b}
+                    onChange={() => onBehaviorChange(b)}
+                    data-testid={`recurring-behavior-${b}`}
+                    className="mt-1"
+                  />
+                  <div>
+                    <div className="text-sm font-bold text-slate-800 dark:text-slate-100">
+                      {BEHAVIOR_LABEL[b]}
+                    </div>
+                    <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 leading-relaxed">
+                      {BEHAVIOR_HINT[b]}
+                    </div>
+                  </div>
+                </label>
+              ))}
+            </div>
+          </fieldset>
         </div>
 
-        <div className="p-4 border-t border-slate-100 flex justify-end gap-2">
+        <div className="p-4 border-t border-slate-100 dark:border-slate-800 flex justify-end gap-2">
           <button className="btn-secondary" onClick={onClose}>إلغاء</button>
           <button
             className="btn-primary"
+            data-testid="recurring-save-btn"
             disabled={saveM.isPending || !form.code || !form.name_ar || !form.category_id || !form.warehouse_id}
             onClick={() => saveM.mutate()}
           >
@@ -655,7 +1098,7 @@ function Field({
 }) {
   return (
     <div>
-      <label className="text-xs font-bold text-slate-600 block mb-1">
+      <label className="text-xs font-bold text-slate-600 dark:text-slate-300 block mb-1">
         {label} {required && <span className="text-rose-500">*</span>}
       </label>
       {children}

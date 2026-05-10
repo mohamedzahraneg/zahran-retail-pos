@@ -10,8 +10,16 @@ import { RecurringExpensesScheduler } from './recurring-expenses.scheduler';
 // family PR's blast radius.
 import { IdempotencyCacheService } from '../common/cache/idempotency-cache.service';
 import { IdempotencyInterceptor } from '../common/interceptors/idempotency.interceptor';
+// PR-A — Recurring Expenses v2.  AccountingModule exports
+// ExpenseApprovalService; importing the module (rather than re-
+// declaring the provider) keeps it a singleton across the app and
+// reuses the same DataSource the rest of the accounting flow uses.
+// Necessary so runOne() can spawn `expense_approvals` rows when
+// `require_approval=true`, mirroring the normal createExpense flow.
+import { AccountingModule } from '../accounting/accounting.module';
 
 @Module({
+  imports: [AccountingModule],
   providers: [
     RecurringExpensesService,
     RecurringExpensesScheduler,
