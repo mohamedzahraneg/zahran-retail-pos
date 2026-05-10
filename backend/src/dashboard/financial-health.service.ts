@@ -764,18 +764,106 @@ export class FinancialHealthService {
     return row;
   }
 
-  /** Operator-only: mark an anomaly resolved. */
+  /**
+   * Operator-only: mark an anomaly resolved.
+   *
+   * PR-FIX-WATCHTOWER-RESOLVE-409.  The unique constraint
+   * `ux_anomalies_open_slot UNIQUE (anomaly_type, affected_entity,
+   * reference_id, resolved)` includes `resolved` as a key column, so
+   * flipping an open row's `resolved` to TRUE produces a duplicate
+   * 4-tuple whenever a resolved twin already exists for the same
+   * `(type, entity, ref)` from a prior cleanup cycle (migrations
+   * 072 / 089 / 098).  PG raises 23505 → API returns 409.
+   *
+   * The fix mirrors the manual cleanup policy those migrations
+   * documented: when a resolved twin is on file, DELETE the open
+   * row (the twin already carries the audit trail) instead of
+   * flipping its `resolved` flag.  No twin → normal UPDATE.
+   *
+   * Wrapped in a transaction with `FOR UPDATE` on the target so two
+   * concurrent resolves on the same id can't both decide there's no
+   * twin.
+   *
+   * Idempotency: a PATCH against an already-resolved anomaly returns
+   * the existing row instead of throwing — matches the FE's
+   * "click-then-retry" expectation and React Query's pessimistic
+   * mutation pattern.
+   */
   async resolve(id: number, userId: string, note?: string) {
     if (!id) throw new BadRequestException('id required');
-    const [row] = await this.ds.query(
-      `UPDATE financial_anomalies
-          SET resolved = TRUE, resolved_by = $2, resolved_at = NOW(),
-              resolution_note = $3
-        WHERE anomaly_id = $1 AND NOT resolved
-        RETURNING *`,
-      [id, userId, note ?? null],
-    );
-    if (!row) throw new BadRequestException('anomaly not found or already resolved');
-    return row;
+
+    return await this.ds.transaction(async (em) => {
+      // 1. Lock the target row so a concurrent resolve can't race us
+      //    past the twin check.
+      const [target] = await em.query(
+        `SELECT anomaly_id, anomaly_type, affected_entity, reference_id,
+                resolved, resolved_at, resolved_by, resolution_note
+           FROM financial_anomalies
+          WHERE anomaly_id = $1
+          FOR UPDATE`,
+        [id],
+      );
+      if (!target) throw new BadRequestException('anomaly not found');
+
+      // 2. Idempotent no-op: already resolved → return current row.
+      if (target.resolved) return target;
+
+      // 3. Twin check.  IS NOT DISTINCT FROM treats NULL=NULL as
+      //    matching, which is the right semantic for the rare rows
+      //    where affected_entity / reference_id are NULL.
+      const [twin] = await em.query(
+        `SELECT anomaly_id
+           FROM financial_anomalies
+          WHERE anomaly_type    = $1
+            AND affected_entity IS NOT DISTINCT FROM $2
+            AND reference_id    IS NOT DISTINCT FROM $3
+            AND resolved        = TRUE
+            AND anomaly_id     <> $4
+          LIMIT 1`,
+        [
+          target.anomaly_type,
+          target.affected_entity,
+          target.reference_id,
+          target.anomaly_id,
+        ],
+      );
+
+      if (twin) {
+        // 4a. DELETE path — resolved twin already on file.  This is
+        //     the same policy migrations 072/089/098 used for the
+        //     manual cleanup batches.  The twin retains the full
+        //     forensic record; the open row is a noisy re-detection.
+        await em.query(
+          `DELETE FROM financial_anomalies WHERE anomaly_id = $1`,
+          [target.anomaly_id],
+        );
+        return {
+          ...target,
+          resolved: true,
+          resolved_by: userId,
+          resolved_at: new Date(),
+          resolution_note:
+            note ??
+            'Auto-collapsed: resolved twin already on file for the same anomaly slot.',
+        };
+      }
+
+      // 4b. UPDATE path — no twin, safe to flip `resolved`.
+      const [row] = await em.query(
+        `UPDATE financial_anomalies
+            SET resolved = TRUE, resolved_by = $2, resolved_at = NOW(),
+                resolution_note = $3
+          WHERE anomaly_id = $1 AND NOT resolved
+          RETURNING *`,
+        [id, userId, note ?? null],
+      );
+      if (!row) {
+        // The FOR UPDATE lock makes this practically unreachable, but
+        // guard against an exotic mid-flight state change rather than
+        // silently returning undefined.
+        throw new BadRequestException('anomaly state changed mid-resolve; retry');
+      }
+      return row;
+    });
   }
 }
