@@ -295,3 +295,103 @@ describe('computeRefundCashTotals — behavioural (PR-FIX-SHIFT-CASH-APPLY-REVER
     });
   });
 });
+
+// ─── computeSummary reconciliation totals: net refund impact ──────
+//   PR-FIX-SHIFT-CLOSE-NET-REFUND-IMPACT — `total_cash_in` /
+//   `total_cash_out` (the reconciliation pair fed into
+//   `assertSnapshotIntegrity`) now consume the helper's NET, not the
+//   gross out/in pair.  This locks the contract so a future regression
+//   that flips the wiring back fails the spec immediately.
+//
+//   The display-only fields (`total_refund_cash_out`,
+//   `total_refund_cash_in`, `net_refund_cash_impact`) keep the gross
+//   audit pair — those assertions live in earlier blocks and are
+//   intentionally untouched.
+
+describe('computeSummary — reconciliation uses NET refund impact (PR-FIX-SHIFT-CLOSE-NET-REFUND-IMPACT)', () => {
+  it('total_cash_in does NOT add totalRefundCashIn (the gross-in is for display only)', () => {
+    // Slice the totalCashIn assignment window and assert the helper's
+    // gross-in is absent from the addition chain.
+    const m = SRC.match(/const\s+totalCashIn\s*=\s*[^;]+;/);
+    expect(m).not.toBeNull();
+    const totalCashInExpr = m![0];
+    expect(totalCashInExpr).not.toMatch(/totalRefundCashIn/);
+    expect(totalCashInExpr).not.toMatch(/refundTotals\.totalRefundCashIn/);
+    expect(totalCashInExpr).not.toMatch(/refund_cash_in/);
+    // Must still include sales / customer receipts / other cash in.
+    expect(totalCashInExpr).toMatch(/cashFromSales/);
+    expect(totalCashInExpr).toMatch(/customerReceipts/);
+    expect(totalCashInExpr).toMatch(/otherCashIn/);
+  });
+
+  it('total_cash_out includes netRefundCashImpact, NOT the gross totalRefundCashOut', () => {
+    const m = SRC.match(/const\s+totalCashOut\s*=\s*[\s\S]+?;/);
+    expect(m).not.toBeNull();
+    const totalCashOutExpr = m![0];
+    expect(totalCashOutExpr).toMatch(/netRefundCashImpact/);
+    expect(totalCashOutExpr).not.toMatch(/^\s*totalRefundCashOut\s*\+/m);
+    // Must still include the other cash-out components.
+    expect(totalCashOutExpr).toMatch(/supplierPayments/);
+    expect(totalCashOutExpr).toMatch(/totalOperatingExpenses/);
+    expect(totalCashOutExpr).toMatch(/totalEmployeeAdvances/);
+    expect(totalCashOutExpr).toMatch(/totalEmployeeSettlements/);
+    expect(totalCashOutExpr).toMatch(/otherCashOut/);
+  });
+
+  it('display fields stay GROSS (total_refund_cash_out / total_refund_cash_in / net_refund_cash_impact)', () => {
+    expect(SRC).toMatch(/total_refund_cash_out:\s*totalRefundCashOut/);
+    expect(SRC).toMatch(/total_refund_cash_in:\s*totalRefundCashIn/);
+    expect(SRC).toMatch(/net_refund_cash_impact:\s*netRefundCashImpact/);
+  });
+
+  it('production-shape RET-2026-000006 fixture: out 450 + in 450 (reversal) + out 450 (replay) → reconciliation net 450', () => {
+    // Drive the helper directly with the exact production shape and
+    // simulate the reconciliation arithmetic.
+    const totals = computeRefundCashTotals([
+      { direction: 'out', amount: 450, is_reversal: false, source_return_status: 'refunded' },
+      { direction: 'in',  amount: 450, is_reversal: true,  source_return_status: 'refunded' },
+      { direction: 'out', amount: 450, is_reversal: false, source_return_status: 'refunded' },
+    ]);
+    expect(totals.totalRefundCashOut).toBe(900); // GROSS for display
+    expect(totals.totalRefundCashIn).toBe(450);  // GROSS for display
+    expect(totals.netRefundCashImpact).toBe(450); // NET for reconciliation
+
+    // Simulate the (post-fix) reconciliation contributions:
+    //   total_cash_in  contribution from refund: 0  (no longer adds totalRefundCashIn)
+    //   total_cash_out contribution from refund: netRefundCashImpact = 450
+    const cashInContribution = 0;
+    const cashOutContribution = totals.netRefundCashImpact;
+    expect(cashInContribution).toBe(0);
+    expect(cashOutContribution).toBe(450);
+
+    // Net cashbox effect: in − out = 0 − 450 = −450 (matches canonical's
+    // returnsCashRefund of 450 → contributes −450 to expected_closing).
+    expect(cashInContribution - cashOutContribution).toBe(-450);
+  });
+
+  it('cancelled-only fixture: out 450 + in 450 (reversal of cancelled) → reconciliation contributes 0 to both sides', () => {
+    const totals = computeRefundCashTotals([
+      { direction: 'out', amount: 450, is_reversal: false, source_return_status: 'cancelled' },
+      { direction: 'in',  amount: 450, is_reversal: true,  source_return_status: 'cancelled' },
+    ]);
+    expect(totals.totalRefundCashOut).toBe(0); // cancelled excluded from active
+    expect(totals.totalRefundCashIn).toBe(0);
+    expect(totals.netRefundCashImpact).toBe(0);
+
+    // Reconciliation contribution: 0 to both sides — matches canonical
+    // (which filters cancelled returns out of returns_cash_refund).
+    expect(0 - totals.netRefundCashImpact).toBe(0);
+  });
+
+  it('plain refund fixture: out 450 → reconciliation contributes 450 to total_cash_out, 0 to total_cash_in', () => {
+    const totals = computeRefundCashTotals([
+      { direction: 'out', amount: 450, is_reversal: false, source_return_status: 'refunded' },
+    ]);
+    expect(totals.netRefundCashImpact).toBe(450);
+
+    const cashInContribution = 0;
+    const cashOutContribution = totals.netRefundCashImpact;
+    expect(cashInContribution).toBe(0);
+    expect(cashOutContribution).toBe(450);
+  });
+});

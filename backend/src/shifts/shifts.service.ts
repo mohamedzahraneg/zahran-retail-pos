@@ -907,9 +907,38 @@ export class ShiftsService {
     // PR-21 swaps `cashRefundsLegacy` for `totalRefundCashOut` (the
     // CT-derived figure) so standalone refunds without invoices show
     // correctly and invoiced refunds aren't double-counted.
-    const totalCashIn = cashFromSales + customerReceipts + otherCashIn + totalRefundCashIn;
+    //
+    // PR-FIX-SHIFT-CLOSE-NET-REFUND-IMPACT — for the reconciliation
+    // totals (`total_cash_in`, `total_cash_out`) we now consume the
+    // helper's NET (`netRefundCashImpact`) rather than the gross
+    // out + gross in pair.  Rationale:
+    //
+    //   · `computeCanonicalSnapshot` derives its refund contribution
+    //     from `returns.net_refund` (already net) and writes only
+    //     `total_cash_out += returns_cash_refund`, never adding to
+    //     `total_cash_in`.  The two paths used to disagree on every
+    //     edit-and-applied refund (e.g. RET-2026-000006: summary
+    //     wrote total_cash_out += 900 / total_cash_in += 450, while
+    //     canonical wrote total_cash_out += 450 / total_cash_in += 0)
+    //     and `assertSnapshotIntegrity` threw the "إجماليات الوردية
+    //     لا تطابق" error on save-close / request-close / refresh.
+    //
+    //   · Using NET here makes the reconciliation totals identical
+    //     to canonical's, eliminating the field-level mismatch.
+    //
+    //   · `expected_closing` math is unchanged: the previous gross
+    //     pair contributed `+totalRefundCashIn − totalRefundCashOut`
+    //     to (in − out) which is `−netRefundCashImpact` — exactly
+    //     what subtracting `netRefundCashImpact` from total_cash_out
+    //     produces.  Net cashbox effect is identical.
+    //
+    //   · The display-only fields (`total_refund_cash_out`,
+    //     `total_refund_cash_in`, `net_refund_cash_impact`) below at
+    //     line ~993 are UNCHANGED — the FE still surfaces the gross
+    //     audit pair plus the net impact.
+    const totalCashIn = cashFromSales + customerReceipts + otherCashIn;
     const totalCashOut =
-      totalRefundCashOut +
+      netRefundCashImpact +
       supplierPayments +
       totalOperatingExpenses +
       totalEmployeeAdvances +

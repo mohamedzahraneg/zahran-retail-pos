@@ -518,4 +518,147 @@ describe('PR-FIX-SHIFT-SNAPSHOT-REALTIME-INTEGRITY-GUARD', () => {
     // shifts.service.refresh-closed-snapshot.spec.ts → "computeSummary
     // — em is optional" describe block.)
   });
+
+  // ────────────────────────────────────────────────────────────────
+  // Test 11: PR-FIX-SHIFT-CLOSE-NET-REFUND-IMPACT — production-shape
+  // RET-2026-000006 fixture (out 450 + in 450 reversal_refund + out
+  // 450 replay).  Before this PR, computeSummary wrote
+  // total_cash_out=900 / total_cash_in=450, while
+  // computeCanonicalSnapshot wrote total_cash_out=450 /
+  // total_cash_in=0 — the +450 deltas on both fields tripped
+  // assertSnapshotIntegrity and surfaced "إجماليات الوردية لا تطابق"
+  // on save-close / request-close / refresh.
+  //
+  // After this PR, computeSummary uses netRefundCashImpact for the
+  // reconciliation sum (450), so summary and canonical now agree on
+  // BOTH fields and the guard passes.
+  // ────────────────────────────────────────────────────────────────
+  it('Test 11: edit-and-replay refund — summary (net 450) and canonical (net 450) reconcile, guard passes', async () => {
+    const svc = makeSvc();
+    // Summary numbers AFTER the fix.
+    //   · total_cash_in: just sales (0 in this fixture, refund-only)
+    //   · total_cash_out: netRefundCashImpact = 450
+    //   · expected_closing = opening − 450
+    //
+    // Display fields total_refund_cash_out=900 and total_refund_cash_in=450
+    // remain GROSS (audit) but are not read by assertSnapshotIntegrity.
+    jest.spyOn(svc as any, 'computeSummary').mockResolvedValue({
+      expected_closing: -450,
+      total_sales: 0,
+      total_returns: 0,           // RET has no original_invoice_id → join misses
+      total_expenses: 0,
+      total_cash_in: 0,           // ← post-fix: NO totalRefundCashIn
+      total_cash_out: 450,        // ← post-fix: netRefundCashImpact (was 900 gross)
+      invoice_count: 0,
+      // Display-only audit pair — included to lock the gross/net split:
+      total_refund_cash_out: 900,
+      total_refund_cash_in: 450,
+      net_refund_cash_impact: 450,
+    } as any);
+
+    const { em, calls } = makeEm({
+      rows: [
+        [
+          {
+            ...baseClosedShift,
+            shift_no: 'SHF-T-RET-EDIT-REPLAY',
+            opening_balance: '0',
+          },
+        ],
+        // Canonical: invoice side = 0 (no is_return invoices), but
+        // returns.net_refund column = 450 (single-row), so
+        // returns_cash_refund = 450 → total_cash_out = 450.
+        // total_cash_in = 0 (no cash-in invoices for refund-only shift).
+        [
+          {
+            total_sales: '0',
+            total_returns: '0',
+            invoice_count: 0,
+            cash_in_invoices: '0',
+            cash_out_inv_returns: '0',
+            instapay_in: '0',
+            wallet_in: '0',
+            expenses_cash: '0',
+            advances_cash: '0',
+            settlements_cash: '0',
+            returns_cash_refund: '450',
+          },
+        ],
+        [{ ...baseClosedShift, expected_closing: '-450.00' }],
+      ],
+    });
+
+    const r = await svc.refreshClosedShiftSnapshot(SHIFT_ID, em);
+    expect(r.status).toBe('updated');
+    expect(calls).toHaveLength(3);
+    // The UPDATE ran — the integrity guard did NOT throw.
+    expect(calls[2].sql).toMatch(/UPDATE shifts SET/i);
+    // expected_closing field passed through with the post-fix net value.
+    expect(calls[2].params[1]).toBe(-450);
+    expect(calls[2].params[5]).toBe(0);     // total_cash_in
+    expect(calls[2].params[6]).toBe(450);   // total_cash_out
+  });
+
+  it('Test 12: regression — pre-fix summary (gross out 900, gross in 450) WOULD trip the guard', async () => {
+    // This is the PRE-fix shape the bug used to produce.  We assert
+    // that with those numbers the guard correctly flags a mismatch,
+    // proving the post-fix net values from Test 11 are what saved
+    // the close path.
+    const svc = makeSvc();
+    jest.spyOn(svc as any, 'computeSummary').mockResolvedValue({
+      expected_closing: -450,
+      total_sales: 0,
+      total_returns: 0,
+      total_expenses: 0,
+      total_cash_in: 450,         // pre-fix gross
+      total_cash_out: 900,        // pre-fix gross
+      invoice_count: 0,
+    } as any);
+
+    const { em } = makeEm({
+      rows: [
+        [
+          {
+            ...baseClosedShift,
+            shift_no: 'SHF-T-RET-PRE-FIX',
+            opening_balance: '0',
+          },
+        ],
+        // Canonical (unchanged) — 450 net only.
+        [
+          {
+            total_sales: '0',
+            total_returns: '0',
+            invoice_count: 0,
+            cash_in_invoices: '0',
+            cash_out_inv_returns: '0',
+            instapay_in: '0',
+            wallet_in: '0',
+            expenses_cash: '0',
+            advances_cash: '0',
+            settlements_cash: '0',
+            returns_cash_refund: '450',
+          },
+        ],
+      ],
+    });
+
+    let captured: any = null;
+    try {
+      await svc.refreshClosedShiftSnapshot(SHIFT_ID, em);
+    } catch (e) {
+      captured = e;
+    }
+    expect(captured).toBeInstanceOf(ConflictException);
+    const body = captured.response ?? captured.getResponse?.() ?? captured;
+    expect(body.code).toBe('SHIFT_SNAPSHOT_INTEGRITY_VIOLATION');
+    expect(String(body.message)).toMatch(/إجماليات الوردية لا تطابق/);
+    // Both total_cash_in and total_cash_out must be flagged.
+    const fields = body.mismatches.map((m: any) => m.field).sort();
+    expect(fields).toEqual(
+      ['total_cash_in', 'total_cash_out'].sort(),
+    );
+    // expected_closing matches because the deltas cancel.
+    expect(fields).not.toContain('expected_closing');
+  });
 });
