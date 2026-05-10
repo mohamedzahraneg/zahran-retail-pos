@@ -147,11 +147,18 @@ function Th({
   align = 'right',
 }: {
   children: React.ReactNode;
-  align?: 'right' | 'left';
+  align?: 'right' | 'left' | 'center';
 }) {
+  // PR-FIN-3-UX — explicit static-class map.  Dynamic Tailwind
+  // (e.g. `text-${align}`) is invisible to the build-time class
+  // scanner, so the variant classes never end up in the final
+  // stylesheet and the cell falls back to browser-default alignment.
+  // The literals below are emitted verbatim and survive purging.
+  const alignCls =
+    align === 'left' ? 'text-left' : align === 'center' ? 'text-center' : 'text-right';
   return (
     <th
-      className={`text-${align} px-3 py-2 text-[10px] font-bold whitespace-nowrap`}
+      className={`${alignCls} px-3 py-2 text-[10px] font-bold whitespace-nowrap`}
     >
       {children}
     </th>

@@ -142,10 +142,15 @@ describe('<FinanceStatements />', () => {
     }
   });
 
-  it('shows "اختر كيانًا" prompt when no entity is selected', () => {
+  it('shows actionable empty-state with 3-step guide when no entity is selected', () => {
     renderPage();
     expect(screen.getByTestId('statements-no-entity')).toBeInTheDocument();
-    expect(screen.getByText('اختر كيانًا لعرض كشف الحسابات')).toBeInTheDocument();
+    // PR-FIN-3-UX — empty state now leads with a call-to-action +
+    // three numbered steps (tab → entity → range).
+    expect(screen.getByText('ابدأ بإنشاء كشف حساب')).toBeInTheDocument();
+    expect(screen.getByTestId('statements-step-1')).toBeInTheDocument();
+    expect(screen.getByTestId('statements-step-2')).toBeInTheDocument();
+    expect(screen.getByTestId('statements-step-3')).toBeInTheDocument();
   });
 
   it('print + Excel buttons render disabled with "قريبًا" badge', () => {
