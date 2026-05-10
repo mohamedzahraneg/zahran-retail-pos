@@ -16,6 +16,67 @@ import { DataSource } from 'typeorm';
  *   * Live queries against journal_entries / journal_lines /
  *     cashboxes / shifts for integrity & drift checks
  */
+/**
+ * PR-FIX-WATCHTOWER-SCANNER-NOISE — engine bypass contexts that we
+ * KNOW are intentional, audited operations.  When a bypass alert
+ * carries one of these contexts, the bypass row stays in
+ * `engine_bypass_alerts` (audit-of-record is preserved) but the
+ * Watchtower no longer surfaces it as a HIGH-severity operator
+ * anomaly.
+ *
+ * The whitelist is intentionally narrow:
+ *   · `service:cash-recon-cleanup` — the production cash-recon
+ *     executor (PR #262, the historical 1,745 EGP gap cleanup).
+ *   · `service:VERIFY_PR`          — explicit verify-pr cleanup
+ *     scripts that set this context.
+ *
+ * Adding a new entry here means: "this context is reviewed and
+ * approved as a safe bypass — do not page the operator".  Anything
+ * else still fires a HIGH anomaly.
+ */
+export const BENIGN_BYPASS_CONTEXTS: ReadonlyArray<string> = [
+  'service:cash-recon-cleanup',
+  'service:VERIFY_PR',
+];
+
+/**
+ * Pattern that, if found in the affected row's notes / description,
+ * also marks the bypass as benign.  This catches cases where the
+ * cleanup script forgot to set an explicit engine context but tagged
+ * the row's notes column with a recognisable marker (the actual
+ * shape of the four April-24 anomalies on production).
+ */
+export const BENIGN_BYPASS_NOTES_PATTERNS: ReadonlyArray<RegExp> = [
+  /VERIFY_PR/i,
+];
+
+/**
+ * Decide whether a bypass-alert candidate is benign.  Defence in
+ * depth: the rule SQL also filters on `context_value NOT IN (...)`
+ * and a NOT-EXISTS check against the affected row's notes, but we
+ * do the same check in TS so unit tests can drive the filter
+ * without spinning up a real Postgres.
+ *
+ * `candidate.details.context`           — set by the SQL's
+ *                                         `jsonb_build_object('context', ...)`
+ * `candidate.details.affected_notes`    — set by the SQL's LEFT JOIN
+ *                                         to the affected row's
+ *                                         notes / description
+ */
+export function isBenignBypass(candidate: any): boolean {
+  const ctx = candidate?.details?.context;
+  if (typeof ctx === 'string' && BENIGN_BYPASS_CONTEXTS.includes(ctx)) {
+    return true;
+  }
+  const notes = candidate?.details?.affected_notes;
+  if (typeof notes === 'string') {
+    if (BENIGN_BYPASS_NOTES_PATTERNS.some((re) => re.test(notes))) {
+      return true;
+    }
+  }
+  return false;
+}
+
 @Injectable()
 export class FinancialHealthService {
   constructor(private readonly ds: DataSource) {}
@@ -220,16 +281,76 @@ export class FinancialHealthService {
 
     const rules: Array<{ sev: 'low'|'medium'|'high'|'critical'; type: string; sql: string; params?: any[] }> = [
       // 1. Direct legacy journal insert bypass (engine_bypass_alerts from mig 063)
+      //
+      // PR-FIX-WATCHTOWER-SCANNER-NOISE — two layers of suppression
+      // for known-good intentional bypasses.  The bypass alert ROW
+      // stays in `engine_bypass_alerts` regardless (audit-of-record),
+      // we just don't promote benign bypasses into operator-facing
+      // HIGH anomalies on the Watchtower:
+      //
+      //   (a) `context_value NOT IN (...)` — fast SQL-side whitelist
+      //       for explicitly-tagged service contexts.
+      //   (b) `NOT EXISTS` against the affected row's notes /
+      //       description — catches scripts whose engine_context was
+      //       set to something generic but whose notes carry a
+      //       recognisable cleanup marker (e.g. the four April-24
+      //       VERIFY_PR rows on production).
+      //
+      // We also expose `affected_notes` in the details JSON so the
+      // TS-side `isBenignBypass()` defence-in-depth filter (in the
+      // candidate loop below) can re-check after fetch.  If a future
+      // schema change drops one of these columns, the scan still
+      // works — `to_regclass`-style guards are not added because
+      // the trigger that populates these is older than the scan.
       {
         sev: 'high',
         type: 'legacy_bypass_journal_entry',
-        sql: `SELECT table_name AS affected_entity, record_id AS reference_id,
-                     jsonb_build_object('context', context_value,
-                                        'session_user', session_user_name,
-                                        'client_addr', client_addr) AS details,
-                     'Legacy writer bypassed engine — ' || table_name || ' ' || operation AS description
-                FROM engine_bypass_alerts
-               WHERE created_at > NOW() - INTERVAL '${h} hours'`,
+        sql: `SELECT a.table_name AS affected_entity,
+                     a.record_id AS reference_id,
+                     jsonb_build_object(
+                       'context',        a.context_value,
+                       'session_user',   a.session_user_name,
+                       'client_addr',    a.client_addr,
+                       'affected_notes', COALESCE(
+                         (SELECT ct.notes
+                            FROM cashbox_transactions ct
+                           WHERE a.table_name = 'cashbox_transactions'
+                             AND ct.id::text = a.record_id::text),
+                         (SELECT je.description
+                            FROM journal_entries je
+                           WHERE a.table_name = 'journal_entries'
+                             AND je.id::text = a.record_id::text),
+                         NULL
+                       )
+                     ) AS details,
+                     'Legacy writer bypassed engine — ' || a.table_name || ' ' || a.operation AS description
+                FROM engine_bypass_alerts a
+               WHERE a.created_at > NOW() - INTERVAL '${h} hours'
+                 AND a.context_value NOT IN (
+                       'service:cash-recon-cleanup',
+                       'service:VERIFY_PR'
+                     )
+                 AND NOT (
+                       a.table_name = 'cashbox_transactions'
+                       AND EXISTS (
+                         SELECT 1 FROM cashbox_transactions ct
+                          WHERE ct.id::text = a.record_id::text
+                            AND ct.notes ILIKE '%VERIFY_PR%'
+                       )
+                     )
+                 AND NOT (
+                       a.table_name IN ('journal_entries', 'journal_lines')
+                       AND EXISTS (
+                         SELECT 1 FROM journal_entries je
+                          WHERE (je.id::text = a.record_id::text
+                                 OR je.id::text IN (
+                                    SELECT jl.entry_id::text
+                                      FROM journal_lines jl
+                                     WHERE jl.id::text = a.record_id::text
+                                 ))
+                            AND je.description ILIKE '%VERIFY_PR%'
+                       )
+                     )`,
       },
       // 2. Unbalanced journal entry (shouldn't happen — DB trigger blocks, but scan anyway)
       {
@@ -290,6 +411,20 @@ export class FinancialHealthService {
               HAVING COUNT(*) >= 3`,
       },
       // 5. Abnormal shift variance spike (>5% of expected OR > 1000 EGP abs)
+      //
+      // PR-FIX-WATCHTOWER-SCANNER-NOISE — skip shifts whose variance
+      // was already addressed during close.  Three signals mean
+      // "operator handled it":
+      //   · variance_treatment IS NOT NULL    — operator picked one of
+      //                                         the treatments at close
+      //   · variance_journal_entry_id IS NOT NULL — the variance was
+      //                                              posted as a JE
+      //                                              (deduction or
+      //                                              accept-cash-loss)
+      //   · variance_approved_at IS NOT NULL  — explicit operator
+      //                                         approval timestamp
+      // Any one of these means the operator already saw + acted on
+      // the variance; we shouldn't re-page them as a fresh anomaly.
       {
         sev: 'medium',
         type: 'shift_variance_spike',
@@ -306,6 +441,9 @@ export class FinancialHealthService {
                 FROM shifts
                WHERE status='closed'
                  AND closed_at > NOW() - INTERVAL '${h} hours'
+                 AND variance_treatment        IS NULL
+                 AND variance_journal_entry_id IS NULL
+                 AND variance_approved_at      IS NULL
                  AND (
                    ABS(COALESCE(actual_closing,0) - COALESCE(expected_closing,0)) > 1000
                    OR (COALESCE(expected_closing,0) > 0 AND
@@ -344,22 +482,35 @@ export class FinancialHealthService {
                  AND risk_score >= 40`,
       },
       // 8. Low-accuracy shifts (variance > 5% of expected closing)
+      //
+      // PR-FIX-WATCHTOWER-SCANNER-NOISE — same treatment-aware guard
+      // as rule 5, applied via NOT EXISTS against `shifts` so we don't
+      // need to modify the v_shift_accuracy_score view.
       {
         sev: 'medium',
         type: 'low_accuracy_shift',
         sql: `SELECT 'shifts' AS affected_entity,
-                     shift_id::text AS reference_id,
+                     v.shift_id::text AS reference_id,
                      jsonb_build_object(
-                       'shift_no', shift_no,
-                       'accuracy_pct', accuracy_pct,
-                       'variance_amount', variance_amount,
-                       'expected_closing', expected_closing
+                       'shift_no', v.shift_no,
+                       'accuracy_pct', v.accuracy_pct,
+                       'variance_amount', v.variance_amount,
+                       'expected_closing', v.expected_closing
                      ) AS details,
-                     'Low accuracy shift ' || shift_no ||
-                       ' — accuracy ' || accuracy_pct::text || '%' AS description
-                FROM v_shift_accuracy_score
-               WHERE accuracy_level = 'low'
-                 AND closed_at > NOW() - INTERVAL '${h} hours'`,
+                     'Low accuracy shift ' || v.shift_no ||
+                       ' — accuracy ' || v.accuracy_pct::text || '%' AS description
+                FROM v_shift_accuracy_score v
+               WHERE v.accuracy_level = 'low'
+                 AND v.closed_at > NOW() - INTERVAL '${h} hours'
+                 AND NOT EXISTS (
+                   SELECT 1 FROM shifts s
+                    WHERE s.id = v.shift_id
+                      AND (
+                        s.variance_treatment        IS NOT NULL
+                        OR s.variance_journal_entry_id IS NOT NULL
+                        OR s.variance_approved_at      IS NOT NULL
+                      )
+                 )`,
       },
     ];
 
@@ -375,6 +526,16 @@ export class FinancialHealthService {
         continue; // tolerate missing tables on older deployments
       }
       for (const c of candidates) {
+        // PR-FIX-WATCHTOWER-SCANNER-NOISE — defence-in-depth: even if
+        // the rule SQL forgets to add the whitelist clause (or a new
+        // rule introduces another bypass surface), the post-fetch
+        // filter below stops a known-benign legacy bypass from being
+        // promoted into an operator anomaly.  The rule SQL also
+        // filters; this is the safety net.
+        if (rule.type === 'legacy_bypass_journal_entry' && isBenignBypass(c)) {
+          skipped++;
+          continue;
+        }
         try {
           // Suppress re-detection when a resolved=TRUE anomaly already
           // exists for the same (anomaly_type, affected_entity,
