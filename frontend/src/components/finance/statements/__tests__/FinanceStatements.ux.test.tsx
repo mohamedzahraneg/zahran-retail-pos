@@ -290,6 +290,35 @@ describe('FinanceStatements — date presets (PR-FIN-3-UX gap B)', () => {
     // Saturday before Wed = May 9.
     expect(from).toBe('2026-05-09');
   });
+
+  // PR-FIN-3-UX regression guard: the runner's local TZ is whatever
+  // GitHub Actions provides (UTC).  Date arithmetic must operate on
+  // Cairo YYYY-MM-DD strings, not on `Date.setDate()` in local TZ,
+  // otherwise the midnight crossover drifts results by a full day.
+  // CI caught this on commit abc4a2d — pinning the symptom here so
+  // it can't recur.
+  it('presetRange("last30") is timezone-pure — exactly 29 days regardless of UTC-vs-Cairo midnight crossover', () => {
+    // 21:10 UTC on 2026-05-10 is 00:10 Cairo on 2026-05-11.  Pre-fix
+    // this produced a 30-day diff because `now.setDate(d - 29)` saw
+    // UTC date 10, while `today` was already Cairo May 11.
+    const crossover = new Date('2026-05-10T21:10:00Z');
+    const { from, to } = presetRange('last30', crossover);
+    expect(to).toBe('2026-05-11');
+    expect(from).toBe('2026-04-12');
+    const fromMs = new Date(from + 'T00:00:00Z').getTime();
+    const toMs = new Date(to + 'T00:00:00Z').getTime();
+    expect(Math.round((toMs - fromMs) / 86_400_000)).toBe(29);
+  });
+
+  it('presetRange("week") on the Cairo midnight crossover still anchors on the Cairo Saturday', () => {
+    // 22:00 UTC on 2026-05-08 (Friday) is 01:00 Cairo on 2026-05-09
+    // (Saturday).  `from` must be Cairo May 9 (= Saturday) and `to`
+    // must be Cairo May 9 — i.e. a single-day "week-so-far".
+    const crossover = new Date('2026-05-08T22:00:00Z');
+    const { from, to } = presetRange('week', crossover);
+    expect(to).toBe('2026-05-09');
+    expect(from).toBe('2026-05-09');
+  });
 });
 
 // ─── 5. Print / Export gating ───────────────────────────────────────

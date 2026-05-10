@@ -79,31 +79,51 @@ function defaultRange(): { from: string; to: string } {
 
 type PresetKey = 'today' | 'week' | 'month' | 'mtd' | 'last30';
 
+// PR-FIN-3-UX — date arithmetic helpers that operate on YYYY-MM-DD
+// calendar strings rather than `Date.setDate(...)` on a wall-clock
+// `Date` object.  Necessary because the runner's local TZ (UTC in CI,
+// host-local for devs) is not Cairo, so doing `setDate(d - 29)` then
+// re-formatting in Cairo can drift the result by a full day at the
+// midnight crossover.  Treating the Cairo date as a pure calendar
+// value sidesteps the issue entirely.
+
+/** Add `days` (signed) to a YYYY-MM-DD calendar date. */
+function ymdAddDays(ymd: string, days: number): string {
+  const [y, m, d] = ymd.split('-').map(Number);
+  const t = Date.UTC(y!, m! - 1, d!);
+  const shifted = new Date(t + days * 86_400_000);
+  const yy = shifted.getUTCFullYear();
+  const mm = String(shifted.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(shifted.getUTCDate()).padStart(2, '0');
+  return `${yy}-${mm}-${dd}`;
+}
+
+/** Day-of-week (0=Sun..6=Sat) for a YYYY-MM-DD calendar date. */
+function ymdDayOfWeek(ymd: string): number {
+  const [y, m, d] = ymd.split('-').map(Number);
+  return new Date(Date.UTC(y!, m! - 1, d!)).getUTCDay();
+}
+
 /** Resolve a named preset to a `{from, to}` pair in Cairo time. */
 export function presetRange(preset: PresetKey, now: Date = new Date()): { from: string; to: string } {
   const today = fmtCairoYmd(now);
   if (preset === 'today') return { from: today, to: today };
-  if (preset === 'last30') {
-    const past = new Date(now);
-    past.setDate(past.getDate() - 29);
-    return { from: fmtCairoYmd(past), to: today };
-  }
+  if (preset === 'last30') return { from: ymdAddDays(today, -29), to: today };
   if (preset === 'week') {
-    // Saturday-start week (common in Egypt).  JS getDay() → 0=Sun..6=Sat.
-    const dow = now.getDay();
+    // Saturday-start week (common in Egypt).  ymdDayOfWeek returns
+    // 0=Sun..6=Sat for the calendar date itself.
+    const dow = ymdDayOfWeek(today);
     const daysSinceSat = (dow + 1) % 7;
-    const start = new Date(now);
-    start.setDate(start.getDate() - daysSinceSat);
-    return { from: fmtCairoYmd(start), to: today };
+    return { from: ymdAddDays(today, -daysSinceSat), to: today };
   }
   // 'month' (full current month) and 'mtd' (1st → today) both want
   // the 1st of the current month as `from`.  `month` extends `to` to
   // the last day of the month; `mtd` clamps at today.
   const firstOfMonth = today.slice(0, 7) + '-01';
   if (preset === 'mtd') return { from: firstOfMonth, to: today };
-  // 'month' — last day of current month
+  // 'month' — last day of current calendar month
   const [yr, mo] = today.split('-').map(Number);
-  const lastDay = new Date(yr!, mo!, 0).getDate(); // Date(y, m, 0) → last day of month m-1
+  const lastDay = new Date(Date.UTC(yr!, mo!, 0)).getUTCDate(); // Date.UTC(y, m, 0) → last day of month m-1, expressed in UTC
   const last = `${String(yr).padStart(4, '0')}-${String(mo).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
   return { from: firstOfMonth, to: last };
 }
