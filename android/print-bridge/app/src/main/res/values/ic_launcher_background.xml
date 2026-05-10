@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Adaptive icon background — solid pale lilac so the foreground
+         vector reads cleanly. -->
+    <color name="ic_launcher_background">#ede9fe</color>
+</resources>

@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Launcher icon foreground — a stylised printer glyph drawn as a
+    vector so we don't have to ship raster PNGs.  Adaptive icons need
+    a 108×108 dp art region (108×108 vector viewport) with safe content
+    inside the inner 72×72 area.  Brand purple #7c3aed.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Printer body -->
+    <path
+        android:fillColor="#7c3aed"
+        android:pathData="M30,40 L78,40 A6,6 0 0 1 84,46 L84,72 A6,6 0 0 1 78,78 L72,78 L72,84 A4,4 0 0 1 68,88 L40,88 A4,4 0 0 1 36,84 L36,78 L30,78 A6,6 0 0 1 24,72 L24,46 A6,6 0 0 1 30,40 Z" />
+    <!-- Top paper feed slot -->
+    <path
+        android:fillColor="#5b21b6"
+        android:pathData="M36,30 L72,30 A4,4 0 0 1 76,34 L76,40 L32,40 L32,34 A4,4 0 0 1 36,30 Z" />
+    <!-- Bottom paper output -->
+    <path
+        android:fillColor="#ffffff"
+        android:pathData="M40,62 L68,62 L68,84 L40,84 Z" />
+    <!-- Receipt lines -->
+    <path
+        android:fillColor="#7c3aed"
+        android:pathData="M44,68 L64,68 L64,70 L44,70 Z M44,73 L60,73 L60,75 L44,75 Z M44,78 L62,78 L62,80 L44,80 Z" />
+    <!-- LED indicator -->
+    <path
+        android:fillColor="#ec4899"
+        android:pathData="M76,48 m-3,0 a3,3 0 1,0 6,0 a3,3 0 1,0 -6,0" />
+</vector>

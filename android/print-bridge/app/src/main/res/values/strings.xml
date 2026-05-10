@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">جسر الطباعة</string>
+    <string name="app_name_en">Print Bridge</string>
+
+    <!-- Status block -->
+    <string name="status_running">جسر الطباعة يعمل</string>
+    <string name="status_stopped">جسر الطباعة متوقف</string>
+    <string name="status_url">الرابط: %1$s</string>
+
+    <!-- Printer block -->
+    <string name="printer_section_title">الطابعات المقترنة (Bluetooth)</string>
+    <string name="printer_scan">تحديث القائمة</string>
+    <string name="printer_none">لا توجد طابعات مقترنة. اربط الطابعة من إعدادات Android Bluetooth أولاً.</string>
+    <string name="printer_selected_label">الطابعة المختارة:</string>
+    <string name="printer_none_selected">— لا شيء —</string>
+
+    <!-- Buttons -->
+    <string name="action_test_print">اختبار طباعة</string>
+    <string name="action_open_settings">فتح إعدادات Bluetooth</string>
+    <string name="action_grant_permissions">منح الأذونات</string>
+
+    <!-- Permissions block -->
+    <string name="permissions_section_title">الأذونات المطلوبة</string>
+    <string name="permission_bt_granted">Bluetooth ✓</string>
+    <string name="permission_bt_denied">Bluetooth — لم يُمنح بعد</string>
+    <string name="permission_notif_granted">الإشعارات ✓</string>
+    <string name="permission_notif_denied">الإشعارات — لم تُمنح بعد</string>
+
+    <!-- Foreground notification -->
+    <string name="notif_channel_name">جسر الطباعة</string>
+    <string name="notif_channel_desc">يبقى الجسر يعمل في الخلفية لاستقبال أوامر الطباعة من نظام نقاط البيع.</string>
+    <string name="notif_title">جسر الطباعة يعمل</string>
+    <string name="notif_text">الاستماع على %1$s</string>
+
+    <!-- Errors / toasts -->
+    <string name="toast_no_printer">اختر طابعة أولاً</string>
+    <string name="toast_test_started">جارٍ إرسال اختبار الطباعة…</string>
+    <string name="toast_test_ok">تم إرسال الطباعة بنجاح</string>
+    <string name="toast_test_error">فشل اختبار الطباعة: %1$s</string>
+</resources>

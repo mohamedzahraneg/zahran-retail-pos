@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!--
+        Print Bridge — manifest.
+
+        Permissions are split across SDK levels:
+          · Android 12+ (API 31): runtime BLUETOOTH_CONNECT for any
+            BluetoothDevice / BluetoothSocket access.  The bridge needs
+            it to enumerate bonded printers and to open RFCOMM sockets.
+          · Android 11 and below: legacy BLUETOOTH + BLUETOOTH_ADMIN
+            (normal-protection, no runtime prompt).
+          · Android 13+ (API 33): runtime POST_NOTIFICATIONS so the
+            foreground-service notification can show.
+          · Foreground service: required so the bridge survives Doze /
+            battery saver while the user is in another app (Chrome
+            doing the actual print).
+
+        We deliberately do NOT request ACCESS_FINE_LOCATION.  The
+        bridge only enumerates BONDED devices (already paired in
+        Android Settings), which doesn't require location on any
+        Android version when BLUETOOTH_CONNECT is granted.
+    -->
+
+    <!-- Android 12+ runtime BT permissions.  `usesPermissionFlags="neverForLocation"`
+         is the explicit opt-out so the system knows we will not
+         derive location from BT scans — required to skip the FINE
+         location requirement on API 31+. -->
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation"
+        tools:targetApi="s" />
+
+    <!-- Legacy permissions for Android 11 and below.  Capped at API 30
+         so they aren't requested on API 31+. -->
+    <uses-permission
+        android:name="android.permission.BLUETOOTH"
+        android:maxSdkVersion="30" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_ADMIN"
+        android:maxSdkVersion="30" />
+
+    <!-- Foreground service — required to survive Doze.  Android 14
+         requires the typed permission below. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission
+        android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"
+        tools:targetApi="34" />
+
+    <!-- Notifications (Android 13+ runtime).  No-op on lower API levels. -->
+    <uses-permission
+        android:name="android.permission.POST_NOTIFICATIONS"
+        tools:targetApi="33" />
+
+    <!-- Loopback HTTP: INTERNET is implicitly granted (normal),
+         no <uses-permission> needed for 127.0.0.1 listening. -->
+
+    <!-- Hard requirement: device has Bluetooth.  Without it the
+         bridge has nothing to do. -->
+    <uses-feature
+        android:name="android.hardware.bluetooth"
+        android:required="true" />
+
+    <application
+        android:name=".BridgeApplication"
+        android:allowBackup="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.PrintBridge"
+        tools:targetApi="34">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".BridgeService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+
+    </application>
+
+</manifest>
