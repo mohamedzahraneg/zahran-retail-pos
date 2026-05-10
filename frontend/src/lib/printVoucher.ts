@@ -2,7 +2,13 @@
  * Print a cash voucher (سند قبض / سند صرف) to an iframe so it doesn't
  * repaint the whole page. 80mm thermal-friendly layout. Works for both
  * customer payments (قبض) and supplier payments (صرف).
+ *
+ * Phase-1 wiring: routed through `routePrintJob` so a configured
+ * thermal-ESC/POS printer with a Phase-2 bridge can take the print
+ * directly.  Falls back to today's iframe behaviour when no profile
+ * is set or the bridge is unreachable.
  */
+import { routePrintJob } from '@/lib/printers/router';
 
 export interface VoucherPayload {
   kind: 'receipt' | 'payment'; // قبض | صرف
@@ -33,6 +39,20 @@ export function printVoucher(v: VoucherPayload) {
   if (!v.in_words) {
     v.in_words = numberToArabicWords(v.amount);
   }
+  // Sync entry, async router internally — public `void` preserved.
+  void routePrintJob({
+    document_type: 'voucher',
+    document_id: v.doc_no,
+    buildPayload: () => ({
+      kind: 'escpos_html',
+      html: renderVoucherHtml(v),
+      width_mm: 80,
+    }),
+    onBrowserFallback: () => browserFallbackPrintVoucher(v),
+  });
+}
+
+function renderVoucherHtml(v: VoucherPayload): string {
   const title =
     v.kind === 'receipt' ? 'سند قبض' : 'سند صرف';
   const partyLabel = v.kind === 'receipt' ? 'استلمنا من' : 'دفعنا إلى';
@@ -43,7 +63,7 @@ export function printVoucher(v: VoucherPayload) {
     bank_transfer: 'تحويل بنكي',
   };
 
-  const html = `<!doctype html>
+  return `<!doctype html>
 <html dir="rtl" lang="ar">
 <head>
 <meta charset="utf-8" />
@@ -126,6 +146,11 @@ export function printVoucher(v: VoucherPayload) {
 </body>
 </html>`;
 
+}
+
+// ─── Browser-fallback path (today's behaviour) ────────────────────
+function browserFallbackPrintVoucher(v: VoucherPayload): void {
+  const html = renderVoucherHtml(v);
   const iframe = document.createElement('iframe');
   iframe.style.position = 'fixed';
   iframe.style.right = '0';

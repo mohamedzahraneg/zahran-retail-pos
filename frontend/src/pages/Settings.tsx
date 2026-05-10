@@ -27,6 +27,7 @@ import {
 } from '@/api/settings.api';
 import { useAuthStore } from '@/stores/auth.store';
 import { ReceiptTemplatesTab } from './ReceiptTemplatesTab';
+import { PrintersTab } from './PrintersTab';
 import { PaymentAccountLogoManager } from '@/components/payment-accounts/PaymentAccountLogoManager';
 import { displayCashboxBalance } from '@/lib/cashboxBalanceDisplay';
 
@@ -34,6 +35,7 @@ type TabKey =
   | 'company'
   | 'receipt'
   | 'templates'
+  | 'printers'
   | 'warehouses'
   | 'cashboxes'
   | 'payments'
@@ -44,6 +46,7 @@ const TABS: { key: TabKey; label: string; icon: any }[] = [
   { key: 'company', label: 'بيانات المحل', icon: Building2 },
   { key: 'receipt', label: 'إعدادات الفاتورة', icon: Printer },
   { key: 'templates', label: 'قوالب الفاتورة', icon: Printer },
+  { key: 'printers', label: 'الطابعات', icon: Printer },
   { key: 'warehouses', label: 'المخازن', icon: WarehouseIcon },
   { key: 'cashboxes', label: 'الخزائن', icon: Wallet },
   { key: 'payments', label: 'طرق الدفع', icon: CreditCard },
@@ -81,6 +84,7 @@ export default function Settings() {
           {tab === 'company' && <CompanyTab />}
           {tab === 'receipt' && <ReceiptTab />}
           {tab === 'templates' && <ReceiptTemplatesTab />}
+          {tab === 'printers' && <PrintersTab />}
           {tab === 'warehouses' && <WarehousesTab />}
           {tab === 'cashboxes' && <CashboxesTab />}
           {tab === 'payments' && <PaymentsTab />}

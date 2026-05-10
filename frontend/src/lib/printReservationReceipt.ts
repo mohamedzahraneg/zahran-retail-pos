@@ -7,7 +7,13 @@
  * Uses an off-screen iframe so the app's own stylesheet doesn't
  * interfere with the thermal page break and the browser's print
  * preview stays clean.
+ *
+ * Phase-1 wiring: internally routed through `routePrintJob`.  When
+ * no printer profile is configured for `reservation`, the router
+ * immediately invokes the inline iframe fallback below (today's
+ * behaviour, byte-for-byte).  Public signature `void` is preserved.
  */
+import { routePrintJob } from '@/lib/printers/router';
 
 const EGP = (n: number | string) =>
   `${Number(n || 0).toLocaleString('en-US', {
@@ -29,13 +35,58 @@ function fmtDate(s?: string | null) {
 }
 
 export function printReservationReceipt(res: any) {
+  // Sync entry, async router internally.  Public `void` return is
+  // preserved — onClick handlers don't need to await.
+  void routePrintJob({
+    document_type: 'reservation',
+    document_id: String(res?.id ?? res?.reservation_no ?? ''),
+    buildPayload: () => buildReservationPayload(res),
+    onBrowserFallback: () => browserFallbackPrint(res),
+  });
+}
+
+// ─── Bridge payload builder (Phase 2 will use this) ───────────────
+async function buildReservationPayload(res: any): Promise<any> {
+  // The bridge can lift the same HTML the iframe path uses; we
+  // produce it once here so the bridge route doesn't re-render.
+  const html = renderReservationHtml(res);
+  return { kind: 'escpos_html', html, width_mm: 80 };
+}
+
+// ─── Browser-fallback path (today's behaviour) ────────────────────
+function browserFallbackPrint(res: any): void {
+  const html = renderReservationHtml(res);
+  const iframe = document.createElement('iframe');
+  iframe.style.position = 'fixed';
+  iframe.style.width = '0';
+  iframe.style.height = '0';
+  iframe.style.border = 'none';
+  iframe.style.visibility = 'hidden';
+  document.body.appendChild(iframe);
+  const doc = iframe.contentDocument || iframe.contentWindow?.document;
+  if (doc) {
+    doc.open();
+    doc.write(html);
+    doc.close();
+  }
+  // Remove after print dialog closes.
+  setTimeout(() => {
+    try {
+      document.body.removeChild(iframe);
+    } catch {
+      /* ignore */
+    }
+  }, 60_000);
+}
+
+function renderReservationHtml(res: any): string {
   const shopName = 'زهران للأحذية والحقائب';
   const items = res.items || [];
   const deposit = Number(res.paid_amount || 0);
   const total = Number(res.total_amount || 0);
   const remaining = Number(res.remaining_amount || 0);
 
-  const html = `
+  return `
 <!DOCTYPE html>
 <html dir="rtl" lang="ar">
   <head>
@@ -136,26 +187,4 @@ export function printReservationReceipt(res: any) {
     </script>
   </body>
 </html>`;
-
-  const iframe = document.createElement('iframe');
-  iframe.style.position = 'fixed';
-  iframe.style.width = '0';
-  iframe.style.height = '0';
-  iframe.style.border = 'none';
-  iframe.style.visibility = 'hidden';
-  document.body.appendChild(iframe);
-  const doc = iframe.contentDocument || iframe.contentWindow?.document;
-  if (doc) {
-    doc.open();
-    doc.write(html);
-    doc.close();
-  }
-  // Remove after print dialog closes.
-  setTimeout(() => {
-    try {
-      document.body.removeChild(iframe);
-    } catch {
-      /* ignore */
-    }
-  }, 60_000);
 }
