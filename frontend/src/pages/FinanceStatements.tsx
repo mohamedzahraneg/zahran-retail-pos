@@ -100,7 +100,33 @@ export function FinanceStatements() {
         className="flex items-start justify-between gap-3 flex-wrap"
         data-testid="statements-header"
       >
-        <div className="order-2 lg:order-1 flex items-center gap-2">
+        {/* Title block — first in DOM. In RTL flex this sits on the
+            RIGHT (where the title belongs visually). */}
+        <div
+          className="flex items-start gap-3"
+          data-testid="finance-statements-header-title-block"
+        >
+          <div className="text-right">
+            <h1 className="text-xl font-black text-slate-900 dark:text-slate-100">
+              كشف الحسابات
+            </h1>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+              كشوف حسابات تفصيلية لكل كيان مالي مع الرصيد الافتتاحي
+              والختامي.
+            </p>
+          </div>
+          <div className="w-10 h-10 rounded-xl bg-brand-50 dark:bg-brand-900/40 text-brand-700 dark:text-brand-300 flex items-center justify-center shrink-0">
+            <ScrollText size={20} />
+          </div>
+        </div>
+
+        {/* Action buttons — last in DOM. In RTL flex this sits on the
+            LEFT. No `order-*` classes — relying on natural JSX order
+            keeps the layout consistent across all breakpoints. */}
+        <div
+          className="flex items-center gap-2"
+          data-testid="finance-statements-header-actions"
+        >
           <button
             type="button"
             onClick={() => refetch()}
@@ -137,21 +163,6 @@ export function FinanceStatements() {
               قريبًا
             </span>
           </button>
-        </div>
-
-        <div className="order-1 lg:order-2 flex items-start gap-3">
-          <div className="text-right">
-            <h1 className="text-xl font-black text-slate-900 dark:text-slate-100">
-              كشف الحسابات
-            </h1>
-            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-              كشوف حسابات تفصيلية لكل كيان مالي مع الرصيد الافتتاحي
-              والختامي.
-            </p>
-          </div>
-          <div className="w-10 h-10 rounded-xl bg-brand-50 dark:bg-brand-900/40 text-brand-700 dark:text-brand-300 flex items-center justify-center shrink-0">
-            <ScrollText size={20} />
-          </div>
         </div>
       </header>
 
