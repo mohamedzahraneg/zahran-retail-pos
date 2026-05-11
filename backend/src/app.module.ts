@@ -40,6 +40,7 @@ import { LoyaltyModule } from './loyalty/loyalty.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { SetupModule } from './setup/setup.module';
 import { RecurringExpensesModule } from './recurring-expenses/recurring-expenses.module';
+import { ExpenseAllocationsModule } from './expense-allocations/expense-allocations.module';
 import { CustomerGroupsModule } from './customer-groups/customer-groups.module';
 import { CategoriesModule } from './categories/categories.module';
 import { AttendanceModule } from './attendance/attendance.module';
@@ -111,6 +112,7 @@ class HealthController {
     NotificationsModule,
     SetupModule,
     RecurringExpensesModule,
+    ExpenseAllocationsModule,
     CustomerGroupsModule,
     CategoriesModule,
     ChartOfAccountsModule,
