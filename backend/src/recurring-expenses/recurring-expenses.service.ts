@@ -20,6 +20,29 @@ export type Frequency =
   | 'annual'
   | 'custom_days';
 
+/**
+ * PR-A2-FIX — payment_method whitelist for recurring expense templates.
+ * Mirrors the live PG enum `payment_method_code` (see
+ * `database/migrations/001_extensions_and_enums.sql:44` + the `wallet`
+ * extension in migration 113).  Without this guard a stale FE that
+ * still sends an out-of-enum value (e.g. legacy `'card'`) gets a raw
+ * PG 500 from the INSERT statement; with it, the operator sees a
+ * clean Arabic 400 and the DB stays unbothered.
+ */
+export const SUPPORTED_RECURRING_PAYMENT_METHODS: ReadonlyArray<string> = [
+  'cash',
+  'card_visa',
+  'card_mastercard',
+  'card_meeza',
+  'instapay',
+  'vodafone_cash',
+  'orange_cash',
+  'wallet',
+  'bank_transfer',
+  'credit',
+  'other',
+];
+
 export interface CreateRecurringExpenseDto {
   code: string;
   name_ar: string;
@@ -124,6 +147,10 @@ export class RecurringExpensesService {
 
   async create(dto: CreateRecurringExpenseDto, userId: string) {
     this.validateDto(dto);
+    // PR-A2-FIX — payment_method whitelist.  Stops a stale FE from
+    // bouncing a raw PG enum error back at the operator (500 leaking
+    // `invalid input value for enum "payment_method_code"`).
+    this.assertPaymentMethodSupported(dto.payment_method);
     // PR-A2 — cashbox invariant.  A cash template without a cashbox_id
     // would later trip `assertExpenseInvariants` at runOne() time,
     // failing every scheduled generation.  Catch it at template-create
@@ -185,6 +212,12 @@ export class RecurringExpensesService {
       [id],
     );
     if (!cur) throw new NotFoundException('not found');
+    // PR-A2-FIX — validate the new payment_method against the live
+    // enum BEFORE the UPDATE so callers see a clean 400 instead of
+    // a raw PG 500.
+    if (dto.payment_method !== undefined) {
+      this.assertPaymentMethodSupported(dto.payment_method);
+    }
     // PR-A2 — same cashbox invariant as create(), applied whenever
     // either the payment_method or the cashbox_id is being changed.
     // A pure no-op update (e.g. just bumping the amount) skips the
@@ -519,6 +552,22 @@ export class RecurringExpensesService {
     }
     if (dto.day_of_month != null && (dto.day_of_month < 1 || dto.day_of_month > 31)) {
       throw new BadRequestException('day_of_month must be 1..31');
+    }
+  }
+
+  /**
+   * PR-A2-FIX — payment_method whitelist guard.  When the caller
+   * supplies an out-of-enum value (e.g. legacy `'card'`), reject with
+   * a clean Arabic 400 instead of letting the INSERT/UPDATE crash
+   * with a raw PG enum error that surfaces as 500.  null/undefined
+   * is allowed — the DB default (`'cash'`) applies.
+   */
+  private assertPaymentMethodSupported(
+    paymentMethod: string | null | undefined,
+  ): void {
+    if (paymentMethod == null) return; // DB default will fill it
+    if (!SUPPORTED_RECURRING_PAYMENT_METHODS.includes(paymentMethod)) {
+      throw new BadRequestException('طريقة الدفع غير مدعومة.');
     }
   }
 

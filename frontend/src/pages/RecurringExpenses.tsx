@@ -42,6 +42,27 @@ import { settingsApi } from '@/api/settings.api';
 import { cashDeskApi } from '@/api/cash-desk.api';
 import { fmtCairoDate, fmtCairoDateTimeSeconds } from '@/lib/dates';
 
+// PR-A2-FIX — payment_method options must match the live DB enum
+// `payment_method_code`.  The pre-PR-A2 form used a value `card` that
+// does NOT exist in the enum, which crashed every Recurring Expense
+// create with a raw PG 500.  These literals mirror the enum values
+// exactly (see `database/migrations/001_extensions_and_enums.sql:44`
+// + the `wallet` extension in migration 113).  Each entry's `value`
+// is what flies on the wire; `label` is the Arabic UI text.
+export const RECURRING_PAYMENT_METHOD_OPTIONS = [
+  { value: 'cash',            label: 'نقدي' },
+  { value: 'card_visa',       label: 'بطاقة Visa' },
+  { value: 'card_mastercard', label: 'بطاقة Mastercard' },
+  { value: 'card_meeza',      label: 'بطاقة ميزة' },
+  { value: 'instapay',        label: 'انستاباي' },
+  { value: 'wallet',          label: 'محفظة إلكترونية' },
+  { value: 'bank_transfer',   label: 'تحويل بنكي' },
+] as const;
+
+/** Set of valid payment-method literals — used by the FE form gate. */
+export const RECURRING_PAYMENT_METHOD_VALUES: ReadonlyArray<string> =
+  RECURRING_PAYMENT_METHOD_OPTIONS.map((o) => o.value);
+
 const FREQUENCY_LABEL: Record<Frequency, string> = {
   daily: 'يومي',
   weekly: 'أسبوعي',
@@ -972,11 +993,11 @@ function RecurringExpenseFormModal({
                 onChange={(e) => onPaymentMethodChange(e.target.value)}
                 data-testid="recurring-payment-method"
               >
-                <option value="cash">نقدي</option>
-                <option value="card">بطاقة</option>
-                <option value="instapay">انستاباي</option>
-                <option value="wallet">محفظة</option>
-                <option value="bank_transfer">حوالة</option>
+                {RECURRING_PAYMENT_METHOD_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
               </select>
             </Field>
             <Field label="اسم المستفيد">

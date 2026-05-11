@@ -252,15 +252,18 @@ describe('RecurringExpensesService.create — auto_post category-GL validation (
   const USER_ID = 'user-1';
 
   // PR-A2 — these tests target the GL-mapping guard.  Set
-  // payment_method='card' so the new cashbox-invariant guard (which
-  // fires before the GL guard for cash defaults) does not interfere.
+  // payment_method='card_visa' (a real enum value) so the cashbox-
+  // invariant guard (which fires before the GL guard for cash defaults)
+  // does not interfere.  PR-A2-FIX additionally tightened the
+  // payment-method whitelist so the legacy 'card' literal would now
+  // be rejected too.
   const baseDto = {
     code: 'RENT-01',
     name_ar: 'إيجار',
     category_id: 'cat-1',
     warehouse_id: 'wh-1',
     amount: 5000,
-    payment_method: 'card',
+    payment_method: 'card_visa',
     frequency: 'monthly' as const,
     start_date: '2026-05-01',
   };
@@ -392,6 +395,144 @@ describe('RecurringExpensesService.update — auto_post category-GL validation (
   });
 });
 
+// ─── Behavioural: payment_method whitelist (PR-A2-FIX) ────────────
+
+describe('RecurringExpensesService — payment_method enum guard (PR-A2-FIX)', () => {
+  const USER_ID = 'user-pm';
+
+  const baseDto = {
+    code: 'PM-01',
+    name_ar: 'اشتراك',
+    category_id: 'cat-1',
+    warehouse_id: 'wh-1',
+    amount: 100,
+    frequency: 'monthly' as const,
+    start_date: '2026-05-01',
+    auto_post: false, // skip GL-mapping check
+  };
+
+  function makeHandler() {
+    return ({ sql }: MockCall): any[] => {
+      if (/SELECT id, account_id FROM expense_categories WHERE id = \$1/i.test(sql))
+        return [{ id: 'cat-1', account_id: 'acc-1' }];
+      if (/INSERT INTO recurring_expenses/i.test(sql))
+        return [{ id: 'new-tpl-pm', ...baseDto }];
+      return [];
+    };
+  }
+
+  it('rejects payment_method="card" with Arabic 400 (the original screenshot bug)', async () => {
+    const { ds } = makeMockDs(makeHandler());
+    const svc = new RecurringExpensesService(ds);
+    await expect(
+      svc.create(
+        { ...baseDto, payment_method: 'card', cashbox_id: undefined },
+        USER_ID,
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    await expect(
+      svc.create(
+        { ...baseDto, payment_method: 'card', cashbox_id: undefined },
+        USER_ID,
+      ),
+    ).rejects.toMatchObject({ message: 'طريقة الدفع غير مدعومة.' });
+  });
+
+  it('rejects any out-of-enum payment_method before INSERT (no PG round-trip)', async () => {
+    const { ds, calls } = makeMockDs(makeHandler());
+    const svc = new RecurringExpensesService(ds);
+    await expect(
+      svc.create(
+        { ...baseDto, payment_method: 'crypto', cashbox_id: undefined },
+        USER_ID,
+      ),
+    ).rejects.toMatchObject({ message: 'طريقة الدفع غير مدعومة.' });
+    // No INSERT was attempted — proves the guard fires upstream.
+    expect(findAll(calls, /INSERT INTO recurring_expenses/i)).toHaveLength(0);
+  });
+
+  it('accepts each documented enum value', async () => {
+    const goodValues = [
+      'cash',
+      'card_visa',
+      'card_mastercard',
+      'card_meeza',
+      'instapay',
+      'vodafone_cash',
+      'orange_cash',
+      'wallet',
+      'bank_transfer',
+      'credit',
+      'other',
+    ];
+    for (const pm of goodValues) {
+      const { ds } = makeMockDs(makeHandler());
+      const svc = new RecurringExpensesService(ds);
+      const out = await svc.create(
+        {
+          ...baseDto,
+          payment_method: pm,
+          // cash needs a cashbox; everything else is fine without
+          cashbox_id: pm === 'cash' ? 'cb-MAIN' : undefined,
+        },
+        USER_ID,
+      );
+      expect(out).toMatchObject({ id: 'new-tpl-pm' });
+    }
+  });
+
+  it('accepts null/undefined payment_method (DB default applies)', async () => {
+    const { ds } = makeMockDs(makeHandler());
+    const svc = new RecurringExpensesService(ds);
+    // payment_method omitted entirely → cash default → needs cashbox
+    const out = await svc.create(
+      { ...baseDto, cashbox_id: 'cb-MAIN' },
+      USER_ID,
+    );
+    expect(out).toMatchObject({ id: 'new-tpl-pm' });
+  });
+
+  it('update() with payment_method="card" rejects before UPDATE fires', async () => {
+    const existing = {
+      id: 'tpl-PM',
+      payment_method: 'cash',
+      cashbox_id: 'cb-MAIN',
+      auto_post: false,
+      category_id: 'cat-1',
+    };
+    const { ds, calls } = makeMockDs(({ sql }) => {
+      if (/^SELECT \* FROM recurring_expenses WHERE id = \$1/i.test(sql))
+        return [existing];
+      return [];
+    });
+    const svc = new RecurringExpensesService(ds);
+    await expect(
+      svc.update('tpl-PM', { payment_method: 'card' }),
+    ).rejects.toMatchObject({ message: 'طريقة الدفع غير مدعومة.' });
+    expect(findAll(calls, /^UPDATE recurring_expenses SET/i)).toHaveLength(0);
+  });
+
+  it('update() that omits payment_method skips the whitelist check', async () => {
+    const existing = {
+      id: 'tpl-PM2',
+      payment_method: 'cash',
+      cashbox_id: 'cb-MAIN',
+      auto_post: false,
+      category_id: 'cat-1',
+    };
+    const { ds } = makeMockDs(({ sql }) => {
+      if (/^SELECT \* FROM recurring_expenses WHERE id = \$1/i.test(sql))
+        return [existing];
+      if (/^UPDATE recurring_expenses SET/i.test(sql))
+        return [{ ...existing, amount: 200 }];
+      return [];
+    });
+    const svc = new RecurringExpensesService(ds);
+    const out = await svc.update('tpl-PM2', { amount: 200 });
+    expect(out).toMatchObject({ amount: 200 });
+  });
+});
+
 // ─── Behavioural: cashbox invariant on create/update (PR-A2) ──────
 
 describe('RecurringExpensesService.create — cashbox invariant (PR-A2)', () => {
@@ -448,11 +589,11 @@ describe('RecurringExpensesService.create — cashbox invariant (PR-A2)', () => 
     expect(out).toMatchObject({ id: 'new-tpl-1' });
   });
 
-  it('accepts non-cash (card) without cashbox_id', async () => {
+  it('accepts non-cash (card_visa) without cashbox_id', async () => {
     const { ds } = makeMockDs(makeHandler());
     const svc = new RecurringExpensesService(ds);
     const out = await svc.create(
-      { ...baseDto, payment_method: 'card', cashbox_id: undefined },
+      { ...baseDto, payment_method: 'card_visa', cashbox_id: undefined },
       USER_ID,
     );
     expect(out).toMatchObject({ id: 'new-tpl-1' });
@@ -482,7 +623,7 @@ describe('RecurringExpensesService.update — cashbox invariant (PR-A2)', () => 
   it('rejects update that flips payment_method to cash when no cashbox is set', async () => {
     const existing = {
       id: 'tpl-A2',
-      payment_method: 'card',
+      payment_method: 'card_visa',
       cashbox_id: null,
       auto_post: false,
       category_id: 'cat-1',
@@ -503,7 +644,7 @@ describe('RecurringExpensesService.update — cashbox invariant (PR-A2)', () => 
   it('accepts update that flips payment_method to cash AND sets cashbox_id in the same call', async () => {
     const existing = {
       id: 'tpl-A2b',
-      payment_method: 'card',
+      payment_method: 'card_visa',
       cashbox_id: null,
       auto_post: false,
       category_id: 'cat-1',
@@ -523,7 +664,7 @@ describe('RecurringExpensesService.update — cashbox invariant (PR-A2)', () => 
     expect(out).toMatchObject({ payment_method: 'cash', cashbox_id: 'cb-MAIN' });
   });
 
-  it('accepts update from cash → card without cashbox (cashbox no longer required)', async () => {
+  it('accepts update from cash → card_visa without cashbox (cashbox no longer required)', async () => {
     const existing = {
       id: 'tpl-A2c',
       payment_method: 'cash',
@@ -535,12 +676,12 @@ describe('RecurringExpensesService.update — cashbox invariant (PR-A2)', () => 
       if (/^SELECT \* FROM recurring_expenses WHERE id = \$1/i.test(sql))
         return [existing];
       if (/^UPDATE recurring_expenses SET/i.test(sql))
-        return [{ ...existing, payment_method: 'card' }];
+        return [{ ...existing, payment_method: 'card_visa' }];
       return [];
     });
     const svc = new RecurringExpensesService(ds);
-    const out = await svc.update('tpl-A2c', { payment_method: 'card' });
-    expect(out).toMatchObject({ payment_method: 'card' });
+    const out = await svc.update('tpl-A2c', { payment_method: 'card_visa' });
+    expect(out).toMatchObject({ payment_method: 'card_visa' });
   });
 
   it('rejects update that drops cashbox_id while payment_method stays cash', async () => {

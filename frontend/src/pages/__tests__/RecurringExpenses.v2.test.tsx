@@ -30,6 +30,8 @@ import RecurringExpenses, {
   flagsToBehavior,
   behaviorToFlags,
   filterRowsByDue,
+  RECURRING_PAYMENT_METHOD_OPTIONS,
+  RECURRING_PAYMENT_METHOD_VALUES,
 } from '@/pages/RecurringExpenses';
 import type { RecurringExpense } from '@/api/recurringExpenses.api';
 
@@ -401,6 +403,76 @@ describe('RecurringExpenses — generation-behavior radio (PR-A)', () => {
   });
 });
 
+// ─── Payment-method options whitelist (PR-A2-FIX) ──────────────────
+
+describe('RecurringExpenses — payment_method whitelist (PR-A2-FIX)', () => {
+  // The DB enum `payment_method_code` values, verified live on prod
+  // before this fix landed.  Updating this constant requires a
+  // coordinated migration + BE whitelist + FE option change, so we
+  // pin it as a regression guard.
+  const DB_ENUM = [
+    'cash',
+    'card_visa',
+    'card_mastercard',
+    'card_meeza',
+    'instapay',
+    'vodafone_cash',
+    'orange_cash',
+    'bank_transfer',
+    'credit',
+    'other',
+    'wallet',
+  ];
+
+  it('every exported FE option value exists in the DB enum', () => {
+    for (const v of RECURRING_PAYMENT_METHOD_VALUES) {
+      expect(DB_ENUM).toContain(v);
+    }
+  });
+
+  it('does NOT export the bogus legacy "card" value', () => {
+    expect(RECURRING_PAYMENT_METHOD_VALUES).not.toContain('card');
+  });
+
+  it('source-grep — RecurringExpenses.tsx has no `<option value="card">` and no `payment_method: \'card\'`', () => {
+    const src = readFileSync(
+      resolve(__dirname, '../RecurringExpenses.tsx'),
+      'utf-8',
+    );
+    const code = src
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/\/\/[^\n]*/g, '');
+    expect(code).not.toMatch(/value=["']card["']/);
+    expect(code).not.toMatch(/payment_method:\s*['"]card['"]/);
+  });
+
+  it('form renders every option from the canonical list', async () => {
+    listFixture = [];
+    renderPage();
+    fireEvent.click(await screen.findByTestId('recurring-new-template-btn'));
+    const select = screen.getByTestId(
+      'recurring-payment-method',
+    ) as HTMLSelectElement;
+    const optionValues = Array.from(select.options).map((o) => o.value);
+    for (const o of RECURRING_PAYMENT_METHOD_OPTIONS) {
+      expect(optionValues).toContain(o.value);
+    }
+    // And no leftover "card" entry.
+    expect(optionValues).not.toContain('card');
+  });
+
+  it('selecting "بطاقة Visa" sets payment_method=card_visa (valid enum value)', async () => {
+    listFixture = [];
+    renderPage();
+    fireEvent.click(await screen.findByTestId('recurring-new-template-btn'));
+    fireEvent.change(screen.getByTestId('recurring-payment-method'), {
+      target: { value: 'card_visa' },
+    });
+    // Cashbox row should disappear since card_visa is not cash.
+    expect(screen.queryByTestId('recurring-cashbox-row')).toBeNull();
+  });
+});
+
 // ─── Cashbox selector + payment-method gating (PR-A2) ──────────────
 
 describe('RecurringExpenses — form cashbox field (PR-A2)', () => {
@@ -416,12 +488,12 @@ describe('RecurringExpenses — form cashbox field (PR-A2)', () => {
     );
   });
 
-  it('cashbox row is hidden when payment_method=card', async () => {
+  it('cashbox row is hidden when payment_method is non-cash (e.g. card_visa)', async () => {
     listFixture = [];
     renderPage();
     fireEvent.click(await screen.findByTestId('recurring-new-template-btn'));
     fireEvent.change(screen.getByTestId('recurring-payment-method'), {
-      target: { value: 'card' },
+      target: { value: 'card_visa' },
     });
     expect(screen.queryByTestId('recurring-cashbox-row')).toBeNull();
     expect(screen.queryByTestId('recurring-cashbox-select')).toBeNull();
