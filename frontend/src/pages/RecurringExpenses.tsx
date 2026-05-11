@@ -136,6 +136,22 @@ export function behaviorToFlags(b: GenerationBehavior): BehaviorFlags {
   }
 }
 
+/**
+ * Default behaviour for a brand-new template ("اعتماد ودفع تلقائي" =
+ * the most common operator workflow).
+ *
+ * PR-A2-FIX-2 — the radio's visual default and the form's boolean
+ * defaults MUST come from the same source.  Earlier versions had the
+ * radio defaulting to `'auto_paid'` while the form's individual
+ * booleans defaulted to `auto_post=true, auto_paid=false,
+ * require_approval=false` (the "auto_post" combo, not "auto_paid").
+ * Operators who trusted the visual selection and clicked Save without
+ * touching the radio got a misconfigured template (e.g.
+ * TEST-RECUR-AUTOPAID-CASH-01 on 2026-05-11).  Driving both from this
+ * constant via `behaviorToFlags(...)` eliminates the desync.
+ */
+export const DEFAULT_GENERATION_BEHAVIOR: GenerationBehavior = 'auto_paid';
+
 // ─── Due-status filter ──────────────────────────────────────────────
 
 type DueFilter =
@@ -826,6 +842,21 @@ function RecurringExpenseFormModal({
   onClose: () => void;
   onSaved: () => void;
 }) {
+  // PR-A2-FIX-2 — radio and form boolean defaults come from the
+  // SAME source so they cannot drift.  For new templates, both are
+  // seeded from `behaviorToFlags(DEFAULT_GENERATION_BEHAVIOR)`.  For
+  // edits, both are derived from the existing row's flags.
+  const initialBehavior: GenerationBehavior = editing
+    ? flagsToBehavior(editing)
+    : DEFAULT_GENERATION_BEHAVIOR;
+  const initialFlags: BehaviorFlags = editing
+    ? {
+        auto_post: editing.auto_post,
+        auto_paid: editing.auto_paid,
+        require_approval: editing.require_approval,
+      }
+    : behaviorToFlags(DEFAULT_GENERATION_BEHAVIOR);
+
   const [form, setForm] = useState<CreateRecurringExpenseInput>({
     code: editing?.code || '',
     name_ar: editing?.name_ar || '',
@@ -842,17 +873,11 @@ function RecurringExpenseFormModal({
     day_of_month: editing?.day_of_month,
     start_date: editing?.start_date || new Date().toISOString().slice(0, 10),
     end_date: editing?.end_date,
-    auto_post: editing?.auto_post ?? true,
-    auto_paid: editing?.auto_paid ?? false,
     notify_days_before: editing?.notify_days_before ?? 3,
-    require_approval: editing?.require_approval ?? false,
+    ...initialFlags,
   });
 
-  // Initialize behavior radio from existing flags (or sensible default
-  // for new templates: "اعتماد ودفع تلقائي" → most common workflow).
-  const [behavior, setBehavior] = useState<GenerationBehavior>(() =>
-    editing ? flagsToBehavior(editing) : 'auto_paid',
-  );
+  const [behavior, setBehavior] = useState<GenerationBehavior>(initialBehavior);
 
   const onBehaviorChange = (b: GenerationBehavior) => {
     setBehavior(b);

@@ -32,6 +32,7 @@ import RecurringExpenses, {
   filterRowsByDue,
   RECURRING_PAYMENT_METHOD_OPTIONS,
   RECURRING_PAYMENT_METHOD_VALUES,
+  DEFAULT_GENERATION_BEHAVIOR,
 } from '@/pages/RecurringExpenses';
 import type { RecurringExpense } from '@/api/recurringExpenses.api';
 
@@ -345,6 +346,164 @@ describe('RecurringExpenses — due-status filter pills (PR-A)', () => {
     // Only the overdue row remains
     expect(screen.getByText('متأخر')).toBeInTheDocument();
     expect(screen.queryByText('مجدول')).toBeNull();
+  });
+});
+
+// ─── Behavior/form default sync (PR-A2-FIX-2) ──────────────────────
+
+describe('RecurringExpenses — new-template behavior/form defaults are SYNCED (PR-A2-FIX-2)', () => {
+  it('DEFAULT_GENERATION_BEHAVIOR is "auto_paid" (most common workflow)', () => {
+    expect(DEFAULT_GENERATION_BEHAVIOR).toBe('auto_paid');
+  });
+
+  it('the default behaviour maps to {auto_post:true, auto_paid:true, require_approval:false}', () => {
+    expect(behaviorToFlags(DEFAULT_GENERATION_BEHAVIOR)).toEqual({
+      auto_post: true,
+      auto_paid: true,
+      require_approval: false,
+    });
+  });
+
+  it('opening the form for a NEW template visually selects the "auto_paid" radio', async () => {
+    listFixture = [];
+    renderPage();
+    fireEvent.click(await screen.findByTestId('recurring-new-template-btn'));
+    const autoPaid = screen.getByTestId(
+      'recurring-behavior-auto_paid',
+    ) as HTMLInputElement;
+    expect(autoPaid.checked).toBe(true);
+    // None of the other radios should be selected.
+    expect(
+      (screen.getByTestId('recurring-behavior-draft') as HTMLInputElement).checked,
+    ).toBe(false);
+    expect(
+      (screen.getByTestId('recurring-behavior-auto_post') as HTMLInputElement).checked,
+    ).toBe(false);
+    expect(
+      (screen.getByTestId('recurring-behavior-approval') as HTMLInputElement).checked,
+    ).toBe(false);
+  });
+
+  it('saving a NEW template WITHOUT touching the radio sends auto_paid=true (regression for the silent desync bug)', async () => {
+    // Spy on the create call so we can inspect the exact payload.
+    const { recurringExpensesApi } = await import('@/api/recurringExpenses.api');
+    const createSpy = vi
+      .mocked(recurringExpensesApi.create)
+      .mockResolvedValue({} as any);
+
+    listFixture = [];
+    renderPage();
+    fireEvent.click(await screen.findByTestId('recurring-new-template-btn'));
+
+    // Wait for the cashbox list to load — needed because the default
+    // payment_method='cash' makes the Save button require a cashbox.
+    await waitFor(() => {
+      const cb = screen.getByTestId('recurring-cashbox-select') as HTMLSelectElement;
+      expect(Array.from(cb.options).find((o) => o.value === 'cb-MAIN')).toBeDefined();
+    });
+
+    // Fill the required text + select fields.  Notice: we never touch
+    // the behaviour radio.  The radio is already visually showing
+    // "auto_paid"; the bug being tested would have shipped auto_paid=
+    // false anyway.
+    fireEvent.change(screen.getByPlaceholderText('RENT-CAIRO-01'), {
+      target: { value: 'TEST-NEW-DEFAULT' },
+    });
+    fireEvent.change(screen.getAllByRole('textbox')[1]!, {
+      target: { value: 'اختبار افتراضي' },
+    });
+    const selects = screen.getAllByRole('combobox');
+    fireEvent.change(selects[0]!, { target: { value: 'cat-1' } });
+    fireEvent.change(selects[1]!, { target: { value: 'wh-1' } });
+    fireEvent.change(screen.getByTestId('recurring-cashbox-select'), {
+      target: { value: 'cb-MAIN' },
+    });
+    fireEvent.change(screen.getByDisplayValue('0'), {
+      target: { value: '1000' },
+    });
+
+    await waitFor(() => {
+      const save = screen.getByTestId('recurring-save-btn') as HTMLButtonElement;
+      expect(save.disabled).toBe(false);
+    });
+    fireEvent.click(screen.getByTestId('recurring-save-btn'));
+
+    await waitFor(() => expect(createSpy).toHaveBeenCalled());
+    const payload = createSpy.mock.calls[0]![0];
+    expect(payload).toMatchObject({
+      auto_post: true,
+      auto_paid: true, // ← the bug fix: was previously FALSE
+      require_approval: false,
+    });
+  });
+
+  it('editing an existing auto_post=true / auto_paid=false template classifies as "auto_post" behaviour', async () => {
+    const existing = buildTemplate({
+      id: 'tpl-EXISTING-B',
+      code: 'EXISTING-B',
+      name_ar: 'قالب B',
+      auto_post: true,
+      auto_paid: false,
+      require_approval: false,
+    });
+    listFixture = [existing];
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByTestId('recurring-table')).toBeInTheDocument(),
+    );
+    // Open the edit modal by clicking the row's edit icon.  The edit
+    // icon doesn't have a test-id, so target by title.
+    fireEvent.click(screen.getByTitle('تعديل'));
+    // Behaviour radio "auto_post" should be selected.
+    const autoPost = screen.getByTestId(
+      'recurring-behavior-auto_post',
+    ) as HTMLInputElement;
+    expect(autoPost.checked).toBe(true);
+    expect(
+      (screen.getByTestId('recurring-behavior-auto_paid') as HTMLInputElement).checked,
+    ).toBe(false);
+  });
+
+  it('editing an existing require_approval=true template classifies as "approval" behaviour', async () => {
+    const existing = buildTemplate({
+      id: 'tpl-EXISTING-APP',
+      code: 'EXISTING-APP',
+      name_ar: 'قالب اعتماد',
+      auto_post: false,
+      auto_paid: false,
+      require_approval: true,
+      payment_method: 'card_visa',
+    });
+    listFixture = [existing];
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByTestId('recurring-table')).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByTitle('تعديل'));
+    const approval = screen.getByTestId(
+      'recurring-behavior-approval',
+    ) as HTMLInputElement;
+    expect(approval.checked).toBe(true);
+  });
+
+  it('source-grep — no separate hardcoded defaults exist for auto_post / auto_paid / require_approval', () => {
+    const src = readFileSync(
+      resolve(__dirname, '../RecurringExpenses.tsx'),
+      'utf-8',
+    );
+    const code = src
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/\/\/[^\n]*/g, '');
+    // The legacy hard-coded form defaults pattern (each boolean with
+    // its own `?? <bool>` fallback) must be gone — that's what caused
+    // the radio/form desync.
+    expect(code).not.toMatch(/auto_post:\s*editing\??\.auto_post\s*\?\?\s*true/);
+    expect(code).not.toMatch(/auto_paid:\s*editing\??\.auto_paid\s*\?\?\s*false/);
+    expect(code).not.toMatch(
+      /require_approval:\s*editing\??\.require_approval\s*\?\?\s*false/,
+    );
+    // Positive guard — defaults flow through the shared constant.
+    expect(code).toMatch(/DEFAULT_GENERATION_BEHAVIOR/);
   });
 });
 
