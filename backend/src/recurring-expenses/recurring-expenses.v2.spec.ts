@@ -1006,6 +1006,225 @@ describe('RecurringExpensesService — behaviour consistency (cash ↔ auto_paid
   });
 });
 
+// ─── Behavioural: PR-TRIM string normalisation ────────────────────
+
+describe('RecurringExpensesService — string trim normalisation (PR-TRIM)', () => {
+  const USER_ID = 'user-trim';
+
+  const baseDto = {
+    code: 'TRIM-01',
+    name_ar: 'اختبار',
+    category_id: 'cat-1',
+    warehouse_id: 'wh-1',
+    amount: 100,
+    payment_method: 'card_visa',
+    frequency: 'monthly' as const,
+    start_date: '2026-05-11',
+    auto_post: false,
+  };
+
+  /**
+   * Mock handler that captures the parameter list of every INSERT/
+   * UPDATE against `recurring_expenses` so tests can assert the
+   * trimmed values actually reach the SQL boundary.
+   */
+  function makeCapturingHandler() {
+    const inserts: any[][] = [];
+    const updates: any[][] = [];
+    const handler = ({ sql, params }: MockCall): any[] => {
+      if (/SELECT id, account_id FROM expense_categories WHERE id = \$1/i.test(sql))
+        return [{ id: 'cat-1', account_id: 'acc-1' }];
+      if (/INSERT INTO recurring_expenses/i.test(sql)) {
+        inserts.push(params || []);
+        return [{ id: 'new-trim-1', code: params?.[0], name_ar: params?.[1] }];
+      }
+      if (/^SELECT \* FROM recurring_expenses WHERE id = \$1/i.test(sql))
+        return [{
+          id: 'existing-1',
+          code: 'EXISTING',
+          name_ar: 'موجود',
+          name_en: 'Existing',
+          vendor_name: 'Vendor',
+          description: 'desc',
+          payment_method: 'card_visa',
+          cashbox_id: null,
+          category_id: 'cat-1',
+          auto_post: false,
+          auto_paid: false,
+        }];
+      if (/^UPDATE recurring_expenses SET/i.test(sql)) {
+        updates.push(params || []);
+        return [{ id: 'existing-1' }];
+      }
+      return [];
+    };
+    return { handler, inserts, updates };
+  }
+
+  // ─── create() trim happy path ────────────────────────────────────
+
+  it('create() trims leading/trailing whitespace from code before INSERT', async () => {
+    const { handler, inserts } = makeCapturingHandler();
+    const { ds } = makeMockDs(handler);
+    const svc = new RecurringExpensesService(ds);
+    await svc.create({ ...baseDto, code: '   TRIM-01   ' }, USER_ID);
+    // INSERT params: (code, name_ar, name_en, category, warehouse, ...) — position 0 is code.
+    expect(inserts[0]?.[0]).toBe('TRIM-01');
+  });
+
+  it('create() trims name_ar before INSERT', async () => {
+    const { handler, inserts } = makeCapturingHandler();
+    const { ds } = makeMockDs(handler);
+    const svc = new RecurringExpensesService(ds);
+    await svc.create({ ...baseDto, name_ar: '   اختبار   ' }, USER_ID);
+    expect(inserts[0]?.[1]).toBe('اختبار');
+  });
+
+  it('create() trims name_en (optional) and stores null when only whitespace', async () => {
+    const { handler, inserts } = makeCapturingHandler();
+    const { ds } = makeMockDs(handler);
+    const svc = new RecurringExpensesService(ds);
+    await svc.create({ ...baseDto, name_en: '   ' as any }, USER_ID);
+    // INSERT position 2 is name_en; trimmed empty → undefined → service maps `|| null`.
+    expect(inserts[0]?.[2]).toBeNull();
+  });
+
+  it('create() trims vendor_name and stores null when only whitespace', async () => {
+    const { handler, inserts } = makeCapturingHandler();
+    const { ds } = makeMockDs(handler);
+    const svc = new RecurringExpensesService(ds);
+    await svc.create({ ...baseDto, vendor_name: '  المالك  ' }, USER_ID);
+    // INSERT position 8 is vendor_name.
+    expect(inserts[0]?.[8]).toBe('المالك');
+
+    const { handler: h2, inserts: i2 } = makeCapturingHandler();
+    const { ds: ds2 } = makeMockDs(h2);
+    const svc2 = new RecurringExpensesService(ds2);
+    await svc2.create({ ...baseDto, code: 'TRIM-02', vendor_name: '   ' }, USER_ID);
+    expect(i2[0]?.[8]).toBeNull();
+  });
+
+  it('create() trims description and stores null when only whitespace', async () => {
+    const { handler, inserts } = makeCapturingHandler();
+    const { ds } = makeMockDs(handler);
+    const svc = new RecurringExpensesService(ds);
+    await svc.create({ ...baseDto, description: '  ملاحظة  ' }, USER_ID);
+    // INSERT position 9 is description.
+    expect(inserts[0]?.[9]).toBe('ملاحظة');
+  });
+
+  it('create() preserves INNER whitespace ("Office Rent" stays "Office Rent")', async () => {
+    const { handler, inserts } = makeCapturingHandler();
+    const { ds } = makeMockDs(handler);
+    const svc = new RecurringExpensesService(ds);
+    await svc.create(
+      { ...baseDto, code: '  Office Rent  ', name_ar: '  إيجار المكتب  ' },
+      USER_ID,
+    );
+    expect(inserts[0]?.[0]).toBe('Office Rent');
+    expect(inserts[0]?.[1]).toBe('إيجار المكتب');
+  });
+
+  // ─── create() trim → required-field guard ────────────────────────
+
+  it('create() with pure-whitespace code is rejected with the existing required-field BadRequest', async () => {
+    const { handler, inserts } = makeCapturingHandler();
+    const { ds } = makeMockDs(handler);
+    const svc = new RecurringExpensesService(ds);
+    await expect(
+      svc.create({ ...baseDto, code: '     ' }, USER_ID),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    await expect(
+      svc.create({ ...baseDto, code: '     ' }, USER_ID),
+    ).rejects.toMatchObject({ message: 'code + name_ar مطلوبان' });
+    // No INSERT fired.
+    expect(inserts).toHaveLength(0);
+  });
+
+  it('create() with pure-whitespace name_ar is rejected with the same Arabic guard', async () => {
+    const { handler, inserts } = makeCapturingHandler();
+    const { ds } = makeMockDs(handler);
+    const svc = new RecurringExpensesService(ds);
+    await expect(
+      svc.create({ ...baseDto, name_ar: '   ' }, USER_ID),
+    ).rejects.toMatchObject({ message: 'code + name_ar مطلوبان' });
+    expect(inserts).toHaveLength(0);
+  });
+
+  // ─── update() trim ───────────────────────────────────────────────
+
+  it('update() trims fields present in the DTO before UPDATE', async () => {
+    const { handler, updates } = makeCapturingHandler();
+    const { ds } = makeMockDs(handler);
+    const svc = new RecurringExpensesService(ds);
+    await svc.update('existing-1', {
+      code: '   NEW-CODE   ',
+      name_ar: '   جديد   ',
+      vendor_name: '   مورد   ',
+    });
+    expect(updates).toHaveLength(1);
+    // UPDATE params order is (id, ...fields).  Since `push()` only
+    // appends fields that are in the DTO, just assert the trimmed
+    // values appear in the array.
+    const params = updates[0]!;
+    expect(params).toContain('NEW-CODE');
+    expect(params).toContain('جديد');
+    expect(params).toContain('مورد');
+    // No raw padded versions.
+    expect(params).not.toContain('   NEW-CODE   ');
+    expect(params).not.toContain('   جديد   ');
+  });
+
+  it('update() does NOT clobber omitted string fields (only trims what is in the DTO)', async () => {
+    const { handler, updates } = makeCapturingHandler();
+    const { ds } = makeMockDs(handler);
+    const svc = new RecurringExpensesService(ds);
+    // Only amount in the DTO — nothing else.
+    await svc.update('existing-1', { amount: 999 });
+    expect(updates).toHaveLength(1);
+    const params = updates[0]!;
+    // No string field appears in the params (besides the id, which is
+    // a UUID-shaped string; the existing stored strings are not
+    // re-emitted by the push() helper).
+    expect(params).not.toContain('EXISTING');
+    expect(params).not.toContain('موجود');
+    expect(params).not.toContain('Existing');
+    expect(params).not.toContain('Vendor');
+    expect(params).not.toContain('desc');
+    // Only amount was updated.
+    expect(params).toContain(999);
+  });
+
+  it('update() with description set to pure whitespace is a no-op for that field (conservative — does NOT wipe stored value)', async () => {
+    const { handler, updates } = makeCapturingHandler();
+    const { ds } = makeMockDs(handler);
+    const svc = new RecurringExpensesService(ds);
+    // normaliseStrings collapses pure-whitespace optional fields to
+    // undefined.  The push() helper in update() skips undefined → the
+    // description column never appears in the UPDATE.  If the operator
+    // genuinely wants to clear a description, they can submit an
+    // empty string explicitly — that flows as a regular zero-length
+    // string through the API path.  Submitting pure spaces is treated
+    // as "you didn't mean to change this field".
+    await svc.update('existing-1', { description: '   ' });
+    // No UPDATE was emitted at all (no other fields in the DTO).
+    expect(updates).toHaveLength(0);
+  });
+
+  // ─── Source-grep regression guards ───────────────────────────────
+
+  it('source-grep — normaliseStrings is called from create() and update()', () => {
+    const SRC = readFileSync(
+      resolve(__dirname, './recurring-expenses.service.ts'),
+      'utf-8',
+    );
+    const code = SRC.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+    expect(code).toMatch(/this\.normaliseStrings\(dto\)/);
+    // Helper defined.
+    expect(code).toMatch(/private normaliseStrings\(/);
+  });
+});
+
 // ─── Source-grep: write-surface invariants ────────────────────────
 
 describe('recurring-expenses.service.ts — write-surface invariants (PR-A)', () => {

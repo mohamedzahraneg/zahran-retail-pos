@@ -954,6 +954,121 @@ describe('RecurringExpenses — Cairo date formatting (PR-A2)', () => {
   });
 });
 
+// ─── String trim before submit (PR-TRIM) ───────────────────────────
+
+describe('RecurringExpenses — string trim before submit (PR-TRIM)', () => {
+  /**
+   * Drives the form to save with whitespace-padded inputs and
+   * asserts the create payload that hits the API is already trimmed.
+   * Reuses the spy-on-create pattern from the PR-A2-FIX-2 tests.
+   */
+  async function fillFormAndSave(opts: {
+    code: string;
+    name_ar: string;
+    vendor_name?: string;
+    description?: string;
+    /** Fired AFTER the modal mounts and BEFORE the field assignments
+     *  if the caller wants to switch payment_method etc. */
+    extra?: () => void;
+  }) {
+    const { recurringExpensesApi } = await import('@/api/recurringExpenses.api');
+    const createSpy = vi.mocked(recurringExpensesApi.create);
+    createSpy.mockClear().mockResolvedValue({} as any);
+
+    listFixture = [];
+    renderPage();
+    fireEvent.click(await screen.findByTestId('recurring-new-template-btn'));
+    await screen.findByPlaceholderText('RENT-CAIRO-01');
+    if (opts.extra) opts.extra();
+
+    fireEvent.change(screen.getByPlaceholderText('RENT-CAIRO-01'), {
+      target: { value: opts.code },
+    });
+    const textboxes = screen.getAllByRole('textbox');
+    // textboxes order: [code, name_ar, vendor_name, description]
+    fireEvent.change(textboxes[1]!, { target: { value: opts.name_ar } });
+    if (opts.vendor_name !== undefined) {
+      fireEvent.change(textboxes[2]!, { target: { value: opts.vendor_name } });
+    }
+    if (opts.description !== undefined) {
+      fireEvent.change(textboxes[3]!, { target: { value: opts.description } });
+    }
+    const selects = screen.getAllByRole('combobox');
+    fireEvent.change(selects[0]!, { target: { value: 'cat-1' } }); // category
+    fireEvent.change(selects[1]!, { target: { value: 'wh-1' } }); // warehouse
+
+    await waitFor(() => {
+      const save = screen.getByTestId('recurring-save-btn') as HTMLButtonElement;
+      expect(save.disabled).toBe(false);
+    });
+    fireEvent.click(screen.getByTestId('recurring-save-btn'));
+
+    await waitFor(() => expect(createSpy).toHaveBeenCalled());
+    return createSpy.mock.calls[0]![0];
+  }
+
+  it('saving with code " TEST-CODE " sends payload.code = "TEST-CODE"', async () => {
+    const payload = await fillFormAndSave({
+      code: '   TEST-CODE   ',
+      name_ar: 'اسم',
+    });
+    expect(payload.code).toBe('TEST-CODE');
+  });
+
+  it('saving with name_ar " اختبار " sends payload.name_ar = "اختبار"', async () => {
+    const payload = await fillFormAndSave({
+      code: 'CODE-1',
+      name_ar: '   اختبار   ',
+    });
+    expect(payload.name_ar).toBe('اختبار');
+  });
+
+  it('saving with vendor_name " vendor " sends payload.vendor_name = "vendor"', async () => {
+    const payload = await fillFormAndSave({
+      code: 'CODE-2',
+      name_ar: 'اسم',
+      vendor_name: '   vendor   ',
+    });
+    expect(payload.vendor_name).toBe('vendor');
+  });
+
+  it('empty-after-trim vendor_name collapses to undefined (not the literal "" or "   ")', async () => {
+    const payload = await fillFormAndSave({
+      code: 'CODE-3',
+      name_ar: 'اسم',
+      vendor_name: '     ',
+    });
+    expect(payload.vendor_name).toBeUndefined();
+  });
+
+  it('description with padded value sends payload.description trimmed', async () => {
+    const padded = await fillFormAndSave({
+      code: 'CODE-4',
+      name_ar: 'اسم',
+      description: '   ملاحظة هنا   ',
+    });
+    expect(padded.description).toBe('ملاحظة هنا');
+  });
+
+  it('description empty-after-trim collapses to undefined', async () => {
+    const empty = await fillFormAndSave({
+      code: 'CODE-5',
+      name_ar: 'اسم',
+      description: '    ',
+    });
+    expect(empty.description).toBeUndefined();
+  });
+
+  it('inner whitespace is preserved ("Office Rent" stays "Office Rent")', async () => {
+    const payload = await fillFormAndSave({
+      code: '  Office Rent  ',
+      name_ar: '  إيجار المكتب  ',
+    });
+    expect(payload.code).toBe('Office Rent');
+    expect(payload.name_ar).toBe('إيجار المكتب');
+  });
+});
+
 // ─── Runs history drawer ────────────────────────────────────────────
 
 describe('RecurringExpenses — runs history drawer (PR-A)', () => {

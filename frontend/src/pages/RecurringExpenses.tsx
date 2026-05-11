@@ -939,11 +939,34 @@ function RecurringExpenseFormModal({
   const cashRequiresCashbox =
     form.payment_method === 'cash' && !form.cashbox_id;
 
+  // PR-TRIM — normalise user-typed string fields before sending so a
+  // trailing space the operator didn't notice doesn't land in the DB.
+  // The BE has its own trim pass (defence in depth), but trimming
+  // client-side also means the saved row matches what the operator
+  // actually intended even if they're on a stale BE deploy.
+  const buildTrimmedPayload = (): CreateRecurringExpenseInput => {
+    const opt = (v: string | undefined): string | undefined => {
+      if (v == null) return undefined;
+      const t = v.trim();
+      return t.length === 0 ? undefined : t;
+    };
+    return {
+      ...form,
+      code: form.code.trim(),
+      name_ar: form.name_ar.trim(),
+      name_en: opt(form.name_en),
+      vendor_name: opt(form.vendor_name),
+      description: opt(form.description),
+    };
+  };
+
   const saveM = useMutation({
-    mutationFn: () =>
-      editing
-        ? recurringExpensesApi.update(editing.id, form)
-        : recurringExpensesApi.create(form),
+    mutationFn: () => {
+      const payload = buildTrimmedPayload();
+      return editing
+        ? recurringExpensesApi.update(editing.id, payload)
+        : recurringExpensesApi.create(payload);
+    },
     onSuccess: () => {
       toast.success(editing ? 'تم التحديث' : 'تم الإنشاء');
       onSaved();

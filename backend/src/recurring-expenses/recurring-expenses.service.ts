@@ -146,6 +146,15 @@ export class RecurringExpensesService {
   }
 
   async create(dto: CreateRecurringExpenseDto, userId: string) {
+    // PR-TRIM — strip leading/trailing whitespace from every user-typed
+    // string BEFORE validation so:
+    //   1. Pure-whitespace `code` / `name_ar` (e.g. "   ") become empty
+    //      and trip the existing required-field check in validateDto().
+    //   2. The UNIQUE(code) constraint compares clean values (no
+    //      "ABC" vs " ABC" duplicates can land).
+    // Mutates the DTO in place — that's fine, the controller passes a
+    // freshly-instantiated request object per call.
+    this.normaliseStrings(dto);
     this.validateDto(dto);
     // PR-A2-FIX — payment_method whitelist.  Stops a stale FE from
     // bouncing a raw PG enum error back at the operator (500 leaking
@@ -216,6 +225,11 @@ export class RecurringExpensesService {
   }
 
   async update(id: string, dto: UpdateRecurringExpenseDto) {
+    // PR-TRIM — same normalisation as create(); only trims fields
+    // present in the DTO (omitted fields are not touched so we never
+    // clobber stored values).
+    this.normaliseStrings(dto);
+
     const [cur] = await this.ds.query(
       `SELECT * FROM recurring_expenses WHERE id = $1`,
       [id],
@@ -589,6 +603,40 @@ export class RecurringExpensesService {
     if (!SUPPORTED_RECURRING_PAYMENT_METHODS.includes(paymentMethod)) {
       throw new BadRequestException('طريقة الدفع غير مدعومة.');
     }
+  }
+
+  /**
+   * PR-TRIM — single source of truth for "what does string normalisation
+   * mean on this DTO".  Trims every user-typed field; for optional
+   * fields, an empty-after-trim value collapses to `undefined` so the
+   * downstream INSERT/UPDATE stores SQL `NULL` (matching the
+   * `|| null` pattern already used in the INSERT statement).
+   *
+   * Only touches fields actually present in the DTO — omitted fields
+   * stay `undefined` and the `update()` push-builder skips them, so
+   * we never clobber stored values on a partial PATCH.
+   */
+  private normaliseStrings(dto: {
+    code?: string;
+    name_ar?: string;
+    name_en?: string;
+    vendor_name?: string;
+    description?: string;
+  }): void {
+    const trimRequired = (v: string | undefined) =>
+      v === undefined ? undefined : v.trim();
+    const trimOptional = (v: string | undefined) => {
+      if (v === undefined) return undefined;
+      const t = v.trim();
+      return t.length === 0 ? undefined : t;
+    };
+    if (dto.code !== undefined) dto.code = trimRequired(dto.code)!;
+    if (dto.name_ar !== undefined) dto.name_ar = trimRequired(dto.name_ar)!;
+    if (dto.name_en !== undefined) dto.name_en = trimOptional(dto.name_en);
+    if (dto.vendor_name !== undefined)
+      dto.vendor_name = trimOptional(dto.vendor_name);
+    if (dto.description !== undefined)
+      dto.description = trimOptional(dto.description);
   }
 
   /**
