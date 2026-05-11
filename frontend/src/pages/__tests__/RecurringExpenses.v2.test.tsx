@@ -82,6 +82,15 @@ vi.mock('@/api/settings.api', () => ({
   },
 }));
 
+vi.mock('@/api/cash-desk.api', () => ({
+  cashDeskApi: {
+    cashboxes: vi.fn(async () => [
+      { id: 'cb-MAIN', name_ar: 'الخزينة الرئيسية', kind: 'cash', is_active: true },
+      { id: 'cb-OLD',  name_ar: 'خزنة مغلقة',       kind: 'cash', is_active: false },
+    ]),
+  },
+}));
+
 vi.mock('react-hot-toast', () => {
   const fn = vi.fn();
   return {
@@ -389,6 +398,202 @@ describe('RecurringExpenses — generation-behavior radio (PR-A)', () => {
     expect(code).not.toMatch(/checked=\{form\.auto_post\}/);
     expect(code).not.toMatch(/checked=\{form\.auto_paid\}/);
     expect(code).not.toMatch(/checked=\{form\.require_approval\}/);
+  });
+});
+
+// ─── Cashbox selector + payment-method gating (PR-A2) ──────────────
+
+describe('RecurringExpenses — form cashbox field (PR-A2)', () => {
+  it('cashbox row is visible by default (payment_method defaults to cash)', async () => {
+    listFixture = [];
+    renderPage();
+    fireEvent.click(await screen.findByTestId('recurring-new-template-btn'));
+    expect(screen.getByTestId('recurring-cashbox-row')).toBeInTheDocument();
+    expect(screen.getByTestId('recurring-cashbox-select')).toBeInTheDocument();
+    // Helper text present
+    expect(screen.getByTestId('recurring-cashbox-helper').textContent).toMatch(
+      /اختر الخزنة لأن المصروف سيتم دفعه نقديًا/,
+    );
+  });
+
+  it('cashbox row is hidden when payment_method=card', async () => {
+    listFixture = [];
+    renderPage();
+    fireEvent.click(await screen.findByTestId('recurring-new-template-btn'));
+    fireEvent.change(screen.getByTestId('recurring-payment-method'), {
+      target: { value: 'card' },
+    });
+    expect(screen.queryByTestId('recurring-cashbox-row')).toBeNull();
+    expect(screen.queryByTestId('recurring-cashbox-select')).toBeNull();
+  });
+
+  it('switching back to cash re-shows the cashbox row', async () => {
+    listFixture = [];
+    renderPage();
+    fireEvent.click(await screen.findByTestId('recurring-new-template-btn'));
+    fireEvent.change(screen.getByTestId('recurring-payment-method'), {
+      target: { value: 'instapay' },
+    });
+    expect(screen.queryByTestId('recurring-cashbox-row')).toBeNull();
+    fireEvent.change(screen.getByTestId('recurring-payment-method'), {
+      target: { value: 'cash' },
+    });
+    expect(screen.getByTestId('recurring-cashbox-row')).toBeInTheDocument();
+  });
+
+  it('Save button is disabled when payment_method=cash and cashbox is empty', async () => {
+    listFixture = [];
+    renderPage();
+    fireEvent.click(await screen.findByTestId('recurring-new-template-btn'));
+    // Fill the other required fields so the only blocker is the cashbox.
+    fireEvent.change(screen.getByPlaceholderText('RENT-CAIRO-01'), {
+      target: { value: 'TEST-CASH-NEG' },
+    });
+    fireEvent.change(screen.getAllByRole('textbox')[1]!, {
+      target: { value: 'إيجار اختبار' },
+    });
+    const selects = screen.getAllByRole('combobox');
+    // category select
+    fireEvent.change(selects[0]!, { target: { value: 'cat-1' } });
+    // warehouse select
+    fireEvent.change(selects[1]!, { target: { value: 'wh-1' } });
+    // Cashbox left empty — Save should still be disabled.
+    const save = screen.getByTestId('recurring-save-btn') as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
+    // Inline error visible.
+    expect(screen.getByTestId('recurring-cashbox-error').textContent).toMatch(
+      /الخزنة مطلوبة عند اختيار الدفع النقدي للمصروف الدوري/,
+    );
+  });
+
+  it('Save button enables when payment_method=cash and a cashbox is picked', async () => {
+    listFixture = [];
+    renderPage();
+    fireEvent.click(await screen.findByTestId('recurring-new-template-btn'));
+    // Wait for category + warehouse + cashbox lists to populate.
+    await waitFor(() => {
+      const cb = screen.getByTestId('recurring-cashbox-select') as HTMLSelectElement;
+      expect(Array.from(cb.options).find((o) => o.value === 'cb-MAIN')).toBeDefined();
+    });
+    // Fill code via placeholder, then name_ar via the only textbox
+    // labelled "الاسم بالعربية".
+    fireEvent.change(screen.getByPlaceholderText('RENT-CAIRO-01'), {
+      target: { value: 'TEST-CASH-POS' },
+    });
+    fireEvent.change(screen.getAllByRole('textbox')[1]!, {
+      target: { value: 'إيجار اختبار' },
+    });
+    const selects = screen.getAllByRole('combobox');
+    fireEvent.change(selects[0]!, { target: { value: 'cat-1' } });
+    fireEvent.change(selects[1]!, { target: { value: 'wh-1' } });
+    fireEvent.change(screen.getByTestId('recurring-cashbox-select'), {
+      target: { value: 'cb-MAIN' },
+    });
+    // React batches updates; assert in a waitFor to let the next tick
+    // recompute the disabled predicate.
+    await waitFor(() => {
+      const save = screen.getByTestId('recurring-save-btn') as HTMLButtonElement;
+      expect(save.disabled).toBe(false);
+    });
+    expect(screen.queryByTestId('recurring-cashbox-error')).toBeNull();
+  });
+
+  it('inactive cashboxes are filtered out of the dropdown', async () => {
+    listFixture = [];
+    renderPage();
+    fireEvent.click(await screen.findByTestId('recurring-new-template-btn'));
+    await waitFor(() => {
+      const cb = screen.getByTestId('recurring-cashbox-select') as HTMLSelectElement;
+      const values = Array.from(cb.options).map((o) => o.value);
+      expect(values).toContain('cb-MAIN');
+      expect(values).not.toContain('cb-OLD');
+    });
+  });
+
+  it('warehouse field remains separate and labelled "المخزن"', async () => {
+    listFixture = [];
+    renderPage();
+    fireEvent.click(await screen.findByTestId('recurring-new-template-btn'));
+    // "المخزن" label still present (not collapsed with cashbox).
+    expect(screen.getByText('المخزن')).toBeInTheDocument();
+    // "الخزنة" label is for the cashbox row.
+    expect(screen.getByText('الخزنة')).toBeInTheDocument();
+  });
+});
+
+// ─── Date formatting integration (PR-A2) ───────────────────────────
+
+describe('RecurringExpenses — Cairo date formatting (PR-A2)', () => {
+  it('table cell renders human-readable Cairo date, NOT raw ISO', async () => {
+    listFixture = [
+      buildTemplate({
+        id: 'tpl-ISO',
+        next_run_date: '2026-05-10T21:00:00.000Z' as unknown as string,
+      }),
+    ];
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByTestId('recurring-table')).toBeInTheDocument(),
+    );
+    const badge = screen.getByTestId('recurring-due-badge');
+    expect(badge.textContent).toMatch(/11\/05\/2026/);
+    expect(badge.textContent).not.toMatch(/T\d{2}:/);
+    expect(badge.textContent).not.toMatch(/Z/);
+  });
+
+  it('runs drawer renders scheduled_for as Cairo datetime with seconds', async () => {
+    const tpl = buildTemplate({ id: 'tpl-RUN' });
+    listFixture = [tpl];
+    getFixture = {
+      ...tpl,
+      runs: [
+        {
+          id: 'run-1',
+          recurring_id: 'tpl-RUN',
+          expense_id: 'exp-1',
+          expense_no: 'EXP-2026-0001',
+          scheduled_for: '2026-05-10T21:00:00.000Z',
+          generated_at: '2026-05-10T21:05:00.000Z',
+          amount: 5000,
+          status: 'generated',
+        },
+      ],
+    };
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByTestId('recurring-table')).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByTestId('recurring-history-tpl-RUN'));
+    await waitFor(() =>
+      expect(screen.getByTestId('recurring-history-drawer')).toBeInTheDocument(),
+    );
+    const stamp = await screen.findByTestId('recurring-run-scheduled');
+    expect(stamp.textContent).toMatch(/11\/05\/2026/);
+    expect(stamp.textContent).toMatch(/[صم]/); // Arabic AM/PM marker
+    expect(stamp.textContent).not.toMatch(/T\d{2}:/);
+  });
+
+  it('source-grep — RecurringExpenses.tsx imports and uses the Cairo date helpers', () => {
+    const src = readFileSync(
+      resolve(__dirname, '../RecurringExpenses.tsx'),
+      'utf-8',
+    );
+    const code = src
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/\/\/[^\n]*/g, '');
+    // Helpers imported from the shared util.
+    expect(code).toMatch(
+      /import\s*\{[^}]*fmtCairoDate[^}]*\}\s*from\s*['"]@\/lib\/dates['"]/,
+    );
+    // Both helpers actually called somewhere in the page.
+    expect(code).toMatch(/fmtCairoDate\s*\(/);
+    expect(code).toMatch(/fmtCairoDateTimeSeconds\s*\(/);
+    // Forbid raw rendering of dates as JSX text children — i.e. the
+    // pattern `>{x.next_run_date}<` or `>{run.scheduled_for}<`.
+    // (Prop-passing like `date={r.next_run_date}` is fine because the
+    // receiving component runs the value through the helper.)
+    expect(code).not.toMatch(/>\s*\{\s*[a-zA-Z_]+\.next_run_date\s*\}\s*</);
+    expect(code).not.toMatch(/>\s*\{\s*[a-zA-Z_]+\.scheduled_for\s*\}\s*</);
   });
 });
 

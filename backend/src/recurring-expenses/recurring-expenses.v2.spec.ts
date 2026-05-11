@@ -251,12 +251,16 @@ describe('RecurringExpensesService.runOne — approval spawn (PR-A)', () => {
 describe('RecurringExpensesService.create — auto_post category-GL validation (PR-A)', () => {
   const USER_ID = 'user-1';
 
+  // PR-A2 — these tests target the GL-mapping guard.  Set
+  // payment_method='card' so the new cashbox-invariant guard (which
+  // fires before the GL guard for cash defaults) does not interfere.
   const baseDto = {
     code: 'RENT-01',
     name_ar: 'إيجار',
     category_id: 'cat-1',
     warehouse_id: 'wh-1',
     amount: 5000,
+    payment_method: 'card',
     frequency: 'monthly' as const,
     start_date: '2026-05-01',
   };
@@ -385,6 +389,205 @@ describe('RecurringExpensesService.update — auto_post category-GL validation (
     expect(
       findAll(calls, /SELECT id, account_id FROM expense_categories/i),
     ).toHaveLength(0);
+  });
+});
+
+// ─── Behavioural: cashbox invariant on create/update (PR-A2) ──────
+
+describe('RecurringExpensesService.create — cashbox invariant (PR-A2)', () => {
+  const USER_ID = 'user-A2';
+
+  const baseDto = {
+    code: 'CB-01',
+    name_ar: 'إيجار',
+    category_id: 'cat-1',
+    warehouse_id: 'wh-1',
+    amount: 5000,
+    frequency: 'monthly' as const,
+    start_date: '2026-05-01',
+  };
+
+  function makeHandler(catAccountId: string | null = 'acc-529') {
+    return ({ sql }: MockCall): any[] => {
+      if (/SELECT id, account_id FROM expense_categories WHERE id = \$1/i.test(sql))
+        return [{ id: 'cat-1', account_id: catAccountId }];
+      if (/INSERT INTO recurring_expenses/i.test(sql))
+        return [{ id: 'new-tpl-1', ...baseDto }];
+      return [];
+    };
+  }
+
+  it('rejects cash + null cashbox_id', async () => {
+    const { ds } = makeMockDs(makeHandler());
+    const svc = new RecurringExpensesService(ds);
+    await expect(
+      svc.create({ ...baseDto, payment_method: 'cash', cashbox_id: undefined }, USER_ID),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    await expect(
+      svc.create({ ...baseDto, payment_method: 'cash', cashbox_id: undefined }, USER_ID),
+    ).rejects.toMatchObject({
+      message: 'الخزنة مطلوبة عند اختيار الدفع النقدي للمصروف الدوري.',
+    });
+  });
+
+  it('rejects when payment_method is omitted (defaults to cash) and cashbox is missing', async () => {
+    const { ds } = makeMockDs(makeHandler());
+    const svc = new RecurringExpensesService(ds);
+    await expect(svc.create(baseDto, USER_ID)).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+  });
+
+  it('accepts cash + cashbox_id set', async () => {
+    const { ds } = makeMockDs(makeHandler());
+    const svc = new RecurringExpensesService(ds);
+    const out = await svc.create(
+      { ...baseDto, payment_method: 'cash', cashbox_id: 'cb-MAIN' },
+      USER_ID,
+    );
+    expect(out).toMatchObject({ id: 'new-tpl-1' });
+  });
+
+  it('accepts non-cash (card) without cashbox_id', async () => {
+    const { ds } = makeMockDs(makeHandler());
+    const svc = new RecurringExpensesService(ds);
+    const out = await svc.create(
+      { ...baseDto, payment_method: 'card', cashbox_id: undefined },
+      USER_ID,
+    );
+    expect(out).toMatchObject({ id: 'new-tpl-1' });
+  });
+
+  it('cashbox invariant fires BEFORE the GL-mapping check (template never INSERTed when cash+null)', async () => {
+    const { ds, calls } = makeMockDs(makeHandler(null));
+    const svc = new RecurringExpensesService(ds);
+    await expect(
+      svc.create(
+        { ...baseDto, payment_method: 'cash', cashbox_id: undefined, auto_post: true },
+        USER_ID,
+      ),
+    ).rejects.toMatchObject({
+      message: 'الخزنة مطلوبة عند اختيار الدفع النقدي للمصروف الدوري.',
+    });
+    // No SELECT against the categories table — cashbox guard short-
+    // circuited before the GL-mapping helper was reached.
+    expect(
+      findAll(calls, /SELECT id, account_id FROM expense_categories/i),
+    ).toHaveLength(0);
+    expect(findAll(calls, /INSERT INTO recurring_expenses/i)).toHaveLength(0);
+  });
+});
+
+describe('RecurringExpensesService.update — cashbox invariant (PR-A2)', () => {
+  it('rejects update that flips payment_method to cash when no cashbox is set', async () => {
+    const existing = {
+      id: 'tpl-A2',
+      payment_method: 'card',
+      cashbox_id: null,
+      auto_post: false,
+      category_id: 'cat-1',
+    };
+    const { ds, calls } = makeMockDs(({ sql }) => {
+      if (/^SELECT \* FROM recurring_expenses WHERE id = \$1/i.test(sql))
+        return [existing];
+      return [];
+    });
+    const svc = new RecurringExpensesService(ds);
+    await expect(
+      svc.update('tpl-A2', { payment_method: 'cash' }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    // No UPDATE issued.
+    expect(findAll(calls, /^UPDATE recurring_expenses SET/i)).toHaveLength(0);
+  });
+
+  it('accepts update that flips payment_method to cash AND sets cashbox_id in the same call', async () => {
+    const existing = {
+      id: 'tpl-A2b',
+      payment_method: 'card',
+      cashbox_id: null,
+      auto_post: false,
+      category_id: 'cat-1',
+    };
+    const { ds } = makeMockDs(({ sql }) => {
+      if (/^SELECT \* FROM recurring_expenses WHERE id = \$1/i.test(sql))
+        return [existing];
+      if (/^UPDATE recurring_expenses SET/i.test(sql))
+        return [{ ...existing, payment_method: 'cash', cashbox_id: 'cb-MAIN' }];
+      return [];
+    });
+    const svc = new RecurringExpensesService(ds);
+    const out = await svc.update('tpl-A2b', {
+      payment_method: 'cash',
+      cashbox_id: 'cb-MAIN',
+    });
+    expect(out).toMatchObject({ payment_method: 'cash', cashbox_id: 'cb-MAIN' });
+  });
+
+  it('accepts update from cash → card without cashbox (cashbox no longer required)', async () => {
+    const existing = {
+      id: 'tpl-A2c',
+      payment_method: 'cash',
+      cashbox_id: 'cb-old',
+      auto_post: false,
+      category_id: 'cat-1',
+    };
+    const { ds } = makeMockDs(({ sql }) => {
+      if (/^SELECT \* FROM recurring_expenses WHERE id = \$1/i.test(sql))
+        return [existing];
+      if (/^UPDATE recurring_expenses SET/i.test(sql))
+        return [{ ...existing, payment_method: 'card' }];
+      return [];
+    });
+    const svc = new RecurringExpensesService(ds);
+    const out = await svc.update('tpl-A2c', { payment_method: 'card' });
+    expect(out).toMatchObject({ payment_method: 'card' });
+  });
+
+  it('rejects update that drops cashbox_id while payment_method stays cash', async () => {
+    const existing = {
+      id: 'tpl-A2d',
+      payment_method: 'cash',
+      cashbox_id: 'cb-MAIN',
+      auto_post: false,
+      category_id: 'cat-1',
+    };
+    const { ds, calls } = makeMockDs(({ sql }) => {
+      if (/^SELECT \* FROM recurring_expenses WHERE id = \$1/i.test(sql))
+        return [existing];
+      return [];
+    });
+    const svc = new RecurringExpensesService(ds);
+    await expect(
+      svc.update('tpl-A2d', { cashbox_id: null as any }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(findAll(calls, /^UPDATE recurring_expenses SET/i)).toHaveLength(0);
+  });
+
+  it('skips the cashbox check when neither payment_method nor cashbox_id is in the DTO', async () => {
+    // Editing an unrelated field (e.g. amount) on a row that happens
+    // to be misconfigured shouldn't suddenly start failing.  The
+    // pre-existing row was accepted under the older rules; this
+    // PR only validates NEW changes that touch the cashbox semantics.
+    const existing = {
+      id: 'tpl-A2e',
+      payment_method: 'cash',
+      cashbox_id: null, // legacy bad row
+      auto_post: false,
+      category_id: 'cat-1',
+    };
+    const { ds, calls } = makeMockDs(({ sql }) => {
+      if (/^SELECT \* FROM recurring_expenses WHERE id = \$1/i.test(sql))
+        return [existing];
+      if (/^UPDATE recurring_expenses SET/i.test(sql))
+        return [{ ...existing, amount: 7000 }];
+      return [];
+    });
+    const svc = new RecurringExpensesService(ds);
+    const out = await svc.update('tpl-A2e', { amount: 7000 });
+    expect(out).toMatchObject({ amount: 7000 });
+    // UPDATE did fire — proves we did NOT short-circuit on the
+    // legacy bad row.
+    expect(findAll(calls, /^UPDATE recurring_expenses SET/i)).toHaveLength(1);
   });
 });
 

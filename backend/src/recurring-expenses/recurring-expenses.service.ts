@@ -124,6 +124,12 @@ export class RecurringExpensesService {
 
   async create(dto: CreateRecurringExpenseDto, userId: string) {
     this.validateDto(dto);
+    // PR-A2 — cashbox invariant.  A cash template without a cashbox_id
+    // would later trip `assertExpenseInvariants` at runOne() time,
+    // failing every scheduled generation.  Catch it at template-create
+    // so the operator sees a clear field-level message instead of a
+    // daily silent failure in the scheduler logs.
+    this.assertCashboxConsistent(dto.payment_method, dto.cashbox_id);
     // PR-A — if the template will auto-post on generation, the
     // category MUST resolve to an active chart-of-accounts row.
     // The engine silently falls back to GL 529 (General Expense)
@@ -179,6 +185,16 @@ export class RecurringExpensesService {
       [id],
     );
     if (!cur) throw new NotFoundException('not found');
+    // PR-A2 — same cashbox invariant as create(), applied whenever
+    // either the payment_method or the cashbox_id is being changed.
+    // A pure no-op update (e.g. just bumping the amount) skips the
+    // check to avoid re-validating an already-valid stored row.
+    if (dto.payment_method !== undefined || dto.cashbox_id !== undefined) {
+      const effPm = dto.payment_method ?? cur.payment_method;
+      const effCb =
+        dto.cashbox_id !== undefined ? dto.cashbox_id : cur.cashbox_id;
+      this.assertCashboxConsistent(effPm, effCb);
+    }
     // PR-A — same category-GL guard as create().  Triggered when
     // either the caller flips auto_post=true OR changes the category
     // while auto_post is already true on the existing row.
@@ -503,6 +519,30 @@ export class RecurringExpensesService {
     }
     if (dto.day_of_month != null && (dto.day_of_month < 1 || dto.day_of_month > 31)) {
       throw new BadRequestException('day_of_month must be 1..31');
+    }
+  }
+
+  /**
+   * PR-A2 — pre-create / pre-update guard for the cashbox invariant.
+   * `runOne()` already calls the shared `assertExpenseInvariants`
+   * (defence in depth), but operators expect a clear field-level
+   * Arabic message at template-create / template-update time — not
+   * a silent every-morning scheduler failure.  The wording is
+   * recurring-specific to match the form field label.
+   */
+  private assertCashboxConsistent(
+    paymentMethod: string | null | undefined,
+    cashboxId: string | null | undefined,
+  ): void {
+    const pm = (paymentMethod ?? 'cash').toString().toLowerCase();
+    const hasCashbox =
+      cashboxId !== null &&
+      cashboxId !== undefined &&
+      String(cashboxId).length > 0;
+    if (pm === 'cash' && !hasCashbox) {
+      throw new BadRequestException(
+        'الخزنة مطلوبة عند اختيار الدفع النقدي للمصروف الدوري.',
+      );
     }
   }
 

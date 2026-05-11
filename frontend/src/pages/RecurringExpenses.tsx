@@ -39,6 +39,8 @@ import {
 } from '@/api/recurringExpenses.api';
 import { accountingApi } from '@/api/accounting.api';
 import { settingsApi } from '@/api/settings.api';
+import { cashDeskApi } from '@/api/cash-desk.api';
+import { fmtCairoDate, fmtCairoDateTimeSeconds } from '@/lib/dates';
 
 const FREQUENCY_LABEL: Record<Frequency, string> = {
   daily: 'يومي',
@@ -531,8 +533,11 @@ function DueBadge({
       : 'bg-slate-100 text-slate-600';
   return (
     <div>
-      <span className={`px-2 py-0.5 rounded-full text-[11px] font-bold ${cls}`}>
-        {date}
+      <span
+        className={`px-2 py-0.5 rounded-full text-[11px] font-bold ${cls}`}
+        data-testid="recurring-due-badge"
+      >
+        {fmtCairoDate(date)}
       </span>
       {status === 'due' && daysOverdue != null && daysOverdue > 0 && (
         <div className="text-[10px] text-rose-700 mt-0.5">
@@ -698,9 +703,12 @@ function RunsHistoryDrawer({
                 {data.name_ar}
               </div>
               <div className="text-xs text-slate-500 dark:text-slate-400 flex flex-wrap gap-3">
-                <span className="inline-flex items-center gap-1">
+                <span
+                  className="inline-flex items-center gap-1"
+                  data-testid="recurring-drawer-next"
+                >
                   <CalendarClock size={12} />
-                  القادم: {data.next_run_date}
+                  القادم: {fmtCairoDate(data.next_run_date)}
                 </span>
                 <span className="inline-flex items-center gap-1">
                   <DollarSign size={12} />
@@ -757,8 +765,11 @@ function RunRow({ run }: { run: RecurringExpenseRun }) {
     >
       <div className="flex items-start justify-between gap-2">
         <div className="space-y-1">
-          <div className="text-xs font-bold text-slate-700 dark:text-slate-200 flex items-center gap-1">
-            <CalendarClock size={11} /> {run.scheduled_for}
+          <div
+            className="text-xs font-bold text-slate-700 dark:text-slate-200 flex items-center gap-1"
+            data-testid="recurring-run-scheduled"
+          >
+            <CalendarClock size={11} /> {fmtCairoDateTimeSeconds(run.scheduled_for)}
           </div>
           {run.expense_no && (
             <div className="text-[11px] font-mono text-slate-500 dark:text-slate-400">
@@ -842,6 +853,34 @@ function RecurringExpenseFormModal({
       }
     },
   });
+
+  // PR-A2 — cashbox list for the "الخزنة" selector that appears when
+  // payment_method='cash'.  Re-uses the same endpoint the Statements
+  // and CashDesk pages already consume so cashbox naming/colors stay
+  // consistent across the app.
+  const { data: cashboxes = [] } = useQuery({
+    queryKey: ['cashboxes-active'],
+    queryFn: async () => {
+      try {
+        return await cashDeskApi.cashboxes(false);
+      } catch {
+        return [];
+      }
+    },
+  });
+
+  // PR-A2 — the cashbox selector is only meaningful for cash.  When
+  // the operator flips payment_method away from 'cash' we drop any
+  // previously-selected cashbox_id so the saved row isn't a misnomer
+  // (e.g. card + cashbox).
+  const onPaymentMethodChange = (pm: string) => {
+    setForm((f) =>
+      pm === 'cash' ? { ...f, payment_method: pm } : { ...f, payment_method: pm, cashbox_id: undefined },
+    );
+  };
+
+  const cashRequiresCashbox =
+    form.payment_method === 'cash' && !form.cashbox_id;
 
   const saveM = useMutation({
     mutationFn: () =>
@@ -930,7 +969,8 @@ function RecurringExpenseFormModal({
               <select
                 className="input"
                 value={form.payment_method}
-                onChange={(e) => setForm({ ...form, payment_method: e.target.value })}
+                onChange={(e) => onPaymentMethodChange(e.target.value)}
+                data-testid="recurring-payment-method"
               >
                 <option value="cash">نقدي</option>
                 <option value="card">بطاقة</option>
@@ -947,6 +987,49 @@ function RecurringExpenseFormModal({
               />
             </Field>
           </div>
+
+          {/* PR-A2 — cashbox selector.  Required when payment_method='cash'
+              because the engine's posting path needs a cashbox to credit
+              the cash leg against.  Hidden for non-cash methods (cards /
+              instapay / wallet / bank_transfer credit the AP 210 account
+              and do NOT use a cashbox). */}
+          {form.payment_method === 'cash' && (
+            <div className="grid grid-cols-1 gap-3" data-testid="recurring-cashbox-row">
+              <Field label="الخزنة" required>
+                <select
+                  className={`input ${cashRequiresCashbox ? 'border-rose-300 focus:border-rose-500' : ''}`}
+                  value={form.cashbox_id || ''}
+                  onChange={(e) =>
+                    setForm({ ...form, cashbox_id: e.target.value || undefined })
+                  }
+                  data-testid="recurring-cashbox-select"
+                >
+                  <option value="">— اختر —</option>
+                  {cashboxes
+                    .filter((c) => c.is_active !== false)
+                    .map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name_ar}
+                      </option>
+                    ))}
+                </select>
+                <p
+                  className="text-[10px] text-slate-500 dark:text-slate-400 mt-1 leading-relaxed"
+                  data-testid="recurring-cashbox-helper"
+                >
+                  اختر الخزنة لأن المصروف سيتم دفعه نقديًا من هذه الخزنة.
+                </p>
+                {cashRequiresCashbox && (
+                  <p
+                    className="text-[10px] text-rose-700 dark:text-rose-300 mt-1 font-bold"
+                    data-testid="recurring-cashbox-error"
+                  >
+                    الخزنة مطلوبة عند اختيار الدفع النقدي للمصروف الدوري.
+                  </p>
+                )}
+              </Field>
+            </div>
+          )}
 
           <div className="grid grid-cols-3 gap-3">
             <Field label="التكرار" required>
@@ -1076,7 +1159,15 @@ function RecurringExpenseFormModal({
           <button
             className="btn-primary"
             data-testid="recurring-save-btn"
-            disabled={saveM.isPending || !form.code || !form.name_ar || !form.category_id || !form.warehouse_id}
+            disabled={
+              saveM.isPending ||
+              !form.code ||
+              !form.name_ar ||
+              !form.category_id ||
+              !form.warehouse_id ||
+              // PR-A2 — block save when cash payment_method has no cashbox
+              cashRequiresCashbox
+            }
             onClick={() => saveM.mutate()}
           >
             {saveM.isPending ? 'جارٍ الحفظ…' : editing ? 'تحديث' : 'حفظ'}
