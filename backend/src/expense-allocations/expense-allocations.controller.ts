@@ -1,21 +1,100 @@
-import { Controller, Get, Param, Query, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  Patch,
+  Post,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
-import { ExpenseAllocationsService } from './expense-allocations.service';
+import {
+  IsDateString,
+  IsEnum,
+  IsNumber,
+  IsOptional,
+  IsString,
+  IsUUID,
+  Min,
+  MinLength,
+  ValidateIf,
+} from 'class-validator';
+import {
+  ExpenseAllocationsService,
+  CreatePeriodDto,
+  UpdatePeriodDto,
+  AddLineDto,
+  UpdateLineDto,
+} from './expense-allocations.service';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles, Permissions } from '../common/decorators/roles.decorator';
+import {
+  CurrentUser,
+  JwtUser,
+} from '../common/decorators/current-user.decorator';
 
 /**
- * Periods controller — PR-PHASE2-B1 (read-only foundation).
+ * DTOs (class-validator) — declared here so the controller stays the
+ * single source of truth for request shape + validation, while the
+ * service-side interfaces remain framework-agnostic.
+ */
+class CreatePeriodDtoIn implements CreatePeriodDto {
+  @IsDateString() period_start: string;
+  @IsDateString() period_end: string;
+  @IsOptional() @IsUUID() warehouse_id?: string;
+  @IsOptional() @IsString() notes?: string;
+}
+
+class UpdatePeriodDtoIn implements UpdatePeriodDto {
+  @IsOptional() @IsDateString() period_start?: string;
+  @IsOptional() @IsDateString() period_end?: string;
+  // Pass `null` explicitly to clear the scope back to company-wide.
+  @IsOptional() @ValidateIf((_, v) => v !== null) @IsUUID() warehouse_id?: string | null;
+  @IsOptional() @ValidateIf((_, v) => v !== null) @IsString() notes?: string | null;
+}
+
+class AddLineDtoIn implements AddLineDto {
+  @IsOptional() @IsUUID() expense_id?: string;
+  @IsOptional() @IsUUID() expense_category_id?: string;
+  @IsNumber() @Min(0) source_amount: number;
+  @IsOptional() @IsUUID() product_id?: string;
+  @IsOptional() @IsUUID() product_category_id?: string;
+  @IsOptional() @IsUUID() warehouse_id?: string;
+  // PR-PHASE2-B2 accepts only `manual`.  The other methods are reserved
+  // for a future PR that adds preview/compute endpoints.
+  @IsOptional() @IsEnum(['manual']) allocation_method?: 'manual';
+  @IsNumber() @Min(0) allocated_amount: number;
+  @IsOptional() @IsString() notes?: string;
+}
+
+class UpdateLineDtoIn implements UpdateLineDto {
+  @IsOptional() @IsNumber() @Min(0) source_amount?: number;
+  @IsOptional() @IsNumber() @Min(0) allocated_amount?: number;
+  @IsOptional() @ValidateIf((_, v) => v !== null) @IsUUID() product_id?: string | null;
+  @IsOptional() @ValidateIf((_, v) => v !== null) @IsUUID() product_category_id?: string | null;
+  @IsOptional() @ValidateIf((_, v) => v !== null) @IsUUID() warehouse_id?: string | null;
+  @IsOptional() @ValidateIf((_, v) => v !== null) @IsUUID() expense_id?: string | null;
+  @IsOptional() @ValidateIf((_, v) => v !== null) @IsUUID() expense_category_id?: string | null;
+}
+
+class ReverseDtoIn {
+  // Non-empty reason is required to flip an approved period to reversed.
+  @IsString() @MinLength(1) reason: string;
+}
+
+/**
+ * Periods controller — PR-PHASE2-B1 (read) + PR-PHASE2-B2 (mutate).
  *
- *   GET /expense-allocations/periods         — list with filters
- *   GET /expense-allocations/periods/:id     — single period + its lines
+ * Permissions:
+ *   * Class-level `expense_allocation.view` covers GET routes.
+ *   * Mutation routes override with `expense_allocation.manage` so a
+ *     viewer cannot accidentally create / approve / reverse periods.
  *
- * Permission: `expense_allocation.view`.  Wider write permissions
- * (`expense_allocation.manage`) are introduced in PR-PHASE2-B2 along
- * with the mutation endpoints (create / approve / reverse / compute).
- *
- * No FinancialEngine call.  No JE/CT/SM writes.  Pure SELECT-only.
+ * No FinancialEngine call.  No JE/CT/SM writes.  All mutations are
+ * confined to `expense_allocation_periods` and `expense_allocation_lines`.
  */
 @ApiBearerAuth()
 @ApiTags('expense-allocations')
@@ -25,6 +104,8 @@ import { Roles, Permissions } from '../common/decorators/roles.decorator';
 @Controller('expense-allocations')
 export class ExpenseAllocationsController {
   constructor(private readonly svc: ExpenseAllocationsService) {}
+
+  // ─── Reads (view permission) ────────────────────────────────────
 
   @Get('periods')
   @ApiOperation({ summary: 'قائمة فترات توزيع المصاريف' })
@@ -41,5 +122,75 @@ export class ExpenseAllocationsController {
   @ApiOperation({ summary: 'فترة توزيع واحدة مع سطورها' })
   getPeriod(@Param('id') id: string) {
     return this.svc.getPeriod(id);
+  }
+
+  // ─── Periods (manage permission) ────────────────────────────────
+
+  @Post('periods')
+  @Permissions('expense_allocation.manage')
+  @ApiOperation({ summary: 'إنشاء فترة توزيع جديدة (مسودة)' })
+  createPeriod(@Body() dto: CreatePeriodDtoIn, @CurrentUser() user: JwtUser) {
+    return this.svc.createPeriod(dto, user.userId);
+  }
+
+  @Patch('periods/:id')
+  @Permissions('expense_allocation.manage')
+  @ApiOperation({ summary: 'تعديل فترة توزيع (مسودة فقط)' })
+  updatePeriod(@Param('id') id: string, @Body() dto: UpdatePeriodDtoIn) {
+    return this.svc.updatePeriod(id, dto);
+  }
+
+  @Delete('periods/:id')
+  @Permissions('expense_allocation.manage')
+  @ApiOperation({ summary: 'حذف فترة توزيع (مسودة فقط)' })
+  deletePeriod(@Param('id') id: string) {
+    return this.svc.deletePeriod(id);
+  }
+
+  // ─── Lines (manage permission) ──────────────────────────────────
+
+  @Post('periods/:id/lines')
+  @Permissions('expense_allocation.manage')
+  @ApiOperation({ summary: 'إضافة سطر توزيع يدوي (مسودة فقط)' })
+  addLine(@Param('id') id: string, @Body() dto: AddLineDtoIn) {
+    return this.svc.addLine(id, dto);
+  }
+
+  @Delete('periods/:id/lines')
+  @Permissions('expense_allocation.manage')
+  @ApiOperation({ summary: 'مسح كل سطور الفترة (مسودة فقط)' })
+  clearLines(@Param('id') id: string) {
+    return this.svc.clearLines(id);
+  }
+
+  @Patch('periods/:id/lines/:line_id')
+  @Permissions('expense_allocation.manage')
+  @ApiOperation({ summary: 'تعديل سطر توزيع يدوي (مسودة فقط)' })
+  updateLine(
+    @Param('id') id: string,
+    @Param('line_id') lineId: string,
+    @Body() dto: UpdateLineDtoIn,
+  ) {
+    return this.svc.updateLine(id, lineId, dto);
+  }
+
+  // ─── FSM transitions (manage permission) ────────────────────────
+
+  @Post('periods/:id/approve')
+  @Permissions('expense_allocation.manage')
+  @ApiOperation({ summary: 'اعتماد فترة توزيع (مسودة → معتمد)' })
+  approvePeriod(@Param('id') id: string, @CurrentUser() user: JwtUser) {
+    return this.svc.approvePeriod(id, user.userId);
+  }
+
+  @Post('periods/:id/reverse')
+  @Permissions('expense_allocation.manage')
+  @ApiOperation({ summary: 'عكس فترة توزيع (معتمد → معكوس)' })
+  reversePeriod(
+    @Param('id') id: string,
+    @Body() dto: ReverseDtoIn,
+    @CurrentUser() user: JwtUser,
+  ) {
+    return this.svc.reversePeriod(id, user.userId, dto.reason);
   }
 }

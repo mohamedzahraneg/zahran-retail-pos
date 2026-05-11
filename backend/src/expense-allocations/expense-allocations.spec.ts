@@ -366,15 +366,29 @@ describe('expense-allocations.service.ts — source-grep guards (PR-PHASE2-B1)',
     }
   });
 
-  it('does NOT INSERT / UPDATE / DELETE on the new allocation tables either (read-only PR)', () => {
-    for (const verb of ['INSERT INTO', 'UPDATE', 'DELETE FROM']) {
-      expect(CODE).not.toMatch(
-        new RegExp(`${verb}\\s+expense_allocation_periods\\b`, 'i'),
-      );
-      expect(CODE).not.toMatch(
-        new RegExp(`${verb}\\s+expense_allocation_lines\\b`, 'i'),
-      );
+  it('confines all writes to expense_allocation_periods and expense_allocation_lines only (B2 scope)', () => {
+    // PR-PHASE2-B2 adds INSERT/UPDATE/DELETE on the two allocation tables.
+    // That is expected.  This test pins the WRITE SCOPE: collect every
+    // INSERT / UPDATE / DELETE token in the service, then confirm each
+    // one names ONLY one of the two allocation tables — never any other.
+    const writeTokenRe =
+      /\b(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+([a-z_]+)/gi;
+    const allowed = new Set([
+      'expense_allocation_periods',
+      'expense_allocation_lines',
+    ]);
+    const targets = new Set<string>();
+    let m: RegExpExecArray | null;
+    while ((m = writeTokenRe.exec(CODE)) !== null) {
+      targets.add(m[1].toLowerCase());
     }
+    for (const t of targets) {
+      expect(allowed.has(t)).toBe(true);
+    }
+    // And — separately — confirm the two allocation tables ARE actually
+    // written to (B2 mutations land in this PR, so they must appear).
+    expect(targets.has('expense_allocation_periods')).toBe(true);
+    expect(targets.has('expense_allocation_lines')).toBe(true);
   });
 
   it('does NOT use the accounting_only escape hatch', () => {
@@ -486,5 +500,601 @@ describe('ExpenseAllocationsModule — wiring (PR-PHASE2-B1)', () => {
 
   it('only provides ExpenseAllocationsService (read-only foundation)', () => {
     expect(MODULE_SRC).toMatch(/providers:\s*\[\s*ExpenseAllocationsService\s*\]/);
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════
+//  PR-PHASE2-B2 — mutation surface
+// ════════════════════════════════════════════════════════════════════
+//
+// B2 adds draft-period CRUD, manual-line CRUD, and the approve/reverse
+// FSM.  The behavior tests below drive the service against a mock
+// DataSource that supports `ds.transaction(async em => …)` and route
+// queries by SQL shape — keeping the spec independent of any real DB.
+
+interface TxMockCall {
+  sql: string;
+  params?: any[];
+  inTransaction: boolean;
+}
+
+function makeTxMockDs(routes: Array<{ match: RegExp; reply: any[] | ((c: TxMockCall) => any[]) }>) {
+  const calls: TxMockCall[] = [];
+  const route = (sql: string, params?: any[], inTx = false) => {
+    const call: TxMockCall = { sql, params, inTransaction: inTx };
+    calls.push(call);
+    for (const r of routes) {
+      if (r.match.test(sql)) {
+        return typeof r.reply === 'function' ? r.reply(call) : r.reply;
+      }
+    }
+    return [];
+  };
+  const ds: any = {
+    query: async (sql: string, params?: any[]) => route(sql, params, false),
+    transaction: async (fn: (em: any) => any) => {
+      const em = {
+        query: async (sql: string, params?: any[]) => route(sql, params, true),
+      };
+      return fn(em);
+    },
+  };
+  return { ds, calls };
+}
+
+const PERIOD_ROW_FULL = {
+  id: 'p-1',
+  period_start: '2026-05-01',
+  period_end: '2026-05-31',
+  warehouse_id: null,
+  warehouse_name: null,
+  status: 'draft',
+  total_allocated: '0',
+  notes: null,
+  created_by: 'u-1',
+  created_by_name: 'محرر',
+  approved_by: null,
+  approved_by_name: null,
+  approved_at: null,
+  reversed_by: null,
+  reversed_by_name: null,
+  reversed_at: null,
+  reversed_reason: null,
+  created_at: '2026-05-11T10:00:00Z',
+  updated_at: '2026-05-11T10:00:00Z',
+};
+
+// ─── 8. createPeriod ─────────────────────────────────────────────
+
+describe('ExpenseAllocationsService.createPeriod (PR-PHASE2-B2)', () => {
+  it('inserts a draft period with the supplied user as created_by, then returns it via getPeriod', async () => {
+    const { ds, calls } = makeTxMockDs([
+      { match: /^\s*INSERT INTO expense_allocation_periods/, reply: [{ id: 'p-1' }] },
+      { match: /FROM expense_allocation_periods\s+p\s+LEFT JOIN warehouses/, reply: [PERIOD_ROW_FULL] },
+      { match: /FROM expense_allocation_lines/, reply: [] },
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    const res = await svc.createPeriod(
+      { period_start: '2026-05-01', period_end: '2026-05-31' },
+      'user-99',
+    );
+    expect(res).toMatchObject({ id: 'p-1', status: 'draft' });
+    const ins = calls.find((c) => /INSERT INTO expense_allocation_periods/.test(c.sql))!;
+    expect(ins.sql).toMatch(/status,\s*created_by/);
+    expect(ins.params).toEqual([
+      '2026-05-01',
+      '2026-05-31',
+      null,
+      null,
+      'user-99',
+    ]);
+  });
+
+  it('rejects when period_end < period_start (BadRequest, Arabic)', async () => {
+    const { ds } = makeTxMockDs([]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    await expect(
+      svc.createPeriod(
+        { period_start: '2026-05-10', period_end: '2026-05-01' },
+        'u-1',
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects when either date is missing', async () => {
+    const { ds } = makeTxMockDs([]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    await expect(
+      svc.createPeriod({ period_start: '', period_end: '2026-05-31' } as any, 'u-1'),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+});
+
+// ─── 9. updatePeriod ─────────────────────────────────────────────
+
+describe('ExpenseAllocationsService.updatePeriod (PR-PHASE2-B2)', () => {
+  it('updates a draft period and returns the refreshed row', async () => {
+    const { ds, calls } = makeTxMockDs([
+      { match: /FOR UPDATE/, reply: [{ id: 'p-1', status: 'draft', period_start: '2026-05-01', period_end: '2026-05-31' }] },
+      { match: /^\s*UPDATE expense_allocation_periods/, reply: [] },
+      { match: /FROM expense_allocation_periods\s+p\s+LEFT JOIN warehouses/, reply: [{ ...PERIOD_ROW_FULL, notes: 'تم التحديث' }] },
+      { match: /FROM expense_allocation_lines/, reply: [] },
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    const res = await svc.updatePeriod('p-1', { notes: 'تم التحديث' });
+    expect(res).toMatchObject({ notes: 'تم التحديث' });
+    const upd = calls.find((c) => /^\s*UPDATE expense_allocation_periods/.test(c.sql))!;
+    expect(upd.sql).toMatch(/SET notes = \$1/);
+  });
+
+  it('rejects update on an approved period with BadRequest', async () => {
+    const { ds } = makeTxMockDs([
+      { match: /FOR UPDATE/, reply: [{ id: 'p-1', status: 'approved', period_start: '2026-05-01', period_end: '2026-05-31' }] },
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    await expect(
+      svc.updatePeriod('p-1', { notes: 'too late' }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects update on a reversed period', async () => {
+    const { ds } = makeTxMockDs([
+      { match: /FOR UPDATE/, reply: [{ id: 'p-1', status: 'reversed', period_start: '2026-05-01', period_end: '2026-05-31' }] },
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    await expect(
+      svc.updatePeriod('p-1', { notes: 'no' }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects when the merged date range becomes invalid', async () => {
+    const { ds } = makeTxMockDs([
+      { match: /FOR UPDATE/, reply: [{ id: 'p-1', status: 'draft', period_start: '2026-05-01', period_end: '2026-05-31' }] },
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    await expect(
+      svc.updatePeriod('p-1', { period_end: '2026-04-01' }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+});
+
+// ─── 10. deletePeriod ────────────────────────────────────────────
+
+describe('ExpenseAllocationsService.deletePeriod (PR-PHASE2-B2)', () => {
+  it('deletes a draft period; CASCADE handles lines', async () => {
+    const { ds, calls } = makeTxMockDs([
+      { match: /FOR UPDATE/, reply: [{ id: 'p-1', status: 'draft' }] },
+      { match: /^\s*DELETE FROM expense_allocation_periods/, reply: [] },
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    const res = await svc.deletePeriod('p-1');
+    expect(res).toEqual({ success: true });
+    expect(calls.some((c) => /DELETE FROM expense_allocation_periods/.test(c.sql))).toBe(true);
+  });
+
+  it('rejects delete on approved period', async () => {
+    const { ds } = makeTxMockDs([
+      { match: /FOR UPDATE/, reply: [{ id: 'p-1', status: 'approved' }] },
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    await expect(svc.deletePeriod('p-1')).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects delete on reversed period', async () => {
+    const { ds } = makeTxMockDs([
+      { match: /FOR UPDATE/, reply: [{ id: 'p-1', status: 'reversed' }] },
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    await expect(svc.deletePeriod('p-1')).rejects.toBeInstanceOf(BadRequestException);
+  });
+});
+
+// ─── 11. addLine ─────────────────────────────────────────────────
+
+describe('ExpenseAllocationsService.addLine (PR-PHASE2-B2)', () => {
+  function draftAddLineMock() {
+    return makeTxMockDs([
+      { match: /FOR UPDATE/, reply: [{ id: 'p-1', status: 'draft' }] },
+      { match: /^\s*INSERT INTO expense_allocation_lines/, reply: [{ id: 'line-1' }] },
+      { match: /^\s*UPDATE expense_allocation_periods\s+SET total_allocated/, reply: [] },
+    ]);
+  }
+
+  it('appends a manual product-target line and recomputes total_allocated', async () => {
+    const { ds, calls } = draftAddLineMock();
+    const svc = new ExpenseAllocationsService(ds as any);
+    const res = await svc.addLine('p-1', {
+      expense_id: 'e-1',
+      source_amount: 100,
+      product_id: 'prod-1',
+      allocated_amount: 25,
+    });
+    expect(res).toEqual({ id: 'line-1' });
+    const ins = calls.find((c) => /INSERT INTO expense_allocation_lines/.test(c.sql))!;
+    expect(ins.sql).toMatch(/'manual'/);
+    expect(calls.some((c) => /UPDATE expense_allocation_periods\s+SET total_allocated/.test(c.sql))).toBe(true);
+  });
+
+  it('rejects a line with ZERO targets', async () => {
+    const { ds } = draftAddLineMock();
+    const svc = new ExpenseAllocationsService(ds as any);
+    await expect(
+      svc.addLine('p-1', {
+        expense_id: 'e-1',
+        source_amount: 100,
+        allocated_amount: 10,
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects a line with MULTIPLE targets', async () => {
+    const { ds } = draftAddLineMock();
+    const svc = new ExpenseAllocationsService(ds as any);
+    await expect(
+      svc.addLine('p-1', {
+        expense_id: 'e-1',
+        source_amount: 100,
+        product_id: 'p-1',
+        product_category_id: 'cat-1',
+        allocated_amount: 10,
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects a line with no source (no expense_id and no expense_category_id)', async () => {
+    const { ds } = draftAddLineMock();
+    const svc = new ExpenseAllocationsService(ds as any);
+    await expect(
+      svc.addLine('p-1', {
+        source_amount: 100,
+        product_id: 'prod-1',
+        allocated_amount: 10,
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects when allocated_amount is negative', async () => {
+    const { ds } = draftAddLineMock();
+    const svc = new ExpenseAllocationsService(ds as any);
+    await expect(
+      svc.addLine('p-1', {
+        expense_id: 'e-1',
+        source_amount: 100,
+        product_id: 'prod-1',
+        allocated_amount: -5,
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects a non-manual allocation_method (B2 only accepts manual)', async () => {
+    const { ds } = draftAddLineMock();
+    const svc = new ExpenseAllocationsService(ds as any);
+    await expect(
+      svc.addLine('p-1', {
+        expense_id: 'e-1',
+        source_amount: 100,
+        product_id: 'prod-1',
+        allocated_amount: 25,
+        allocation_method: 'by_revenue' as any,
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects adding a line to an approved period', async () => {
+    const { ds } = makeTxMockDs([
+      { match: /FOR UPDATE/, reply: [{ id: 'p-1', status: 'approved' }] },
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    await expect(
+      svc.addLine('p-1', {
+        expense_id: 'e-1',
+        source_amount: 100,
+        product_id: 'prod-1',
+        allocated_amount: 25,
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+});
+
+// ─── 12. clearLines ──────────────────────────────────────────────
+
+describe('ExpenseAllocationsService.clearLines (PR-PHASE2-B2)', () => {
+  it('clears all lines on a draft period and resets total_allocated', async () => {
+    const { ds, calls } = makeTxMockDs([
+      { match: /FOR UPDATE/, reply: [{ id: 'p-1', status: 'draft' }] },
+      { match: /^\s*DELETE FROM expense_allocation_lines/, reply: [] },
+      { match: /^\s*UPDATE expense_allocation_periods\s+SET total_allocated/, reply: [] },
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    const res = await svc.clearLines('p-1');
+    expect(res).toEqual({ success: true });
+    expect(calls.some((c) => /DELETE FROM expense_allocation_lines\s+WHERE period_id/.test(c.sql))).toBe(true);
+    expect(calls.some((c) => /UPDATE expense_allocation_periods\s+SET total_allocated/.test(c.sql))).toBe(true);
+  });
+
+  it('rejects clearLines on a non-draft period', async () => {
+    const { ds } = makeTxMockDs([
+      { match: /FOR UPDATE/, reply: [{ id: 'p-1', status: 'approved' }] },
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    await expect(svc.clearLines('p-1')).rejects.toBeInstanceOf(BadRequestException);
+  });
+});
+
+// ─── 13. updateLine ──────────────────────────────────────────────
+
+describe('ExpenseAllocationsService.updateLine (PR-PHASE2-B2)', () => {
+  it('updates an existing manual line and triggers recompute', async () => {
+    const existing = {
+      id: 'line-1',
+      period_id: 'p-1',
+      allocation_method: 'manual',
+      expense_id: 'e-1',
+      expense_category_id: null,
+      product_id: 'prod-1',
+      product_category_id: null,
+      warehouse_id: null,
+      source_amount: '100',
+      allocated_amount: '25',
+    };
+    const { ds, calls } = makeTxMockDs([
+      { match: /FOR UPDATE/, reply: [{ id: 'p-1', status: 'draft' }] },
+      { match: /FROM expense_allocation_lines WHERE id/, reply: [existing] },
+      { match: /^\s*UPDATE expense_allocation_lines\s+SET/, reply: [] },
+      { match: /^\s*UPDATE expense_allocation_periods\s+SET total_allocated/, reply: [] },
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    const res = await svc.updateLine('p-1', 'line-1', { allocated_amount: 30 });
+    expect(res).toEqual({ id: 'line-1' });
+    expect(calls.some((c) => /UPDATE expense_allocation_lines\s+SET allocated_amount/.test(c.sql))).toBe(true);
+    expect(calls.some((c) => /UPDATE expense_allocation_periods\s+SET total_allocated/.test(c.sql))).toBe(true);
+  });
+
+  it('rejects update on an approved period', async () => {
+    const { ds } = makeTxMockDs([
+      { match: /FOR UPDATE/, reply: [{ id: 'p-1', status: 'approved' }] },
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    await expect(
+      svc.updateLine('p-1', 'line-1', { allocated_amount: 10 }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('throws NotFound when the line does not belong to the period', async () => {
+    const { ds } = makeTxMockDs([
+      { match: /FOR UPDATE/, reply: [{ id: 'p-1', status: 'draft' }] },
+      { match: /FROM expense_allocation_lines WHERE id/, reply: [] },
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    await expect(
+      svc.updateLine('p-1', 'ghost-line', { allocated_amount: 10 }),
+    ).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('re-validates target invariants on the patched row', async () => {
+    const existing = {
+      id: 'line-1',
+      period_id: 'p-1',
+      allocation_method: 'manual',
+      expense_id: 'e-1',
+      expense_category_id: null,
+      product_id: 'prod-1',
+      product_category_id: null,
+      warehouse_id: null,
+      source_amount: '100',
+      allocated_amount: '25',
+    };
+    const { ds } = makeTxMockDs([
+      { match: /FOR UPDATE/, reply: [{ id: 'p-1', status: 'draft' }] },
+      { match: /FROM expense_allocation_lines WHERE id/, reply: [existing] },
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    // Clearing the only target leaves zero targets — must reject.
+    await expect(
+      svc.updateLine('p-1', 'line-1', { product_id: null }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+});
+
+// ─── 14. approvePeriod ──────────────────────────────────────────
+
+describe('ExpenseAllocationsService.approvePeriod (PR-PHASE2-B2)', () => {
+  it('flips draft → approved when at least one line exists; sets approved_by/at + total_allocated', async () => {
+    const { ds, calls } = makeTxMockDs([
+      { match: /FOR UPDATE/, reply: [{ id: 'p-1', status: 'draft' }] },
+      { match: /SELECT COUNT\(\*\)::int AS count FROM expense_allocation_lines/, reply: [{ count: 2 }] },
+      { match: /^\s*UPDATE expense_allocation_periods\s+SET status\s*=\s*'approved'/, reply: [] },
+      { match: /FROM expense_allocation_periods\s+p\s+LEFT JOIN warehouses/, reply: [{ ...PERIOD_ROW_FULL, status: 'approved', approved_by: 'u-99' }] },
+      { match: /FROM expense_allocation_lines/, reply: [] },
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    const res = await svc.approvePeriod('p-1', 'u-99');
+    expect(res).toMatchObject({ status: 'approved', approved_by: 'u-99' });
+    const upd = calls.find((c) =>
+      /UPDATE expense_allocation_periods\s+SET status\s*=\s*'approved'/.test(c.sql),
+    )!;
+    expect(upd.sql).toMatch(/approved_by\s*=\s*\$1/);
+    expect(upd.sql).toMatch(/approved_at\s*=\s*NOW\(\)/);
+    expect(upd.sql).toMatch(/total_allocated\s*=\s*\(\s*SELECT COALESCE/);
+    expect(upd.params).toEqual(['u-99', 'p-1']);
+  });
+
+  it('rejects approve when the period has no lines', async () => {
+    const { ds } = makeTxMockDs([
+      { match: /FOR UPDATE/, reply: [{ id: 'p-1', status: 'draft' }] },
+      { match: /SELECT COUNT\(\*\)::int AS count FROM expense_allocation_lines/, reply: [{ count: 0 }] },
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    await expect(svc.approvePeriod('p-1', 'u-99')).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects approve on a non-draft period', async () => {
+    const { ds } = makeTxMockDs([
+      { match: /FOR UPDATE/, reply: [{ id: 'p-1', status: 'approved' }] },
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    await expect(svc.approvePeriod('p-1', 'u-99')).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects approve on a reversed (terminal) period', async () => {
+    const { ds } = makeTxMockDs([
+      { match: /FOR UPDATE/, reply: [{ id: 'p-1', status: 'reversed' }] },
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    await expect(svc.approvePeriod('p-1', 'u-99')).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('after approve, subsequent addLine on the same period rejects (status guard)', async () => {
+    // Approve gate happens first; we simulate the next mutation seeing status='approved'.
+    const { ds } = makeTxMockDs([
+      { match: /FOR UPDATE/, reply: [{ id: 'p-1', status: 'approved' }] },
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    await expect(
+      svc.addLine('p-1', {
+        expense_id: 'e-1',
+        source_amount: 100,
+        product_id: 'prod-1',
+        allocated_amount: 25,
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+});
+
+// ─── 15. reversePeriod ──────────────────────────────────────────
+
+describe('ExpenseAllocationsService.reversePeriod (PR-PHASE2-B2)', () => {
+  it('flips approved → reversed with reason + reversed_by/at', async () => {
+    const { ds, calls } = makeTxMockDs([
+      { match: /FOR UPDATE/, reply: [{ id: 'p-1', status: 'approved' }] },
+      { match: /^\s*UPDATE expense_allocation_periods\s+SET status\s*=\s*'reversed'/, reply: [] },
+      { match: /FROM expense_allocation_periods\s+p\s+LEFT JOIN warehouses/, reply: [{ ...PERIOD_ROW_FULL, status: 'reversed', reversed_reason: 'خطأ في التوزيع' }] },
+      { match: /FROM expense_allocation_lines/, reply: [] },
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    const res = await svc.reversePeriod('p-1', 'u-99', 'خطأ في التوزيع');
+    expect(res).toMatchObject({ status: 'reversed', reversed_reason: 'خطأ في التوزيع' });
+    const upd = calls.find((c) =>
+      /UPDATE expense_allocation_periods\s+SET status\s*=\s*'reversed'/.test(c.sql),
+    )!;
+    expect(upd.sql).toMatch(/reversed_by\s*=\s*\$1/);
+    expect(upd.sql).toMatch(/reversed_at\s*=\s*NOW\(\)/);
+    expect(upd.sql).toMatch(/reversed_reason\s*=\s*\$2/);
+    expect(upd.params).toEqual(['u-99', 'خطأ في التوزيع', 'p-1']);
+  });
+
+  it('rejects reverse on a draft period', async () => {
+    const { ds } = makeTxMockDs([
+      { match: /FOR UPDATE/, reply: [{ id: 'p-1', status: 'draft' }] },
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    await expect(
+      svc.reversePeriod('p-1', 'u-99', 'سبب'),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects reverse on a reversed period (terminal)', async () => {
+    const { ds } = makeTxMockDs([
+      { match: /FOR UPDATE/, reply: [{ id: 'p-1', status: 'reversed' }] },
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    await expect(
+      svc.reversePeriod('p-1', 'u-99', 'سبب'),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('requires a non-empty reason (whitespace only does NOT count)', async () => {
+    const { ds } = makeTxMockDs([]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    await expect(
+      svc.reversePeriod('p-1', 'u-99', ''),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    await expect(
+      svc.reversePeriod('p-1', 'u-99', '   '),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+});
+
+// ─── 16. Reports react to FSM state (source-level invariants) ────
+
+describe('Reports — FSM-aware overhead aggregation (PR-PHASE2-B2 invariants)', () => {
+  const SRC = readFileSync(
+    resolve(__dirname, './expense-allocations.service.ts'),
+    'utf-8',
+  );
+  const MIG = readFileSync(
+    resolve(__dirname, '../../../database/migrations/132_expense_allocation.sql'),
+    'utf-8',
+  );
+
+  it('profitWithOverhead service overhead subquery is restricted to status = approved', () => {
+    // The service has two overhead branches (date-scoped vs all-time).
+    // BOTH must filter approved-only.
+    const matches = SRC.match(/p\.status\s*=\s*'approved'/g) || [];
+    expect(matches.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('migration view v_product_profit_with_overhead also filters approved-only', () => {
+    expect(MIG).toMatch(
+      /CREATE OR REPLACE VIEW v_product_profit_with_overhead[\s\S]+WHERE p\.status\s*=\s*'approved'/,
+    );
+  });
+
+  it('migration view v_unallocated_expenses correlates against approved periods only', () => {
+    expect(MIG).toMatch(
+      /CREATE OR REPLACE VIEW v_unallocated_expenses[\s\S]+p\.status\s*=\s*'approved'/,
+    );
+  });
+
+  it('draft and reversed status are NEVER selected as approved by the overhead joins', () => {
+    // Negative invariant: no path treats draft/reversed as contributing.
+    expect(SRC).not.toMatch(/p\.status\s*=\s*'draft'\s*OR\s*p\.status\s*=\s*'approved'/);
+    expect(SRC).not.toMatch(/p\.status\s*IN\s*\([^)]*'draft'[^)]*'approved'/i);
+    expect(SRC).not.toMatch(/p\.status\s*IN\s*\([^)]*'reversed'[^)]*'approved'/i);
+  });
+});
+
+// ─── 17. Controller wiring — B2 routes + manage permission ───────
+
+describe('ExpenseAllocationsController — B2 wiring + permissions', () => {
+  const CTRL_RAW = readFileSync(
+    resolve(__dirname, './expense-allocations.controller.ts'),
+    'utf-8',
+  );
+  // Strip comments so docstring mentions of forbidden patterns don't
+  // trip the negative grep.
+  const CTRL = CTRL_RAW
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/[^\n]*/g, '');
+
+  it('declares the 8 mutation routes from the B2 spec', () => {
+    // Route declarations: HTTP-verb decorator on the line above the handler.
+    expect(CTRL).toMatch(/@Post\('periods'\)[\s\S]+createPeriod\s*\(/);
+    expect(CTRL).toMatch(/@Patch\('periods\/:id'\)[\s\S]+updatePeriod\s*\(/);
+    expect(CTRL).toMatch(/@Delete\('periods\/:id'\)[\s\S]+deletePeriod\s*\(/);
+    expect(CTRL).toMatch(/@Post\('periods\/:id\/lines'\)[\s\S]+addLine\s*\(/);
+    expect(CTRL).toMatch(/@Delete\('periods\/:id\/lines'\)[\s\S]+clearLines\s*\(/);
+    expect(CTRL).toMatch(/@Patch\('periods\/:id\/lines\/:line_id'\)[\s\S]+updateLine\s*\(/);
+    expect(CTRL).toMatch(/@Post\('periods\/:id\/approve'\)[\s\S]+approvePeriod\s*\(/);
+    expect(CTRL).toMatch(/@Post\('periods\/:id\/reverse'\)[\s\S]+reversePeriod\s*\(/);
+  });
+
+  it('every mutation route has @Permissions("expense_allocation.manage")', () => {
+    // Count: 8 mutation routes → at least 8 manage-permission decorators.
+    const manageHits = CTRL.match(/@Permissions\(\s*'expense_allocation\.manage'\s*\)/g) || [];
+    expect(manageHits.length).toBeGreaterThanOrEqual(8);
+  });
+
+  it('class-level keeps expense_allocation.view for the GET routes', () => {
+    expect(CTRL).toMatch(/@Permissions\(\s*'expense_allocation\.view'\s*\)\s*@Controller/);
+  });
+
+  it('reverse route requires a body DTO with a reason field', () => {
+    expect(CTRL).toMatch(/class ReverseDtoIn[\s\S]+@IsString\(\)\s+@MinLength\(1\)\s+reason/);
+  });
+
+  it('does NOT import FinancialEngine or chart-of-accounts internals', () => {
+    expect(CTRL).not.toMatch(/FinancialEngine/);
+    expect(CTRL).not.toMatch(/chart-of-accounts/);
   });
 });
