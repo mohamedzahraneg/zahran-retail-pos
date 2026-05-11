@@ -33,6 +33,7 @@ import RecurringExpenses, {
   RECURRING_PAYMENT_METHOD_OPTIONS,
   RECURRING_PAYMENT_METHOD_VALUES,
   DEFAULT_GENERATION_BEHAVIOR,
+  DEFAULT_NEW_PAYMENT_METHOD,
 } from '@/pages/RecurringExpenses';
 import type { RecurringExpense } from '@/api/recurringExpenses.api';
 
@@ -88,8 +89,12 @@ vi.mock('@/api/settings.api', () => ({
 vi.mock('@/api/cash-desk.api', () => ({
   cashDeskApi: {
     cashboxes: vi.fn(async () => [
+      // PR-F-3 fixture — a mix of kinds so the kind='cash' filter has
+      // something real to remove.
       { id: 'cb-MAIN', name_ar: 'الخزينة الرئيسية', kind: 'cash', is_active: true },
       { id: 'cb-OLD',  name_ar: 'خزنة مغلقة',       kind: 'cash', is_active: false },
+      { id: 'cb-BANK', name_ar: 'حساب POS Visa',    kind: 'bank', is_active: true },
+      { id: 'cb-EWAL', name_ar: 'محفظة فودافون',    kind: 'ewallet', is_active: true },
     ]),
   },
 }));
@@ -394,18 +399,14 @@ describe('RecurringExpenses — new-template behavior/form defaults are SYNCED (
     listFixture = [];
     renderPage();
     fireEvent.click(await screen.findByTestId('recurring-new-template-btn'));
+    // Wait for the modal to mount before interacting.
+    await screen.findByPlaceholderText('RENT-CAIRO-01');
 
-    // Wait for the cashbox list to load — needed because the default
-    // payment_method='cash' makes the Save button require a cashbox.
-    await waitFor(() => {
-      const cb = screen.getByTestId('recurring-cashbox-select') as HTMLSelectElement;
-      expect(Array.from(cb.options).find((o) => o.value === 'cb-MAIN')).toBeDefined();
-    });
-
-    // Fill the required text + select fields.  Notice: we never touch
-    // the behaviour radio.  The radio is already visually showing
-    // "auto_paid"; the bug being tested would have shipped auto_paid=
-    // false anyway.
+    // PR-F-3 — the default payment_method is now `card_visa`, so the
+    // cashbox row stays hidden by default and the test no longer
+    // needs to interact with the cashbox.  The radio is visually
+    // "auto_paid"; the bug being regression-guarded here is the
+    // separate-defaults FE-state desync.
     fireEvent.change(screen.getByPlaceholderText('RENT-CAIRO-01'), {
       target: { value: 'TEST-NEW-DEFAULT' },
     });
@@ -415,13 +416,10 @@ describe('RecurringExpenses — new-template behavior/form defaults are SYNCED (
     const selects = screen.getAllByRole('combobox');
     fireEvent.change(selects[0]!, { target: { value: 'cat-1' } });
     fireEvent.change(selects[1]!, { target: { value: 'wh-1' } });
-    fireEvent.change(screen.getByTestId('recurring-cashbox-select'), {
-      target: { value: 'cb-MAIN' },
-    });
-    fireEvent.change(screen.getByDisplayValue('0'), {
-      target: { value: '1000' },
-    });
 
+    // Wait for React to flush the controlled-input state updates,
+    // then assert the save button is enabled.  (amount stays 0 — not
+    // in the disabled predicate.)
     await waitFor(() => {
       const save = screen.getByTestId('recurring-save-btn') as HTMLButtonElement;
       expect(save.disabled).toBe(false);
@@ -634,31 +632,31 @@ describe('RecurringExpenses — payment_method whitelist (PR-A2-FIX)', () => {
 
 // ─── Cashbox selector + payment-method gating (PR-A2) ──────────────
 
-describe('RecurringExpenses — form cashbox field (PR-A2)', () => {
-  it('cashbox row is visible by default (payment_method defaults to cash)', async () => {
+describe('RecurringExpenses — form cashbox field (PR-A2 + PR-F-3)', () => {
+  it('cashbox row is HIDDEN by default for a new template (PR-F-3 — payment_method now defaults to card_visa)', async () => {
     listFixture = [];
     renderPage();
     fireEvent.click(await screen.findByTestId('recurring-new-template-btn'));
+    // Default payment_method=card_visa → no cashbox row.
+    expect(screen.queryByTestId('recurring-cashbox-row')).toBeNull();
+    expect(screen.queryByTestId('recurring-cashbox-select')).toBeNull();
+  });
+
+  it('cashbox row appears after switching payment_method to "cash"', async () => {
+    listFixture = [];
+    renderPage();
+    fireEvent.click(await screen.findByTestId('recurring-new-template-btn'));
+    fireEvent.change(screen.getByTestId('recurring-payment-method'), {
+      target: { value: 'cash' },
+    });
     expect(screen.getByTestId('recurring-cashbox-row')).toBeInTheDocument();
     expect(screen.getByTestId('recurring-cashbox-select')).toBeInTheDocument();
-    // Helper text present
     expect(screen.getByTestId('recurring-cashbox-helper').textContent).toMatch(
       /اختر الخزنة لأن المصروف سيتم دفعه نقديًا/,
     );
   });
 
-  it('cashbox row is hidden when payment_method is non-cash (e.g. card_visa)', async () => {
-    listFixture = [];
-    renderPage();
-    fireEvent.click(await screen.findByTestId('recurring-new-template-btn'));
-    fireEvent.change(screen.getByTestId('recurring-payment-method'), {
-      target: { value: 'card_visa' },
-    });
-    expect(screen.queryByTestId('recurring-cashbox-row')).toBeNull();
-    expect(screen.queryByTestId('recurring-cashbox-select')).toBeNull();
-  });
-
-  it('switching back to cash re-shows the cashbox row', async () => {
+  it('cashbox row stays hidden when payment_method changes between non-cash options', async () => {
     listFixture = [];
     renderPage();
     fireEvent.click(await screen.findByTestId('recurring-new-template-btn'));
@@ -667,16 +665,19 @@ describe('RecurringExpenses — form cashbox field (PR-A2)', () => {
     });
     expect(screen.queryByTestId('recurring-cashbox-row')).toBeNull();
     fireEvent.change(screen.getByTestId('recurring-payment-method'), {
-      target: { value: 'cash' },
+      target: { value: 'bank_transfer' },
     });
-    expect(screen.getByTestId('recurring-cashbox-row')).toBeInTheDocument();
+    expect(screen.queryByTestId('recurring-cashbox-row')).toBeNull();
   });
 
-  it('Save button is disabled when payment_method=cash and cashbox is empty', async () => {
+  it('Save button is disabled when user switches to cash and cashbox is empty', async () => {
     listFixture = [];
     renderPage();
     fireEvent.click(await screen.findByTestId('recurring-new-template-btn'));
-    // Fill the other required fields so the only blocker is the cashbox.
+    // Switch to cash first (default is now card_visa per PR-F-3).
+    fireEvent.change(screen.getByTestId('recurring-payment-method'), {
+      target: { value: 'cash' },
+    });
     fireEvent.change(screen.getByPlaceholderText('RENT-CAIRO-01'), {
       target: { value: 'TEST-CASH-NEG' },
     });
@@ -684,30 +685,27 @@ describe('RecurringExpenses — form cashbox field (PR-A2)', () => {
       target: { value: 'إيجار اختبار' },
     });
     const selects = screen.getAllByRole('combobox');
-    // category select
     fireEvent.change(selects[0]!, { target: { value: 'cat-1' } });
-    // warehouse select
     fireEvent.change(selects[1]!, { target: { value: 'wh-1' } });
     // Cashbox left empty — Save should still be disabled.
     const save = screen.getByTestId('recurring-save-btn') as HTMLButtonElement;
     expect(save.disabled).toBe(true);
-    // Inline error visible.
     expect(screen.getByTestId('recurring-cashbox-error').textContent).toMatch(
       /الخزنة مطلوبة عند اختيار الدفع النقدي للمصروف الدوري/,
     );
   });
 
-  it('Save button enables when payment_method=cash and a cashbox is picked', async () => {
+  it('Save button enables when payment_method=cash AND a cashbox is picked', async () => {
     listFixture = [];
     renderPage();
     fireEvent.click(await screen.findByTestId('recurring-new-template-btn'));
-    // Wait for category + warehouse + cashbox lists to populate.
+    fireEvent.change(screen.getByTestId('recurring-payment-method'), {
+      target: { value: 'cash' },
+    });
     await waitFor(() => {
       const cb = screen.getByTestId('recurring-cashbox-select') as HTMLSelectElement;
       expect(Array.from(cb.options).find((o) => o.value === 'cb-MAIN')).toBeDefined();
     });
-    // Fill code via placeholder, then name_ar via the only textbox
-    // labelled "الاسم بالعربية".
     fireEvent.change(screen.getByPlaceholderText('RENT-CAIRO-01'), {
       target: { value: 'TEST-CASH-POS' },
     });
@@ -720,8 +718,6 @@ describe('RecurringExpenses — form cashbox field (PR-A2)', () => {
     fireEvent.change(screen.getByTestId('recurring-cashbox-select'), {
       target: { value: 'cb-MAIN' },
     });
-    // React batches updates; assert in a waitFor to let the next tick
-    // recompute the disabled predicate.
     await waitFor(() => {
       const save = screen.getByTestId('recurring-save-btn') as HTMLButtonElement;
       expect(save.disabled).toBe(false);
@@ -733,22 +729,152 @@ describe('RecurringExpenses — form cashbox field (PR-A2)', () => {
     listFixture = [];
     renderPage();
     fireEvent.click(await screen.findByTestId('recurring-new-template-btn'));
+    fireEvent.change(screen.getByTestId('recurring-payment-method'), {
+      target: { value: 'cash' },
+    });
     await waitFor(() => {
       const cb = screen.getByTestId('recurring-cashbox-select') as HTMLSelectElement;
       const values = Array.from(cb.options).map((o) => o.value);
       expect(values).toContain('cb-MAIN');
-      expect(values).not.toContain('cb-OLD');
+      expect(values).not.toContain('cb-OLD'); // inactive
     });
   });
 
-  it('warehouse field remains separate and labelled "المخزن"', async () => {
+  it('warehouse field remains labelled "المخزن" (independent of cashbox row visibility)', async () => {
     listFixture = [];
     renderPage();
     fireEvent.click(await screen.findByTestId('recurring-new-template-btn'));
-    // "المخزن" label still present (not collapsed with cashbox).
+    // "المخزن" label is always present.
     expect(screen.getByText('المخزن')).toBeInTheDocument();
-    // "الخزنة" label is for the cashbox row.
+    // "الخزنة" label only appears after switching payment_method to cash.
+    expect(screen.queryByText('الخزنة')).toBeNull();
+    fireEvent.change(screen.getByTestId('recurring-payment-method'), {
+      target: { value: 'cash' },
+    });
     expect(screen.getByText('الخزنة')).toBeInTheDocument();
+    expect(screen.getByText('المخزن')).toBeInTheDocument(); // still there
+  });
+});
+
+// ─── PR-F-3 dedicated tests — default payment_method + kind filter ─
+
+describe('RecurringExpenses — PR-F-3 payment_method default + cashbox kind filter', () => {
+  it('DEFAULT_NEW_PAYMENT_METHOD is "card_visa"', () => {
+    expect(DEFAULT_NEW_PAYMENT_METHOD).toBe('card_visa');
+  });
+
+  it('source-grep — RecurringExpenses.tsx does NOT default new templates to payment_method="cash"', () => {
+    const src = readFileSync(
+      resolve(__dirname, '../RecurringExpenses.tsx'),
+      'utf-8',
+    );
+    const code = src
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/\/\/[^\n]*/g, '');
+    // The old pattern that caused Scenario B's misconfig:
+    expect(code).not.toMatch(/payment_method:\s*editing\??\.payment_method\s*\|\|\s*['"]cash['"]/);
+    // The new pattern uses the shared constant:
+    expect(code).toMatch(
+      /payment_method:\s*editing\??\.payment_method\s*\|\|\s*DEFAULT_NEW_PAYMENT_METHOD/,
+    );
+  });
+
+  it('new template form pre-selects "بطاقة Visa" (card_visa) in the payment-method dropdown', async () => {
+    listFixture = [];
+    renderPage();
+    fireEvent.click(await screen.findByTestId('recurring-new-template-btn'));
+    const pm = screen.getByTestId('recurring-payment-method') as HTMLSelectElement;
+    expect(pm.value).toBe('card_visa');
+  });
+
+  it('switching to cash, the cashbox dropdown contains ONLY kind=\'cash\' active cashboxes (PR-F-3 filter)', async () => {
+    listFixture = [];
+    renderPage();
+    fireEvent.click(await screen.findByTestId('recurring-new-template-btn'));
+    fireEvent.change(screen.getByTestId('recurring-payment-method'), {
+      target: { value: 'cash' },
+    });
+    await waitFor(() => {
+      const cb = screen.getByTestId('recurring-cashbox-select') as HTMLSelectElement;
+      const values = Array.from(cb.options).map((o) => o.value);
+      // "" is the "— اختر —" placeholder; ignore it.
+      const real = values.filter((v) => v !== '');
+      expect(real).toEqual(['cb-MAIN']);
+    });
+  });
+
+  it('the bank-kind cashbox "حساب POS Visa" does NOT appear in the cashbox selector for cash payments', async () => {
+    listFixture = [];
+    renderPage();
+    fireEvent.click(await screen.findByTestId('recurring-new-template-btn'));
+    fireEvent.change(screen.getByTestId('recurring-payment-method'), {
+      target: { value: 'cash' },
+    });
+    await waitFor(() => {
+      const cb = screen.getByTestId('recurring-cashbox-select') as HTMLSelectElement;
+      const values = Array.from(cb.options).map((o) => o.value);
+      expect(values).not.toContain('cb-BANK');
+      expect(values).not.toContain('cb-EWAL');
+    });
+  });
+
+  it('selecting "اعتماد تلقائي بدون دفع" radio keeps payment_method=card_visa (no override)', async () => {
+    listFixture = [];
+    renderPage();
+    fireEvent.click(await screen.findByTestId('recurring-new-template-btn'));
+    // Click the auto_post radio (the "اعتماد تلقائي بدون دفع" option).
+    fireEvent.click(screen.getByTestId('recurring-behavior-auto_post'));
+    // payment_method must NOT have been touched.
+    const pm = screen.getByTestId('recurring-payment-method') as HTMLSelectElement;
+    expect(pm.value).toBe('card_visa');
+    // Cashbox row remains hidden — non-cash.
+    expect(screen.queryByTestId('recurring-cashbox-row')).toBeNull();
+  });
+
+  it('Scenario-B replay — auto_post behaviour + default payment yields a valid B payload', async () => {
+    // This is the regression-guard for the exact incident that triggered
+    // PR-F-3.  With the new defaults, the operator can pick the
+    // "auto_post" behaviour radio and immediately save — and the
+    // resulting payload is what Scenario B actually needs.
+    const { recurringExpensesApi } = await import('@/api/recurringExpenses.api');
+    const createSpy = vi.mocked(recurringExpensesApi.create);
+    // Clear any previous test's calls so .calls[0] refers to ours.
+    createSpy.mockClear().mockResolvedValue({} as any);
+
+    listFixture = [];
+    renderPage();
+    fireEvent.click(await screen.findByTestId('recurring-new-template-btn'));
+    // Wait for the modal to mount before interacting (state-update
+    // flush timing — same pattern as the PR-A2-FIX-2 desync test).
+    await screen.findByPlaceholderText('RENT-CAIRO-01');
+
+    fireEvent.click(screen.getByTestId('recurring-behavior-auto_post'));
+    fireEvent.change(screen.getByPlaceholderText('RENT-CAIRO-01'), {
+      target: { value: 'TEST-RECUR-AUTOPOST-UNPAID-X' },
+    });
+    fireEvent.change(screen.getAllByRole('textbox')[1]!, {
+      target: { value: 'اختبار B' },
+    });
+    const selects = screen.getAllByRole('combobox');
+    fireEvent.change(selects[0]!, { target: { value: 'cat-1' } });
+    fireEvent.change(selects[1]!, { target: { value: 'wh-1' } });
+    // (amount stays 0 — not in the disabled predicate.)
+
+    await waitFor(() => {
+      const save = screen.getByTestId('recurring-save-btn') as HTMLButtonElement;
+      expect(save.disabled).toBe(false);
+    });
+    fireEvent.click(screen.getByTestId('recurring-save-btn'));
+
+    await waitFor(() => expect(createSpy).toHaveBeenCalled());
+    const payload = createSpy.mock.calls[0]![0];
+    expect(payload).toMatchObject({
+      auto_post: true,
+      auto_paid: false,
+      require_approval: false,
+      payment_method: 'card_visa',
+      cashbox_id: undefined,
+    });
   });
 });
 

@@ -468,12 +468,14 @@ describe('RecurringExpensesService — payment_method enum guard (PR-A2-FIX)', (
     for (const pm of goodValues) {
       const { ds } = makeMockDs(makeHandler());
       const svc = new RecurringExpensesService(ds);
+      // PR-F-3 — cash also requires auto_paid=true; other methods are
+      // valid with either flag.
       const out = await svc.create(
         {
           ...baseDto,
           payment_method: pm,
-          // cash needs a cashbox; everything else is fine without
           cashbox_id: pm === 'cash' ? 'cb-MAIN' : undefined,
+          ...(pm === 'cash' ? { auto_paid: true } : {}),
         },
         USER_ID,
       );
@@ -481,12 +483,13 @@ describe('RecurringExpensesService — payment_method enum guard (PR-A2-FIX)', (
     }
   });
 
-  it('accepts null/undefined payment_method (DB default applies)', async () => {
+  it('accepts null/undefined payment_method (DB default cash applies — but caller must supply auto_paid=true to satisfy F-3)', async () => {
     const { ds } = makeMockDs(makeHandler());
     const svc = new RecurringExpensesService(ds);
-    // payment_method omitted entirely → cash default → needs cashbox
+    // payment_method omitted entirely → cash default → also needs
+    // cashbox AND PR-F-3 needs auto_paid=true.
     const out = await svc.create(
-      { ...baseDto, cashbox_id: 'cb-MAIN' },
+      { ...baseDto, cashbox_id: 'cb-MAIN', auto_paid: true },
       USER_ID,
     );
     expect(out).toMatchObject({ id: 'new-tpl-pm' });
@@ -579,11 +582,18 @@ describe('RecurringExpensesService.create — cashbox invariant (PR-A2)', () => 
     );
   });
 
-  it('accepts cash + cashbox_id set', async () => {
+  it('accepts cash + cashbox_id + auto_paid=true', async () => {
     const { ds } = makeMockDs(makeHandler());
     const svc = new RecurringExpensesService(ds);
+    // PR-F-3 — cash now also requires auto_paid=true (a cash template
+    // without auto-deduction is internally meaningless).
     const out = await svc.create(
-      { ...baseDto, payment_method: 'cash', cashbox_id: 'cb-MAIN' },
+      {
+        ...baseDto,
+        payment_method: 'cash',
+        cashbox_id: 'cb-MAIN',
+        auto_paid: true,
+      },
       USER_ID,
     );
     expect(out).toMatchObject({ id: 'new-tpl-1' });
@@ -641,27 +651,40 @@ describe('RecurringExpensesService.update — cashbox invariant (PR-A2)', () => 
     expect(findAll(calls, /^UPDATE recurring_expenses SET/i)).toHaveLength(0);
   });
 
-  it('accepts update that flips payment_method to cash AND sets cashbox_id in the same call', async () => {
+  it('accepts update that flips payment_method to cash + sets cashbox_id + sets auto_paid=true', async () => {
     const existing = {
       id: 'tpl-A2b',
       payment_method: 'card_visa',
       cashbox_id: null,
       auto_post: false,
+      auto_paid: false,
       category_id: 'cat-1',
     };
     const { ds } = makeMockDs(({ sql }) => {
       if (/^SELECT \* FROM recurring_expenses WHERE id = \$1/i.test(sql))
         return [existing];
       if (/^UPDATE recurring_expenses SET/i.test(sql))
-        return [{ ...existing, payment_method: 'cash', cashbox_id: 'cb-MAIN' }];
+        return [{
+          ...existing,
+          payment_method: 'cash',
+          cashbox_id: 'cb-MAIN',
+          auto_paid: true,
+        }];
       return [];
     });
     const svc = new RecurringExpensesService(ds);
+    // PR-F-3 — flipping to cash must come with `auto_paid: true` in
+    // the same call or the behaviour-consistency guard rejects.
     const out = await svc.update('tpl-A2b', {
       payment_method: 'cash',
       cashbox_id: 'cb-MAIN',
+      auto_paid: true,
     });
-    expect(out).toMatchObject({ payment_method: 'cash', cashbox_id: 'cb-MAIN' });
+    expect(out).toMatchObject({
+      payment_method: 'cash',
+      cashbox_id: 'cb-MAIN',
+      auto_paid: true,
+    });
   });
 
   it('accepts update from cash → card_visa without cashbox (cashbox no longer required)', async () => {
@@ -728,6 +751,257 @@ describe('RecurringExpensesService.update — cashbox invariant (PR-A2)', () => 
     expect(out).toMatchObject({ amount: 7000 });
     // UPDATE did fire — proves we did NOT short-circuit on the
     // legacy bad row.
+    expect(findAll(calls, /^UPDATE recurring_expenses SET/i)).toHaveLength(1);
+  });
+});
+
+// ─── Behavioural: PR-F-3 behaviour-consistency guard ──────────────
+
+describe('RecurringExpensesService — behaviour consistency (cash ↔ auto_paid) — PR-F-3', () => {
+  const USER_ID = 'user-f3';
+
+  const baseDto = {
+    code: 'F3-01',
+    name_ar: 'اختبار سلوك',
+    category_id: 'cat-1',
+    warehouse_id: 'wh-1',
+    amount: 500,
+    frequency: 'monthly' as const,
+    start_date: '2026-05-11',
+    auto_post: false, // skip GL-mapping check
+  };
+
+  function makeHandler() {
+    return ({ sql }: MockCall): any[] => {
+      if (/SELECT id, account_id FROM expense_categories WHERE id = \$1/i.test(sql))
+        return [{ id: 'cat-1', account_id: 'acc-1' }];
+      if (/INSERT INTO recurring_expenses/i.test(sql))
+        return [{ id: 'new-tpl-f3', ...baseDto }];
+      return [];
+    };
+  }
+
+  // ─── create() rejections ─────────────────────────────────────────
+
+  it('rejects cash + explicit auto_paid=false at create()', async () => {
+    const { ds } = makeMockDs(makeHandler());
+    const svc = new RecurringExpensesService(ds);
+    await expect(
+      svc.create(
+        {
+          ...baseDto,
+          payment_method: 'cash',
+          cashbox_id: 'cb-MAIN',
+          auto_paid: false,
+        },
+        USER_ID,
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    await expect(
+      svc.create(
+        {
+          ...baseDto,
+          payment_method: 'cash',
+          cashbox_id: 'cb-MAIN',
+          auto_paid: false,
+        },
+        USER_ID,
+      ),
+    ).rejects.toMatchObject({
+      message:
+        'سلوك التوليد غير متناغم: لا يمكن تسجيل مصروف نقدي بدون خصم تلقائي من الخزنة.',
+    });
+  });
+
+  it('rejects cash + auto_paid omitted (defaults to false at DB) at create()', async () => {
+    const { ds, calls } = makeMockDs(makeHandler());
+    const svc = new RecurringExpensesService(ds);
+    await expect(
+      svc.create(
+        {
+          ...baseDto,
+          payment_method: 'cash',
+          cashbox_id: 'cb-MAIN',
+          // auto_paid intentionally omitted → undefined → treated as false
+        },
+        USER_ID,
+      ),
+    ).rejects.toMatchObject({
+      message:
+        'سلوك التوليد غير متناغم: لا يمكن تسجيل مصروف نقدي بدون خصم تلقائي من الخزنة.',
+    });
+    // No INSERT — guard fires before the DB write.
+    expect(findAll(calls, /INSERT INTO recurring_expenses/i)).toHaveLength(0);
+  });
+
+  // ─── create() acceptances ────────────────────────────────────────
+
+  it('accepts cash + auto_paid=true + cashbox at create()', async () => {
+    const { ds } = makeMockDs(makeHandler());
+    const svc = new RecurringExpensesService(ds);
+    const out = await svc.create(
+      {
+        ...baseDto,
+        payment_method: 'cash',
+        cashbox_id: 'cb-MAIN',
+        auto_paid: true,
+      },
+      USER_ID,
+    );
+    expect(out).toMatchObject({ id: 'new-tpl-f3' });
+  });
+
+  it('accepts card_visa + auto_paid=false at create() (non-cash AP path)', async () => {
+    const { ds } = makeMockDs(makeHandler());
+    const svc = new RecurringExpensesService(ds);
+    const out = await svc.create(
+      {
+        ...baseDto,
+        payment_method: 'card_visa',
+        cashbox_id: undefined,
+        auto_paid: false,
+      },
+      USER_ID,
+    );
+    expect(out).toMatchObject({ id: 'new-tpl-f3' });
+  });
+
+  it('accepts card_visa + auto_paid=true (functionally a no-op for non-cash, but valid)', async () => {
+    const { ds } = makeMockDs(makeHandler());
+    const svc = new RecurringExpensesService(ds);
+    const out = await svc.create(
+      {
+        ...baseDto,
+        payment_method: 'card_visa',
+        cashbox_id: undefined,
+        auto_paid: true,
+      },
+      USER_ID,
+    );
+    expect(out).toMatchObject({ id: 'new-tpl-f3' });
+  });
+
+  // ─── ordering vs. other guards ───────────────────────────────────
+
+  it('cashbox-required guard fires BEFORE the behaviour-consistency guard (cash + no cashbox + no auto_paid)', async () => {
+    const { ds } = makeMockDs(makeHandler());
+    const svc = new RecurringExpensesService(ds);
+    await expect(
+      svc.create(
+        {
+          ...baseDto,
+          payment_method: 'cash',
+          cashbox_id: undefined,
+          auto_paid: false,
+        },
+        USER_ID,
+      ),
+    ).rejects.toMatchObject({
+      // The cashbox guard's message takes precedence.
+      message: 'الخزنة مطلوبة عند اختيار الدفع النقدي للمصروف الدوري.',
+    });
+  });
+
+  // ─── update() flows ──────────────────────────────────────────────
+
+  it('rejects update that flips card_visa/auto_paid=false → cash without setting auto_paid=true', async () => {
+    const existing = {
+      id: 'tpl-F3-flip',
+      payment_method: 'card_visa',
+      cashbox_id: null,
+      auto_post: false,
+      auto_paid: false,
+      category_id: 'cat-1',
+    };
+    const { ds, calls } = makeMockDs(({ sql }) => {
+      if (/^SELECT \* FROM recurring_expenses WHERE id = \$1/i.test(sql))
+        return [existing];
+      return [];
+    });
+    const svc = new RecurringExpensesService(ds);
+    await expect(
+      svc.update('tpl-F3-flip', {
+        payment_method: 'cash',
+        cashbox_id: 'cb-MAIN',
+        // auto_paid intentionally omitted → effPaid falls back to
+        // cur.auto_paid=false → rejected by behaviour guard.
+      }),
+    ).rejects.toMatchObject({
+      message:
+        'سلوك التوليد غير متناغم: لا يمكن تسجيل مصروف نقدي بدون خصم تلقائي من الخزنة.',
+    });
+    expect(findAll(calls, /^UPDATE recurring_expenses SET/i)).toHaveLength(0);
+  });
+
+  it('rejects update that flips a cash/auto_paid=true row to auto_paid=false', async () => {
+    const existing = {
+      id: 'tpl-F3-drop',
+      payment_method: 'cash',
+      cashbox_id: 'cb-MAIN',
+      auto_post: true,
+      auto_paid: true,
+      category_id: 'cat-1',
+    };
+    const { ds, calls } = makeMockDs(({ sql }) => {
+      if (/^SELECT \* FROM recurring_expenses WHERE id = \$1/i.test(sql))
+        return [existing];
+      return [];
+    });
+    const svc = new RecurringExpensesService(ds);
+    await expect(
+      svc.update('tpl-F3-drop', { auto_paid: false }),
+    ).rejects.toMatchObject({
+      message:
+        'سلوك التوليد غير متناغم: لا يمكن تسجيل مصروف نقدي بدون خصم تلقائي من الخزنة.',
+    });
+    expect(findAll(calls, /^UPDATE recurring_expenses SET/i)).toHaveLength(0);
+  });
+
+  it('accepts update that flips cash → card_visa without auto_paid changes (non-cash → no longer needs auto_paid=true)', async () => {
+    const existing = {
+      id: 'tpl-F3-back',
+      payment_method: 'cash',
+      cashbox_id: 'cb-MAIN',
+      auto_post: true,
+      auto_paid: true,
+      category_id: 'cat-1',
+    };
+    const { ds } = makeMockDs(({ sql }) => {
+      if (/^SELECT \* FROM recurring_expenses WHERE id = \$1/i.test(sql))
+        return [existing];
+      if (/^UPDATE recurring_expenses SET/i.test(sql))
+        return [{ ...existing, payment_method: 'card_visa' }];
+      return [];
+    });
+    const svc = new RecurringExpensesService(ds);
+    const out = await svc.update('tpl-F3-back', { payment_method: 'card_visa' });
+    expect(out).toMatchObject({ payment_method: 'card_visa' });
+  });
+
+  it('amount-only update on a legacy bad row does NOT re-trigger the behaviour guard', async () => {
+    // A row that was saved BEFORE PR-F-3 with cash + auto_paid=false
+    // exists in production (the smoke-test bad B row).  Bumping an
+    // unrelated field shouldn't force the operator to also fix the
+    // behaviour combo in the same call.
+    const existing = {
+      id: 'tpl-F3-legacy',
+      payment_method: 'cash',
+      cashbox_id: 'cb-OLD',
+      auto_post: true,
+      auto_paid: false,
+      category_id: 'cat-1',
+    };
+    const { ds, calls } = makeMockDs(({ sql }) => {
+      if (/^SELECT \* FROM recurring_expenses WHERE id = \$1/i.test(sql))
+        return [existing];
+      if (/^UPDATE recurring_expenses SET/i.test(sql))
+        return [{ ...existing, amount: 1234 }];
+      return [];
+    });
+    const svc = new RecurringExpensesService(ds);
+    const out = await svc.update('tpl-F3-legacy', { amount: 1234 });
+    expect(out).toMatchObject({ amount: 1234 });
+    // UPDATE fired — no spurious re-validation rejection.
     expect(findAll(calls, /^UPDATE recurring_expenses SET/i)).toHaveLength(1);
   });
 });

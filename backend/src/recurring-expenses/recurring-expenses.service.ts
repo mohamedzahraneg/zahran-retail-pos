@@ -157,6 +157,15 @@ export class RecurringExpensesService {
     // so the operator sees a clear field-level message instead of a
     // daily silent failure in the scheduler logs.
     this.assertCashboxConsistent(dto.payment_method, dto.cashbox_id);
+    // PR-F-3 — behaviour-consistency guard.  When `payment_method='cash'`
+    // is paired with `auto_paid=false` the template is internally
+    // contradictory: the runOne() engine call drops `cashbox_id` (it
+    // only passes it through when `auto_paid && pm === 'cash'`), so
+    // the engine receives `{cash, null cashbox}` and rejects with
+    // "مصروف نقدي بدون خزنة".  Block the inconsistent combo here so
+    // operators get a precise Arabic 400 at template-save time instead
+    // of a misleading runtime failure.  See Scenario B retrospective.
+    this.assertBehaviorConsistent(dto.payment_method, dto.auto_paid);
     // PR-A — if the template will auto-post on generation, the
     // category MUST resolve to an active chart-of-accounts row.
     // The engine silently falls back to GL 529 (General Expense)
@@ -227,6 +236,17 @@ export class RecurringExpensesService {
       const effCb =
         dto.cashbox_id !== undefined ? dto.cashbox_id : cur.cashbox_id;
       this.assertCashboxConsistent(effPm, effCb);
+    }
+    // PR-F-3 — behaviour consistency on update.  Triggered whenever
+    // either the payment_method or the auto_paid flag changes.  Pure
+    // no-op updates (e.g. just amount, description) skip this check
+    // so legacy rows that pre-date the guard aren't forced to fix
+    // themselves on every edit.
+    if (dto.payment_method !== undefined || dto.auto_paid !== undefined) {
+      const effPm = dto.payment_method ?? cur.payment_method;
+      const effPaid =
+        dto.auto_paid !== undefined ? dto.auto_paid : cur.auto_paid;
+      this.assertBehaviorConsistent(effPm, effPaid);
     }
     // PR-A — same category-GL guard as create().  Triggered when
     // either the caller flips auto_post=true OR changes the category
@@ -568,6 +588,37 @@ export class RecurringExpensesService {
     if (paymentMethod == null) return; // DB default will fill it
     if (!SUPPORTED_RECURRING_PAYMENT_METHODS.includes(paymentMethod)) {
       throw new BadRequestException('طريقة الدفع غير مدعومة.');
+    }
+  }
+
+  /**
+   * PR-F-3 — behaviour-consistency guard.  Rejects the meaningless
+   * combination `payment_method='cash' AND auto_paid=false`:
+   *
+   *   - `auto_paid=true`  with cash → engine moves cash out of the
+   *     cashbox at run time (CR cash 1111, paired CT). Valid.
+   *   - `auto_paid=false` with non-cash → engine credits AP 211
+   *     (DR expense / CR supplier-payable). Valid.
+   *   - `auto_paid=false` with cash → contradiction: runOne drops the
+   *     cashbox_id when passing to the engine (it only forwards it
+   *     for `auto_paid && pm === 'cash'`), so the engine receives
+   *     `{cash, null cashbox}` and rejects.  The right place to catch
+   *     this is template-save, not run time.
+   *
+   * `undefined` and `null` for `autoPaid` are both treated as `false`
+   * (the DB default), so an omitted flag still fails when paired
+   * with cash.
+   */
+  private assertBehaviorConsistent(
+    paymentMethod: string | null | undefined,
+    autoPaid: boolean | null | undefined,
+  ): void {
+    const pm = (paymentMethod ?? 'cash').toString().toLowerCase();
+    const paid = autoPaid === true;
+    if (pm === 'cash' && !paid) {
+      throw new BadRequestException(
+        'سلوك التوليد غير متناغم: لا يمكن تسجيل مصروف نقدي بدون خصم تلقائي من الخزنة.',
+      );
     }
   }
 

@@ -63,6 +63,17 @@ export const RECURRING_PAYMENT_METHOD_OPTIONS = [
 export const RECURRING_PAYMENT_METHOD_VALUES: ReadonlyArray<string> =
   RECURRING_PAYMENT_METHOD_OPTIONS.map((o) => o.value);
 
+/**
+ * Default `payment_method` for a brand-new template.  PR-F-3 — moved
+ * from `'cash'` to `'card_visa'` so the form doesn't pre-select an
+ * option that combines awkwardly with the default behaviour radio
+ * ("اعتماد ودفع تلقائي" implies cash + cashbox, but a fresh operator
+ * scanning the radio + payment dropdown could pick a non-cash
+ * behaviour and forget to switch the payment).  Card_visa is a safe
+ * non-cash default that maps cleanly to the AP-211 path.
+ */
+export const DEFAULT_NEW_PAYMENT_METHOD = 'card_visa';
+
 const FREQUENCY_LABEL: Record<Frequency, string> = {
   daily: 'يومي',
   weekly: 'أسبوعي',
@@ -865,7 +876,7 @@ function RecurringExpenseFormModal({
     warehouse_id: editing?.warehouse_id || '',
     cashbox_id: editing?.cashbox_id || undefined,
     amount: editing?.amount || 0,
-    payment_method: editing?.payment_method || 'cash',
+    payment_method: editing?.payment_method || DEFAULT_NEW_PAYMENT_METHOD,
     vendor_name: editing?.vendor_name || '',
     description: editing?.description || '',
     frequency: editing?.frequency || 'monthly',
@@ -1053,6 +1064,14 @@ function RecurringExpenseFormModal({
                   <option value="">— اختر —</option>
                   {cashboxes
                     .filter((c) => c.is_active !== false)
+                    // PR-F-3 — the cashbox row only appears when
+                    // payment_method='cash'; filter to actual cash
+                    // drawers so an operator can't accidentally pick
+                    // a bank/wallet/check settlement cashbox for a
+                    // "cash" payment (which would later mis-credit
+                    // the JE and trip the engine's cash-GL alignment
+                    // guard).
+                    .filter((c) => c.kind === 'cash')
                     .map((c) => (
                       <option key={c.id} value={c.id}>
                         {c.name_ar}
