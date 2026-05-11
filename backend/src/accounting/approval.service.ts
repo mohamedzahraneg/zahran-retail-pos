@@ -430,8 +430,14 @@ export class ExpenseApprovalService {
             // Structured failure — roll back the approval by throwing.
             // Better the approver sees an error than we silently skip
             // the posting and leave another orphan.
+            //
+            // PR-FIX-AP-CODE — the rollback preserves
+            // expense_approvals.status='pending', so the previous
+            // "تم رفض الاعتماد" wording was misleading: the approval
+            // is NOT rejected, it's just transiently unposted.  The
+            // operator can retry once the underlying issue is fixed.
             throw new BadRequestException(
-              `تم رفض الاعتماد لأن ترحيل المصروف فشل: ${res.error}`,
+              `تعذّر اعتماد المصروف لأن ترحيل القيد فشل: ${res.error}. الاعتماد لا يزال قيد الانتظار.`,
             );
           }
         }

@@ -1126,7 +1126,16 @@ export class FinancialEngineService {
         : { account_code: '529', debit: args.amount };
 
     // Credit side: cash if it's a cash expense with a cashbox, else
-    // accounts-payable (210) for credit purchases.
+    // accounts-payable (GL_SUPPLIER_PAYABLE = '211',
+    // الموردون والدائنون) for credit purchases.
+    //
+    // PR-FIX-AP-CODE — was hardcoded to '210' which does NOT exist in
+    // the production chart_of_accounts: '21' is only the non-leaf
+    // header for current liabilities, and the actual AP leaf is '211'
+    // (see `gl-codes.constants.ts:51` GL_SUPPLIER_PAYABLE).  Every
+    // prior expense was cash-paid through `resolve_from_cashbox_id`,
+    // so the AP branch had never been exercised in production until
+    // the first non-cash unpaid recurring expense surfaced the gap.
     const isCash =
       args.payment_method === 'cash' && !!args.cashbox_id;
     const cr: EngineGlLine = isCash
@@ -1135,7 +1144,7 @@ export class FinancialEngineService {
           credit: args.amount,
           cashbox_id: args.cashbox_id!,
         }
-      : { account_code: '210', credit: args.amount };
+      : { account_code: GL_SUPPLIER_PAYABLE, credit: args.amount };
 
     const description =
       args.description ??
