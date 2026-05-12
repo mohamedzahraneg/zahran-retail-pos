@@ -1671,3 +1671,57 @@ describe('ExpenseAllocationsController — preview wiring (PR-PHASE2-B3)', () =>
     expect(CTRL).not.toMatch(/FinancialEngine/);
   });
 });
+
+// ════════════════════════════════════════════════════════════════════
+//  PR-PHASE2-TZ-FIX — DATE columns serialise as YYYY-MM-DD
+// ════════════════════════════════════════════════════════════════════
+//
+// After applying the global pg DATE parser override (see
+// src/database/pg-date-parser.ts), DATE columns flow into responses as
+// plain `YYYY-MM-DD` strings.  The previewAllocation response embeds
+// period_scope.from / .to derived from `period.period_start` and
+// `period.period_end`.  Mock-DataSource tests below pin both shapes.
+
+describe('PR-PHASE2-TZ-FIX — DATE serialisation in expense-allocations responses', () => {
+  it('previewAllocation period_scope.from/to are YYYY-MM-DD with no T time component', async () => {
+    // The mock DataSource here returns the raw string form the pg
+    // override would produce in production.  Asserts the service does
+    // not introduce a Date round-trip that would re-add the T-time.
+    const ds: any = {
+      query: async (sql: string) => {
+        if (/FROM expense_allocation_periods/.test(sql)) {
+          return [{
+            id: 'p-1',
+            period_start: '2026-04-01',
+            period_end:   '2026-04-30',
+            warehouse_id: null,
+            status: 'draft',
+          }];
+        }
+        if (/SELECT amount, is_approved FROM expenses/.test(sql)) {
+          return [{ amount: '100.00', is_approved: true }];
+        }
+        if (/FROM invoice_items/.test(sql)) {
+          return [{
+            target_id: 'prod-1', target_name: 'P',
+            basis_units_sold: '1', basis_revenue: '100', basis_gross_profit: '0',
+          }];
+        }
+        return [];
+      },
+      transaction: async () => { throw new Error('preview must not open a transaction'); },
+    };
+    const svc = new ExpenseAllocationsService(ds);
+    const res = await svc.previewAllocation('p-1', {
+      source: { expense_id: 'e-1' },
+      target_kind: 'product',
+      method: 'by_revenue',
+    });
+    expect(res.period_scope.from).toBe('2026-04-01');
+    expect(res.period_scope.to).toBe('2026-04-30');
+    expect(res.period_scope.from).not.toMatch(/T\d{2}:/);
+    expect(res.period_scope.to).not.toMatch(/T\d{2}:/);
+    expect(res.period_scope.from).not.toMatch(/Z$/);
+    expect(res.period_scope.to).not.toMatch(/Z$/);
+  });
+});

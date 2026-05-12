@@ -4,6 +4,12 @@
  *  Bootstrap file: security, validation, swagger, CORS, graceful shutdown
  * ============================================================================
  */
+// PR-PHASE2-TZ-FIX — must run before any DataSource connection opens.
+// Module-load order: this side-effect-only import precedes everything
+// else (including AppModule which constructs the global DataSource).
+import { applyPgDateParserOverride } from './database/pg-date-parser';
+applyPgDateParserOverride();
+
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe, Logger } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
