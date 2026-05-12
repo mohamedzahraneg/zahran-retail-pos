@@ -14,19 +14,25 @@ import {
   IsDateString,
   IsEnum,
   IsNumber,
+  IsObject,
   IsOptional,
   IsString,
   IsUUID,
   Min,
   MinLength,
   ValidateIf,
+  ValidateNested,
 } from 'class-validator';
+import { Type } from 'class-transformer';
 import {
   ExpenseAllocationsService,
   CreatePeriodDto,
   UpdatePeriodDto,
   AddLineDto,
   UpdateLineDto,
+  PreviewDto,
+  PreviewMethod,
+  PreviewTargetKind,
 } from './expense-allocations.service';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
@@ -83,6 +89,32 @@ class UpdateLineDtoIn implements UpdateLineDto {
 class ReverseDtoIn {
   // Non-empty reason is required to flip an approved period to reversed.
   @IsString() @MinLength(1) reason: string;
+}
+
+/**
+ * PR-PHASE2-B3 preview DTO — read-only compute, no DB writes.
+ *
+ * Exactly one of `source.expense_id` / `source.expense_category_id` is
+ * required.  The mutual-exclusion check lives in the service so both
+ * "both supplied" and "neither supplied" produce the same Arabic 400
+ * — class-validator can't easily express the XOR on nested objects.
+ */
+class PreviewSourceDtoIn {
+  @IsOptional() @IsUUID() expense_id?: string;
+  @IsOptional() @IsUUID() expense_category_id?: string;
+}
+
+class PreviewDtoIn implements PreviewDto {
+  @IsObject()
+  @ValidateNested()
+  @Type(() => PreviewSourceDtoIn)
+  source: PreviewSourceDtoIn;
+
+  @IsEnum(['product', 'category', 'warehouse'])
+  target_kind: PreviewTargetKind;
+
+  @IsEnum(['by_revenue', 'by_units_sold', 'by_gross_profit'])
+  method: PreviewMethod;
 }
 
 /**
@@ -192,5 +224,27 @@ export class ExpenseAllocationsController {
     @CurrentUser() user: JwtUser,
   ) {
     return this.svc.reversePeriod(id, user.userId, dto.reason);
+  }
+
+  // ─── Preview / compute (PR-PHASE2-B3, read-only) ────────────────
+
+  /**
+   * Compute a proposed allocation without writing anything.  Returned
+   * lines are advisory; the operator decides whether and how to save.
+   *
+   * Permission is `expense_allocation.view` (not `.manage`) because no
+   * mutation happens — anyone who can read allocation reports can
+   * preview "what would I propose?" results.  Saving still requires
+   * `.manage` via the existing B2 POST /lines (one manual line at a
+   * time) or a future batch-save PR.
+   *
+   * Allowed on periods of any status (draft / approved / reversed),
+   * mirroring the read-only intent.
+   */
+  @Post('periods/:id/preview')
+  @Permissions('expense_allocation.view')
+  @ApiOperation({ summary: 'معاينة توزيع المصاريف (بدون حفظ)' })
+  preview(@Param('id') id: string, @Body() dto: PreviewDtoIn) {
+    return this.svc.previewAllocation(id, dto);
   }
 }

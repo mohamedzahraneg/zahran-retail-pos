@@ -1098,3 +1098,576 @@ describe('ExpenseAllocationsController — B2 wiring + permissions', () => {
     expect(CTRL).not.toMatch(/chart-of-accounts/);
   });
 });
+
+// ════════════════════════════════════════════════════════════════════
+//  PR-PHASE2-B3 — preview / compute (read-only)
+// ════════════════════════════════════════════════════════════════════
+//
+// B3 adds a single read-only endpoint, POST /periods/:id/preview, that
+// returns proposed allocation lines without writing anything.  Tests
+// below drive previewAllocation() through the route-based mock and
+// assert SQL shape, rounding/residual rules, zero-basis behavior, and
+// negative-GP exclusion semantics.
+
+// Mock helper that classifies SQL by the most distinctive token we
+// expect to see in each query path.  Returns the configured reply.
+function previewMockDs(routes: Array<{ match: RegExp; reply: any[] | ((sql: string, params: any[] | undefined) => any[]) }>) {
+  const calls: { sql: string; params?: any[] }[] = [];
+  const route = (sql: string, params?: any[]) => {
+    calls.push({ sql, params });
+    for (const r of routes) {
+      if (r.match.test(sql)) {
+        return typeof r.reply === 'function' ? r.reply(sql, params) : r.reply;
+      }
+    }
+    return [];
+  };
+  const ds: any = {
+    query: async (sql: string, params?: any[]) => route(sql, params),
+    // previewAllocation is read-only; it does NOT call ds.transaction().
+    // Provide it anyway so a buggy implementation that DOES open a tx
+    // fails fast instead of silently no-op-ing.
+    transaction: async () => {
+      throw new Error('previewAllocation must not open a transaction');
+    },
+  };
+  return { ds, calls };
+}
+
+const PERIOD_LOOKUP = {
+  id: 'p-1',
+  period_start: '2026-04-01',
+  period_end: '2026-04-30',
+  warehouse_id: null,
+  status: 'draft',
+};
+
+// ─── 18. preview — source resolution ─────────────────────────────
+
+describe('ExpenseAllocationsService.previewAllocation — source resolution (PR-PHASE2-B3)', () => {
+  it('resolves source amount from a specific approved expense', async () => {
+    const { ds, calls } = previewMockDs([
+      { match: /FROM expense_allocation_periods/, reply: [PERIOD_LOOKUP] },
+      { match: /SELECT amount, is_approved FROM expenses/, reply: [{ amount: '100.00', is_approved: true }] },
+      { match: /FROM invoice_items/, reply: [
+        { target_id: 'prod-1', target_name: 'P1', basis_units_sold: '1', basis_revenue: '100', basis_gross_profit: '50' },
+      ]},
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    const res = await svc.previewAllocation('p-1', {
+      source: { expense_id: 'e-1' },
+      target_kind: 'product',
+      method: 'by_revenue',
+    });
+    expect(res.source.amount).toBe('100.00');
+    expect(res.source.expense_id).toBe('e-1');
+    expect(res.source.expense_category_id).toBeNull();
+    // Source-side query MUST be the by-id form, NOT the SUM form.
+    expect(calls.some((c) => /SELECT amount, is_approved FROM expenses WHERE id = \$1/.test(c.sql))).toBe(true);
+  });
+
+  it('rejects when expense is not approved (Arabic 400)', async () => {
+    const { ds } = previewMockDs([
+      { match: /FROM expense_allocation_periods/, reply: [PERIOD_LOOKUP] },
+      { match: /SELECT amount, is_approved FROM expenses/, reply: [{ amount: '100.00', is_approved: false }] },
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    await expect(
+      svc.previewAllocation('p-1', {
+        source: { expense_id: 'e-1' },
+        target_kind: 'product',
+        method: 'by_revenue',
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('throws NotFound when expense_id does not exist', async () => {
+    const { ds } = previewMockDs([
+      { match: /FROM expense_allocation_periods/, reply: [PERIOD_LOOKUP] },
+      { match: /SELECT amount, is_approved FROM expenses/, reply: [] },
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    await expect(
+      svc.previewAllocation('p-1', {
+        source: { expense_id: 'e-ghost' },
+        target_kind: 'product',
+        method: 'by_revenue',
+      }),
+    ).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('sums approved expenses in category within the period range', async () => {
+    const { ds, calls } = previewMockDs([
+      { match: /FROM expense_allocation_periods/, reply: [PERIOD_LOOKUP] },
+      { match: /COALESCE\(SUM\(amount\),\s*0\)\s+AS total[\s\S]*FROM expenses/, reply: [{ total: '250.00' }] },
+      { match: /FROM invoice_items/, reply: [
+        { target_id: 'prod-1', target_name: 'P1', basis_units_sold: '1', basis_revenue: '100', basis_gross_profit: '50' },
+      ]},
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    const res = await svc.previewAllocation('p-1', {
+      source: { expense_category_id: 'cat-1' },
+      target_kind: 'product',
+      method: 'by_revenue',
+    });
+    expect(res.source.amount).toBe('250.00');
+    expect(res.source.expense_category_id).toBe('cat-1');
+    expect(res.source.expense_id).toBeNull();
+    // Sum query must scope to the period date range AND filter is_approved=TRUE.
+    const sumCall = calls.find((c) => /COALESCE\(SUM\(amount\),\s*0\)\s+AS total/.test(c.sql))!;
+    expect(sumCall.sql).toMatch(/is_approved\s*=\s*TRUE/);
+    expect(sumCall.sql).toMatch(/expense_date\s+>=\s+\$2/);
+    expect(sumCall.sql).toMatch(/expense_date\s+<=\s+\$3/);
+  });
+
+  it('rejects when both source fields are supplied', async () => {
+    const { ds } = previewMockDs([
+      { match: /FROM expense_allocation_periods/, reply: [PERIOD_LOOKUP] },
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    await expect(
+      svc.previewAllocation('p-1', {
+        source: { expense_id: 'e-1', expense_category_id: 'cat-1' },
+        target_kind: 'product',
+        method: 'by_revenue',
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects when neither source field is supplied', async () => {
+    const { ds } = previewMockDs([
+      { match: /FROM expense_allocation_periods/, reply: [PERIOD_LOOKUP] },
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    await expect(
+      svc.previewAllocation('p-1', {
+        source: {},
+        target_kind: 'product',
+        method: 'by_revenue',
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('throws NotFound when the period does not exist', async () => {
+    const { ds } = previewMockDs([
+      { match: /FROM expense_allocation_periods/, reply: [] },
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    await expect(
+      svc.previewAllocation('p-ghost', {
+        source: { expense_id: 'e-1' },
+        target_kind: 'product',
+        method: 'by_revenue',
+      }),
+    ).rejects.toBeInstanceOf(NotFoundException);
+  });
+});
+
+// ─── 19. preview — by_revenue / target=product ───────────────────
+
+describe('ExpenseAllocationsService.previewAllocation — by_revenue / product (PR-PHASE2-B3)', () => {
+  function setup(candidates: any[], sourceAmount = '100.00') {
+    return previewMockDs([
+      { match: /FROM expense_allocation_periods/, reply: [PERIOD_LOOKUP] },
+      { match: /SELECT amount, is_approved FROM expenses/, reply: [{ amount: sourceAmount, is_approved: true }] },
+      { match: /FROM invoice_items[\s\S]*JOIN products/, reply: candidates },
+    ]);
+  }
+
+  it('happy path: 3 candidates, exact split, zero residual', async () => {
+    const { ds } = setup([
+      { target_id: 'A', target_name: 'A', basis_units_sold: '1', basis_revenue: '100', basis_gross_profit: '10' },
+      { target_id: 'B', target_name: 'B', basis_units_sold: '1', basis_revenue: '200', basis_gross_profit: '20' },
+      { target_id: 'C', target_name: 'C', basis_units_sold: '1', basis_revenue: '700', basis_gross_profit: '70' },
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    const res = await svc.previewAllocation('p-1', {
+      source: { expense_id: 'e-1' },
+      target_kind: 'product',
+      method: 'by_revenue',
+    });
+    expect(res.candidates_total).toBe(3);
+    expect(res.candidates_excluded).toBe(0);
+    expect(res.proposed_lines).toHaveLength(3);
+    const byId = (id: string) => res.proposed_lines.find((l: any) => l.target_id === id)!;
+    expect(byId('A').proposed_amount).toBe('10.00');
+    expect(byId('B').proposed_amount).toBe('20.00');
+    expect(byId('C').proposed_amount).toBe('70.00');
+    expect(res.rounding_residual).toBe('0.00');
+    expect(res.rounding_residual_absorbed_into_target_id).toBeNull();
+    expect(res.zero_basis_warning).toBeNull();
+  });
+
+  it('rounding residual is absorbed into the largest-basis line', async () => {
+    // source=1.00, three candidates with revenues 1/1/1 → each raw share is 0.333…,
+    // each rounds to 0.33, sum = 0.99, residual = 0.01.  All three tie on basis,
+    // so deterministic tie-break by lexicographically-smallest target_id picks 'A'.
+    const { ds } = setup([
+      { target_id: 'A', target_name: 'A', basis_units_sold: '1', basis_revenue: '1', basis_gross_profit: '0' },
+      { target_id: 'B', target_name: 'B', basis_units_sold: '1', basis_revenue: '1', basis_gross_profit: '0' },
+      { target_id: 'C', target_name: 'C', basis_units_sold: '1', basis_revenue: '1', basis_gross_profit: '0' },
+    ], '1.00');
+    const svc = new ExpenseAllocationsService(ds as any);
+    const res = await svc.previewAllocation('p-1', {
+      source: { expense_id: 'e-1' },
+      target_kind: 'product',
+      method: 'by_revenue',
+    });
+    const amounts = res.proposed_lines.map((l: any) => l.proposed_amount).sort();
+    expect(amounts).toEqual(['0.33', '0.33', '0.34']);
+    expect(res.rounding_residual).toBe('0.01');
+    expect(res.rounding_residual_absorbed_into_target_id).toBe('A');
+    // SUM(proposed_amount) must equal source exactly
+    const sum = res.proposed_lines.reduce(
+      (s: number, l: any) => s + Number(l.proposed_amount), 0,
+    );
+    expect(Math.round(sum * 100) / 100).toBe(1);
+  });
+
+  it('zero source amount returns an empty preview with Arabic warning', async () => {
+    const { ds } = setup([
+      { target_id: 'A', target_name: 'A', basis_units_sold: '1', basis_revenue: '100', basis_gross_profit: '10' },
+    ], '0.00');
+    const svc = new ExpenseAllocationsService(ds as any);
+    const res = await svc.previewAllocation('p-1', {
+      source: { expense_id: 'e-1' },
+      target_kind: 'product',
+      method: 'by_revenue',
+    });
+    expect(res.proposed_lines).toEqual([]);
+    expect(res.zero_basis_warning).toBe('مبلغ المصدر صفر.');
+  });
+
+  it('empty candidate set returns empty preview with Arabic warning', async () => {
+    const { ds } = setup([], '100.00');
+    const svc = new ExpenseAllocationsService(ds as any);
+    const res = await svc.previewAllocation('p-1', {
+      source: { expense_id: 'e-1' },
+      target_kind: 'product',
+      method: 'by_revenue',
+    });
+    expect(res.proposed_lines).toEqual([]);
+    expect(res.zero_basis_warning).toBe('لا توجد مبيعات معتمدة في هذه الفترة.');
+  });
+
+  it('embeds weight_pct and weight_basis_total for provenance', async () => {
+    const { ds } = setup([
+      { target_id: 'A', target_name: 'A', basis_units_sold: '1', basis_revenue: '100', basis_gross_profit: '10' },
+      { target_id: 'B', target_name: 'B', basis_units_sold: '1', basis_revenue: '300', basis_gross_profit: '30' },
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    const res = await svc.previewAllocation('p-1', {
+      source: { expense_id: 'e-1' },
+      target_kind: 'product',
+      method: 'by_revenue',
+    });
+    expect(res.total_basis).toBe('400.000000');
+    const byId = (id: string) => res.proposed_lines.find((l: any) => l.target_id === id)!;
+    expect(byId('A').weight_pct).toBe('25.0000');
+    expect(byId('B').weight_pct).toBe('75.0000');
+    expect(byId('A').weight_basis_total).toBe('400.000000');
+  });
+});
+
+// ─── 20. preview — by_units_sold ─────────────────────────────────
+
+describe('ExpenseAllocationsService.previewAllocation — by_units_sold (PR-PHASE2-B3)', () => {
+  it('uses units_sold (not revenue) as the basis', async () => {
+    const { ds } = previewMockDs([
+      { match: /FROM expense_allocation_periods/, reply: [PERIOD_LOOKUP] },
+      { match: /SELECT amount, is_approved FROM expenses/, reply: [{ amount: '100.00', is_approved: true }] },
+      { match: /FROM invoice_items[\s\S]*JOIN products/, reply: [
+        { target_id: 'A', target_name: 'A', basis_units_sold: '1',  basis_revenue: '999', basis_gross_profit: '0' },
+        { target_id: 'B', target_name: 'B', basis_units_sold: '4',  basis_revenue: '1',   basis_gross_profit: '0' },
+      ]},
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    const res = await svc.previewAllocation('p-1', {
+      source: { expense_id: 'e-1' },
+      target_kind: 'product',
+      method: 'by_units_sold',
+    });
+    const byId = (id: string) => res.proposed_lines.find((l: any) => l.target_id === id)!;
+    // Total units = 5; A has 1/5 = 20.00, B has 4/5 = 80.00.
+    expect(byId('A').proposed_amount).toBe('20.00');
+    expect(byId('B').proposed_amount).toBe('80.00');
+    expect(byId('A').basis_value).toBe('1.000000');
+    expect(byId('B').basis_value).toBe('4.000000');
+  });
+});
+
+// ─── 21. preview — by_gross_profit ───────────────────────────────
+
+describe('ExpenseAllocationsService.previewAllocation — by_gross_profit (PR-PHASE2-B3)', () => {
+  it('all positive GPs: all counted, allocates proportionally', async () => {
+    const { ds } = previewMockDs([
+      { match: /FROM expense_allocation_periods/, reply: [PERIOD_LOOKUP] },
+      { match: /SELECT amount, is_approved FROM expenses/, reply: [{ amount: '100.00', is_approved: true }] },
+      { match: /FROM invoice_items[\s\S]*JOIN products/, reply: [
+        { target_id: 'A', target_name: 'A', basis_units_sold: '1', basis_revenue: '999', basis_gross_profit: '40' },
+        { target_id: 'B', target_name: 'B', basis_units_sold: '1', basis_revenue: '999', basis_gross_profit: '60' },
+      ]},
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    const res = await svc.previewAllocation('p-1', {
+      source: { expense_id: 'e-1' },
+      target_kind: 'product',
+      method: 'by_gross_profit',
+    });
+    expect(res.candidates_total).toBe(2);
+    expect(res.candidates_excluded).toBe(0);
+    const byId = (id: string) => res.proposed_lines.find((l: any) => l.target_id === id)!;
+    expect(byId('A').proposed_amount).toBe('40.00');
+    expect(byId('B').proposed_amount).toBe('60.00');
+  });
+
+  it('excludes a target with negative GP and reports candidates_excluded=1', async () => {
+    const { ds } = previewMockDs([
+      { match: /FROM expense_allocation_periods/, reply: [PERIOD_LOOKUP] },
+      { match: /SELECT amount, is_approved FROM expenses/, reply: [{ amount: '100.00', is_approved: true }] },
+      { match: /FROM invoice_items[\s\S]*JOIN products/, reply: [
+        { target_id: 'A', target_name: 'A', basis_units_sold: '1', basis_revenue: '1', basis_gross_profit: '60' },
+        { target_id: 'B', target_name: 'B', basis_units_sold: '1', basis_revenue: '1', basis_gross_profit: '-20' },
+        { target_id: 'C', target_name: 'C', basis_units_sold: '1', basis_revenue: '1', basis_gross_profit: '40' },
+      ]},
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    const res = await svc.previewAllocation('p-1', {
+      source: { expense_id: 'e-1' },
+      target_kind: 'product',
+      method: 'by_gross_profit',
+    });
+    expect(res.candidates_total).toBe(3);
+    expect(res.candidates_excluded).toBe(1);
+    // A=60/(60+40)=60.00, C=40.00; B is dropped from proposed_lines.
+    expect(res.proposed_lines.map((l: any) => l.target_id).sort()).toEqual(['A', 'C']);
+    const byId = (id: string) => res.proposed_lines.find((l: any) => l.target_id === id)!;
+    expect(byId('A').proposed_amount).toBe('60.00');
+    expect(byId('C').proposed_amount).toBe('40.00');
+  });
+
+  it('all GPs non-positive → empty preview + specific Arabic warning', async () => {
+    const { ds } = previewMockDs([
+      { match: /FROM expense_allocation_periods/, reply: [PERIOD_LOOKUP] },
+      { match: /SELECT amount, is_approved FROM expenses/, reply: [{ amount: '100.00', is_approved: true }] },
+      { match: /FROM invoice_items[\s\S]*JOIN products/, reply: [
+        { target_id: 'A', target_name: 'A', basis_units_sold: '1', basis_revenue: '1', basis_gross_profit: '-5' },
+        { target_id: 'B', target_name: 'B', basis_units_sold: '1', basis_revenue: '1', basis_gross_profit: '0' },
+      ]},
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    const res = await svc.previewAllocation('p-1', {
+      source: { expense_id: 'e-1' },
+      target_kind: 'product',
+      method: 'by_gross_profit',
+    });
+    expect(res.proposed_lines).toEqual([]);
+    expect(res.candidates_excluded).toBe(2);
+    expect(res.zero_basis_warning).toBe('لا توجد أهداف ذات ربح موجب في هذه الفترة.');
+  });
+});
+
+// ─── 22. preview — target kind = category ────────────────────────
+
+describe('ExpenseAllocationsService.previewAllocation — target=category (PR-PHASE2-B3)', () => {
+  it('joins categories and groups by category_id', async () => {
+    const { ds, calls } = previewMockDs([
+      { match: /FROM expense_allocation_periods/, reply: [PERIOD_LOOKUP] },
+      { match: /SELECT amount, is_approved FROM expenses/, reply: [{ amount: '100.00', is_approved: true }] },
+      { match: /FROM invoice_items[\s\S]*JOIN categories/, reply: [
+        { target_id: 'cat-A', target_name: 'فئة أ', basis_units_sold: '2', basis_revenue: '200', basis_gross_profit: '0' },
+      ]},
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    const res = await svc.previewAllocation('p-1', {
+      source: { expense_id: 'e-1' },
+      target_kind: 'category',
+      method: 'by_revenue',
+    });
+    expect(res.target_kind).toBe('category');
+    const aggregate = calls.find((c) => /FROM invoice_items[\s\S]*JOIN categories/.test(c.sql))!;
+    expect(aggregate.sql).toMatch(/JOIN categories c\s+ON c\.id\s+=\s+p\.category_id/);
+    expect(aggregate.sql).toMatch(/GROUP BY c\.id, c\.name_ar/);
+    expect(res.proposed_lines[0].target_id).toBe('cat-A');
+  });
+});
+
+// ─── 23. preview — target kind = warehouse ───────────────────────
+
+describe('ExpenseAllocationsService.previewAllocation — target=warehouse (PR-PHASE2-B3)', () => {
+  it('joins warehouses (no product_variants/products join needed)', async () => {
+    const { ds, calls } = previewMockDs([
+      { match: /FROM expense_allocation_periods/, reply: [PERIOD_LOOKUP] },
+      { match: /SELECT amount, is_approved FROM expenses/, reply: [{ amount: '100.00', is_approved: true }] },
+      { match: /FROM invoice_items[\s\S]*JOIN warehouses/, reply: [
+        { target_id: 'wh-A', target_name: 'الفرع الرئيسي', basis_units_sold: '5', basis_revenue: '500', basis_gross_profit: '0' },
+      ]},
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    const res = await svc.previewAllocation('p-1', {
+      source: { expense_id: 'e-1' },
+      target_kind: 'warehouse',
+      method: 'by_revenue',
+    });
+    const aggregate = calls.find((c) => /FROM invoice_items[\s\S]*JOIN warehouses/.test(c.sql))!;
+    expect(aggregate.sql).toMatch(/JOIN warehouses w\s+ON w\.id\s+=\s+i\.warehouse_id/);
+    expect(aggregate.sql).not.toMatch(/JOIN products\s+p\s+ON/);
+    expect(aggregate.sql).not.toMatch(/JOIN product_variants\s+pv\s+ON/);
+    expect(res.proposed_lines[0].target_id).toBe('wh-A');
+  });
+});
+
+// ─── 24. preview — SQL invariants ────────────────────────────────
+
+describe('ExpenseAllocationsService.previewAllocation — SQL invariants (PR-PHASE2-B3)', () => {
+  function captureAggregate(target_kind: 'product' | 'category' | 'warehouse', method: 'by_revenue') {
+    const { ds, calls } = previewMockDs([
+      { match: /FROM expense_allocation_periods/, reply: [{ id: 'p-1', period_start: '2026-04-01', period_end: '2026-04-30', warehouse_id: null }] },
+      { match: /SELECT amount, is_approved FROM expenses/, reply: [{ amount: '100.00', is_approved: true }] },
+      { match: /FROM invoice_items/, reply: [] },
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    return svc.previewAllocation('p-1', {
+      source: { expense_id: 'e-1' },
+      target_kind,
+      method,
+    }).then(() => calls);
+  }
+
+  it('uses canonical sales status filter (completed/paid/partially_paid)', async () => {
+    const calls = await captureAggregate('product', 'by_revenue');
+    const agg = calls.find((c) => /FROM invoice_items/.test(c.sql))!;
+    expect(agg.sql).toMatch(/i\.status\s+IN\s*\(\s*'completed'\s*,\s*'paid'\s*,\s*'partially_paid'\s*\)/);
+  });
+
+  it('filters out returns with NOT i.is_return', async () => {
+    const calls = await captureAggregate('product', 'by_revenue');
+    const agg = calls.find((c) => /FROM invoice_items/.test(c.sql))!;
+    expect(agg.sql).toMatch(/NOT\s+i\.is_return/);
+  });
+
+  it('uses end-exclusive date upper bound (< period_end + INTERVAL 1 day)', async () => {
+    const calls = await captureAggregate('product', 'by_revenue');
+    const agg = calls.find((c) => /FROM invoice_items/.test(c.sql))!;
+    expect(agg.sql).toMatch(/i\.completed_at\s+>=\s+\$1::date/);
+    expect(agg.sql).toMatch(/i\.completed_at\s+<\s+\(\$2::date\s+\+\s+INTERVAL\s+'1\s+day'\)/);
+  });
+
+  it('respects period.warehouse_id when set (conditional filter)', async () => {
+    const calls = await captureAggregate('product', 'by_revenue');
+    const agg = calls.find((c) => /FROM invoice_items/.test(c.sql))!;
+    expect(agg.sql).toMatch(/\$3::uuid\s+IS\s+NULL\s+OR\s+i\.warehouse_id\s*=\s*\$3::uuid/);
+  });
+
+  it('product target uses invoice_items→product_variants→products join chain', async () => {
+    const calls = await captureAggregate('product', 'by_revenue');
+    const agg = calls.find((c) => /FROM invoice_items/.test(c.sql))!;
+    expect(agg.sql).toMatch(/JOIN product_variants pv\s+ON pv\.id\s*=\s*ii\.variant_id/);
+    expect(agg.sql).toMatch(/JOIN products p\s+ON p\.id\s*=\s*pv\.product_id/);
+  });
+
+  it('revenue formula matches v_product_profit (qty * unit_price - discount_amount)', async () => {
+    const calls = await captureAggregate('product', 'by_revenue');
+    const agg = calls.find((c) => /FROM invoice_items/.test(c.sql))!;
+    expect(agg.sql).toMatch(/SUM\(ii\.quantity::numeric\s*\*\s*ii\.unit_price\s*-\s*ii\.discount_amount\)/);
+    // and crucially does NOT use the nullable ii.line_total column
+    expect(agg.sql).not.toMatch(/SUM\(ii\.line_total\)/);
+  });
+});
+
+// ─── 25. preview — period status agnostic ────────────────────────
+
+describe('ExpenseAllocationsService.previewAllocation — works on any period status (PR-PHASE2-B3)', () => {
+  it.each(['draft', 'approved', 'reversed'])(
+    'allows preview on a %s period (read-only)',
+    async (status) => {
+      const { ds } = previewMockDs([
+        { match: /FROM expense_allocation_periods/, reply: [{ ...PERIOD_LOOKUP, status }] },
+        { match: /SELECT amount, is_approved FROM expenses/, reply: [{ amount: '100.00', is_approved: true }] },
+        { match: /FROM invoice_items/, reply: [
+          { target_id: 'A', target_name: 'A', basis_units_sold: '1', basis_revenue: '100', basis_gross_profit: '0' },
+        ]},
+      ]);
+      const svc = new ExpenseAllocationsService(ds as any);
+      const res = await svc.previewAllocation('p-1', {
+        source: { expense_id: 'e-1' },
+        target_kind: 'product',
+        method: 'by_revenue',
+      });
+      expect(res.period_id).toBe('p-1');
+      expect(res.proposed_lines).toHaveLength(1);
+    },
+  );
+});
+
+// ─── 26. preview — source-grep guards (B3-specific) ──────────────
+
+describe('expense-allocations.service.ts — B3 source-grep guards', () => {
+  const SRC_RAW = readFileSync(
+    resolve(__dirname, './expense-allocations.service.ts'),
+    'utf-8',
+  );
+  const SRC = SRC_RAW.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+
+  it('previewAllocation method is implemented and exported', () => {
+    expect(SRC).toMatch(/async previewAllocation\(/);
+  });
+
+  it('previewAllocation does NOT call ds.transaction (read-only path)', () => {
+    // Slice the source between "async previewAllocation(" and the next top-level
+    // method or class close to scope the check to the preview path only.
+    const m = SRC.match(/async previewAllocation\([\s\S]*?\n  (?:private|async|\/\/)/);
+    const slice = m ? m[0] : SRC;
+    expect(slice).not.toMatch(/this\.ds\.transaction\b/);
+    expect(slice).not.toMatch(/em\.query/); // no transactional .query either
+  });
+
+  it('preview helpers only run SELECTs (no INSERT/UPDATE/DELETE keywords in their scope)', () => {
+    const helpersStart = SRC.indexOf('private async resolveSourceAmount');
+    const helpersEnd = SRC.indexOf('private async lockPeriod');
+    expect(helpersStart).toBeGreaterThan(0);
+    expect(helpersEnd).toBeGreaterThan(helpersStart);
+    const slice = SRC.slice(helpersStart, helpersEnd);
+    for (const verb of ['INSERT INTO', 'UPDATE', 'DELETE FROM']) {
+      expect(slice).not.toMatch(new RegExp(`${verb}\\s+[a-z_]+`, 'i'));
+    }
+  });
+
+  it('preview uses canonical sales-status filter as a literal SQL string', () => {
+    expect(SRC).toMatch(/'completed','paid','partially_paid'/);
+  });
+
+  it('still has zero FinancialEngine / financial-engine references in code', () => {
+    expect(SRC).not.toMatch(/FinancialEngine/);
+    expect(SRC).not.toMatch(/financial-engine/);
+  });
+});
+
+// ─── 27. controller wiring — preview route + view permission ────
+
+describe('ExpenseAllocationsController — preview wiring (PR-PHASE2-B3)', () => {
+  const CTRL_RAW = readFileSync(
+    resolve(__dirname, './expense-allocations.controller.ts'),
+    'utf-8',
+  );
+  const CTRL = CTRL_RAW.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+
+  it('declares POST periods/:id/preview', () => {
+    expect(CTRL).toMatch(/@Post\('periods\/:id\/preview'\)[\s\S]+preview\s*\(/);
+  });
+
+  it('preview route is guarded by expense_allocation.view (NOT .manage)', () => {
+    expect(CTRL).toMatch(
+      /@Post\('periods\/:id\/preview'\)\s*@Permissions\(\s*'expense_allocation\.view'\s*\)/,
+    );
+  });
+
+  it('PreviewDtoIn validates nested source via @ValidateNested + @Type', () => {
+    expect(CTRL).toMatch(/class PreviewSourceDtoIn[\s\S]+@IsUUID\(\)\s+expense_id/);
+    expect(CTRL).toMatch(/class PreviewDtoIn[\s\S]+@ValidateNested\(\)[\s\S]+@Type\(\(\)\s*=>\s*PreviewSourceDtoIn\)/);
+  });
+
+  it('still has zero FinancialEngine references', () => {
+    expect(CTRL).not.toMatch(/FinancialEngine/);
+  });
+});

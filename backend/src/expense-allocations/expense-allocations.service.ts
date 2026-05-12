@@ -47,6 +47,25 @@ export interface UpdateLineDto {
 }
 
 /**
+ * PR-PHASE2-B3 — preview / compute.
+ *
+ * READ-ONLY shape consumed by previewAllocation().  The endpoint returns
+ * proposed lines but performs zero DB writes.  Saving is handled either
+ * by the existing B2 POST /lines (manual only) or a later batch-save PR.
+ */
+export type PreviewMethod = 'by_revenue' | 'by_units_sold' | 'by_gross_profit';
+export type PreviewTargetKind = 'product' | 'category' | 'warehouse';
+
+export interface PreviewDto {
+  source: {
+    expense_id?: string;
+    expense_category_id?: string;
+  };
+  target_kind: PreviewTargetKind;
+  method: PreviewMethod;
+}
+
+/**
  * ExpenseAllocationsService — PR-PHASE2-B1 (read) + PR-PHASE2-B2 (mutate).
  *
  * Read paths come from B1 (migration 132).
@@ -590,6 +609,343 @@ export class ExpenseAllocationsService {
       );
       return this.getPeriod(id);
     });
+  }
+
+  // ─── Preview / compute (PR-PHASE2-B3, read-only) ────────────────
+
+  /**
+   * Compute a proposed allocation across product / category / warehouse
+   * targets, weighted by revenue / units sold / gross profit observed in
+   * the parent period's date range.  Returns the proposed lines — does
+   * NOT save them.  Saving remains via the B2 POST /lines endpoint (one
+   * manual line at a time) or a future batch-save PR.
+   *
+   * Allowed on periods of ANY status (read-only operation).  Computes
+   * basis fresh from invoice_items + invoices (the existing
+   * v_product_profit view is all-time and cannot be re-used here).
+   *
+   * Hard constraints (preserved by source-grep guards):
+   *   * Zero writes — pure SELECT over invoice_items / invoices /
+   *     product_variants / products / categories / warehouses / expenses
+   *   * No FinancialEngine call
+   *   * No mutation of expenses
+   */
+  async previewAllocation(periodId: string, dto: PreviewDto) {
+    // 1. Validate DTO shape
+    const { source, target_kind, method } = dto ?? ({} as PreviewDto);
+    if (!source) {
+      throw new BadRequestException('مصدر التوزيع مطلوب.');
+    }
+    const hasExp = Boolean(source.expense_id);
+    const hasCat = Boolean(source.expense_category_id);
+    if (hasExp && hasCat) {
+      throw new BadRequestException('حدد مصدراً واحداً فقط: مصروف معيّن أو فئة مصروفات.');
+    }
+    if (!hasExp && !hasCat) {
+      throw new BadRequestException('يجب تحديد مصدر التوزيع: مصروف معيّن أو فئة مصروفات.');
+    }
+    if (!['product', 'category', 'warehouse'].includes(target_kind)) {
+      throw new BadRequestException('نوع الهدف غير صالح.');
+    }
+    if (!['by_revenue', 'by_units_sold', 'by_gross_profit'].includes(method)) {
+      throw new BadRequestException('طريقة التوزيع غير صالحة.');
+    }
+
+    // 2. Look up the period (read-only, no FOR UPDATE).
+    const [period] = await this.ds.query(
+      `SELECT id, period_start, period_end, warehouse_id, status
+         FROM expense_allocation_periods
+         WHERE id = $1`,
+      [periodId],
+    );
+    if (!period) throw new NotFoundException('فترة التوزيع غير موجودة.');
+
+    // 3. Resolve source amount.
+    const sourceAmount = await this.resolveSourceAmount(period, source);
+
+    // 4. Aggregate basis per target_kind.
+    const rawCandidates = await this.aggregateBasis(period, target_kind);
+
+    // 5. Pick the basis value per the chosen method; for by_gross_profit
+    //    exclude targets with non-positive GP (cannot bear overhead).
+    const valued = rawCandidates.map((c: any) => ({
+      target_id: c.target_id,
+      target_name: c.target_name,
+      basis_units: Number(c.basis_units_sold ?? 0),
+      basis_revenue: Number(c.basis_revenue ?? 0),
+      basis_gross_profit: Number(c.basis_gross_profit ?? 0),
+    }));
+    const basisOf = (c: typeof valued[number]) =>
+      method === 'by_revenue'
+        ? c.basis_revenue
+        : method === 'by_units_sold'
+          ? c.basis_units
+          : c.basis_gross_profit;
+
+    let counted: typeof valued = valued;
+    let excluded = 0;
+    if (method === 'by_gross_profit') {
+      counted = valued.filter((c) => basisOf(c) > 0);
+      excluded = valued.length - counted.length;
+    }
+
+    const totalBasis = counted.reduce((s, c) => s + basisOf(c), 0);
+
+    // 6. Zero-basis early return — no proposed lines, contextual warning.
+    if (sourceAmount === 0 || totalBasis <= 0 || counted.length === 0) {
+      return this.buildPreviewPayload(period, dto, sourceAmount, valued.length, excluded, 0, [], 0, null,
+        this.zeroBasisWarning(method, sourceAmount, totalBasis, counted.length, valued.length));
+    }
+
+    // 7. Compute proposed amounts (rounded to 2dp).
+    const lines = counted.map((c) => {
+      const basis = basisOf(c);
+      const rawShare = (sourceAmount * basis) / totalBasis;
+      return {
+        target_kind,
+        target_id: c.target_id,
+        target_name: c.target_name,
+        basis_value: this.fmt6(basis),
+        weight_basis_total: this.fmt6(totalBasis),
+        weight_pct: this.fmt4((basis / totalBasis) * 100),
+        proposed_amount: this.round2(rawShare),
+        _rawBasis: basis,
+      };
+    });
+
+    // 8. Apply rounding residual to the line with the largest basis
+    //    (deterministic tie-break by lexicographically smallest target_id).
+    const sumRounded = lines.reduce((s, l) => s + Number(l.proposed_amount), 0);
+    const residual = this.round2(sourceAmount - sumRounded);
+    let residualTargetId: string | null = null;
+    if (residual !== 0 && lines.length > 0) {
+      const sorted = [...lines].sort((a, b) => {
+        if (b._rawBasis !== a._rawBasis) return b._rawBasis - a._rawBasis;
+        return a.target_id.localeCompare(b.target_id);
+      });
+      const winner = sorted[0];
+      winner.proposed_amount = this.round2(Number(winner.proposed_amount) + residual);
+      residualTargetId = winner.target_id;
+    }
+
+    // 9. Strip internal-only fields and format proposed_amount as
+    //    `numeric(14,2)`-style string for response stability.
+    const proposed_lines = lines.map((l) => ({
+      target_kind: l.target_kind,
+      target_id: l.target_id,
+      target_name: l.target_name,
+      basis_value: l.basis_value,
+      weight_basis_total: l.weight_basis_total,
+      weight_pct: l.weight_pct,
+      proposed_amount: this.fmt2(Number(l.proposed_amount)),
+    }));
+
+    return this.buildPreviewPayload(
+      period, dto, sourceAmount,
+      valued.length, excluded, totalBasis,
+      proposed_lines, residual, residualTargetId, null,
+    );
+  }
+
+  /**
+   * Build the canonical preview response.  Single place to format the
+   * shape — keeps zero-basis and happy-path branches consistent.
+   */
+  private buildPreviewPayload(
+    period: any,
+    dto: PreviewDto,
+    sourceAmount: number,
+    candidatesTotal: number,
+    candidatesExcluded: number,
+    totalBasis: number,
+    proposed_lines: any[],
+    residual: number,
+    residualTargetId: string | null,
+    zeroWarning: string | null,
+  ) {
+    return {
+      period_id: period.id,
+      method: dto.method,
+      target_kind: dto.target_kind,
+      source: {
+        expense_id: dto.source.expense_id ?? null,
+        expense_category_id: dto.source.expense_category_id ?? null,
+        amount: this.fmt2(sourceAmount),
+      },
+      period_scope: {
+        from: this.dateOnly(period.period_start),
+        to: this.dateOnly(period.period_end),
+        warehouse_id: period.warehouse_id ?? null,
+      },
+      candidates_total: candidatesTotal,
+      candidates_excluded: candidatesExcluded,
+      total_basis: this.fmt6(totalBasis),
+      rounding_residual: this.fmt2(residual),
+      rounding_residual_absorbed_into_target_id: residualTargetId,
+      zero_basis_warning: zeroWarning,
+      proposed_lines,
+    };
+  }
+
+  /**
+   * Resolve the source amount being allocated.
+   *
+   *   * expense_id: the row's `amount`, REQUIRED to be approved.
+   *   * expense_category_id: SUM of approved expenses in that category
+   *     whose expense_date falls inside the period range (and matches
+   *     the period's warehouse if scoped).
+   */
+  private async resolveSourceAmount(
+    period: { period_start: any; period_end: any; warehouse_id: string | null },
+    source: { expense_id?: string; expense_category_id?: string },
+  ): Promise<number> {
+    if (source.expense_id) {
+      const [row] = await this.ds.query(
+        `SELECT amount, is_approved FROM expenses WHERE id = $1`,
+        [source.expense_id],
+      );
+      if (!row) throw new NotFoundException('المصروف المصدر غير موجود.');
+      if (row.is_approved !== true) {
+        throw new BadRequestException('المصروف المصدر يجب أن يكون معتمداً.');
+      }
+      return Number(row.amount ?? 0);
+    }
+    // expense_category_id branch
+    const rows = await this.ds.query(
+      `
+      SELECT COALESCE(SUM(amount), 0) AS total
+      FROM expenses
+      WHERE category_id = $1::uuid
+        AND is_approved = TRUE
+        AND expense_date >= $2::date
+        AND expense_date <= $3::date
+        AND ($4::uuid IS NULL OR warehouse_id = $4::uuid)
+      `,
+      [
+        source.expense_category_id,
+        period.period_start,
+        period.period_end,
+        period.warehouse_id ?? null,
+      ],
+    );
+    return Number(rows[0]?.total ?? 0);
+  }
+
+  /**
+   * Aggregate basis values (units_sold, revenue, gross_profit) per
+   * target.  Period-scoped (filters invoices.completed_at).  Respects
+   * the parent period's warehouse_id when set.  Mirrors v_product_profit's
+   * canonical sales-status filter for consistency with other reports.
+   */
+  private async aggregateBasis(
+    period: { period_start: any; period_end: any; warehouse_id: string | null },
+    target_kind: PreviewTargetKind,
+  ): Promise<any[]> {
+    const commonWhere = `
+        i.status IN ('completed','paid','partially_paid')
+        AND NOT i.is_return
+        AND i.completed_at IS NOT NULL
+        AND i.completed_at >= $1::date
+        AND i.completed_at <  ($2::date + INTERVAL '1 day')
+        AND ($3::uuid IS NULL OR i.warehouse_id = $3::uuid)
+    `;
+    const itemMath = `
+        SUM(ii.quantity)::bigint                                                AS basis_units_sold,
+        SUM(ii.quantity::numeric * ii.unit_price - ii.discount_amount)          AS basis_revenue,
+        SUM(ii.quantity::numeric * ii.unit_price - ii.discount_amount
+            - ii.quantity::numeric * ii.unit_cost)                              AS basis_gross_profit
+    `;
+    const params = [period.period_start, period.period_end, period.warehouse_id ?? null];
+
+    if (target_kind === 'product') {
+      return this.ds.query(
+        `
+        SELECT
+          p.id      AS target_id,
+          p.name_ar AS target_name,
+          ${itemMath}
+        FROM invoice_items ii
+        JOIN product_variants pv ON pv.id = ii.variant_id
+        JOIN products p          ON p.id  = pv.product_id
+        JOIN invoices i          ON i.id  = ii.invoice_id
+        WHERE ${commonWhere}
+        GROUP BY p.id, p.name_ar
+        `,
+        params,
+      );
+    }
+
+    if (target_kind === 'category') {
+      return this.ds.query(
+        `
+        SELECT
+          c.id      AS target_id,
+          c.name_ar AS target_name,
+          ${itemMath}
+        FROM invoice_items ii
+        JOIN product_variants pv ON pv.id = ii.variant_id
+        JOIN products p          ON p.id  = pv.product_id
+        JOIN categories c        ON c.id  = p.category_id
+        JOIN invoices i          ON i.id  = ii.invoice_id
+        WHERE ${commonWhere}
+        GROUP BY c.id, c.name_ar
+        `,
+        params,
+      );
+    }
+
+    // target_kind === 'warehouse'
+    return this.ds.query(
+      `
+      SELECT
+        w.id      AS target_id,
+        w.name_ar AS target_name,
+        ${itemMath}
+      FROM invoice_items ii
+      JOIN invoices i  ON i.id = ii.invoice_id
+      JOIN warehouses w ON w.id = i.warehouse_id
+      WHERE ${commonWhere}
+      GROUP BY w.id, w.name_ar
+      `,
+      params,
+    );
+  }
+
+  private zeroBasisWarning(
+    method: PreviewMethod,
+    sourceAmount: number,
+    totalBasis: number,
+    countedLen: number,
+    rawLen: number,
+  ): string {
+    if (sourceAmount === 0) return 'مبلغ المصدر صفر.';
+    if (rawLen === 0) return 'لا توجد مبيعات معتمدة في هذه الفترة.';
+    if (method === 'by_gross_profit' && countedLen === 0) {
+      return 'لا توجد أهداف ذات ربح موجب في هذه الفترة.';
+    }
+    if (totalBasis <= 0) return 'إجمالي قاعدة التوزيع صفر أو سالب.';
+    return 'لا يمكن حساب توزيع.';
+  }
+
+  // Rounding helpers — explicit half-away-from-zero for positive values
+  // (matches PostgreSQL ROUND() default).  All amounts in this codebase
+  // are non-negative, so the sign caveat doesn't arise.
+  private round2(n: number): number {
+    return Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+  }
+  private fmt2(n: number): string {
+    return this.round2(n).toFixed(2);
+  }
+  private fmt4(n: number): string {
+    return (Math.round((Number(n) + Number.EPSILON) * 10000) / 10000).toFixed(4);
+  }
+  private fmt6(n: number): string {
+    return (Math.round((Number(n) + Number.EPSILON) * 1_000_000) / 1_000_000).toFixed(6);
+  }
+  private dateOnly(d: any): string | null {
+    if (!d) return null;
+    if (typeof d === 'string') return d.slice(0, 10);
+    try { return new Date(d).toISOString().slice(0, 10); } catch { return String(d); }
   }
 
   // ─── Reports (read) ─────────────────────────────────────────────
