@@ -8,9 +8,7 @@ import {
   Post,
   Query,
   UseGuards,
-  UseInterceptors,
 } from '@nestjs/common';
-import { IdempotencyInterceptor } from '../common/interceptors/idempotency.interceptor';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import {
   IsDateString,
@@ -35,7 +33,6 @@ import {
   PreviewDto,
   PreviewMethod,
   PreviewTargetKind,
-  SavePreviewDto,
 } from './expense-allocations.service';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
@@ -118,27 +115,6 @@ class PreviewDtoIn implements PreviewDto {
 
   @IsEnum(['by_revenue', 'by_units_sold', 'by_gross_profit'])
   method: PreviewMethod;
-}
-
-/**
- * PR-PHASE2-B4 — save-preview DTO.  Same shape as PreviewDtoIn plus
- * an optional `replace_existing` flag.  Default behavior refuses to
- * overwrite existing lines; set the flag to true for the destructive
- * "clear and resave" path.
- */
-class SavePreviewDtoIn implements SavePreviewDto {
-  @IsObject()
-  @ValidateNested()
-  @Type(() => PreviewSourceDtoIn)
-  source: PreviewSourceDtoIn;
-
-  @IsEnum(['product', 'category', 'warehouse'])
-  target_kind: PreviewTargetKind;
-
-  @IsEnum(['by_revenue', 'by_units_sold', 'by_gross_profit'])
-  method: PreviewMethod;
-
-  @IsOptional() replace_existing?: boolean;
 }
 
 /**
@@ -270,29 +246,5 @@ export class ExpenseAllocationsController {
   @ApiOperation({ summary: 'معاينة توزيع المصاريف (بدون حفظ)' })
   preview(@Param('id') id: string, @Body() dto: PreviewDtoIn) {
     return this.svc.previewAllocation(id, dto);
-  }
-
-  // ─── Save preview (PR-PHASE2-B4, draft-only write) ──────────────
-
-  /**
-   * Materialise a preview computation into real `expense_allocation_lines`
-   * rows.  Server recomputes the preview internally — clients do NOT
-   * submit precomputed amounts.  Pre-existing lines reject the call
-   * unless `replace_existing=true`, in which case they're cleared
-   * first inside the same transaction.
-   *
-   * Permission: `expense_allocation.manage` (writes).  Opt-in
-   * Idempotency-Key support via the shared IdempotencyInterceptor so
-   * a network retry can't double-insert.
-   *
-   * Draft-only.  No FSM transition — the period stays `draft` after
-   * save; operator approves separately.
-   */
-  @Post('periods/:id/save-preview')
-  @Permissions('expense_allocation.manage')
-  @UseInterceptors(IdempotencyInterceptor)
-  @ApiOperation({ summary: 'حفظ سطور المعاينة في فترة المسودة' })
-  savePreview(@Param('id') id: string, @Body() dto: SavePreviewDtoIn) {
-    return this.svc.saveAllocationPreview(id, dto);
   }
 }
