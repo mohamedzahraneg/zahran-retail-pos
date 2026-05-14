@@ -6,6 +6,7 @@ import {
   RefreshCw,
   ArrowRightCircle,
   Calendar,
+  Calculator,
   UserCircle2,
   Warehouse,
   AlertTriangle,
@@ -25,12 +26,14 @@ import { AllocationBanner } from '@/components/expense-allocations/AllocationBan
 // PR-FE-B.2 — period-level write actions.
 // PR-FE-B.3 — line-level write actions (add/edit + clear-all).
 // PR-FE-B.4 — reverse-approved write action.
+// PR-FE-C   — preview + save-preview wizard.
 import { PeriodHeaderModal } from '@/components/expense-allocations/modals/PeriodHeaderModal';
 import { DeleteDraftDialog } from '@/components/expense-allocations/modals/DeleteDraftDialog';
 import { ApprovePeriodDialog } from '@/components/expense-allocations/modals/ApprovePeriodDialog';
 import { LineModal } from '@/components/expense-allocations/modals/LineModal';
 import { ClearLinesDialog } from '@/components/expense-allocations/modals/ClearLinesDialog';
 import { ReversePeriodDialog } from '@/components/expense-allocations/modals/ReversePeriodDialog';
+import { PreviewWizardModal } from '@/components/expense-allocations/modals/PreviewWizardModal';
 import { useAuthStore } from '@/stores/auth.store';
 import { fmtCairoDate, fmtCairoDateTimeSeconds } from '@/lib/dates';
 
@@ -84,6 +87,10 @@ export default function ExpenseAllocationDetail() {
   const [clearLinesOpen, setClearLinesOpen] = useState(false);
   // PR-FE-B.4 — reverse-approved dialog state.
   const [reverseOpen, setReverseOpen] = useState(false);
+  // PR-FE-C — preview wizard state.  Open to anyone with the view
+  // permission (preview is server-side read-only); the wizard's
+  // internal Save button gates itself on manage + draft.
+  const [previewOpen, setPreviewOpen] = useState(false);
 
   const {
     data: period,
@@ -140,6 +147,21 @@ export default function ExpenseAllocationDetail() {
           <RefreshCw className={isFetching ? 'h-4 w-4 animate-spin' : 'h-4 w-4'} />
           <span>تحديث</span>
         </button>
+        {/* PR-FE-C — Preview wizard entry-point.  Server gates the
+            preview endpoint with `expense_allocation.view`, so this
+            button is visible to anyone who can already view the
+            page.  The Save button inside the wizard self-gates on
+            `expense_allocation.manage` AND `status === 'draft'`. */}
+        {period && (
+          <button
+            type="button"
+            onClick={() => setPreviewOpen(true)}
+            className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
+          >
+            <Calculator className="h-4 w-4" />
+            <span>معاينة التوزيع</span>
+          </button>
+        )}
       </div>
 
       <AllocationBanner />
@@ -425,6 +447,10 @@ export default function ExpenseAllocationDetail() {
                       editLineCandidate.product_category_id,
                     warehouse_id: editLineCandidate.warehouse_id,
                     allocated_amount: editLineCandidate.allocated_amount,
+                    // PR-FE-C — forward the stored method so the
+                    // chip in the edit modal reflects reality
+                    // (manual / by_revenue / by_units_sold / etc).
+                    allocation_method: editLineCandidate.allocation_method,
                   }
                 : undefined
             }
@@ -444,6 +470,19 @@ export default function ExpenseAllocationDetail() {
             onClose={() => setReverseOpen(false)}
           />
         </>
+      )}
+      {/* PR-FE-C — preview wizard.  Mounted outside the canManage
+          block because preview itself is read-only — viewers can
+          open the wizard and see the proposed lines.  The wizard's
+          internal Save button hides itself for non-manage / non-
+          draft. */}
+      {period && (
+        <PreviewWizardModal
+          open={previewOpen}
+          period={period}
+          canManage={canManage}
+          onClose={() => setPreviewOpen(false)}
+        />
       )}
     </div>
   );

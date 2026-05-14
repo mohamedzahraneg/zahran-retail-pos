@@ -37,6 +37,7 @@ import { X } from 'lucide-react';
 import {
   expenseAllocationsApi,
   type AllocationLineRow,
+  type AllocationMethod,
 } from '@/api/expenseAllocations.api';
 import { ExpensePicker } from '@/components/expense-allocations/pickers/ExpensePicker';
 import { ExpenseCategoryPicker } from '@/components/expense-allocations/pickers/ExpenseCategoryPicker';
@@ -49,6 +50,22 @@ type Mode = 'create' | 'edit';
 type SourceKind = 'expense' | 'expense_category';
 type TargetKind = 'product' | 'product_category' | 'warehouse';
 
+// PR-FE-C touchup — the method chip in edit mode now reflects the
+// actual stored method instead of being hardcoded to «يدوي».  Lines
+// created by save-preview carry by_revenue / by_units_sold /
+// by_gross_profit, and showing «يدوي» on those would mislead the
+// operator about what they're editing.  Create mode stays «يدوي»
+// because new lines via this modal are always manual (only the
+// preview wizard can write engine-computed methods).
+const METHOD_LABEL_AR: Record<AllocationMethod, string> = {
+  manual: 'يدوي',
+  by_revenue: 'حسب الإيراد',
+  by_units_sold: 'حسب الكمية المباعة',
+  by_gross_profit: 'حسب الربح الإجمالي',
+  by_category_pct: 'حسب نسبة الفئة',
+  by_warehouse: 'حسب المخزن',
+};
+
 export interface LineInitial {
   id: string;
   expense_id: string | null;
@@ -58,6 +75,9 @@ export interface LineInitial {
   product_category_id: string | null;
   warehouse_id: string | null;
   allocated_amount: string;
+  /** PR-FE-C — the line's stored method.  Used only to label the
+   *  read-only chip in edit mode; never sent in the PATCH body. */
+  allocation_method?: AllocationMethod;
 }
 
 export interface LineModalProps {
@@ -289,7 +309,13 @@ export function LineModal({
           <div className="flex items-center gap-2">
             <span className="text-xs text-slate-500">الطريقة:</span>
             <span className="rounded-full bg-violet-50 px-2 py-0.5 text-xs font-medium text-violet-700">
-              يدوي
+              {/* PR-FE-C — edit-mode chip reflects the stored method
+                  (manual / by_revenue / …).  Create-mode is always
+                  manual; the backend only accepts manual on POST
+                  /lines anyway. */}
+              {mode === 'edit' && initial?.allocation_method
+                ? METHOD_LABEL_AR[initial.allocation_method]
+                : 'يدوي'}
             </span>
           </div>
 

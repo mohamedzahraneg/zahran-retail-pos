@@ -1,18 +1,19 @@
 /**
  * Expense Allocations — Frontend API client.
  *
- *   * PR-FE-A   (shipped) — the four READ wrappers.
- *   * PR-FE-B.1 (this PR) — eight manual-workflow WRITE wrappers
- *     (create / update / delete period, add / update / clear lines,
- *     approve, reverse).  These are plumbing: defined here so FE-B.2+
- *     can call them, but NO mounted page invokes them yet.  Save-
- *     preview stays out — it ships in FE-C with the preview wizard.
+ *   * PR-FE-A   — the four READ wrappers.
+ *   * PR-FE-B.1 — eight manual-workflow WRITE wrappers (create /
+ *     update / delete period, add / update / clear lines, approve,
+ *     reverse).
+ *   * PR-FE-C   — preview + save-preview wrappers (engine-driven
+ *     batch line creation by computed method).
  *
  * Hard scope reminders (mirrors the design):
- *   * `expense_allocation.view`   gates the four GETs.
- *   * `expense_allocation.manage` gates every write endpoint below;
- *     callers should also defense-in-depth with hasPermission(...)
- *     before rendering write controls (FE-B.2+).
+ *   * `expense_allocation.view`   gates the four GETs **and** the
+ *     read-only preview endpoint (the server enforces this).
+ *   * `expense_allocation.manage` gates every write endpoint below
+ *     including save-preview; callers should also defense-in-depth
+ *     with hasPermission(...) before rendering write controls.
  *   * DATE columns arrive as 'YYYY-MM-DD' strings (TZ fix in effect).
  *   * Numeric columns arrive as strings from pg; callers Number(...) at
  *     egress.
@@ -181,6 +182,118 @@ export interface ReverseBody {
   reason: string;
 }
 
+// ─── Preview / Save-Preview DTOs (PR-FE-C) ─────────────────────────
+//
+// Engine-driven batch allocation.  Preview is a pure read; save-
+// preview materializes the proposal into `expense_allocation_lines`
+// rows for a draft period.  The backend service is at
+// `backend/src/expense-allocations/expense-allocations.service.ts`
+// (`previewAllocation` / `saveAllocationPreview`); response field
+// names + decimal precisions verified there before this file was
+// written.
+
+export type PreviewMethod =
+  | 'by_revenue'
+  | 'by_units_sold'
+  | 'by_gross_profit';
+
+export type PreviewTargetKind = 'product' | 'category' | 'warehouse';
+
+export interface PreviewBody {
+  /** Exactly one of expense_id / expense_category_id; backend XORs. */
+  source: {
+    expense_id?: string;
+    expense_category_id?: string;
+  };
+  target_kind: PreviewTargetKind;
+  method: PreviewMethod;
+}
+
+export interface SavePreviewBody extends PreviewBody {
+  /** Default false.  When true, clears all existing lines on the
+   *  draft inside the same transaction before inserting the new
+   *  ones.  When false, the backend rejects with 400 if any lines
+   *  already exist (see ../components/expense-allocations/modals/
+   *  PreviewWizardModal — the replace-confirmation step retries
+   *  with this flag set to true). */
+  replace_existing?: boolean;
+}
+
+export interface PreviewProposedLine {
+  target_kind: PreviewTargetKind;
+  target_id: string;
+  target_name: string;
+  /** Numeric 6dp — the per-target basis (revenue / units / profit). */
+  basis_value: string;
+  /** Numeric 6dp — the grand total of all candidates' basis values. */
+  weight_basis_total: string;
+  /** Numeric 4dp percentage, e.g. "25.5000". */
+  weight_pct: string;
+  /** Numeric 2dp — what would be saved as allocated_amount. */
+  proposed_amount: string;
+}
+
+export interface PreviewResult {
+  period_id: string;
+  method: PreviewMethod;
+  target_kind: PreviewTargetKind;
+  source: {
+    expense_id: string | null;
+    expense_category_id: string | null;
+    /** Numeric 2dp — total source amount being distributed. */
+    amount: string;
+  };
+  period_scope: {
+    from: string | null;
+    to: string | null;
+    warehouse_id: string | null;
+  };
+  candidates_total: number;
+  candidates_excluded: number;
+  /** Numeric 6dp. */
+  total_basis: string;
+  /** Numeric 2dp.  Sum of distributed proposed_amount typically
+   *  matches source.amount; the rounding_residual goes onto one
+   *  target (see rounding_residual_absorbed_into_target_id). */
+  rounding_residual: string;
+  /** UUID of the target row that absorbed the rounding residual,
+   *  or null when there's no residual. */
+  rounding_residual_absorbed_into_target_id: string | null;
+  /** Arabic warning message when no candidate has a positive basis;
+   *  null on the happy path.  When present, proposed_lines is empty
+   *  and the FE must hide the Save button. */
+  zero_basis_warning: string | null;
+  proposed_lines: PreviewProposedLine[];
+}
+
+export interface SavePreviewResult extends PreviewResult {
+  saved_count: number;
+  /** Numeric 2dp — equals source.amount after save. */
+  total_allocated: string;
+  /** Echoes the flag the caller sent. */
+  replace_existing: boolean;
+  /** 0 when replace_existing=false; otherwise the number of lines
+   *  that were cleared before the new ones were inserted. */
+  existing_lines_deleted: number;
+  /** ID of the actual saved line that absorbed the residual (if
+   *  any).  Distinct from the *_target_id above, which is the
+   *  product/category/warehouse id. */
+  rounding_residual_absorbed_into_line_id: string | null;
+  /** The newly saved lines, with their DB-issued ids and the
+   *  full computed values. */
+  lines: Array<{
+    id: string;
+    target_kind: PreviewTargetKind;
+    target_id: string;
+    target_name: string;
+    basis_value: string;
+    weight_basis_total: string;
+    weight_pct: string;
+    source_amount: string;
+    allocated_amount: string;
+  }>;
+}
+
 // ─── Client ────────────────────────────────────────────────────────
 
 /**
@@ -293,6 +406,30 @@ export const expenseAllocationsApi = {
     unwrap<AllocationPeriodDetail>(
       api.post(
         `/expense-allocations/periods/${encodeURIComponent(id)}/reverse`,
+        body,
+      ),
+    ),
+
+  // ─── Preview / Save-Preview — PR-FE-C ───────────────────────────
+  //
+  // Preview is server-side `.view` (read-only compute, no DB writes).
+  // Save-preview is `.manage` and draft-only (writes a batch of
+  // allocation_lines computed by the engine).
+
+  /** POST /api/v1/expense-allocations/periods/:id/preview */
+  previewAllocation: (id: string, body: PreviewBody) =>
+    unwrap<PreviewResult>(
+      api.post(
+        `/expense-allocations/periods/${encodeURIComponent(id)}/preview`,
+        body,
+      ),
+    ),
+
+  /** POST /api/v1/expense-allocations/periods/:id/save-preview */
+  savePreview: (id: string, body: SavePreviewBody) =>
+    unwrap<SavePreviewResult>(
+      api.post(
+        `/expense-allocations/periods/${encodeURIComponent(id)}/save-preview`,
         body,
       ),
     ),
