@@ -1,7 +1,14 @@
 import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
-import { Wallet2, RefreshCw, Filter, ArrowLeftCircle } from 'lucide-react';
+import {
+  Wallet2,
+  RefreshCw,
+  Filter,
+  ArrowLeftCircle,
+  Plus,
+  Trash2,
+} from 'lucide-react';
 import {
   expenseAllocationsApi,
   type AllocationPeriodRow,
@@ -10,14 +17,26 @@ import {
 } from '@/api/expenseAllocations.api';
 import { PeriodStatusBadge } from '@/components/expense-allocations/PeriodStatusBadge';
 import { AllocationBanner } from '@/components/expense-allocations/AllocationBanner';
+// PR-FE-B.2 — period-level write actions.  Mounted from this page
+// only when the operator holds `expense_allocation.manage`.  Line
+// editing, approve, and reverse stay outside FE-B.2's scope.
+import { PeriodHeaderModal } from '@/components/expense-allocations/modals/PeriodHeaderModal';
+import { DeleteDraftDialog } from '@/components/expense-allocations/modals/DeleteDraftDialog';
+import { useAuthStore } from '@/stores/auth.store';
 import { fmtCairoDate } from '@/lib/dates';
 
 /**
- * Allocation periods list — PR-FE-A (read-only).
+ * Allocation periods list — PR-FE-A (read) + PR-FE-B.2 (period write).
  *
  * Renders all allocation periods with status, dates, audit fields,
- * and line counts.  Filters: from/to/status/warehouse_id.  No write
- * actions in FE-A.
+ * and line counts.  Filters: from/to/status/warehouse_id.
+ *
+ * Write surface added in FE-B.2 and gated by `expense_allocation.manage`:
+ *   * "+ فترة جديدة" header button (CreatePeriod via PeriodHeaderModal).
+ *   * Per-row "حذف المسودة" trash icon, draft-only, with typed-
+ *     confirmation via DeleteDraftDialog.
+ * Edit-header, approve, line CRUD, and reverse live on the detail
+ * page (and FE-B.3 / FE-B.4) — not here.
  */
 const STATUS_OPTIONS: { value: '' | AllocationPeriodStatus; label: string }[] = [
   { value: '', label: 'كل الحالات' },
@@ -29,6 +48,17 @@ const STATUS_OPTIONS: { value: '' | AllocationPeriodStatus; label: string }[] = 
 export default function ExpenseAllocations() {
   const navigate = useNavigate();
   const [filters, setFilters] = useState<PeriodFilters>({});
+
+  // PR-FE-B.2 — defense-in-depth: server already enforces
+  // `expense_allocation.manage` on every write, but we also hide the
+  // entire write surface for users without the permission.  Viewers
+  // see exactly the FE-A list.
+  const canManage = useAuthStore((s) => s.hasPermission)(
+    'expense_allocation.manage',
+  );
+  const [createOpen, setCreateOpen] = useState(false);
+  const [deleteCandidate, setDeleteCandidate] =
+    useState<AllocationPeriodRow | null>(null);
 
   const { data: periods, isLoading, isFetching, refetch, error } = useQuery({
     queryKey: ['allocations', 'periods', filters] as const,
@@ -68,6 +98,16 @@ export default function ExpenseAllocations() {
           <RefreshCw className={isFetching ? 'h-4 w-4 animate-spin' : 'h-4 w-4'} />
           <span>تحديث</span>
         </button>
+        {canManage && (
+          <button
+            type="button"
+            onClick={() => setCreateOpen(true)}
+            className="inline-flex items-center gap-2 rounded-md bg-violet-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-violet-700"
+          >
+            <Plus className="h-4 w-4" />
+            <span>فترة جديدة</span>
+          </button>
+        )}
       </div>
 
       <AllocationBanner />
@@ -210,7 +250,23 @@ export default function ExpenseAllocations() {
                     {fmtCairoDate(p.created_at)}
                   </td>
                   <td className="p-3 text-left">
-                    <ArrowLeftCircle className="h-4 w-4 text-slate-400" />
+                    <div className="flex items-center justify-end gap-1">
+                      {canManage && p.status === 'draft' && (
+                        <button
+                          type="button"
+                          aria-label="حذف المسودة"
+                          title="حذف المسودة"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setDeleteCandidate(p);
+                          }}
+                          className="rounded p-1 text-rose-500 hover:bg-rose-50 hover:text-rose-700"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      )}
+                      <ArrowLeftCircle className="h-4 w-4 text-slate-400" />
+                    </div>
                   </td>
                 </tr>
               ))
@@ -220,9 +276,30 @@ export default function ExpenseAllocations() {
       </div>
 
       <p className="text-[11px] text-slate-400">
-        FE-A — عرض فقط. إنشاء وتعديل واعتماد وعكس الفترات غير متاح في هذه
-        المرحلة.
+        إنشاء وحذف الفترات المسودة متاحان لمن لديه صلاحية{' '}
+        <code className="font-mono">expense_allocation.manage</code>. التعديل
+        على السطور واعتماد وعكس الفترات يظهران داخل صفحة التفاصيل.
       </p>
+
+      {/* PR-FE-B.2 — write modals, mounted only when the operator
+          has `expense_allocation.manage`.  Each modal renders a
+          backdrop only while `open` is true (no DOM cost otherwise). */}
+      {canManage && (
+        <>
+          <PeriodHeaderModal
+            open={createOpen}
+            mode="create"
+            onClose={() => setCreateOpen(false)}
+            onSuccess={(period) => navigate(`/expense-allocations/${period.id}`)}
+          />
+          <DeleteDraftDialog
+            open={!!deleteCandidate}
+            periodId={deleteCandidate?.id ?? ''}
+            linesCount={Number(deleteCandidate?.lines_count ?? 0)}
+            onClose={() => setDeleteCandidate(null)}
+          />
+        </>
+      )}
     </div>
   );
 }

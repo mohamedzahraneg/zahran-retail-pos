@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
@@ -8,6 +9,9 @@ import {
   UserCircle2,
   Warehouse,
   AlertTriangle,
+  Pencil,
+  ShieldCheck,
+  Trash2,
 } from 'lucide-react';
 import {
   expenseAllocationsApi,
@@ -15,13 +19,29 @@ import {
 } from '@/api/expenseAllocations.api';
 import { PeriodStatusBadge } from '@/components/expense-allocations/PeriodStatusBadge';
 import { AllocationBanner } from '@/components/expense-allocations/AllocationBanner';
+// PR-FE-B.2 — period-level write actions on the detail page.  Line
+// CRUD, clear-lines, and reverse land in FE-B.3 / FE-B.4.
+import { PeriodHeaderModal } from '@/components/expense-allocations/modals/PeriodHeaderModal';
+import { DeleteDraftDialog } from '@/components/expense-allocations/modals/DeleteDraftDialog';
+import { ApprovePeriodDialog } from '@/components/expense-allocations/modals/ApprovePeriodDialog';
+import { useAuthStore } from '@/stores/auth.store';
 import { fmtCairoDate, fmtCairoDateTimeSeconds } from '@/lib/dates';
 
 /**
- * Allocation period detail — PR-FE-A (read-only).
+ * Allocation period detail — PR-FE-A (read) + PR-FE-B.2 (period write).
  *
  * Renders the period header (with audit fields based on status) and
- * the lines table.  No action buttons in FE-A.
+ * the lines table.
+ *
+ * Write surface added in FE-B.2 and gated by `expense_allocation.manage`:
+ *   * "تعديل الرأس" — edit period_start / period_end / warehouse /
+ *     notes via PeriodHeaderModal (draft only).
+ *   * "حذف الفترة"   — typed-confirmation via DeleteDraftDialog
+ *     (draft only).
+ *   * "اعتماد"       — summary-confirmation via ApprovePeriodDialog
+ *     (draft only; visible only when lines_count > 0).
+ * Adding/editing lines, clearing lines, and reversing the period are
+ * intentionally NOT part of this PR.
  */
 const METHOD_LABEL: Record<string, string> = {
   manual: 'يدوي',
@@ -35,6 +55,16 @@ const METHOD_LABEL: Record<string, string> = {
 export default function ExpenseAllocationDetail() {
   const { id = '' } = useParams<{ id: string }>();
   const navigate = useNavigate();
+
+  // PR-FE-B.2 — defense-in-depth: server enforces
+  // `expense_allocation.manage` on every write, but the UI also hides
+  // every action when the operator lacks the permission.
+  const canManage = useAuthStore((s) => s.hasPermission)(
+    'expense_allocation.manage',
+  );
+  const [editOpen, setEditOpen] = useState(false);
+  const [approveOpen, setApproveOpen] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
 
   const {
     data: period,
@@ -54,6 +84,10 @@ export default function ExpenseAllocationDetail() {
       (error as any)?.message ||
       'تعذر تحميل فترة التوزيع.'
     : null;
+
+  const isDraft = period?.status === 'draft';
+  const linesCount = period?.lines.length ?? 0;
+  const showWriteActions = canManage && isDraft;
 
   return (
     <div dir="rtl" className="space-y-4 p-4">
@@ -164,6 +198,43 @@ export default function ExpenseAllocationDetail() {
                 extra={period.reversed_reason ?? undefined}
               />
             </div>
+
+            {/* PR-FE-B.2 — period-level actions for draft periods. */}
+            {showWriteActions && (
+              <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-3">
+                <button
+                  type="button"
+                  onClick={() => setEditOpen(true)}
+                  className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
+                >
+                  <Pencil className="h-4 w-4" />
+                  <span>تعديل الرأس</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setApproveOpen(true)}
+                  disabled={linesCount === 0}
+                  title={
+                    linesCount === 0
+                      ? 'أضف سطرًا واحدًا على الأقل قبل الاعتماد.'
+                      : undefined
+                  }
+                  className="inline-flex items-center gap-2 rounded-md bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <ShieldCheck className="h-4 w-4" />
+                  <span>اعتماد</span>
+                </button>
+                <div className="flex-1" />
+                <button
+                  type="button"
+                  onClick={() => setDeleteOpen(true)}
+                  className="inline-flex items-center gap-2 rounded-md border border-rose-200 bg-white px-3 py-1.5 text-sm text-rose-700 hover:bg-rose-50"
+                >
+                  <Trash2 className="h-4 w-4" />
+                  <span>حذف الفترة</span>
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Lines table */}
@@ -198,9 +269,44 @@ export default function ExpenseAllocationDetail() {
           </div>
 
           <p className="text-[11px] text-slate-400">
-            FE-A — عرض فقط. إضافة السطور وتعديلها واعتماد/عكس الفترة غير متاح
-            في هذه المرحلة.
+            تعديل الرأس وحذف المسودة والاعتماد متاحة لمن لديه صلاحية{' '}
+            <code className="font-mono">expense_allocation.manage</code> في
+            الفترات المسودة فقط. إضافة السطور وتعديلها والعكس تُطلق في
+            مرحلة لاحقة.
           </p>
+        </>
+      )}
+
+      {/* PR-FE-B.2 — write modals.  All three render their overlay
+          only while `open` is true (no DOM cost otherwise), and stay
+          unmounted entirely for users without `expense_allocation.manage`. */}
+      {canManage && period && (
+        <>
+          <PeriodHeaderModal
+            open={editOpen}
+            mode="edit"
+            initial={{
+              id: period.id,
+              period_start: period.period_start,
+              period_end: period.period_end,
+              warehouse_id: period.warehouse_id,
+              notes: period.notes,
+              lines_count: period.lines.length,
+            }}
+            onClose={() => setEditOpen(false)}
+          />
+          <ApprovePeriodDialog
+            open={approveOpen}
+            period={period}
+            onClose={() => setApproveOpen(false)}
+          />
+          <DeleteDraftDialog
+            open={deleteOpen}
+            periodId={period.id}
+            linesCount={period.lines.length}
+            onClose={() => setDeleteOpen(false)}
+            onDeleted={() => navigate('/expense-allocations')}
+          />
         </>
       )}
     </div>
