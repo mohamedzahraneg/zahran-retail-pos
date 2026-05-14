@@ -1,0 +1,228 @@
+import { useMemo, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { useNavigate } from 'react-router-dom';
+import { Wallet2, RefreshCw, Filter, ArrowLeftCircle } from 'lucide-react';
+import {
+  expenseAllocationsApi,
+  type AllocationPeriodRow,
+  type AllocationPeriodStatus,
+  type PeriodFilters,
+} from '@/api/expenseAllocations.api';
+import { PeriodStatusBadge } from '@/components/expense-allocations/PeriodStatusBadge';
+import { AllocationBanner } from '@/components/expense-allocations/AllocationBanner';
+import { fmtCairoDate } from '@/lib/dates';
+
+/**
+ * Allocation periods list — PR-FE-A (read-only).
+ *
+ * Renders all allocation periods with status, dates, audit fields,
+ * and line counts.  Filters: from/to/status/warehouse_id.  No write
+ * actions in FE-A.
+ */
+const STATUS_OPTIONS: { value: '' | AllocationPeriodStatus; label: string }[] = [
+  { value: '', label: 'كل الحالات' },
+  { value: 'draft', label: 'مسودة' },
+  { value: 'approved', label: 'معتمدة' },
+  { value: 'reversed', label: 'معكوسة' },
+];
+
+export default function ExpenseAllocations() {
+  const navigate = useNavigate();
+  const [filters, setFilters] = useState<PeriodFilters>({});
+
+  const { data: periods, isLoading, isFetching, refetch, error } = useQuery({
+    queryKey: ['allocations', 'periods', filters] as const,
+    queryFn: () => expenseAllocationsApi.listPeriods(filters),
+  });
+
+  const rows: AllocationPeriodRow[] = useMemo(() => periods ?? [], [periods]);
+
+  const errMsg = error
+    ? (error as any)?.response?.data?.message ||
+      (error as any)?.message ||
+      'تعذر تحميل قائمة الفترات.'
+    : null;
+
+  return (
+    <div dir="rtl" className="space-y-4 p-4">
+      {/* Header */}
+      <div className="flex items-center gap-3">
+        <div className="rounded-lg bg-violet-50 p-2 text-violet-700">
+          <Wallet2 className="h-5 w-5" />
+        </div>
+        <div className="flex-1">
+          <h1 className="text-xl font-semibold text-slate-900">
+            توزيع المصاريف التشغيلية
+          </h1>
+          <p className="text-sm text-slate-500">
+            فترات توزيع المصاريف على المنتجات والفئات والمخازن للتقارير
+            الإدارية.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => refetch()}
+          className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
+          disabled={isFetching}
+        >
+          <RefreshCw className={isFetching ? 'h-4 w-4 animate-spin' : 'h-4 w-4'} />
+          <span>تحديث</span>
+        </button>
+      </div>
+
+      <AllocationBanner />
+
+      {/* Filters */}
+      <div className="rounded-lg border border-slate-200 bg-white p-3">
+        <div className="mb-2 flex items-center gap-2 text-xs font-medium text-slate-500">
+          <Filter className="h-3.5 w-3.5" />
+          <span>تصفية</span>
+        </div>
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
+          <label className="flex flex-col gap-1 text-xs text-slate-600">
+            <span>من تاريخ</span>
+            <input
+              type="date"
+              value={filters.from ?? ''}
+              onChange={(e) =>
+                setFilters((f) => ({ ...f, from: e.target.value || undefined }))
+              }
+              className="rounded-md border border-slate-200 px-2 py-1.5 text-sm"
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-xs text-slate-600">
+            <span>إلى تاريخ</span>
+            <input
+              type="date"
+              value={filters.to ?? ''}
+              onChange={(e) =>
+                setFilters((f) => ({ ...f, to: e.target.value || undefined }))
+              }
+              className="rounded-md border border-slate-200 px-2 py-1.5 text-sm"
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-xs text-slate-600">
+            <span>الحالة</span>
+            <select
+              value={filters.status ?? ''}
+              onChange={(e) =>
+                setFilters((f) => ({
+                  ...f,
+                  status: (e.target.value || undefined) as
+                    | AllocationPeriodStatus
+                    | undefined,
+                }))
+              }
+              className="rounded-md border border-slate-200 px-2 py-1.5 text-sm"
+            >
+              {STATUS_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="flex items-end">
+            {(filters.from || filters.to || filters.status) && (
+              <button
+                type="button"
+                onClick={() => setFilters({})}
+                className="text-xs text-slate-600 underline hover:text-slate-900"
+              >
+                مسح التصفية
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Error */}
+      {errMsg && (
+        <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800">
+          {errMsg}
+        </div>
+      )}
+
+      {/* Table */}
+      <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
+        <table className="w-full text-sm">
+          <thead className="bg-slate-50 text-xs text-slate-600">
+            <tr>
+              <th className="p-3 text-right font-medium">الفترة</th>
+              <th className="p-3 text-right font-medium">المخزن</th>
+              <th className="p-3 text-right font-medium">الحالة</th>
+              <th className="p-3 text-right font-medium">إجمالي التوزيع</th>
+              <th className="p-3 text-right font-medium">عدد السطور</th>
+              <th className="p-3 text-right font-medium">أنشئت بواسطة</th>
+              <th className="p-3 text-right font-medium">أنشئت في</th>
+              <th className="p-3 text-right font-medium w-20"></th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {isLoading ? (
+              <tr>
+                <td colSpan={8} className="p-6 text-center text-slate-400">
+                  جاري التحميل…
+                </td>
+              </tr>
+            ) : rows.length === 0 ? (
+              <tr>
+                <td colSpan={8} className="p-6 text-center text-slate-500">
+                  لا توجد فترات توزيع مطابقة للتصفية.
+                </td>
+              </tr>
+            ) : (
+              rows.map((p) => (
+                <tr
+                  key={p.id}
+                  className="cursor-pointer hover:bg-slate-50"
+                  onClick={() => navigate(`/expense-allocations/${p.id}`)}
+                >
+                  <td className="p-3 font-mono tabular-nums text-xs">
+                    <div className="text-slate-700">
+                      {fmtCairoDate(p.period_start)} — {fmtCairoDate(p.period_end)}
+                    </div>
+                    {p.notes && (
+                      <div className="text-[11px] text-slate-400">{p.notes}</div>
+                    )}
+                  </td>
+                  <td className="p-3 text-slate-700">
+                    {p.warehouse_name ?? (
+                      <span className="text-slate-400">جميع المخازن</span>
+                    )}
+                  </td>
+                  <td className="p-3">
+                    <PeriodStatusBadge status={p.status} />
+                  </td>
+                  <td className="p-3 font-mono tabular-nums text-slate-900">
+                    {Number(p.total_allocated).toLocaleString('en-EG', {
+                      minimumFractionDigits: 2,
+                      maximumFractionDigits: 2,
+                    })}
+                  </td>
+                  <td className="p-3 font-mono tabular-nums text-slate-700">
+                    {Number(p.lines_count)}
+                  </td>
+                  <td className="p-3 text-slate-700">
+                    {p.created_by_name ?? '—'}
+                  </td>
+                  <td className="p-3 text-xs text-slate-500">
+                    {fmtCairoDate(p.created_at)}
+                  </td>
+                  <td className="p-3 text-left">
+                    <ArrowLeftCircle className="h-4 w-4 text-slate-400" />
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      <p className="text-[11px] text-slate-400">
+        FE-A — عرض فقط. إنشاء وتعديل واعتماد وعكس الفترات غير متاح في هذه
+        المرحلة.
+      </p>
+    </div>
+  );
+}

@@ -37,6 +37,12 @@ import FinancialControls from '@/pages/FinancialControls';
 import OpeningBalance from '@/pages/OpeningBalance';
 import RecurringExpenses from '@/pages/RecurringExpenses';
 import DailyExpenses from '@/pages/DailyExpenses';
+// PR-FE-A — read-only Operational Expense Allocation surface
+// (list + detail + 2 reports).  Write paths land in FE-B/FE-C.
+import ExpenseAllocations from '@/pages/ExpenseAllocations';
+import ExpenseAllocationDetail from '@/pages/ExpenseAllocationDetail';
+import ProfitWithOverheadReport from '@/pages/ProfitWithOverheadReport';
+import ExpensesUnallocatedReport from '@/pages/ExpensesUnallocatedReport';
 import FinancialControlTower from '@/pages/FinancialControlTower';
 import FinanceDashboard from '@/pages/FinanceDashboard';
 import FinanceStatements from '@/pages/FinanceStatements';
@@ -239,6 +245,43 @@ export default function App() {
           element={
             <ProtectedRoute permissions={['expenses.daily.create']}>
               <DailyExpenses />
+            </ProtectedRoute>
+          }
+        />
+        {/* PR-FE-A — Operational Expense Allocation read-only surface.
+            List + detail of allocation periods, plus the two reports
+            (profit-with-overhead, unallocated-expenses). Gated by
+            `expense_allocation.view`. Write paths (create/approve/
+            reverse + line edits) land in FE-B/FE-C. */}
+        <Route
+          path="expense-allocations"
+          element={
+            <ProtectedRoute permissions={['expense_allocation.view']}>
+              <ExpenseAllocations />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="expense-allocations/:id"
+          element={
+            <ProtectedRoute permissions={['expense_allocation.view']}>
+              <ExpenseAllocationDetail />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="reports/profit-with-overhead"
+          element={
+            <ProtectedRoute permissions={['expense_allocation.view']}>
+              <ProfitWithOverheadReport />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="reports/unallocated-expenses"
+          element={
+            <ProtectedRoute permissions={['expense_allocation.view']}>
+              <ExpensesUnallocatedReport />
             </ProtectedRoute>
           }
         />

@@ -36,6 +36,10 @@ import {
   Shield,
   Repeat,
   Receipt,
+  // PR-FE-A — icon for the Operational Expense Allocation list entry.
+  // Matches the page-header icon so the sidebar item and the open page
+  // share a visual cue.
+  Wallet2,
   Activity,
   Users2,
   Settings,
@@ -154,6 +158,12 @@ const groups: NavGroup[] = [
       // pending expense approvals from the sidebar.  Previously the
       // route was reachable only by typing the URL.
       { to: '/financial-controls', label: 'موافقات المصاريف', icon: Inbox, roles: ['admin', 'manager', 'accountant'], permission: ['accounts.approval.decide', 'accounts.approval.manage'] },
+      // PR-FE-A — Operational Expense Allocation (read-only foundation).
+      // Sits next to المصروفات اليومية / الدورية because allocation
+      // periods are how those approved expenses get attributed to
+      // products / categories / warehouses for management reports.
+      // Gate: expense_allocation.view. Write paths land in FE-B/FE-C.
+      { to: '/expense-allocations', label: 'توزيع المصاريف', icon: Wallet2, roles: ['admin', 'manager', 'accountant'], permission: 'expense_allocation.view' },
 
       // ─── 5. المراقبة والتقارير ────────────────────────────
       // PR-FIN-SIDEBAR-2 Q1A — Analytics moves here (semantic fit:
@@ -178,6 +188,15 @@ const groups: NavGroup[] = [
       // Same icon (PieChart) and permission (finance.dashboard.view)
       // as the placeholder version.
       { to: '/finance/reports', label: 'التقارير المالية', icon: PieChart, roles: ['admin', 'manager', 'accountant'], permission: 'finance.dashboard.view' },
+      // PR-FE-A — two read-only reports that consume approved
+      // allocation periods. Same gate as the list page
+      // (expense_allocation.view): a user who can see the periods
+      // should be able to see how they roll up. Icons reuse what's
+      // already imported (BarChart3 for the profit overlay, Receipt
+      // for the expense list); the labels distinguish them from the
+      // generic /reports entries above.
+      { to: '/reports/profit-with-overhead', label: 'الأرباح بعد التوزيع', icon: BarChart3, roles: ['admin', 'manager', 'accountant'], permission: 'expense_allocation.view' },
+      { to: '/reports/unallocated-expenses', label: 'المصاريف غير الموزعة', icon: Receipt, roles: ['admin', 'manager', 'accountant'], permission: 'expense_allocation.view' },
 
       // ─── 6. عمليات متقدمة ─────────────────────────────────
       { kind: 'subheader', to: 'subhdr:fin:advanced', label: 'عمليات متقدمة', icon: Calculator, roles: ['admin', 'accountant'], permission: 'accounts.journal.post' },
