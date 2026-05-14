@@ -10,7 +10,9 @@ import {
   Warehouse,
   AlertTriangle,
   Pencil,
+  Plus,
   ShieldCheck,
+  Eraser,
   Trash2,
 } from 'lucide-react';
 import {
@@ -19,29 +21,38 @@ import {
 } from '@/api/expenseAllocations.api';
 import { PeriodStatusBadge } from '@/components/expense-allocations/PeriodStatusBadge';
 import { AllocationBanner } from '@/components/expense-allocations/AllocationBanner';
-// PR-FE-B.2 — period-level write actions on the detail page.  Line
-// CRUD, clear-lines, and reverse land in FE-B.3 / FE-B.4.
+// PR-FE-B.2 — period-level write actions.
+// PR-FE-B.3 — line-level write actions (add/edit + clear-all).
 import { PeriodHeaderModal } from '@/components/expense-allocations/modals/PeriodHeaderModal';
 import { DeleteDraftDialog } from '@/components/expense-allocations/modals/DeleteDraftDialog';
 import { ApprovePeriodDialog } from '@/components/expense-allocations/modals/ApprovePeriodDialog';
+import { LineModal } from '@/components/expense-allocations/modals/LineModal';
+import { ClearLinesDialog } from '@/components/expense-allocations/modals/ClearLinesDialog';
 import { useAuthStore } from '@/stores/auth.store';
 import { fmtCairoDate, fmtCairoDateTimeSeconds } from '@/lib/dates';
 
 /**
- * Allocation period detail — PR-FE-A (read) + PR-FE-B.2 (period write).
+ * Allocation period detail — PR-FE-A (read) + PR-FE-B.2 (period write)
+ * + PR-FE-B.3 (line write).
  *
  * Renders the period header (with audit fields based on status) and
  * the lines table.
  *
- * Write surface added in FE-B.2 and gated by `expense_allocation.manage`:
+ * Write surface gated by `expense_allocation.manage` and `status='draft'`:
  *   * "تعديل الرأس" — edit period_start / period_end / warehouse /
- *     notes via PeriodHeaderModal (draft only).
- *   * "حذف الفترة"   — typed-confirmation via DeleteDraftDialog
- *     (draft only).
+ *     notes via PeriodHeaderModal.
+ *   * "+ سطر يدوي"   — add a manual allocation line via LineModal.
+ *   * Pencil icon on each line row — edit an existing line via the
+ *     same LineModal in edit mode.
+ *   * "مسح كل السطور" — typed-confirmation that wipes all lines via
+ *     ClearLinesDialog (visible only when lines_count > 0).
  *   * "اعتماد"       — summary-confirmation via ApprovePeriodDialog
- *     (draft only; visible only when lines_count > 0).
- * Adding/editing lines, clearing lines, and reversing the period are
- * intentionally NOT part of this PR.
+ *     (visible only when lines_count > 0).
+ *   * "حذف الفترة"   — typed-confirmation via DeleteDraftDialog.
+ * Per-line delete is intentionally NOT available — the backend has no
+ * DELETE /lines/:line_id endpoint.  Operators correct individual
+ * lines via the pencil; reset via مسح كل السطور.  Reverse remains
+ * FE-B.4 scope.
  */
 const METHOD_LABEL: Record<string, string> = {
   manual: 'يدوي',
@@ -65,6 +76,11 @@ export default function ExpenseAllocationDetail() {
   const [editOpen, setEditOpen] = useState(false);
   const [approveOpen, setApproveOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  // PR-FE-B.3 — line-level dialog state.
+  const [addLineOpen, setAddLineOpen] = useState(false);
+  const [editLineCandidate, setEditLineCandidate] =
+    useState<AllocationLineRow | null>(null);
+  const [clearLinesOpen, setClearLinesOpen] = useState(false);
 
   const {
     data: period,
@@ -199,7 +215,14 @@ export default function ExpenseAllocationDetail() {
               />
             </div>
 
-            {/* PR-FE-B.2 — period-level actions for draft periods. */}
+            {/* PR-FE-B.2 + PR-FE-B.3 — period-level + line-level
+                actions for draft periods.  Order (RTL, right→left):
+                  · تعديل الرأس
+                  · + سطر يدوي
+                  · اعتماد
+                  · (spacer)
+                  · مسح كل السطور (only when lines exist)
+                  · حذف الفترة */}
             {showWriteActions && (
               <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-3">
                 <button
@@ -209,6 +232,14 @@ export default function ExpenseAllocationDetail() {
                 >
                   <Pencil className="h-4 w-4" />
                   <span>تعديل الرأس</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAddLineOpen(true)}
+                  className="inline-flex items-center gap-2 rounded-md bg-violet-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-violet-700"
+                >
+                  <Plus className="h-4 w-4" />
+                  <span>سطر يدوي</span>
                 </button>
                 <button
                   type="button"
@@ -225,6 +256,16 @@ export default function ExpenseAllocationDetail() {
                   <span>اعتماد</span>
                 </button>
                 <div className="flex-1" />
+                {linesCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setClearLinesOpen(true)}
+                    className="inline-flex items-center gap-2 rounded-md border border-amber-200 bg-white px-3 py-1.5 text-sm text-amber-700 hover:bg-amber-50"
+                  >
+                    <Eraser className="h-4 w-4" />
+                    <span>مسح كل السطور</span>
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => setDeleteOpen(true)}
@@ -252,34 +293,54 @@ export default function ExpenseAllocationDetail() {
                   <th className="p-3 text-right font-medium">إجمالي القاعدة</th>
                   <th className="p-3 text-right font-medium">مبلغ المصدر</th>
                   <th className="p-3 text-right font-medium">المبلغ الموزع</th>
+                  {showWriteActions && (
+                    <th className="w-12 p-3 text-right font-medium"></th>
+                  )}
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {period.lines.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="p-6 text-center text-slate-500">
-                      لا توجد سطور في هذه الفترة.
+                    <td
+                      colSpan={showWriteActions ? 8 : 7}
+                      className="p-6 text-center text-slate-500"
+                    >
+                      <div>لا توجد سطور في هذه الفترة.</div>
+                      {/* PR-FE-B.3 — empty-state hint, draft + manage only. */}
+                      {showWriteActions && (
+                        <div className="mt-1 text-xs text-slate-400">
+                          اضغط «+ سطر يدوي» لإضافة أول سطر.
+                        </div>
+                      )}
                     </td>
                   </tr>
                 ) : (
-                  period.lines.map((l) => <LineRow key={l.id} line={l} />)
+                  period.lines.map((l) => (
+                    <LineRow
+                      key={l.id}
+                      line={l}
+                      canEdit={showWriteActions}
+                      onEdit={() => setEditLineCandidate(l)}
+                    />
+                  ))
                 )}
               </tbody>
             </table>
           </div>
 
           <p className="text-[11px] text-slate-400">
-            تعديل الرأس وحذف المسودة والاعتماد متاحة لمن لديه صلاحية{' '}
+            تعديل الرأس والسطور والمسح والاعتماد والحذف متاحة لمن لديه
+            صلاحية{' '}
             <code className="font-mono">expense_allocation.manage</code> في
-            الفترات المسودة فقط. إضافة السطور وتعديلها والعكس تُطلق في
-            مرحلة لاحقة.
+            الفترات المسودة فقط. عكس الفترات المعتمدة يُطلق في مرحلة لاحقة.
           </p>
         </>
       )}
 
-      {/* PR-FE-B.2 — write modals.  All three render their overlay
-          only while `open` is true (no DOM cost otherwise), and stay
-          unmounted entirely for users without `expense_allocation.manage`. */}
+      {/* PR-FE-B.2 + PR-FE-B.3 — write modals.  Each renders its
+          overlay only while `open` is true (no DOM cost otherwise),
+          and the whole tree stays unmounted for users without
+          `expense_allocation.manage`. */}
       {canManage && period && (
         <>
           <PeriodHeaderModal
@@ -306,6 +367,46 @@ export default function ExpenseAllocationDetail() {
             linesCount={period.lines.length}
             onClose={() => setDeleteOpen(false)}
             onDeleted={() => navigate('/expense-allocations')}
+          />
+          {/* PR-FE-B.3 — line CRUD + clear-all. */}
+          <LineModal
+            open={addLineOpen}
+            mode="create"
+            periodId={period.id}
+            periodStart={period.period_start}
+            periodEnd={period.period_end}
+            onClose={() => setAddLineOpen(false)}
+          />
+          <LineModal
+            open={!!editLineCandidate}
+            mode="edit"
+            periodId={period.id}
+            periodStart={period.period_start}
+            periodEnd={period.period_end}
+            initial={
+              editLineCandidate
+                ? {
+                    id: editLineCandidate.id,
+                    expense_id: editLineCandidate.expense_id,
+                    expense_category_id:
+                      editLineCandidate.expense_category_id,
+                    source_amount: editLineCandidate.source_amount,
+                    product_id: editLineCandidate.product_id,
+                    product_category_id:
+                      editLineCandidate.product_category_id,
+                    warehouse_id: editLineCandidate.warehouse_id,
+                    allocated_amount: editLineCandidate.allocated_amount,
+                  }
+                : undefined
+            }
+            onClose={() => setEditLineCandidate(null)}
+          />
+          <ClearLinesDialog
+            open={clearLinesOpen}
+            periodId={period.id}
+            linesCount={period.lines.length}
+            totalAllocated={period.total_allocated}
+            onClose={() => setClearLinesOpen(false)}
           />
         </>
       )}
@@ -354,7 +455,15 @@ function AuditField({
   );
 }
 
-function LineRow({ line }: { line: AllocationLineRow }) {
+function LineRow({
+  line,
+  canEdit,
+  onEdit,
+}: {
+  line: AllocationLineRow;
+  canEdit?: boolean;
+  onEdit?: () => void;
+}) {
   const target =
     line.product_name ??
     line.product_category_name ??
@@ -402,6 +511,22 @@ function LineRow({ line }: { line: AllocationLineRow }) {
           maximumFractionDigits: 2,
         })}
       </td>
+      {/* PR-FE-B.3 — pencil opens the LineModal in edit mode.  No
+          per-line delete: backend has no DELETE /lines/:line_id;
+          operators use «مسح كل السطور» to wipe. */}
+      {canEdit && (
+        <td className="p-3 text-left">
+          <button
+            type="button"
+            aria-label="تعديل السطر"
+            title="تعديل السطر"
+            onClick={onEdit}
+            className="rounded p-1 text-slate-500 hover:bg-slate-100 hover:text-slate-700"
+          >
+            <Pencil className="h-3.5 w-3.5" />
+          </button>
+        </td>
+      )}
     </tr>
   );
 }

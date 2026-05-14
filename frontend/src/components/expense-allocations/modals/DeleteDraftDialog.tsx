@@ -37,7 +37,21 @@ export function DeleteDraftDialog({
   const mut = useMutation({
     mutationFn: () => expenseAllocationsApi.deletePeriod(periodId),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['allocations'] });
+      // PR-FE-B.3 — fix for the FE-B.2 wart where deleting from the
+      // detail page surfaced a transient "فترة التوزيع غير موجودة."
+      // toast.  The previous broad `invalidateQueries(['allocations'])`
+      // also matched the still-mounted detail page's
+      // `['allocations','period', id]` query, which refetched the
+      // now-deleted period before navigation completed and hit 404.
+      //
+      // The fix has two steps:
+      //   (1) `removeQueries` drops the deleted period from cache
+      //       entirely — no refetch is scheduled, so no 404 toast.
+      //   (2) Narrow the invalidation to the periods list so the row
+      //       disappears on the next list view.
+      // Then the caller's onDeleted navigates as usual.
+      qc.removeQueries({ queryKey: ['allocations', 'period', periodId] });
+      qc.invalidateQueries({ queryKey: ['allocations', 'periods'] });
       toast.success('تم حذف فترة المسودة.');
       onClose();
       onDeleted?.();
