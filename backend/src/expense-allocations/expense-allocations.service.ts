@@ -56,6 +56,31 @@ export interface UpdateLineDto {
 export type PreviewMethod = 'by_revenue' | 'by_units_sold' | 'by_gross_profit';
 export type PreviewTargetKind = 'product' | 'category' | 'warehouse';
 
+/**
+ * Minimal abstraction over the two ways a service method can issue a
+ * query: directly on the global DataSource (read-only paths like
+ * previewAllocation), or via an EntityManager scoped to a transaction
+ * (write paths like saveAllocationPreview).  Both `DataSource.query`
+ * and `EntityManager.query` share this signature.
+ */
+type Querier = { query(sql: string, params?: any[]): Promise<any[]> };
+
+/**
+ * PR-PHASE2-B4 v2 — save-preview DTO.  Same shape as PreviewDto plus
+ * an optional `replace_existing` flag.  When false (default) the save
+ * refuses to run if the period already has any lines; when true it
+ * deletes existing lines inside the same transaction before inserting
+ * the recomputed preview.
+ *
+ * v2 intentionally does NOT use an Idempotency-Key interceptor — the
+ * "reject if lines exist" guard is the idempotency mechanism: any
+ * accidental retry after a successful first save sees lines present
+ * and gets a clear 400 from the server.
+ */
+export interface SavePreviewDto extends PreviewDto {
+  replace_existing?: boolean;
+}
+
 export interface PreviewDto {
   source: {
     expense_id?: string;
@@ -661,10 +686,10 @@ export class ExpenseAllocationsService {
     if (!period) throw new NotFoundException('فترة التوزيع غير موجودة.');
 
     // 3. Resolve source amount.
-    const sourceAmount = await this.resolveSourceAmount(period, source);
+    const sourceAmount = await this.resolveSourceAmount(this.ds, period, source);
 
     // 4. Aggregate basis per target_kind.
-    const rawCandidates = await this.aggregateBasis(period, target_kind);
+    const rawCandidates = await this.aggregateBasis(this.ds, period, target_kind);
 
     // 5. Pick the basis value per the chosen method; for by_gross_profit
     //    exclude targets with non-positive GP (cannot bear overhead).
@@ -748,6 +773,245 @@ export class ExpenseAllocationsService {
   }
 
   /**
+   * PR-PHASE2-B4 v2 — materialise a preview computation into real
+   * `expense_allocation_lines` rows for a draft period.
+   *
+   * Server recomputes the preview internally — clients do NOT submit
+   * precomputed amounts.  Avoids a trust-boundary problem (operator
+   * could fabricate basis values otherwise) and a stale-snapshot
+   * problem (data may have shifted between preview and save).
+   *
+   * Hard contract:
+   *   * Period must be `draft`.  Approved/reversed reject with 400.
+   *   * `replace_existing = false` (default) → reject 400 if any line
+   *     already exists.  `true` → DELETE existing lines first, then
+   *     INSERT the new set, all inside the same transaction.
+   *   * Zero-basis (source=0 OR no candidates OR all GP excluded) →
+   *     reject 400.  We refuse to save an empty allocation.
+   *   * `weight_basis_value` / `weight_basis_total` persisted on every
+   *     row for auditor recomputation.
+   *   * Single `ds.transaction(em => …)` with `SELECT … FOR UPDATE` on
+   *     the parent period: concurrent approve / addLine / save calls
+   *     serialise behind us.
+   *   * After INSERT, `expense_allocation_periods.total_allocated` is
+   *     recomputed from `SUM(allocated_amount)` in the same txn.
+   *
+   * Idempotency — handled by the "reject if lines exist" guard, NOT
+   * by an Idempotency-Key interceptor.  A network retry after a
+   * successful first save sees lines present and gets a 400 with a
+   * clear Arabic message; the client distinguishes this from a real
+   * rejection by the message wording.
+   *
+   * Writes confined to the two allocation tables; source-grep tests
+   * enforce this.  No call to FinancialEngine.  No write to
+   * journal_entries / cashbox_transactions / stock_movements /
+   * product_variants / invoice_items / invoices / expenses.
+   */
+  async saveAllocationPreview(periodId: string, dto: SavePreviewDto) {
+    // 1. DTO validation (same gates as preview, ahead of any IO).
+    if (!dto?.source) {
+      throw new BadRequestException('مصدر التوزيع مطلوب.');
+    }
+    const hasExp = Boolean(dto.source.expense_id);
+    const hasCat = Boolean(dto.source.expense_category_id);
+    if (hasExp && hasCat) {
+      throw new BadRequestException('حدد مصدراً واحداً فقط: مصروف معيّن أو فئة مصروفات.');
+    }
+    if (!hasExp && !hasCat) {
+      throw new BadRequestException('يجب تحديد مصدر التوزيع: مصروف معيّن أو فئة مصروفات.');
+    }
+    if (!['product', 'category', 'warehouse'].includes(dto.target_kind)) {
+      throw new BadRequestException('نوع الهدف غير صالح.');
+    }
+    if (!['by_revenue', 'by_units_sold', 'by_gross_profit'].includes(dto.method)) {
+      throw new BadRequestException('طريقة التوزيع غير صالحة.');
+    }
+
+    return this.ds.transaction(async (em) => {
+      // 2. Lock parent period (FSM safety against concurrent transitions).
+      const period = await this.lockPeriod(em, periodId);
+      if (period.status !== 'draft') {
+        throw new BadRequestException(
+          'يمكن حفظ المعاينة في حالة المسودة فقط.',
+        );
+      }
+
+      // 3. Compute the preview inside this transaction so the snapshot
+      //    matches the post-edit state exactly.
+      const fullPeriod = period as any;
+      const periodLite = {
+        period_start: fullPeriod.period_start,
+        period_end: fullPeriod.period_end,
+        warehouse_id: fullPeriod.warehouse_id ?? null,
+      };
+      const sourceAmount = await this.resolveSourceAmount(em, periodLite, dto.source);
+      const rawCandidates = await this.aggregateBasis(em, periodLite, dto.target_kind);
+
+      const valued = rawCandidates.map((c: any) => ({
+        target_id: c.target_id as string,
+        target_name: c.target_name as string,
+        basis_units: Number(c.basis_units_sold ?? 0),
+        basis_revenue: Number(c.basis_revenue ?? 0),
+        basis_gross_profit: Number(c.basis_gross_profit ?? 0),
+      }));
+      const basisOf = (c: typeof valued[number]) =>
+        dto.method === 'by_revenue'
+          ? c.basis_revenue
+          : dto.method === 'by_units_sold'
+            ? c.basis_units
+            : c.basis_gross_profit;
+
+      let counted = valued;
+      let excluded = 0;
+      if (dto.method === 'by_gross_profit') {
+        counted = valued.filter((c) => basisOf(c) > 0);
+        excluded = valued.length - counted.length;
+      }
+      const totalBasis = counted.reduce((s, c) => s + basisOf(c), 0);
+
+      // 4. Zero-basis reject (save MUST produce ≥ 1 line).
+      if (sourceAmount === 0 || totalBasis <= 0 || counted.length === 0) {
+        throw new BadRequestException(
+          this.zeroBasisWarning(dto.method, sourceAmount, totalBasis, counted.length, valued.length),
+        );
+      }
+
+      // 5. Pre-existing lines policy.  Default: refuse.
+      const [{ count: existingCount }] = await em.query(
+        `SELECT COUNT(*)::int AS count FROM expense_allocation_lines WHERE period_id = $1`,
+        [periodId],
+      );
+      if (existingCount > 0) {
+        if (!dto.replace_existing) {
+          throw new BadRequestException(
+            'الفترة تحتوي على سطور بالفعل. امسحها أولاً أو استخدم replace_existing=true.',
+          );
+        }
+        await em.query(
+          `DELETE FROM expense_allocation_lines WHERE period_id = $1`,
+          [periodId],
+        );
+      }
+
+      // 6. Build draft rows with the residual absorbed into the
+      //    largest-basis target (deterministic tie-break by target_id).
+      type LineDraft = {
+        target_id: string;
+        target_name: string;
+        basis_value: number;
+        proposed_amount: number;
+      };
+      const drafts: LineDraft[] = counted.map((c) => ({
+        target_id: c.target_id,
+        target_name: c.target_name,
+        basis_value: basisOf(c),
+        proposed_amount: this.round2((sourceAmount * basisOf(c)) / totalBasis),
+      }));
+      const sumRounded = drafts.reduce((s, l) => s + l.proposed_amount, 0);
+      const residual = this.round2(sourceAmount - sumRounded);
+      let residualTargetId: string | null = null;
+      if (residual !== 0 && drafts.length > 0) {
+        const sorted = [...drafts].sort((a, b) => {
+          if (b.basis_value !== a.basis_value) return b.basis_value - a.basis_value;
+          return a.target_id.localeCompare(b.target_id);
+        });
+        const winner = sorted[0];
+        winner.proposed_amount = this.round2(winner.proposed_amount + residual);
+        residualTargetId = winner.target_id;
+      }
+
+      // 7. Bulk INSERT.  Parameterised VALUES list — 11 slots per row,
+      //    one INSERT per call regardless of N.
+      const expense_id = dto.source.expense_id ?? null;
+      const expense_category_id = dto.source.expense_category_id ?? null;
+      const placeholders: string[] = [];
+      const params: any[] = [];
+      let p = 1;
+      const slot = () => `$${p++}`;
+      for (const d of drafts) {
+        params.push(periodId);
+        params.push(expense_id);
+        params.push(expense_category_id);
+        params.push(d.proposed_amount);                                    // source_amount
+        params.push(dto.target_kind === 'product'   ? d.target_id : null); // product_id
+        params.push(dto.target_kind === 'category'  ? d.target_id : null); // product_category_id
+        params.push(dto.target_kind === 'warehouse' ? d.target_id : null); // warehouse_id
+        params.push(dto.method);
+        params.push(d.proposed_amount);                                    // allocated_amount
+        params.push(d.basis_value);
+        params.push(totalBasis);
+        placeholders.push(
+          `(${slot()}::uuid, ${slot()}::uuid, ${slot()}::uuid, ${slot()}, ` +
+          `${slot()}::uuid, ${slot()}::uuid, ${slot()}::uuid, ` +
+          `${slot()}, ${slot()}, ${slot()}, ${slot()})`,
+        );
+      }
+      const inserted = await em.query(
+        `
+        INSERT INTO expense_allocation_lines
+          (period_id, expense_id, expense_category_id, source_amount,
+           product_id, product_category_id, warehouse_id,
+           allocation_method, allocated_amount,
+           weight_basis_value, weight_basis_total)
+        VALUES ${placeholders.join(', ')}
+        RETURNING id, product_id, product_category_id, warehouse_id, allocated_amount, weight_basis_value, weight_basis_total
+        `,
+        params,
+      );
+
+      // 8. Recompute period.total_allocated atomically.
+      await this.recomputeTotal(em, periodId);
+
+      // 9. Map back to drafts for response shape.
+      const idByTargetId = new Map<string, string>();
+      for (const row of inserted) {
+        const tid = row.product_id || row.product_category_id || row.warehouse_id;
+        if (tid) idByTargetId.set(tid, row.id);
+      }
+      const residualLineId = residualTargetId ? idByTargetId.get(residualTargetId) ?? null : null;
+
+      const lines = drafts.map((d) => ({
+        id: idByTargetId.get(d.target_id) ?? null,
+        target_kind: dto.target_kind,
+        target_id: d.target_id,
+        target_name: d.target_name,
+        basis_value: this.fmt6(d.basis_value),
+        weight_basis_total: this.fmt6(totalBasis),
+        weight_pct: this.fmt4((d.basis_value / totalBasis) * 100),
+        source_amount: this.fmt2(d.proposed_amount),
+        allocated_amount: this.fmt2(d.proposed_amount),
+      }));
+
+      return {
+        period_id: periodId,
+        method: dto.method,
+        target_kind: dto.target_kind,
+        source: {
+          expense_id,
+          expense_category_id,
+          amount: this.fmt2(sourceAmount),
+        },
+        period_scope: {
+          from: this.dateOnly(fullPeriod.period_start),
+          to: this.dateOnly(fullPeriod.period_end),
+          warehouse_id: fullPeriod.warehouse_id ?? null,
+        },
+        saved_count: lines.length,
+        candidates_total: valued.length,
+        candidates_excluded: excluded,
+        total_basis: this.fmt6(totalBasis),
+        total_allocated: this.fmt2(sourceAmount),
+        rounding_residual: this.fmt2(residual),
+        rounding_residual_absorbed_into_target_id: residualTargetId,
+        rounding_residual_absorbed_into_line_id: residualLineId,
+        replace_existing: Boolean(dto.replace_existing),
+        existing_lines_deleted: existingCount > 0 && dto.replace_existing ? existingCount : 0,
+        lines,
+      };
+    });
+  }
+
+  /**
    * Build the canonical preview response.  Single place to format the
    * shape — keeps zero-basis and happy-path branches consistent.
    */
@@ -796,11 +1060,12 @@ export class ExpenseAllocationsService {
    *     the period's warehouse if scoped).
    */
   private async resolveSourceAmount(
+    runner: Querier,
     period: { period_start: any; period_end: any; warehouse_id: string | null },
     source: { expense_id?: string; expense_category_id?: string },
   ): Promise<number> {
     if (source.expense_id) {
-      const [row] = await this.ds.query(
+      const [row] = await runner.query(
         `SELECT amount, is_approved FROM expenses WHERE id = $1`,
         [source.expense_id],
       );
@@ -811,7 +1076,7 @@ export class ExpenseAllocationsService {
       return Number(row.amount ?? 0);
     }
     // expense_category_id branch
-    const rows = await this.ds.query(
+    const rows = await runner.query(
       `
       SELECT COALESCE(SUM(amount), 0) AS total
       FROM expenses
@@ -838,6 +1103,7 @@ export class ExpenseAllocationsService {
    * canonical sales-status filter for consistency with other reports.
    */
   private async aggregateBasis(
+    runner: Querier,
     period: { period_start: any; period_end: any; warehouse_id: string | null },
     target_kind: PreviewTargetKind,
   ): Promise<any[]> {
@@ -858,7 +1124,7 @@ export class ExpenseAllocationsService {
     const params = [period.period_start, period.period_end, period.warehouse_id ?? null];
 
     if (target_kind === 'product') {
-      return this.ds.query(
+      return runner.query(
         `
         SELECT
           p.id      AS target_id,
@@ -876,7 +1142,7 @@ export class ExpenseAllocationsService {
     }
 
     if (target_kind === 'category') {
-      return this.ds.query(
+      return runner.query(
         `
         SELECT
           c.id      AS target_id,
@@ -895,7 +1161,7 @@ export class ExpenseAllocationsService {
     }
 
     // target_kind === 'warehouse'
-    return this.ds.query(
+    return runner.query(
       `
       SELECT
         w.id      AS target_id,

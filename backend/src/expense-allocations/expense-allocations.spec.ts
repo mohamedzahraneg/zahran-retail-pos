@@ -1725,3 +1725,491 @@ describe('PR-PHASE2-TZ-FIX — DATE serialisation in expense-allocations respons
     expect(res.period_scope.to).not.toMatch(/Z$/);
   });
 });
+
+// ════════════════════════════════════════════════════════════════════
+//  PR-PHASE2-B4 v2 — saveAllocationPreview (batch save inside a txn)
+// ════════════════════════════════════════════════════════════════════
+//
+// v2 drops the IdempotencyInterceptor that caused the v1 bootstrap
+// crash; idempotency is provided by the "reject if lines exist" guard
+// (replace_existing=false default).  All other invariants preserved.
+
+function saveMockDs(routes: Array<{ match: RegExp; reply: any[] | ((c: { sql: string; params?: any[]; inTx: boolean }) => any[]) }>) {
+  const calls: { sql: string; params?: any[]; inTx: boolean }[] = [];
+  const dispatch = (sql: string, params: any[] | undefined, inTx: boolean) => {
+    const call = { sql, params, inTx };
+    calls.push(call);
+    for (const r of routes) {
+      if (r.match.test(sql)) {
+        return typeof r.reply === 'function' ? r.reply(call) : r.reply;
+      }
+    }
+    return [];
+  };
+  const ds: any = {
+    query: async (sql: string, params?: any[]) => dispatch(sql, params, false),
+    transaction: async (fn: (em: any) => any) => {
+      const em = {
+        query: async (sql: string, params?: any[]) => dispatch(sql, params, true),
+      };
+      return fn(em);
+    },
+  };
+  return { ds, calls };
+}
+
+const DRAFT_PERIOD = {
+  id: 'p-1',
+  period_start: '2026-04-01',
+  period_end: '2026-04-30',
+  warehouse_id: null,
+  status: 'draft',
+};
+const SOURCE = { expense_id: 'e-1' } as const;
+
+// ─── 28. saveAllocationPreview — happy path / by_revenue × product ───
+
+describe('ExpenseAllocationsService.saveAllocationPreview — by_revenue × product (PR-PHASE2-B4 v2)', () => {
+  function defaultMock(opts?: { existingLines?: number; insertedIds?: string[] }) {
+    const existing = opts?.existingLines ?? 0;
+    const inserted = (opts?.insertedIds ?? ['line-A', 'line-B', 'line-C']).map(
+      (id, i) => ({
+        id,
+        product_id: ['prod-A', 'prod-B', 'prod-C'][i],
+        product_category_id: null,
+        warehouse_id: null,
+        allocated_amount: '0',
+        weight_basis_value: '0',
+        weight_basis_total: '0',
+      }),
+    );
+    return saveMockDs([
+      { match: /FOR UPDATE/, reply: [DRAFT_PERIOD] },
+      { match: /SELECT amount, is_approved FROM expenses/, reply: [{ amount: '100.00', is_approved: true }] },
+      { match: /FROM invoice_items[\s\S]*JOIN products/, reply: [
+        { target_id: 'prod-A', target_name: 'A', basis_units_sold: '1', basis_revenue: '100', basis_gross_profit: '10' },
+        { target_id: 'prod-B', target_name: 'B', basis_units_sold: '1', basis_revenue: '200', basis_gross_profit: '20' },
+        { target_id: 'prod-C', target_name: 'C', basis_units_sold: '1', basis_revenue: '700', basis_gross_profit: '70' },
+      ] },
+      { match: /SELECT COUNT\(\*\)::int AS count FROM expense_allocation_lines/, reply: [{ count: existing }] },
+      { match: /^\s*DELETE FROM expense_allocation_lines/, reply: [] },
+      { match: /^\s*INSERT INTO expense_allocation_lines/, reply: inserted },
+      { match: /^\s*UPDATE expense_allocation_periods\s+SET total_allocated/, reply: [] },
+    ]);
+  }
+
+  it('saves N lines, returns saved_count + total_allocated, recomputes period total', async () => {
+    const { ds, calls } = defaultMock();
+    const svc = new ExpenseAllocationsService(ds as any);
+    const res = await svc.saveAllocationPreview('p-1', {
+      source: { expense_id: 'e-1' },
+      target_kind: 'product',
+      method: 'by_revenue',
+    });
+    expect(res.saved_count).toBe(3);
+    expect(res.total_allocated).toBe('100.00');
+    expect(res.method).toBe('by_revenue');
+    expect(res.target_kind).toBe('product');
+    expect(res.candidates_excluded).toBe(0);
+    expect(res.candidates_total).toBe(3);
+    expect(res.replace_existing).toBe(false);
+    expect(res.existing_lines_deleted).toBe(0);
+    expect(res.lines).toHaveLength(3);
+    const insertCall = calls.find((c) => /INSERT INTO expense_allocation_lines/.test(c.sql))!;
+    expect(insertCall.inTx).toBe(true);
+    expect(insertCall.sql).toMatch(/VALUES /);
+    expect(insertCall.sql).toMatch(/RETURNING/);
+    const recomputeCall = calls.find((c) => /UPDATE expense_allocation_periods\s+SET total_allocated/.test(c.sql))!;
+    expect(recomputeCall.inTx).toBe(true);
+  });
+
+  it('attributes basis + weight provenance into every line', async () => {
+    const { ds } = defaultMock();
+    const svc = new ExpenseAllocationsService(ds as any);
+    const res = await svc.saveAllocationPreview('p-1', {
+      source: { expense_id: 'e-1' },
+      target_kind: 'product',
+      method: 'by_revenue',
+    });
+    expect(res.total_basis).toBe('1000.000000');
+    for (const l of res.lines) {
+      expect(l.weight_basis_total).toBe('1000.000000');
+      expect(l.weight_pct).toMatch(/^\d+\.\d{4}$/);
+      expect(l.basis_value).toMatch(/^\d+\.\d{6}$/);
+      expect(l.allocated_amount).toMatch(/^\d+\.\d{2}$/);
+    }
+  });
+
+  it('SUM(proposed_amount) === source_amount exactly (residual rule)', async () => {
+    const inserted = ['ins-A', 'ins-B', 'ins-C'].map((id, i) => ({
+      id,
+      product_id: ['A', 'B', 'C'][i],
+      product_category_id: null,
+      warehouse_id: null,
+    }));
+    const { ds } = saveMockDs([
+      { match: /FOR UPDATE/, reply: [DRAFT_PERIOD] },
+      { match: /SELECT amount, is_approved FROM expenses/, reply: [{ amount: '1.00', is_approved: true }] },
+      { match: /FROM invoice_items[\s\S]*JOIN products/, reply: [
+        { target_id: 'A', target_name: 'A', basis_units_sold: '1', basis_revenue: '1', basis_gross_profit: '0' },
+        { target_id: 'B', target_name: 'B', basis_units_sold: '1', basis_revenue: '1', basis_gross_profit: '0' },
+        { target_id: 'C', target_name: 'C', basis_units_sold: '1', basis_revenue: '1', basis_gross_profit: '0' },
+      ] },
+      { match: /SELECT COUNT\(\*\)::int AS count FROM expense_allocation_lines/, reply: [{ count: 0 }] },
+      { match: /^\s*INSERT INTO expense_allocation_lines/, reply: inserted },
+      { match: /^\s*UPDATE expense_allocation_periods\s+SET total_allocated/, reply: [] },
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    const res = await svc.saveAllocationPreview('p-1', {
+      source: { expense_id: 'e-1' },
+      target_kind: 'product',
+      method: 'by_revenue',
+    });
+    expect(res.rounding_residual).toBe('0.01');
+    expect(res.rounding_residual_absorbed_into_target_id).toBe('A');
+    expect(res.rounding_residual_absorbed_into_line_id).toBe('ins-A');
+    const amounts = res.lines.map((l: any) => Number(l.allocated_amount)).sort();
+    expect(amounts).toEqual([0.33, 0.33, 0.34]);
+    const sum = res.lines.reduce((s: number, l: any) => s + Number(l.allocated_amount), 0);
+    expect(Math.round(sum * 100) / 100).toBe(1);
+  });
+});
+
+// ─── 29. period status guards (draft-only) ────────────────────────
+
+describe('saveAllocationPreview — FSM guards (PR-PHASE2-B4 v2)', () => {
+  function statusMock(status: 'approved' | 'reversed') {
+    return saveMockDs([
+      { match: /FOR UPDATE/, reply: [{ ...DRAFT_PERIOD, status }] },
+    ]);
+  }
+  it('rejects approved periods with Arabic 400', async () => {
+    const { ds } = statusMock('approved');
+    const svc = new ExpenseAllocationsService(ds as any);
+    await expect(
+      svc.saveAllocationPreview('p-1', { source: SOURCE, target_kind: 'product', method: 'by_revenue' }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+  it('rejects reversed periods with Arabic 400', async () => {
+    const { ds } = statusMock('reversed');
+    const svc = new ExpenseAllocationsService(ds as any);
+    await expect(
+      svc.saveAllocationPreview('p-1', { source: SOURCE, target_kind: 'product', method: 'by_revenue' }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+  it('throws NotFound when the period does not exist', async () => {
+    const { ds } = saveMockDs([{ match: /FOR UPDATE/, reply: [] }]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    await expect(
+      svc.saveAllocationPreview('p-ghost', { source: SOURCE, target_kind: 'product', method: 'by_revenue' }),
+    ).rejects.toBeInstanceOf(NotFoundException);
+  });
+});
+
+// ─── 30. pre-existing lines policy (the v2 idempotency model) ─────
+
+describe('saveAllocationPreview — pre-existing lines policy (PR-PHASE2-B4 v2)', () => {
+  function reuseBasisMock(existing: number) {
+    const inserted = ['ins-1'].map((id) => ({ id, product_id: 'prod-1', product_category_id: null, warehouse_id: null }));
+    return saveMockDs([
+      { match: /FOR UPDATE/, reply: [DRAFT_PERIOD] },
+      { match: /SELECT amount, is_approved FROM expenses/, reply: [{ amount: '50.00', is_approved: true }] },
+      { match: /FROM invoice_items[\s\S]*JOIN products/, reply: [
+        { target_id: 'prod-1', target_name: 'X', basis_units_sold: '1', basis_revenue: '50', basis_gross_profit: '0' },
+      ] },
+      { match: /SELECT COUNT\(\*\)::int AS count FROM expense_allocation_lines/, reply: [{ count: existing }] },
+      { match: /^\s*DELETE FROM expense_allocation_lines/, reply: [] },
+      { match: /^\s*INSERT INTO expense_allocation_lines/, reply: inserted },
+      { match: /^\s*UPDATE expense_allocation_periods\s+SET total_allocated/, reply: [] },
+    ]);
+  }
+
+  it('rejects (400 Arabic) when lines exist and replace_existing is false', async () => {
+    const { ds, calls } = reuseBasisMock(2);
+    const svc = new ExpenseAllocationsService(ds as any);
+    await expect(
+      svc.saveAllocationPreview('p-1', {
+        source: { expense_id: 'e-1' },
+        target_kind: 'product',
+        method: 'by_revenue',
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(calls.some((c) => /^\s*DELETE FROM expense_allocation_lines/.test(c.sql))).toBe(false);
+    expect(calls.some((c) => /^\s*INSERT INTO expense_allocation_lines/.test(c.sql))).toBe(false);
+  });
+
+  it('rejects also when replace_existing is omitted (defaults to false)', async () => {
+    const { ds } = reuseBasisMock(1);
+    const svc = new ExpenseAllocationsService(ds as any);
+    await expect(
+      svc.saveAllocationPreview('p-1', {
+        source: { expense_id: 'e-1' },
+        target_kind: 'product',
+        method: 'by_revenue',
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('with replace_existing=true: DELETE existing then INSERT new — all inside the same txn', async () => {
+    const { ds, calls } = reuseBasisMock(2);
+    const svc = new ExpenseAllocationsService(ds as any);
+    const res = await svc.saveAllocationPreview('p-1', {
+      source: { expense_id: 'e-1' },
+      target_kind: 'product',
+      method: 'by_revenue',
+      replace_existing: true,
+    });
+    expect(res.replace_existing).toBe(true);
+    expect(res.existing_lines_deleted).toBe(2);
+    const delCall = calls.find((c) => /^\s*DELETE FROM expense_allocation_lines/.test(c.sql))!;
+    const insCall = calls.find((c) => /^\s*INSERT INTO expense_allocation_lines/.test(c.sql))!;
+    expect(delCall.inTx).toBe(true);
+    expect(insCall.inTx).toBe(true);
+    expect(calls.indexOf(delCall)).toBeLessThan(calls.indexOf(insCall));
+  });
+
+  it('with replace_existing=true and NO existing lines: no DELETE issued, INSERT proceeds', async () => {
+    const { ds, calls } = reuseBasisMock(0);
+    const svc = new ExpenseAllocationsService(ds as any);
+    const res = await svc.saveAllocationPreview('p-1', {
+      source: { expense_id: 'e-1' },
+      target_kind: 'product',
+      method: 'by_revenue',
+      replace_existing: true,
+    });
+    expect(res.existing_lines_deleted).toBe(0);
+    expect(calls.some((c) => /^\s*DELETE FROM expense_allocation_lines/.test(c.sql))).toBe(false);
+    expect(calls.some((c) => /^\s*INSERT INTO expense_allocation_lines/.test(c.sql))).toBe(true);
+  });
+});
+
+// ─── 31. zero-basis rejects (no empty save allowed) ────────────────
+
+describe('saveAllocationPreview — zero-basis rejects (PR-PHASE2-B4 v2)', () => {
+  it('rejects when sourceAmount = 0', async () => {
+    const { ds } = saveMockDs([
+      { match: /FOR UPDATE/, reply: [DRAFT_PERIOD] },
+      { match: /SELECT amount, is_approved FROM expenses/, reply: [{ amount: '0', is_approved: true }] },
+      { match: /FROM invoice_items[\s\S]*JOIN products/, reply: [
+        { target_id: 'A', target_name: 'A', basis_units_sold: '1', basis_revenue: '100', basis_gross_profit: '50' },
+      ] },
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    await expect(
+      svc.saveAllocationPreview('p-1', { source: { expense_id: 'e-1' }, target_kind: 'product', method: 'by_revenue' }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects when no candidates returned by the basis query', async () => {
+    const { ds } = saveMockDs([
+      { match: /FOR UPDATE/, reply: [DRAFT_PERIOD] },
+      { match: /SELECT amount, is_approved FROM expenses/, reply: [{ amount: '100', is_approved: true }] },
+      { match: /FROM invoice_items[\s\S]*JOIN products/, reply: [] },
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    await expect(
+      svc.saveAllocationPreview('p-1', { source: { expense_id: 'e-1' }, target_kind: 'product', method: 'by_revenue' }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects when by_gross_profit excludes ALL candidates', async () => {
+    const { ds } = saveMockDs([
+      { match: /FOR UPDATE/, reply: [DRAFT_PERIOD] },
+      { match: /SELECT amount, is_approved FROM expenses/, reply: [{ amount: '100', is_approved: true }] },
+      { match: /FROM invoice_items[\s\S]*JOIN products/, reply: [
+        { target_id: 'A', target_name: 'A', basis_units_sold: '1', basis_revenue: '100', basis_gross_profit: '-10' },
+        { target_id: 'B', target_name: 'B', basis_units_sold: '1', basis_revenue: '100', basis_gross_profit: '0' },
+      ] },
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    await expect(
+      svc.saveAllocationPreview('p-1', { source: { expense_id: 'e-1' }, target_kind: 'product', method: 'by_gross_profit' }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+});
+
+// ─── 32. DTO validation (same gates as preview) ────────────────────
+
+describe('saveAllocationPreview — DTO validation (PR-PHASE2-B4 v2)', () => {
+  function emptyMock() {
+    return saveMockDs([{ match: /FOR UPDATE/, reply: [DRAFT_PERIOD] }]);
+  }
+  it('rejects when source is missing', async () => {
+    const { ds } = emptyMock();
+    const svc = new ExpenseAllocationsService(ds as any);
+    await expect(
+      svc.saveAllocationPreview('p-1', { target_kind: 'product', method: 'by_revenue' } as any),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+  it('rejects when both source fields supplied', async () => {
+    const { ds } = emptyMock();
+    const svc = new ExpenseAllocationsService(ds as any);
+    await expect(
+      svc.saveAllocationPreview('p-1', {
+        source: { expense_id: 'e', expense_category_id: 'c' },
+        target_kind: 'product', method: 'by_revenue',
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+  it('rejects when neither source field supplied', async () => {
+    const { ds } = emptyMock();
+    const svc = new ExpenseAllocationsService(ds as any);
+    await expect(
+      svc.saveAllocationPreview('p-1', { source: {}, target_kind: 'product', method: 'by_revenue' } as any),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+});
+
+// ─── 33. target_kind matrix — category + warehouse paths ───────────
+
+describe('saveAllocationPreview — target_kind matrix (PR-PHASE2-B4 v2)', () => {
+  it('target_kind=category populates product_category_id on each row', async () => {
+    const { ds, calls } = saveMockDs([
+      { match: /FOR UPDATE/, reply: [DRAFT_PERIOD] },
+      { match: /SELECT amount, is_approved FROM expenses/, reply: [{ amount: '100', is_approved: true }] },
+      { match: /FROM invoice_items[\s\S]*JOIN categories/, reply: [
+        { target_id: 'cat-A', target_name: 'فئة', basis_units_sold: '2', basis_revenue: '200', basis_gross_profit: '0' },
+      ] },
+      { match: /SELECT COUNT\(\*\)::int AS count FROM expense_allocation_lines/, reply: [{ count: 0 }] },
+      { match: /^\s*INSERT INTO expense_allocation_lines/, reply: [
+        { id: 'ins', product_id: null, product_category_id: 'cat-A', warehouse_id: null },
+      ] },
+      { match: /^\s*UPDATE expense_allocation_periods\s+SET total_allocated/, reply: [] },
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    await svc.saveAllocationPreview('p-1', {
+      source: { expense_id: 'e-1' },
+      target_kind: 'category',
+      method: 'by_units_sold',
+    });
+    const insertCall = calls.find((c) => /INSERT INTO expense_allocation_lines/.test(c.sql))!;
+    const params = insertCall.params!;
+    expect(params[4]).toBeNull();              // product_id
+    expect(params[5]).toBe('cat-A');           // product_category_id
+    expect(params[6]).toBeNull();              // warehouse_id
+    expect(params[7]).toBe('by_units_sold');
+  });
+
+  it('target_kind=warehouse populates warehouse_id on each row', async () => {
+    const { ds, calls } = saveMockDs([
+      { match: /FOR UPDATE/, reply: [DRAFT_PERIOD] },
+      { match: /SELECT amount, is_approved FROM expenses/, reply: [{ amount: '100', is_approved: true }] },
+      { match: /FROM invoice_items[\s\S]*JOIN warehouses/, reply: [
+        { target_id: 'wh-A', target_name: 'الفرع', basis_units_sold: '5', basis_revenue: '500', basis_gross_profit: '300' },
+      ] },
+      { match: /SELECT COUNT\(\*\)::int AS count FROM expense_allocation_lines/, reply: [{ count: 0 }] },
+      { match: /^\s*INSERT INTO expense_allocation_lines/, reply: [
+        { id: 'ins', product_id: null, product_category_id: null, warehouse_id: 'wh-A' },
+      ] },
+      { match: /^\s*UPDATE expense_allocation_periods\s+SET total_allocated/, reply: [] },
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    await svc.saveAllocationPreview('p-1', {
+      source: { expense_id: 'e-1' },
+      target_kind: 'warehouse',
+      method: 'by_gross_profit',
+    });
+    const insertCall = calls.find((c) => /INSERT INTO expense_allocation_lines/.test(c.sql))!;
+    const params = insertCall.params!;
+    expect(params[4]).toBeNull();              // product_id
+    expect(params[5]).toBeNull();              // product_category_id
+    expect(params[6]).toBe('wh-A');            // warehouse_id
+    expect(params[7]).toBe('by_gross_profit');
+  });
+});
+
+// ─── 34. source-grep guards (B4 v2 specific) ───────────────────────
+
+describe('expense-allocations.service.ts — B4 v2 source-grep guards', () => {
+  const SRC_RAW = readFileSync(
+    resolve(__dirname, './expense-allocations.service.ts'),
+    'utf-8',
+  );
+  const SRC = SRC_RAW.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+
+  it('saveAllocationPreview is implemented and exported', () => {
+    expect(SRC).toMatch(/async saveAllocationPreview\(/);
+  });
+
+  it('saveAllocationPreview opens a single transaction (ds.transaction wrapper)', () => {
+    const m = SRC.match(/async saveAllocationPreview\([\s\S]*?\n  (?:async|private|\/\/)/);
+    expect(m).not.toBeNull();
+    const slice = m![0];
+    expect(slice).toMatch(/this\.ds\.transaction\(async\s*\(\s*em\s*\)\s*=>/);
+  });
+
+  it('saveAllocationPreview locks the parent period with FOR UPDATE (via lockPeriod)', () => {
+    const m = SRC.match(/async saveAllocationPreview\([\s\S]*?\n  (?:async|private|\/\/)/);
+    const slice = m![0];
+    expect(slice).toMatch(/this\.lockPeriod\(em,\s*periodId\)/);
+  });
+
+  it('B4 v2 writes are confined to expense_allocation_lines + expense_allocation_periods', () => {
+    const writeTokenRe = /\b(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+([a-z_]+)/gi;
+    const allowed = new Set(['expense_allocation_periods', 'expense_allocation_lines']);
+    const targets = new Set<string>();
+    let mm: RegExpExecArray | null;
+    while ((mm = writeTokenRe.exec(SRC)) !== null) {
+      targets.add(mm[1].toLowerCase());
+    }
+    for (const t of targets) {
+      expect(allowed.has(t)).toBe(true);
+    }
+    expect(SRC).toMatch(/INSERT\s+INTO\s+expense_allocation_lines/i);
+    expect(SRC).toMatch(/DELETE\s+FROM\s+expense_allocation_lines/i);
+  });
+
+  it('B4 v2 path never references forbidden tables / FinancialEngine / accounting_only', () => {
+    expect(SRC).not.toMatch(/FinancialEngine/);
+    for (const t of [
+      'journal_entries',
+      'journal_lines',
+      'cashbox_transactions',
+      'stock_movements',
+      'product_variants',
+      'invoice_items',
+      'invoices',
+    ]) {
+      expect(SRC).not.toMatch(new RegExp(`INSERT\\s+INTO\\s+${t}\\b`, 'i'));
+      expect(SRC).not.toMatch(new RegExp(`UPDATE\\s+${t}\\b`, 'i'));
+      expect(SRC).not.toMatch(new RegExp(`DELETE\\s+FROM\\s+${t}\\b`, 'i'));
+    }
+    expect(SRC).not.toMatch(/\baccounting_only\b/);
+    expect(SRC).not.toMatch(/provisioning/);
+  });
+});
+
+// ─── 35. controller wiring — route + permission + NO interceptor ───
+
+describe('ExpenseAllocationsController — save-preview wiring (PR-PHASE2-B4 v2)', () => {
+  const CTRL_RAW = readFileSync(
+    resolve(__dirname, './expense-allocations.controller.ts'),
+    'utf-8',
+  );
+  const CTRL = CTRL_RAW.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+
+  it('declares POST periods/:id/save-preview', () => {
+    expect(CTRL).toMatch(/@Post\('periods\/:id\/save-preview'\)[\s\S]+savePreview\s*\(/);
+  });
+
+  it('save-preview route is guarded by expense_allocation.manage', () => {
+    expect(CTRL).toMatch(
+      /@Post\('periods\/:id\/save-preview'\)\s*@Permissions\(\s*'expense_allocation\.manage'\s*\)/,
+    );
+  });
+
+  it('save-preview route does NOT wire IdempotencyInterceptor (v1 crash regression guard)', () => {
+    // The route block (the next ~6 lines after @Post('save-preview')) must NOT
+    // contain @UseInterceptors.  And the controller file must not import
+    // IdempotencyInterceptor at all.
+    const routeBlock = CTRL.match(/@Post\('periods\/:id\/save-preview'\)[\s\S]{0,400}?savePreview\s*\(/);
+    expect(routeBlock).not.toBeNull();
+    expect(routeBlock![0]).not.toMatch(/@UseInterceptors/);
+    expect(CTRL).not.toMatch(/IdempotencyInterceptor/);
+    expect(CTRL).not.toMatch(/idempotency\.interceptor/);
+  });
+
+  it('SavePreviewDtoIn declares optional replace_existing flag', () => {
+    expect(CTRL).toMatch(/class SavePreviewDtoIn[\s\S]+@IsOptional\(\)\s+replace_existing/);
+  });
+});
