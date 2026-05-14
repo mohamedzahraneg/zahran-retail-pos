@@ -14,6 +14,7 @@ import {
   ShieldCheck,
   Eraser,
   Trash2,
+  Undo2,
 } from 'lucide-react';
 import {
   expenseAllocationsApi,
@@ -23,36 +24,36 @@ import { PeriodStatusBadge } from '@/components/expense-allocations/PeriodStatus
 import { AllocationBanner } from '@/components/expense-allocations/AllocationBanner';
 // PR-FE-B.2 — period-level write actions.
 // PR-FE-B.3 — line-level write actions (add/edit + clear-all).
+// PR-FE-B.4 — reverse-approved write action.
 import { PeriodHeaderModal } from '@/components/expense-allocations/modals/PeriodHeaderModal';
 import { DeleteDraftDialog } from '@/components/expense-allocations/modals/DeleteDraftDialog';
 import { ApprovePeriodDialog } from '@/components/expense-allocations/modals/ApprovePeriodDialog';
 import { LineModal } from '@/components/expense-allocations/modals/LineModal';
 import { ClearLinesDialog } from '@/components/expense-allocations/modals/ClearLinesDialog';
+import { ReversePeriodDialog } from '@/components/expense-allocations/modals/ReversePeriodDialog';
 import { useAuthStore } from '@/stores/auth.store';
 import { fmtCairoDate, fmtCairoDateTimeSeconds } from '@/lib/dates';
 
 /**
  * Allocation period detail — PR-FE-A (read) + PR-FE-B.2 (period write)
- * + PR-FE-B.3 (line write).
+ * + PR-FE-B.3 (line write) + PR-FE-B.4 (reverse-approved).
  *
  * Renders the period header (with audit fields based on status) and
- * the lines table.
+ * the lines table.  Three write surfaces, each gated by
+ * `expense_allocation.manage` AND the period's FSM state:
  *
- * Write surface gated by `expense_allocation.manage` and `status='draft'`:
- *   * "تعديل الرأس" — edit period_start / period_end / warehouse /
- *     notes via PeriodHeaderModal.
- *   * "+ سطر يدوي"   — add a manual allocation line via LineModal.
- *   * Pencil icon on each line row — edit an existing line via the
- *     same LineModal in edit mode.
- *   * "مسح كل السطور" — typed-confirmation that wipes all lines via
- *     ClearLinesDialog (visible only when lines_count > 0).
- *   * "اعتماد"       — summary-confirmation via ApprovePeriodDialog
- *     (visible only when lines_count > 0).
- *   * "حذف الفترة"   — typed-confirmation via DeleteDraftDialog.
- * Per-line delete is intentionally NOT available — the backend has no
- * DELETE /lines/:line_id endpoint.  Operators correct individual
- * lines via the pencil; reset via مسح كل السطور.  Reverse remains
- * FE-B.4 scope.
+ *   draft     → تعديل الرأس · + سطر يدوي · pencil-per-line · مسح كل
+ *               السطور (when lines>0) · اعتماد (when lines>0) · حذف
+ *               الفترة.
+ *   approved  → عكس only.  Approve is recoverable via reverse, so
+ *               approved periods are otherwise read-only.
+ *   reversed  → no write actions.  Terminal state — period stays
+ *               visible as an audit record (lines + reversed_by/at/
+ *               reason).
+ *
+ * Per-line delete is intentionally NOT available — the backend has
+ * no DELETE /lines/:line_id endpoint.  Operators correct individual
+ * lines via the pencil; reset via مسح كل السطور.
  */
 const METHOD_LABEL: Record<string, string> = {
   manual: 'يدوي',
@@ -81,6 +82,8 @@ export default function ExpenseAllocationDetail() {
   const [editLineCandidate, setEditLineCandidate] =
     useState<AllocationLineRow | null>(null);
   const [clearLinesOpen, setClearLinesOpen] = useState(false);
+  // PR-FE-B.4 — reverse-approved dialog state.
+  const [reverseOpen, setReverseOpen] = useState(false);
 
   const {
     data: period,
@@ -102,8 +105,10 @@ export default function ExpenseAllocationDetail() {
     : null;
 
   const isDraft = period?.status === 'draft';
+  const isApproved = period?.status === 'approved';
   const linesCount = period?.lines.length ?? 0;
   const showWriteActions = canManage && isDraft;
+  const showReverseAction = canManage && isApproved;
 
   return (
     <div dir="rtl" className="space-y-4 p-4">
@@ -276,6 +281,29 @@ export default function ExpenseAllocationDetail() {
                 </button>
               </div>
             )}
+
+            {/* PR-FE-B.4 — single-button action row for approved
+                periods.  Reverse is the only operation allowed once
+                approved (the FSM is draft → approved → reversed, and
+                reversed is terminal).  When status === 'reversed' both
+                action rows disappear entirely. */}
+            {showReverseAction && (
+              <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-3">
+                <span className="text-xs text-slate-500">
+                  الفترة معتمدة. التعديل على الرأس والسطور غير متاح.
+                </span>
+                <div className="flex-1" />
+                <button
+                  type="button"
+                  onClick={() => setReverseOpen(true)}
+                  title="العكس إجراء تدقيقي لا رجعة فيه. يتطلب سببًا."
+                  className="inline-flex items-center gap-2 rounded-md border border-amber-300 bg-white px-3 py-1.5 text-sm font-medium text-amber-700 hover:bg-amber-50"
+                >
+                  <Undo2 className="h-4 w-4" />
+                  <span>عكس</span>
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Lines table */}
@@ -329,10 +357,11 @@ export default function ExpenseAllocationDetail() {
           </div>
 
           <p className="text-[11px] text-slate-400">
-            تعديل الرأس والسطور والمسح والاعتماد والحذف متاحة لمن لديه
-            صلاحية{' '}
-            <code className="font-mono">expense_allocation.manage</code> في
-            الفترات المسودة فقط. عكس الفترات المعتمدة يُطلق في مرحلة لاحقة.
+            جميع إجراءات الكتابة (تعديل، إضافة سطر، اعتماد، حذف، عكس) تظهر
+            لمن لديه صلاحية{' '}
+            <code className="font-mono">expense_allocation.manage</code>.
+            الإجراءات المتاحة تتغير حسب حالة الفترة: مسودة (تعديل/سطور/
+            اعتماد/حذف) أو معتمدة (عكس فقط) أو معكوسة (للعرض كسجل تدقيقي).
           </p>
         </>
       )}
@@ -407,6 +436,12 @@ export default function ExpenseAllocationDetail() {
             linesCount={period.lines.length}
             totalAllocated={period.total_allocated}
             onClose={() => setClearLinesOpen(false)}
+          />
+          {/* PR-FE-B.4 — reverse-approved. */}
+          <ReversePeriodDialog
+            open={reverseOpen}
+            periodId={period.id}
+            onClose={() => setReverseOpen(false)}
           />
         </>
       )}
