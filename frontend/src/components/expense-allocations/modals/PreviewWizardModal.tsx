@@ -73,6 +73,19 @@ const TARGET_LABEL_AR: Record<PreviewTargetKind, string> = {
   warehouse: 'مخزن',
 };
 
+// PR-FE-C-POLISH-1 — single source of truth for the «lines exist»
+// message pattern.  Used in TWO places:
+//   1. `isLinesExistError(err)` below, to switch the wizard to the
+//      replace-confirm step on 400.
+//   2. The `_silentOnErrorPattern` on the save-preview request config,
+//      so the global axios toast doesn't fire the same Arabic message
+//      in parallel.  See `api/client.ts` ApiRequestConfig docs.
+//
+// Stable substring from BadRequestException at backend/src/expense-
+// allocations/expense-allocations.service.ts:886.  Any future
+// translation tweak of the rest of the sentence stays grep-safe.
+const LINES_EXIST_PATTERN = /تحتوي على سطور/;
+
 const isLinesExistError = (err: unknown): boolean => {
   const e = err as {
     response?: { status?: number; data?: { message?: unknown } };
@@ -80,11 +93,7 @@ const isLinesExistError = (err: unknown): boolean => {
   if (e?.response?.status !== 400) return false;
   const msg = e.response?.data?.message;
   const text = Array.isArray(msg) ? String(msg[0]) : String(msg ?? '');
-  // BadRequestException at backend/src/expense-allocations/expense-
-  // allocations.service.ts:886.  Match on the stable substring «تحتوي
-  // على سطور» so a future translation tweak of the rest doesn't
-  // silently break the replace flow.
-  return /تحتوي على سطور/.test(text);
+  return LINES_EXIST_PATTERN.test(text);
 };
 
 const formatError = (err: unknown, fallback: string): string => {
@@ -161,10 +170,21 @@ export function PreviewWizardModal({
 
   const saveMut = useMutation({
     mutationFn: (replace: boolean) =>
-      expenseAllocationsApi.savePreview(period.id, {
-        ...previewBody,
-        replace_existing: replace,
-      }),
+      expenseAllocationsApi.savePreview(
+        period.id,
+        {
+          ...previewBody,
+          replace_existing: replace,
+        },
+        {
+          // PR-FE-C-POLISH-1 — suppress the global axios toast ONLY
+          // for the expected «lines exist» 400 we already translate
+          // into the replace-confirm step below.  Any other 4xx on
+          // this call (e.g. 403, validation, server error) still
+          // toasts as usual.
+          _silentOnErrorPattern: LINES_EXIST_PATTERN,
+        },
+      ),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['allocations', 'periods'] });
       qc.invalidateQueries({

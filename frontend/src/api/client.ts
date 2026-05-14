@@ -1,4 +1,9 @@
-import axios, { AxiosError, AxiosInstance, AxiosResponse } from 'axios';
+import axios, {
+  AxiosError,
+  AxiosInstance,
+  AxiosRequestConfig,
+  AxiosResponse,
+} from 'axios';
 import toast from 'react-hot-toast';
 import { useAuthStore } from '@/stores/auth.store';
 // PR-FE-IDEM-RESPONSE-INTERCEPTOR (Sprint 5 / FE-IDEM PR 1)
@@ -257,8 +262,22 @@ api.interceptors.response.use(
       err.response?.data?.error ||
       err.message ||
       'حدث خطأ غير متوقع';
-    if (status && status >= 400 && status !== 401 && status !== 403) {
-      toast.error(Array.isArray(msg) ? msg[0] : String(msg));
+    const messageText = Array.isArray(msg) ? String(msg[0]) : String(msg);
+    // PR-FE-C-POLISH-1 — honor per-request `_silentOnErrorPattern`
+    // (see ApiRequestConfig).  Suppresses ONLY this single error;
+    // unrelated errors on other calls (or non-matching messages on
+    // the same call) still toast as usual.
+    const silentPattern: RegExp | undefined = original?._silentOnErrorPattern;
+    const isSilencedByPattern =
+      silentPattern instanceof RegExp && silentPattern.test(messageText);
+    if (
+      status &&
+      status >= 400 &&
+      status !== 401 &&
+      status !== 403 &&
+      !isSilencedByPattern
+    ) {
+      toast.error(messageText);
     }
     return Promise.reject(err);
   },
@@ -274,6 +293,34 @@ export function unwrap<T>(promise: Promise<AxiosResponse<T>>): Promise<T> {
     return body as T;
   });
 }
+
+// ─── PR-FE-C-POLISH-1 — per-request silent-error opt-out ────────────────
+//
+// Default behavior: the response interceptor toasts every 4xx error
+// (except 401 = refreshed, and 403 = silenced by design).  Some callers
+// surface a specific 4xx as part of their happy-path flow — e.g. the
+// PreviewWizardModal's save-preview call expects a 400 «الفترة تحتوي
+// على سطور بالفعل…» and translates it into the typed-«استبدال»
+// confirmation step.  In those cases the global toast duplicates the
+// signal the wizard is about to display in a richer form.
+//
+// `ApiRequestConfig` adds an optional `_silentOnErrorPattern` RegExp.
+// When set, the interceptor matches the pattern against
+// `response.data.message` and skips the toast on a match only.  Other
+// errors on the same call (and unmatched messages) still toast.
+//
+// The opt-out is per-request and per-pattern — narrowly scoped, no
+// global silencing.  Defined as a type alias rather than via module
+// augmentation so other Axios consumers across the codebase don't pick
+// up a new optional field they don't need.
+
+export type ApiRequestConfig = AxiosRequestConfig & {
+  /** Skip the global error toast when an error message matches this
+   *  pattern.  Caller is expected to surface the matched case in its
+   *  own UX (a wizard step, inline banner, etc.).  Unmatched errors
+   *  on the same request still toast. */
+  _silentOnErrorPattern?: RegExp;
+};
 
 // ─── PR-FE-IDEM-RESPONSE-INTERCEPTOR ────────────────────────────────────
 // Shared handling for the four idempotency-specific BE responses + the

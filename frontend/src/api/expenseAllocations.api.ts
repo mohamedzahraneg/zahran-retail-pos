@@ -18,7 +18,7 @@
  *   * Numeric columns arrive as strings from pg; callers Number(...) at
  *     egress.
  */
-import { api, unwrap } from './client';
+import { api, unwrap, type ApiRequestConfig } from './client';
 
 // ─── Types — periods ────────────────────────────────────────────────
 
@@ -425,12 +425,23 @@ export const expenseAllocationsApi = {
       ),
     ),
 
-  /** POST /api/v1/expense-allocations/periods/:id/save-preview */
-  savePreview: (id: string, body: SavePreviewBody) =>
+  /** POST /api/v1/expense-allocations/periods/:id/save-preview.
+   *
+   *  Optional `config` is an `ApiRequestConfig` so callers can opt out
+   *  of the global error toast for an expected 4xx — PreviewWizard
+   *  uses `_silentOnErrorPattern: /تحتوي على سطور/` to suppress the
+   *  duplicate toast when the backend returns the «lines exist» 400
+   *  that the wizard translates into its replace-confirmation step. */
+  savePreview: (
+    id: string,
+    body: SavePreviewBody,
+    config?: ApiRequestConfig,
+  ) =>
     unwrap<SavePreviewResult>(
       api.post(
         `/expense-allocations/periods/${encodeURIComponent(id)}/save-preview`,
         body,
+        config,
       ),
     ),
 };
