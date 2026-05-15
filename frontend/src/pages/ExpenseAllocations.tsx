@@ -8,6 +8,8 @@ import {
   ArrowLeftCircle,
   Plus,
   Trash2,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
 import {
   expenseAllocationsApi,
@@ -26,10 +28,18 @@ import { useAuthStore } from '@/stores/auth.store';
 import { fmtCairoDate } from '@/lib/dates';
 
 /**
- * Allocation periods list — PR-FE-A (read) + PR-FE-B.2 (period write).
+ * Allocation periods list — PR-FE-A (read) + PR-FE-B.2 (period write)
+ * + PR-FE-UX-ALLOC-2 (hide-reversed default).
  *
  * Renders all allocation periods with status, dates, audit fields,
  * and line counts.  Filters: from/to/status/warehouse_id.
+ *
+ * Reversed periods are terminal audit records — they clutter the
+ * active worklist, so the list **hides them by default** and exposes
+ * a sticky "إظهار المعكوسة" toggle.  Explicit `status=reversed` from
+ * the dropdown overrides the toggle so direct URLs and saved filters
+ * keep working.  Detail pages for reversed periods are unaffected
+ * (they live on a separate route).
  *
  * Write surface added in FE-B.2 and gated by `expense_allocation.manage`:
  *   * "+ فترة جديدة" header button (CreatePeriod via PeriodHeaderModal).
@@ -48,6 +58,12 @@ const STATUS_OPTIONS: { value: '' | AllocationPeriodStatus; label: string }[] = 
 export default function ExpenseAllocations() {
   const navigate = useNavigate();
   const [filters, setFilters] = useState<PeriodFilters>({});
+  // PR-FE-UX-ALLOC-2 — hide reversed (terminal/audit) periods by
+  // default so the active worklist isn't cluttered.  The toggle
+  // surfaces them when the operator explicitly asks; an explicit
+  // `status=reversed` filter also overrides the toggle so URLs and
+  // saved filters keep working.
+  const [showReversed, setShowReversed] = useState(false);
 
   // PR-FE-B.2 — defense-in-depth: server already enforces
   // `expense_allocation.manage` on every write, but we also hide the
@@ -65,7 +81,25 @@ export default function ExpenseAllocations() {
     queryFn: () => expenseAllocationsApi.listPeriods(filters),
   });
 
-  const rows: AllocationPeriodRow[] = useMemo(() => periods ?? [], [periods]);
+  // PR-FE-UX-ALLOC-2 — client-side filter for the reversed-hide
+  // toggle.  Bypassed when the user explicitly selected
+  // `status=reversed` from the dropdown.
+  const rawRows: AllocationPeriodRow[] = useMemo(() => periods ?? [], [periods]);
+  const explicitReversedFilter = filters.status === 'reversed';
+  const rows = useMemo(
+    () =>
+      showReversed || explicitReversedFilter
+        ? rawRows
+        : rawRows.filter((p) => p.status !== 'reversed'),
+    [rawRows, showReversed, explicitReversedFilter],
+  );
+  const hiddenReversedCount = useMemo(
+    () =>
+      showReversed || explicitReversedFilter
+        ? 0
+        : rawRows.filter((p) => p.status === 'reversed').length,
+    [rawRows, showReversed, explicitReversedFilter],
+  );
 
   const errMsg = error
     ? (error as any)?.response?.data?.message ||
@@ -162,7 +196,44 @@ export default function ExpenseAllocations() {
               ))}
             </select>
           </label>
-          <div className="flex items-end">
+          <div className="flex flex-col items-stretch justify-end gap-2">
+            {/* PR-FE-UX-ALLOC-2 — reversed-visibility toggle.  Hidden
+                (i.e. no effect) when the operator already selected
+                `status=reversed` explicitly from the dropdown — that
+                selection overrides the toggle. */}
+            {!explicitReversedFilter && (
+              <button
+                type="button"
+                onClick={() => setShowReversed((v) => !v)}
+                title={
+                  showReversed
+                    ? 'إخفاء الفترات المعكوسة (سجل تدقيقي)'
+                    : 'إظهار الفترات المعكوسة (سجل تدقيقي)'
+                }
+                className={
+                  'inline-flex items-center justify-center gap-2 rounded-md border px-3 py-1.5 text-xs ' +
+                  (showReversed
+                    ? 'border-slate-300 bg-slate-100 text-slate-700 hover:bg-slate-200'
+                    : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50')
+                }
+              >
+                {showReversed ? (
+                  <EyeOff className="h-3.5 w-3.5" />
+                ) : (
+                  <Eye className="h-3.5 w-3.5" />
+                )}
+                <span>
+                  {showReversed
+                    ? 'إخفاء المعكوسة'
+                    : 'إظهار المعكوسة'}
+                  {!showReversed && hiddenReversedCount > 0 && (
+                    <span className="ms-1 font-mono tabular-nums text-slate-400">
+                      ({hiddenReversedCount})
+                    </span>
+                  )}
+                </span>
+              </button>
+            )}
             {(filters.from || filters.to || filters.status) && (
               <button
                 type="button"
@@ -208,7 +279,16 @@ export default function ExpenseAllocations() {
             ) : rows.length === 0 ? (
               <tr>
                 <td colSpan={8} className="p-6 text-center text-slate-500">
-                  لا توجد فترات توزيع مطابقة للتصفية.
+                  <div>لا توجد فترات توزيع مطابقة للتصفية.</div>
+                  {hiddenReversedCount > 0 && (
+                    <div className="mt-1 text-xs text-slate-400">
+                      توجد{' '}
+                      <span className="font-mono tabular-nums">
+                        {hiddenReversedCount}
+                      </span>{' '}
+                      فترة معكوسة مخفية — فعّل «إظهار المعكوسة» للعرض.
+                    </div>
+                  )}
                 </td>
               </tr>
             ) : (
@@ -278,7 +358,9 @@ export default function ExpenseAllocations() {
       <p className="text-[11px] text-slate-400">
         إنشاء وحذف الفترات المسودة متاحان لمن لديه صلاحية{' '}
         <code className="font-mono">expense_allocation.manage</code>. التعديل
-        على السطور واعتماد وعكس الفترات يظهران داخل صفحة التفاصيل.
+        على السطور واعتماد وعكس الفترات يظهران داخل صفحة التفاصيل. الفترات
+        المعكوسة (سجل تدقيقي) مخفية افتراضيًا — استخدم زر «إظهار المعكوسة»
+        أو فلتر الحالة لعرضها.
       </p>
 
       {/* PR-FE-B.2 — write modals, mounted only when the operator

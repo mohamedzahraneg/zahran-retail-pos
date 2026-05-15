@@ -594,13 +594,17 @@ export function PreviewWizardModal({
       aria-modal="true"
       aria-label={title}
     >
-      {/* PR-FE-UX-ALLOC-1 — widen the modal to comfortably hold the
-          4-column proposed-lines table on the result step and switch
-          the layout to flex-column with `max-h-[92vh]` so the header
-          and footer stay pinned while only the middle scrolls. */}
+      {/* PR-FE-UX-ALLOC-2 — give the modal a DEFINITE height
+          (`h-[min(92vh,820px)]`).  The previous `max-h-[92vh]` only
+          capped the height; flex containers without a fixed/min size
+          shrink to content, so the modal rendered ~256px tall on the
+          source step and the result step couldn't reach the cap
+          either.  A definite height lets the body (`flex-1`) claim
+          the full available vertical space so the result table shows
+          many rows before scrolling. */}
       <div
         onClick={(e) => e.stopPropagation()}
-        className="flex w-[min(96vw,1200px)] max-h-[92vh] flex-col overflow-hidden rounded-2xl bg-white shadow-xl"
+        className="flex w-[min(96vw,900px)] h-[min(92vh,820px)] flex-col overflow-hidden rounded-2xl bg-white shadow-xl"
       >
         <div className="flex shrink-0 items-center justify-between border-b border-slate-100 px-5 py-4">
           <div className="flex items-center gap-3">
