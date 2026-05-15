@@ -389,9 +389,9 @@ export function PreviewWizardModal({
           />
         </div>
 
-        <div className="overflow-hidden rounded-md border border-slate-200">
-          <table className="w-full text-xs">
-            <thead className="bg-slate-50 text-slate-600">
+        <div className="overflow-x-auto rounded-md border border-slate-200">
+          <table className="w-full min-w-[640px] text-xs">
+            <thead className="sticky top-0 z-10 bg-slate-50 text-slate-600 shadow-[0_1px_0_0_rgb(241_245_249)]">
               <tr>
                 <th className="p-2 text-right font-medium">الهدف</th>
                 <th className="p-2 text-right font-medium">قيمة القاعدة</th>
@@ -594,11 +594,15 @@ export function PreviewWizardModal({
       aria-modal="true"
       aria-label={title}
     >
+      {/* PR-FE-UX-ALLOC-1 — widen the modal to comfortably hold the
+          4-column proposed-lines table on the result step and switch
+          the layout to flex-column with `max-h-[92vh]` so the header
+          and footer stay pinned while only the middle scrolls. */}
       <div
         onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-2xl overflow-hidden rounded-2xl bg-white shadow-xl"
+        className="flex w-[min(96vw,1200px)] max-h-[92vh] flex-col overflow-hidden rounded-2xl bg-white shadow-xl"
       >
-        <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
+        <div className="flex shrink-0 items-center justify-between border-b border-slate-100 px-5 py-4">
           <div className="flex items-center gap-3">
             <h3 className="text-base font-semibold text-slate-900">
               {title}
@@ -616,14 +620,14 @@ export function PreviewWizardModal({
           </button>
         </div>
 
-        <div className="max-h-[70vh] overflow-y-auto px-5 py-4">
+        <div className="flex-1 overflow-y-auto px-5 py-4">
           {step === 'source' && renderSource()}
           {step === 'target_method' && renderTargetMethod()}
           {step === 'result' && renderResult()}
           {step === 'replace_confirm' && renderReplaceConfirm()}
         </div>
 
-        <div className="flex flex-wrap items-center gap-2 border-t border-slate-100 px-5 py-3">
+        <div className="flex shrink-0 flex-wrap items-center gap-2 border-t border-slate-100 px-5 py-3">
           {renderFooter()}
         </div>
       </div>

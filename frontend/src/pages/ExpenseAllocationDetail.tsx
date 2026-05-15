@@ -115,9 +115,14 @@ export default function ExpenseAllocationDetail() {
 
   const isDraft = period?.status === 'draft';
   const isApproved = period?.status === 'approved';
+  const isReversed = period?.status === 'reversed';
   const linesCount = period?.lines.length ?? 0;
   const showWriteActions = canManage && isDraft;
   const showReverseAction = canManage && isApproved;
+  // PR-FE-UX-ALLOC-1 — visible reason row for non-draft periods so the
+  // operator immediately understands why action buttons are absent.
+  // Symmetric to the existing approved row at the same coordinates.
+  const showReversedNotice = isReversed;
 
   return (
     <div dir="rtl" className="space-y-4 p-4">
@@ -309,8 +314,7 @@ export default function ExpenseAllocationDetail() {
             {/* PR-FE-B.4 — single-button action row for approved
                 periods.  Reverse is the only operation allowed once
                 approved (the FSM is draft → approved → reversed, and
-                reversed is terminal).  When status === 'reversed' both
-                action rows disappear entirely. */}
+                reversed is terminal). */}
             {showReverseAction && (
               <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-3">
                 <span className="text-xs text-slate-500">
@@ -326,6 +330,20 @@ export default function ExpenseAllocationDetail() {
                   <Undo2 className="h-4 w-4" />
                   <span>عكس</span>
                 </button>
+              </div>
+            )}
+
+            {/* PR-FE-UX-ALLOC-1 — symmetric notice for reversed
+                (terminal) periods.  Without this row the page looked
+                "empty of actions" without an in-context reason,
+                leading admin users to suspect a missing permission. */}
+            {showReversedNotice && (
+              <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-3">
+                <Undo2 className="h-4 w-4 text-slate-400" />
+                <span className="text-xs text-slate-500">
+                  هذه الفترة معكوسة (حالة نهائية). الصفحة للعرض فقط
+                  كسجل تدقيقي — لا توجد إجراءات تعديل.
+                </span>
               </div>
             )}
           </div>
