@@ -385,6 +385,21 @@ export const expenseAllocationsApi = {
       ),
     ),
 
+  /** DELETE /api/v1/expense-allocations/periods/:id/lines/:line_id
+   *
+   *  PR-PHASE2-B5 — targeted per-line delete.  Returns `{id, deleted:true}`.
+   *  Server enforces draft-only + ownership (line belongs to period);
+   *  responds 404 when the line either doesn't exist or belongs to a
+   *  different period (no info leak across periods). */
+  deleteLine: (id: string, lineId: string) =>
+    unwrap<{ id: string; deleted: true }>(
+      api.delete(
+        `/expense-allocations/periods/${encodeURIComponent(
+          id,
+        )}/lines/${encodeURIComponent(lineId)}`,
+      ),
+    ),
+
   /** DELETE /api/v1/expense-allocations/periods/:id/lines */
   clearLines: (id: string) =>
     unwrap<{ cleared: number }>(

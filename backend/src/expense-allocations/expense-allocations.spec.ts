@@ -896,6 +896,81 @@ describe('ExpenseAllocationsService.updateLine (PR-PHASE2-B2)', () => {
   });
 });
 
+// ─── 13b. deleteLine (PR-PHASE2-B5) ─────────────────────────────
+
+describe('ExpenseAllocationsService.deleteLine (PR-PHASE2-B5)', () => {
+  it('deletes a single line on a draft period and recomputes total_allocated', async () => {
+    const { ds, calls } = makeTxMockDs([
+      { match: /FOR UPDATE/, reply: [{ id: 'p-1', status: 'draft' }] },
+      // Ownership probe — line exists and belongs to this period.
+      { match: /SELECT id FROM expense_allocation_lines WHERE id/, reply: [{ id: 'line-1' }] },
+      // Targeted DELETE on the single line.
+      { match: /^\s*DELETE FROM expense_allocation_lines\s+WHERE id/, reply: [] },
+      // Recompute pulled from SUM(allocated_amount) of remaining lines.
+      { match: /^\s*UPDATE expense_allocation_periods\s+SET total_allocated/, reply: [] },
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    const res = await svc.deleteLine('p-1', 'line-1');
+    expect(res).toEqual({ id: 'line-1', deleted: true });
+
+    // Write-surface guard: confirm BOTH the targeted DELETE and the
+    // period recompute fired (and no bulk DELETE …WHERE period_id).
+    expect(
+      calls.some((c) => /DELETE FROM expense_allocation_lines\s+WHERE id\s*=\s*\$1/.test(c.sql)),
+    ).toBe(true);
+    expect(
+      calls.some((c) => /UPDATE expense_allocation_periods\s+SET total_allocated/.test(c.sql)),
+    ).toBe(true);
+    expect(
+      calls.some((c) => /DELETE FROM expense_allocation_lines\s+WHERE period_id/.test(c.sql)),
+    ).toBe(false);
+
+    // Transaction boundary: every SQL call ran in a transaction.  None
+    // ran on the bare DataSource.  Same pattern asserted in
+    // clearLines / updateLine.
+    expect(calls.every((c) => c.inTransaction)).toBe(true);
+  });
+
+  it('rejects deleteLine on an approved period', async () => {
+    const { ds } = makeTxMockDs([
+      { match: /FOR UPDATE/, reply: [{ id: 'p-1', status: 'approved' }] },
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    await expect(svc.deleteLine('p-1', 'line-1')).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+  });
+
+  it('rejects deleteLine on a reversed period', async () => {
+    const { ds } = makeTxMockDs([
+      { match: /FOR UPDATE/, reply: [{ id: 'p-1', status: 'reversed' }] },
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    await expect(svc.deleteLine('p-1', 'line-1')).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+  });
+
+  it('throws NotFound when the line does not belong to the period (or is missing entirely)', async () => {
+    const { ds, calls } = makeTxMockDs([
+      { match: /FOR UPDATE/, reply: [{ id: 'p-1', status: 'draft' }] },
+      // Empty reply — covers both "line doesn't exist" and "line
+      // exists but belongs to a different period" without leaking
+      // which one it is.
+      { match: /SELECT id FROM expense_allocation_lines WHERE id/, reply: [] },
+    ]);
+    const svc = new ExpenseAllocationsService(ds as any);
+    await expect(svc.deleteLine('p-1', 'ghost-line')).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+    // The DELETE must NOT have been issued when the ownership probe
+    // returned empty.
+    expect(
+      calls.some((c) => /DELETE FROM expense_allocation_lines/.test(c.sql)),
+    ).toBe(false);
+  });
+});
+
 // ─── 14. approvePeriod ──────────────────────────────────────────
 
 describe('ExpenseAllocationsService.approvePeriod (PR-PHASE2-B2)', () => {

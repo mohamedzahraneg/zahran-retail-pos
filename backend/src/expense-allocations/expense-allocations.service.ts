@@ -556,6 +556,51 @@ export class ExpenseAllocationsService {
     });
   }
 
+  /**
+   * Delete a single allocation line from a draft period (PR-PHASE2-B5).
+   *
+   * Sits between `clearLines` (bulk) and `updateLine` (per-line) — same
+   * transaction shape, same draft-only guard, same `lockPeriod` +
+   * `recomputeTotal` helpers.  Accepts any line `allocation_method`
+   * (manual OR engine-computed via save-preview) because the operator's
+   * intent is "remove this single line", not "edit it" — only the
+   * editing path has the manual-only restriction.
+   *
+   * Write surface: `expense_allocation_lines` DELETE + `expense_
+   * allocation_periods` UPDATE total_allocated only.  No FinancialEngine
+   * calls, no JE/CT/SM/inventory/expense writes.
+   *
+   * Returns `{ id, deleted: true }` — minimal payload, mirrors the
+   * shape `deletePeriod` already returns so the FE wrapper signature
+   * stays consistent.
+   */
+  async deleteLine(periodId: string, lineId: string) {
+    return this.ds.transaction(async (em) => {
+      const current = await this.lockPeriod(em, periodId);
+      if (current.status !== 'draft') {
+        throw new BadRequestException(
+          'يمكن حذف سطور الفترات في حالة المسودة فقط.',
+        );
+      }
+
+      // Combined ownership + existence check.  "Wrong period" and
+      // "doesn't exist at all" return the same NotFound on purpose
+      // (no line-existence leak across periods).
+      const [line] = await em.query(
+        `SELECT id FROM expense_allocation_lines WHERE id = $1 AND period_id = $2`,
+        [lineId, periodId],
+      );
+      if (!line) throw new NotFoundException('سطر التوزيع غير موجود.');
+
+      await em.query(
+        `DELETE FROM expense_allocation_lines WHERE id = $1`,
+        [lineId],
+      );
+      await this.recomputeTotal(em, periodId);
+      return { id: lineId, deleted: true as const };
+    });
+  }
+
   // ─── FSM transitions ────────────────────────────────────────────
 
   /**

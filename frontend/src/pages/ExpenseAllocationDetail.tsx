@@ -32,6 +32,7 @@ import { DeleteDraftDialog } from '@/components/expense-allocations/modals/Delet
 import { ApprovePeriodDialog } from '@/components/expense-allocations/modals/ApprovePeriodDialog';
 import { LineModal } from '@/components/expense-allocations/modals/LineModal';
 import { ClearLinesDialog } from '@/components/expense-allocations/modals/ClearLinesDialog';
+import { DeleteLineDialog } from '@/components/expense-allocations/modals/DeleteLineDialog';
 import { ReversePeriodDialog } from '@/components/expense-allocations/modals/ReversePeriodDialog';
 import { PreviewWizardModal } from '@/components/expense-allocations/modals/PreviewWizardModal';
 import { useAuthStore } from '@/stores/auth.store';
@@ -39,24 +40,21 @@ import { fmtCairoDate, fmtCairoDateTimeSeconds } from '@/lib/dates';
 
 /**
  * Allocation period detail — PR-FE-A (read) + PR-FE-B.2 (period write)
- * + PR-FE-B.3 (line write) + PR-FE-B.4 (reverse-approved).
+ * + PR-FE-B.3 (line write) + PR-FE-B.4 (reverse-approved) +
+ * PR-PHASE2-B5 (per-line delete).
  *
  * Renders the period header (with audit fields based on status) and
  * the lines table.  Three write surfaces, each gated by
  * `expense_allocation.manage` AND the period's FSM state:
  *
- *   draft     → تعديل الرأس · + سطر يدوي · pencil-per-line · مسح كل
- *               السطور (when lines>0) · اعتماد (when lines>0) · حذف
- *               الفترة.
+ *   draft     → تعديل الرأس · + سطر يدوي · pencil-per-line · trash-
+ *               per-line · مسح كل السطور (when lines>0) · اعتماد
+ *               (when lines>0) · حذف الفترة.
  *   approved  → عكس only.  Approve is recoverable via reverse, so
  *               approved periods are otherwise read-only.
  *   reversed  → no write actions.  Terminal state — period stays
  *               visible as an audit record (lines + reversed_by/at/
  *               reason).
- *
- * Per-line delete is intentionally NOT available — the backend has
- * no DELETE /lines/:line_id endpoint.  Operators correct individual
- * lines via the pencil; reset via مسح كل السطور.
  */
 const METHOD_LABEL: Record<string, string> = {
   manual: 'يدوي',
@@ -85,6 +83,10 @@ export default function ExpenseAllocationDetail() {
   const [editLineCandidate, setEditLineCandidate] =
     useState<AllocationLineRow | null>(null);
   const [clearLinesOpen, setClearLinesOpen] = useState(false);
+  // PR-PHASE2-B5 — per-line delete dialog state.  Same draft + manage
+  // gate as the edit pencil; mirror's clearLinesOpen at the line scope.
+  const [deleteLineCandidate, setDeleteLineCandidate] =
+    useState<AllocationLineRow | null>(null);
   // PR-FE-B.4 — reverse-approved dialog state.
   const [reverseOpen, setReverseOpen] = useState(false);
   // PR-FE-C — preview wizard state.  Open to anyone with the view
@@ -371,6 +373,7 @@ export default function ExpenseAllocationDetail() {
                       line={l}
                       canEdit={showWriteActions}
                       onEdit={() => setEditLineCandidate(l)}
+                      onDelete={() => setDeleteLineCandidate(l)}
                     />
                   ))
                 )}
@@ -463,6 +466,19 @@ export default function ExpenseAllocationDetail() {
             totalAllocated={period.total_allocated}
             onClose={() => setClearLinesOpen(false)}
           />
+          {/* PR-PHASE2-B5 — per-line delete.  Mounted alongside the
+              edit modal so the line's identity stays in state while
+              the typed-confirm dialog is open. */}
+          <DeleteLineDialog
+            open={!!deleteLineCandidate}
+            periodId={period.id}
+            lineId={deleteLineCandidate?.id ?? ''}
+            lineLabel={
+              deleteLineCandidate ? lineLabelFor(deleteLineCandidate) : ''
+            }
+            lineAmount={deleteLineCandidate?.allocated_amount ?? '0'}
+            onClose={() => setDeleteLineCandidate(null)}
+          />
           {/* PR-FE-B.4 — reverse-approved. */}
           <ReversePeriodDialog
             open={reverseOpen}
@@ -533,10 +549,12 @@ function LineRow({
   line,
   canEdit,
   onEdit,
+  onDelete,
 }: {
   line: AllocationLineRow;
   canEdit?: boolean;
   onEdit?: () => void;
+  onDelete?: () => void;
 }) {
   const target =
     line.product_name ??
@@ -585,22 +603,54 @@ function LineRow({
           maximumFractionDigits: 2,
         })}
       </td>
-      {/* PR-FE-B.3 — pencil opens the LineModal in edit mode.  No
-          per-line delete: backend has no DELETE /lines/:line_id;
-          operators use «مسح كل السطور» to wipe. */}
+      {/* PR-FE-B.3 / PR-PHASE2-B5 — pencil opens the LineModal in edit
+          mode; trash opens the per-line typed-confirm DeleteLineDialog.
+          Both icons share the same draft + manage gate (canEdit). */}
       {canEdit && (
         <td className="p-3 text-left">
-          <button
-            type="button"
-            aria-label="تعديل السطر"
-            title="تعديل السطر"
-            onClick={onEdit}
-            className="rounded p-1 text-slate-500 hover:bg-slate-100 hover:text-slate-700"
-          >
-            <Pencil className="h-3.5 w-3.5" />
-          </button>
+          <div className="flex items-center justify-end gap-1">
+            <button
+              type="button"
+              aria-label="تعديل السطر"
+              title="تعديل السطر"
+              onClick={onEdit}
+              className="rounded p-1 text-slate-500 hover:bg-slate-100 hover:text-slate-700"
+            >
+              <Pencil className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              aria-label="حذف السطر"
+              title="حذف السطر"
+              onClick={onDelete}
+              className="rounded p-1 text-slate-500 hover:bg-rose-50 hover:text-rose-700"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </button>
+          </div>
         </td>
       )}
     </tr>
   );
+}
+
+/**
+ * Compose a short human-readable label for a line — used in the
+ * per-line delete confirm dialog so the operator can sanity-check
+ * which row they're about to remove.  Mirrors the (source → target)
+ * layout the table already shows; the amount is rendered separately
+ * by DeleteLineDialog.
+ */
+function lineLabelFor(line: AllocationLineRow): string {
+  const source = line.expense_no
+    ? `مصروف ${line.expense_no}`
+    : line.expense_category_name
+      ? `فئة ${line.expense_category_name}`
+      : '—';
+  const target =
+    line.product_name ??
+    line.product_category_name ??
+    line.target_warehouse_name ??
+    '—';
+  return `${source} ← ${target}`;
 }

@@ -231,6 +231,21 @@ export class ExpenseAllocationsController {
     return this.svc.updateLine(id, lineId, dto);
   }
 
+  // PR-PHASE2-B5 — targeted per-line delete.  Sits between `clearLines`
+  // (bulk) and `updateLine` (per-line edit).  Same draft-only + manage
+  // FSM contract as the rest of the line surface.  Returns 404 when the
+  // line either doesn't exist or belongs to a different period (no
+  // information leak across periods).
+  @Delete('periods/:id/lines/:line_id')
+  @Permissions('expense_allocation.manage')
+  @ApiOperation({ summary: 'حذف سطر توزيع واحد (مسودة فقط)' })
+  deleteLine(
+    @Param('id') id: string,
+    @Param('line_id') lineId: string,
+  ) {
+    return this.svc.deleteLine(id, lineId);
+  }
+
   // ─── FSM transitions (manage permission) ────────────────────────
 
   @Post('periods/:id/approve')
