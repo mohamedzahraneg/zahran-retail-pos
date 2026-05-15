@@ -18,6 +18,123 @@ import { PaymentsService } from '../payments/payments.service';
 import { resolveLogoKey } from '../payments/providers.catalog';
 import { ShiftsService } from '../shifts/shifts.service';
 
+/**
+ * PR-POS-INVOICE-DELTA-1 — classify an invoice edit as monetary-only
+ * or structural.
+ *
+ * Monetary-only means: the set of `(variant_id, quantity)` pairs is
+ * unchanged, the payment shape (count + multiset of payment_method +
+ * payment_account_id) is unchanged, and the customer_id is unchanged.
+ * Only `unit_price`, per-line `discount`, invoice-level
+ * `discount_total`, and per-payment `amount` may have moved — i.e.
+ * the cash mathematically changed but no products / quantities / GL
+ * routing did.
+ *
+ * Returns `{ monetary_only: false }` for structural edits — the
+ * caller falls through to the legacy reverse-and-repost path.
+ *
+ * Returns `{ monetary_only: true, delta }` for monetary-only edits,
+ * where `delta = (sum of new dto.payments.amount) − orig.paid_amount`.
+ *
+ *   delta > 0 → applyMonetaryDeltaEdit posts one additive sale JE+CT
+ *               + appends one `+delta` `invoice_payments` row.
+ *   delta = 0 → applyMonetaryDeltaEdit updates invoice metadata only;
+ *               no GL/CT/payment writes.
+ *   delta < 0 → applyMonetaryDeltaEdit returns
+ *               `{ monetary_only: false }` (delegated structurally)
+ *               because `invoice_payments.amount > 0` blocks a
+ *               negative delta payment row.  See PR halt report.
+ */
+export function classifyInvoiceEdit(
+  orig: { paid_amount: number | string; customer_id: string | null },
+  origItems: Array<{ variant_id: string; quantity: number | string }>,
+  origPayments: Array<{
+    payment_method: string;
+    amount: number | string;
+    payment_account_id: string | null;
+  }>,
+  dto: {
+    lines: Array<{ variant_id: string; qty: number; unit_price?: number; discount?: number }>;
+    payments?: Array<{ payment_method: string; amount: number; payment_account_id?: string | null }>;
+    customer_id?: string | null;
+  },
+): { monetary_only: true; delta: number } | { monetary_only: false; reason: string } {
+  // ── 1) Lines: same variant_id + same quantity per variant, same count
+  const dtoLines = dto.lines ?? [];
+  if (dtoLines.length !== origItems.length) {
+    return { monetary_only: false, reason: 'line_count_changed' };
+  }
+  // Aggregate qty per variant (multiple rows for the same variant collapse).
+  const origQtyByVariant = new Map<string, number>();
+  for (const i of origItems) {
+    const key = i.variant_id;
+    origQtyByVariant.set(
+      key,
+      (origQtyByVariant.get(key) ?? 0) + Number(i.quantity),
+    );
+  }
+  const dtoQtyByVariant = new Map<string, number>();
+  for (const l of dtoLines) {
+    dtoQtyByVariant.set(
+      l.variant_id,
+      (dtoQtyByVariant.get(l.variant_id) ?? 0) + Number(l.qty),
+    );
+  }
+  if (origQtyByVariant.size !== dtoQtyByVariant.size) {
+    return { monetary_only: false, reason: 'variant_set_changed' };
+  }
+  // Two passes so the failure reason is precise: first verify the
+  // variant_id sets match (a swap reads as 'variant_set_changed', not
+  // 'qty_changed' just because the missing variant has undefined qty).
+  for (const variantId of origQtyByVariant.keys()) {
+    if (!dtoQtyByVariant.has(variantId)) {
+      return { monetary_only: false, reason: 'variant_set_changed' };
+    }
+  }
+  for (const [variantId, qty] of origQtyByVariant) {
+    if (dtoQtyByVariant.get(variantId) !== qty) {
+      return { monetary_only: false, reason: 'qty_changed' };
+    }
+  }
+
+  // ── 2) Payment shape: same count, same multiset of (method, account)
+  const dtoPayments = dto.payments ?? [];
+  if (dtoPayments.length !== origPayments.length) {
+    return { monetary_only: false, reason: 'payment_count_changed' };
+  }
+  const keyOf = (p: { payment_method: string; payment_account_id?: string | null }) =>
+    `${p.payment_method}|${p.payment_account_id ?? ''}`;
+  const origKeys = origPayments.map(keyOf).sort();
+  const dtoKeys = dtoPayments.map(keyOf).sort();
+  for (let i = 0; i < origKeys.length; i++) {
+    if (origKeys[i] !== dtoKeys[i]) {
+      return { monetary_only: false, reason: 'payment_shape_changed' };
+    }
+  }
+
+  // ── 3) Customer unchanged when specified
+  if (
+    dto.customer_id != null &&
+    dto.customer_id !== orig.customer_id
+  ) {
+    return { monetary_only: false, reason: 'customer_changed' };
+  }
+
+  // ── 4) Compute delta from payment amounts
+  const newPaid = dtoPayments.reduce((s, p) => s + Number(p.amount || 0), 0);
+  const oldPaid = Number(orig.paid_amount || 0);
+  const delta = +(newPaid - oldPaid).toFixed(2);
+
+  // Negative delta cannot use the delta-payment path (CHECK constraint
+  // on invoice_payments.amount > 0).  Treat as structural and fall
+  // through to legacy reverse-and-repost.
+  if (delta < 0) {
+    return { monetary_only: false, reason: 'negative_delta_uses_legacy_path' };
+  }
+
+  return { monetary_only: true, delta };
+}
+
 @Injectable()
 export class PosService {
   constructor(
@@ -719,6 +836,17 @@ export class PosService {
    * The invoice_no and id are preserved, so customers/receivers still
    * see the same document — only the line-level content changes and a
    * history row records who changed what and when.
+   *
+   * PR-POS-INVOICE-DELTA-1 — early-exit for the monetary-only positive
+   * delta case.  When the edit changes ONLY the total / unit_price /
+   * discount (no line product/qty changes, same payment shape, same
+   * customer) AND the delta is > 0, we take a different path that
+   * APPENDS one `+delta` payment row + posts one additive sale JE+CT,
+   * without voiding the original.  Zero-delta monetary-only edits skip
+   * the GL posting entirely.  Negative deltas + every structural shape
+   * keep the original reverse-and-repost path because the
+   * `invoice_payments.amount > 0` CHECK constraint blocks the negative
+   * payment row a symmetric "delta" path would need.
    */
   async editInvoice(
     id: string,
@@ -748,6 +876,25 @@ export class PosService {
         `SELECT * FROM invoice_payments WHERE invoice_id = $1 ORDER BY id`,
         [id],
       );
+
+      // ── PR-POS-INVOICE-DELTA-1 — monetary-only short-circuit ─────
+      // Detect "price-only / total-only" edits and skip the heavy
+      // reverse-and-repost path when the change is just a monetary
+      // tweak.  Negative-delta + structural changes still fall through
+      // to the legacy path below.
+      const classification = classifyInvoiceEdit(orig, origItems, origPayments, dto);
+      if (classification.monetary_only) {
+        return this.applyMonetaryDeltaEdit(
+          em,
+          id,
+          orig,
+          origPayments,
+          dto,
+          userId,
+          reason,
+          classification.delta,
+        );
+      }
 
       // ── 1) Reverse stock (one adjustment-in per original line) ───
       for (const it of origItems) {
@@ -861,7 +1008,7 @@ export class PosService {
       // Keep the original VAT configuration from the invoice row.
       const vatRate = Number(orig.tax_rate || 0);
       let tax_amount = 0;
-      let grand_total = net_before_tax;
+      const grand_total = net_before_tax;
       if (vatRate > 0) {
         // Assume inclusive (matches what createInvoice does by default).
         tax_amount = (net_before_tax * vatRate) / (100 + vatRate);
@@ -1126,6 +1273,219 @@ export class PosService {
 
       return { invoice: updated, edited: true, history_id: historyId };
     });
+  }
+
+  /**
+   * PR-POS-INVOICE-DELTA-1 — apply a monetary-only edit (positive or
+   * zero delta) WITHOUT reversing the original invoice JE.  Caller
+   * (`editInvoice`) has already classified the edit as monetary-only
+   * via `classifyInvoiceEdit` and is running inside the outer
+   * transaction.
+   *
+   * What this method does:
+   *   1. INSERT an `invoice_edit_history` row with the before-snapshot.
+   *   2. (delta > 0 ONLY) INSERT one `+delta` `invoice_payments` row
+   *      using the FIRST original payment row's method + account
+   *      (mirroring the cashbox/GL routing of the historical sale).
+   *   3. UPDATE invoices grand_total / paid_amount / tax_amount /
+   *      change_amount / notes / customer_id / salesperson_id /
+   *      edit_count / last_edited_at.
+   *   4. Backfill the history row's after-snapshot.
+   *   5. (delta > 0 ONLY) Call `posting.postInvoiceDelta` which posts
+   *      ONE additive JE+CT for the delta only.
+   *   6. Refresh the closed shift snapshot if the invoice belongs to
+   *      one (same logic as the legacy path).
+   *   7. Emit the realtime event so the UI refetches.
+   *
+   * What this method explicitly does NOT do (vs the legacy path):
+   *   · Does not reverse stock (lines are unchanged).
+   *   · Does not DELETE invoice_items (lines are unchanged).
+   *   · Does not DELETE the original invoice_payments rows.
+   *   · Does not call `reverseByReference` / `postInvoiceEdit`.
+   *   · Does not emit a `reversal_sale` CT or a `refund` JE.
+   */
+  private async applyMonetaryDeltaEdit(
+    em: any,
+    id: string,
+    orig: any,
+    origPayments: Array<any>,
+    dto: any,
+    userId: string,
+    reason: string,
+    delta: number,
+  ) {
+    // Recompute totals from the DTO.  Lines are unchanged by definition
+    // (monetary-only classification), so we read item rows for COGS
+    // pass-through and trust the DTO's per-line unit_price + discount
+    // + invoice-level discount_total.
+    const lines = dto.lines as Array<{
+      variant_id: string;
+      qty: number;
+      unit_price: number;
+      discount?: number;
+    }>;
+    const subtotal = lines.reduce(
+      (s, l) => s + Number(l.unit_price) * Number(l.qty) - Number(l.discount || 0),
+      0,
+    );
+    const invoice_discount = Number(dto.discount_total || 0);
+    const net_before_tax = Math.max(0, subtotal - invoice_discount);
+    const vatRate = Number(orig.tax_rate || 0);
+    let tax_amount = 0;
+    if (vatRate > 0) {
+      tax_amount = (net_before_tax * vatRate) / (100 + vatRate);
+    }
+    const grand_total = net_before_tax;
+    const newPaidTotal = (dto.payments ?? []).reduce(
+      (s: number, p: any) => s + Number(p.amount || 0),
+      0,
+    );
+    const change_amount = Math.max(0, newPaidTotal - grand_total);
+
+    // ── 1) History row with before-snapshot ────────────────────────
+    const origItems = await em.query(
+      `SELECT * FROM invoice_items WHERE invoice_id = $1 ORDER BY id`,
+      [id],
+    );
+    const [historyRow] = await em.query(
+      `INSERT INTO invoice_edit_history
+         (invoice_id, edited_by, reason, before_snapshot)
+       VALUES ($1,$2,$3,$4::jsonb)
+       RETURNING id`,
+      [
+        id,
+        userId,
+        reason,
+        JSON.stringify({ invoice: orig, items: origItems, payments: origPayments }),
+      ],
+    );
+    const historyId = historyRow.id;
+
+    // ── 2) Append +delta payment row (delta > 0 only) ──────────────
+    // Mirror the first original payment's method + account so the
+    // delta row routes through the same GL bucket the historical sale
+    // touched (which postInvoiceDelta will mirror on the JE side).
+    if (delta > 0) {
+      const proto = origPayments[0];
+      await em.query(
+        `INSERT INTO invoice_payments
+           (invoice_id, payment_method, amount, reference,
+            payment_account_id, payment_account_snapshot)
+         VALUES ($1,$2,$3,$4,$5,$6::jsonb)`,
+        [
+          id,
+          proto.payment_method,
+          delta,
+          // Reference label makes the row identifiable in audit views.
+          `PR-POS-INVOICE-DELTA-1 +${delta}`,
+          proto.payment_account_id ?? null,
+          proto.payment_account_snapshot
+            ? JSON.stringify(proto.payment_account_snapshot)
+            : null,
+        ],
+      );
+    }
+
+    // ── 3) Update invoice totals + edit marker ─────────────────────
+    // COGS doesn't change for monetary-only edits (lines unchanged),
+    // so gross_profit moves by exactly `delta`.
+    const cogs_total = Number(orig.cogs_total || 0);
+    const gross_profit = grand_total - cogs_total;
+    const [updated] = await em.query(
+      `UPDATE invoices
+          SET subtotal         = $2,
+              invoice_discount = $3,
+              tax_amount       = $4,
+              grand_total      = $5,
+              paid_amount      = $6,
+              change_amount    = $7,
+              gross_profit     = $8,
+              customer_id      = COALESCE($9, customer_id),
+              salesperson_id   = COALESCE($10, salesperson_id),
+              notes            = $11,
+              edit_count       = edit_count + 1,
+              last_edited_at   = NOW(),
+              updated_at       = NOW()
+        WHERE id = $1
+        RETURNING *`,
+      [
+        id,
+        subtotal,
+        invoice_discount,
+        tax_amount,
+        grand_total,
+        newPaidTotal,
+        change_amount,
+        gross_profit,
+        dto.customer_id ?? null,
+        dto.salesperson_id ?? null,
+        dto.notes ?? orig.notes ?? null,
+      ],
+    );
+
+    // ── 4) Backfill history with after-snapshot ────────────────────
+    const newPayments = await em.query(
+      `SELECT * FROM invoice_payments WHERE invoice_id = $1 ORDER BY id`,
+      [id],
+    );
+    await em.query(
+      `UPDATE invoice_edit_history
+          SET after_summary  = $2::jsonb,
+              after_snapshot = $3::jsonb
+        WHERE id = $1`,
+      [
+        historyId,
+        JSON.stringify({
+          items_count: lines.length,
+          grand_total,
+          cogs_total,
+          gross_profit,
+          paid: newPaidTotal,
+          delta,
+          path: 'monetary_delta',
+        }),
+        JSON.stringify({
+          invoice: updated,
+          items: origItems, // unchanged
+          payments: newPayments,
+        }),
+      ],
+    );
+
+    // ── 5) Post delta JE+CT (delta > 0 only) ───────────────────────
+    if (delta > 0 && this.posting) {
+      const postRes = (await this.posting.postInvoiceDelta(
+        id,
+        delta,
+        userId,
+        em,
+      )) as any;
+      if (postRes?.error) {
+        throw new BadRequestException(
+          `فشل ترحيل دلتا تعديل الفاتورة: ${postRes.error}`,
+        );
+      }
+    }
+
+    // ── 6) Refresh closed-shift snapshot if applicable ─────────────
+    if (orig.shift_id && this.shifts) {
+      const refresh = await this.shifts.refreshClosedShiftSnapshot(
+        orig.shift_id,
+        em,
+      );
+      if (refresh.status === 'blocked') {
+        throw new ConflictException(
+          'لا يمكن تعديل فاتورة لوردية مغلقة سبق ترحيل فروقاتها محاسبياً. يجب تسوية أو إلغاء معالجة الفروقات أولاً.',
+        );
+      }
+    }
+
+    this.realtime?.emitPosEvent({
+      type: 'invoice.created',
+      payload: { invoice_id: id, edited: true, edited_by: userId, path: 'monetary_delta' },
+    });
+
+    return { invoice: updated, edited: true, history_id: historyId };
   }
 
   /** Return the edit-history timeline for an invoice. */

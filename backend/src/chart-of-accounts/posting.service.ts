@@ -480,6 +480,204 @@ export class AccountingPostingService {
   }
 
   /**
+   * PR-POS-INVOICE-DELTA-1 — Post a SINGLE additional JE+CT for a
+   * monetary-only positive-delta edit, WITHOUT voiding the original
+   * invoice JE.
+   *
+   * Companion path to `postInvoiceEdit`.  Used only by
+   * `pos.service.editInvoice` when:
+   *   · all invoice line items match the originals (variant_id + qty)
+   *   · payment_method / payment_account_id / cashbox / shift unchanged
+   *   · `delta = new_total - old_total > 0`
+   *
+   * Builds a tiny "delta sale" shape (same layout as `postInvoice` for
+   * a sale of value `delta`) and pushes it through `engine.recordTransaction`:
+   *   DR cash (resolved from original cashbox) = delta
+   *   CR sales revenue                          = delta - taxPortion
+   *   CR VAT payable                            = taxPortion (if applicable)
+   *
+   * Metadata is identical to a normal sale: `kind='sale'`,
+   * `reference_type='invoice'`, `reference_id=invoiceId`.  No new
+   * reference_type / kind is invented.  The original JE+CT stay
+   * untouched (no `reverseByReference` call) so the cashbox audit feed
+   * shows ONE extra row per edit instead of two.
+   *
+   * The caller (`pos.service.editInvoice`) is responsible for
+   * appending the matching `+delta` `invoice_payments` row BEFORE
+   * calling this method, so that `computeCanonicalSnapshot`'s
+   * `SUM(invoice_payments.amount)` keeps matching the GL.
+   *
+   * Constraints honored (per the DB-level audit at PR halt):
+   *   · `cashbox_transactions_amount_check (amount > 0)`  — delta > 0 ✓
+   *   · `journal_lines.chk_debit_xor_credit`              — each line is either DR or CR ✓
+   *   · No schema change, no migration, no new convention.
+   *
+   * Negative-delta edits intentionally do NOT use this helper — the
+   * `invoice_payments_amount_check (amount > 0)` constraint forbids a
+   * negative payment row, and synthesising one with `amount=abs(delta)`
+   * and a separate "void"/"correction" marker would invent a new
+   * convention.  Negative deltas continue to use the existing
+   * reverse-and-repost path (`postInvoiceEdit`).
+   */
+  async postInvoiceDelta(
+    invoiceId: string,
+    delta: number,
+    userId: string,
+    em?: EntityManager,
+  ): Promise<{ entry_id?: string; error?: string } | null> {
+    if (!this.engine) return null;
+    if (!(delta > 0) || !Number.isFinite(delta)) {
+      throw new Error(
+        `postInvoiceDelta: delta must be a positive finite number (got ${delta})`,
+      );
+    }
+    const runner = em ?? this.ds.manager;
+    const ctx = `engine:postInvoiceDelta`;
+    await runner.query(`SELECT set_config('app.engine_context', $1, true)`, [ctx]);
+
+    // Load invoice metadata + resolve cashbox via shift (mirrors postInvoice).
+    const [inv] = await runner.query(
+      `SELECT i.id, i.invoice_no, i.tax_rate, i.completed_at, i.created_at,
+              i.customer_id,
+              s.cashbox_id AS cashbox_id
+         FROM invoices i
+         LEFT JOIN shifts s ON s.id = i.shift_id
+        WHERE i.id = $1`,
+      [invoiceId],
+    );
+    if (!inv) return { error: 'invoice_not_found' };
+
+    // Find the FIRST payment row to mirror its method + payment_account.
+    // The delta path is only entered when all payment_methods + accounts
+    // match the originals (see isMonetaryOnlyEdit in pos.service), so the
+    // first row's metadata is representative.  We deliberately look up
+    // the payment shape from DB (not the DTO) to keep the GL routing
+    // strictly anchored to the historical sale.
+    const [origPayment] = await runner.query(
+      `SELECT payment_method::text AS payment_method,
+              payment_account_id, payment_account_snapshot
+         FROM invoice_payments
+        WHERE invoice_id = $1
+        ORDER BY id LIMIT 1`,
+      [invoiceId],
+    );
+    if (!origPayment) return { error: 'no_original_payment' };
+
+    // Build delta GL lines.  Same shape as a fresh sale of `delta`.
+    const taxRate = Number(inv.tax_rate || 0);
+    const taxPortion =
+      taxRate > 0 ? +((delta * taxRate) / (100 + taxRate)).toFixed(2) : 0;
+    const revenuePortion = +(delta - taxPortion).toFixed(2);
+
+    const lines: any[] = [];
+    const cashMoves: Array<{
+      cashbox_id: string;
+      direction: 'in' | 'out';
+      amount: number;
+      category: string;
+      notes?: string;
+    }> = [];
+
+    if (isCashMethod(origPayment.payment_method)) {
+      if (!inv.cashbox_id) {
+        return { error: 'cashbox_not_resolvable_via_shift' };
+      }
+      lines.push({
+        resolve_from_cashbox_id: inv.cashbox_id,
+        debit: delta,
+        cashbox_id: inv.cashbox_id,
+        description: `كاش - تعديل فاتورة ${inv.invoice_no} (+${delta})`,
+      });
+      cashMoves.push({
+        cashbox_id: inv.cashbox_id,
+        direction: 'in',
+        amount: delta,
+        category: 'sale',
+        notes: `تعديل بيع — فاتورة ${inv.invoice_no} (+${delta})`,
+      });
+    } else {
+      // Non-cash leg — pull GL code + paCashboxId from the snapshot first
+      // (same resolution order as postInvoice).
+      const snap =
+        (origPayment.payment_account_snapshot as
+          | Record<string, unknown>
+          | null) ?? {};
+      let glCode: string | undefined =
+        (snap.gl_account_code as string | undefined) ?? undefined;
+      let paCashboxId: string | undefined =
+        (snap.cashbox_id as string | undefined) ?? undefined;
+
+      if ((!glCode || !paCashboxId) && origPayment.payment_account_id && this.payments) {
+        const live = await this.payments.resolveForPosting(
+          origPayment.payment_account_id,
+          runner,
+        );
+        if (live) {
+          if (!glCode) glCode = live.gl_account_code;
+          if (!paCashboxId) paCashboxId = live.cashbox_id ?? undefined;
+        }
+      }
+      if (!glCode) {
+        glCode = PAYMENT_METHOD_ACCOUNT_CODE[origPayment.payment_method];
+      }
+      if (!glCode) {
+        return {
+          error: `no_gl_code_for_payment_method:${origPayment.payment_method}`,
+        };
+      }
+      const lineEntry: any = {
+        account_code: glCode,
+        debit: delta,
+        description: `${origPayment.payment_method} - تعديل فاتورة ${inv.invoice_no} (+${delta})`,
+      };
+      if (paCashboxId) {
+        lineEntry.cashbox_id = paCashboxId;
+        cashMoves.push({
+          cashbox_id: paCashboxId,
+          direction: 'in',
+          amount: delta,
+          category: 'sale',
+          notes: `${origPayment.payment_method} — تعديل فاتورة ${inv.invoice_no} (+${delta})`,
+        });
+      }
+      lines.push(lineEntry);
+    }
+
+    if (revenuePortion > 0) {
+      lines.push({
+        account_code: GL_SALES_REVENUE,
+        credit: revenuePortion,
+        description: `إيراد - تعديل فاتورة ${inv.invoice_no} (+${delta})`,
+      });
+    }
+    if (taxPortion > 0) {
+      lines.push({
+        account_code: GL_TAX_PAYABLE,
+        credit: taxPortion,
+        description: `ضريبة - تعديل فاتورة ${inv.invoice_no} (+${delta})`,
+      });
+    }
+    if (lines.length < 2) return { error: 'delta_je_too_small' };
+
+    const entryDate = this.dateOnly(inv.completed_at || inv.created_at);
+
+    const res = await this.engine.recordTransaction({
+      kind: 'sale',
+      reference_type: 'invoice',
+      reference_id: invoiceId,
+      entry_date: entryDate,
+      description: `تعديل قيد فاتورة ${inv.invoice_no} (+${delta})`,
+      gl_lines: lines,
+      cash_movements: cashMoves,
+      user_id: userId,
+      em,
+    });
+
+    if (!res.ok) return { error: res.error };
+    return { entry_id: (res as any).entry_id };
+  }
+
+  /**
    * Customer return → reverses the sale:
    *   DR Sales Returns (49)       = net_refund (gross minus restocking)
    *   DR Restocking Fee revenue?  → kept in-house; we credit 'other revenue' (422)
