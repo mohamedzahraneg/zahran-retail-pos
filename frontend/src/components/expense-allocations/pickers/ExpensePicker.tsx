@@ -49,11 +49,20 @@ export function ExpensePicker({
   const [input, setInput] = useState('');
   const [debouncedQ, setDebouncedQ] = useState('');
   const containerRef = useRef<HTMLDivElement>(null);
+  // PR-FE-C-POLISH-2 — programmatic focus on the search input when
+  // the popover opens (see ProductPicker for the rationale).
+  const searchRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedQ(input.trim()), 250);
     return () => clearTimeout(t);
   }, [input]);
+
+  useEffect(() => {
+    if (!open) return;
+    const t = setTimeout(() => searchRef.current?.focus(), 0);
+    return () => clearTimeout(t);
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -153,20 +162,23 @@ export function ExpensePicker({
             النطاق: {fmtCairoDate(period_start)} — {fmtCairoDate(period_end)}{' '}
             · مصاريف معتمدة فقط
           </div>
-          <div className="border-b border-slate-100 p-2">
-            <div className="flex items-center gap-2 rounded-md bg-slate-50 px-2 py-1">
-              <Search className="h-3.5 w-3.5 text-slate-400" />
+          <div className="border-b border-slate-100 px-2 py-2">
+            <label className="mb-1 block text-xs font-medium text-slate-500">
+              بحث
+            </label>
+            <div className="flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 focus-within:border-slate-400">
+              <Search className="h-3.5 w-3.5 shrink-0 text-slate-400" />
               <input
+                ref={searchRef}
                 type="text"
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 placeholder="بحث برقم المصروف أو الوصف…"
-                autoFocus
                 dir="rtl"
                 className="flex-1 bg-transparent text-sm focus:outline-none"
               />
               {isFetching && (
-                <Loader2 className="h-3.5 w-3.5 animate-spin text-slate-400" />
+                <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-slate-400" />
               )}
             </div>
           </div>

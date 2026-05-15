@@ -35,6 +35,13 @@ export function ProductPicker({
   const [input, setInput] = useState('');
   const [debouncedQ, setDebouncedQ] = useState('');
   const containerRef = useRef<HTMLDivElement>(null);
+  // PR-FE-C-POLISH-2 — programmatic focus on the search input when
+  // the popover opens.  The HTML `autoFocus` attribute is unreliable
+  // here because React mounts the popover after the trigger's state
+  // batches, sometimes missing the focus window.  A 0-ms timeout
+  // defers focus to the next tick, after the commit phase has
+  // finished mounting the popover subtree.
+  const searchRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedQ(input.trim()), 250);
@@ -60,6 +67,16 @@ export function ProductPicker({
       document.removeEventListener('mousedown', onMouseDown);
       document.removeEventListener('keydown', onKey);
     };
+  }, [open]);
+
+  // PR-FE-C-POLISH-2 — focus the search input on every popover open
+  // transition (not just first mount).  setTimeout(0) defers the
+  // focus call until after React's commit phase, which is when the
+  // popover subtree (and the input ref) actually exist in the DOM.
+  useEffect(() => {
+    if (!open) return;
+    const t = setTimeout(() => searchRef.current?.focus(), 0);
+    return () => clearTimeout(t);
   }, [open]);
 
   const { data, isFetching } = useQuery({
@@ -113,20 +130,23 @@ export function ProductPicker({
 
       {open && (
         <div className="absolute z-30 mt-1 max-h-72 w-full overflow-hidden rounded-md border border-slate-200 bg-white shadow-lg">
-          <div className="border-b border-slate-100 p-2">
-            <div className="flex items-center gap-2 rounded-md bg-slate-50 px-2 py-1">
-              <Search className="h-3.5 w-3.5 text-slate-400" />
+          <div className="border-b border-slate-100 px-2 py-2">
+            <label className="mb-1 block text-xs font-medium text-slate-500">
+              بحث
+            </label>
+            <div className="flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 focus-within:border-slate-400">
+              <Search className="h-3.5 w-3.5 shrink-0 text-slate-400" />
               <input
+                ref={searchRef}
                 type="text"
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 placeholder="بحث بالاسم أو الكود…"
-                autoFocus
                 dir="rtl"
                 className="flex-1 bg-transparent text-sm focus:outline-none"
               />
               {isFetching && (
-                <Loader2 className="h-3.5 w-3.5 animate-spin text-slate-400" />
+                <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-slate-400" />
               )}
             </div>
           </div>
