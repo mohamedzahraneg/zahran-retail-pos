@@ -193,3 +193,72 @@ describe('displayCashboxBalance — graceful fallbacks', () => {
     ).toBe(0);
   });
 });
+
+describe('displayCashboxBalance — NaN defense (PR-FIX-CASHBOX-NAN)', () => {
+  // Production incident: «الخزينة الرئيسية» rendered "NaN" because the
+  // stored `cashboxes.current_balance` was the pg numeric NaN literal
+  // (serialized to JSON as the string "NaN").  The naive
+  // `Number(x) || 0` idiom does NOT catch NaN — NaN is truthy in JS,
+  // so `NaN || 0 === NaN`.  These tests pin the `Number.isFinite`
+  // defense at every branch so a corrupted source value renders 0,
+  // never the literal "NaN".
+
+  it('cash kind: current_balance="NaN" string coerces to 0', () => {
+    expect(
+      displayCashboxBalance({ kind: 'cash', current_balance: 'NaN' }),
+    ).toEqual({ amount: 0, kind: 'cash', glCode: null });
+  });
+
+  it('cash kind: numeric NaN coerces to 0', () => {
+    expect(
+      displayCashboxBalance({ kind: 'cash', current_balance: Number.NaN as any }),
+    ).toEqual({ amount: 0, kind: 'cash', glCode: null });
+  });
+
+  it('cash kind: Infinity coerces to 0 (defensive against any non-finite)', () => {
+    expect(
+      displayCashboxBalance({
+        kind: 'cash',
+        current_balance: Number.POSITIVE_INFINITY as any,
+      }),
+    ).toEqual({ amount: 0, kind: 'cash', glCode: null });
+  });
+
+  it('non-cash kind: accounting_balance="NaN" coerces to 0', () => {
+    expect(
+      displayCashboxBalance({
+        kind: 'ewallet',
+        current_balance: '0',
+        accounting_balance: 'NaN',
+        accounting_gl_code: '1114',
+      }),
+    ).toEqual({ amount: 0, kind: 'accounting', glCode: '1114' });
+  });
+
+  it('unlinked kind: accounting_balance="NaN" coerces to 0', () => {
+    expect(
+      displayCashboxBalance({
+        kind: 'ewallet',
+        current_balance: '0',
+        accounting_balance: 'NaN',
+        accounting_gl_code: null,
+      }),
+    ).toEqual({ amount: 0, kind: 'unlinked', glCode: null });
+  });
+
+  it('non-cash fallback (accounting_balance null) with NaN current_balance coerces to 0', () => {
+    expect(
+      displayCashboxBalance({
+        kind: 'bank',
+        current_balance: 'NaN',
+        accounting_balance: null,
+      }),
+    ).toEqual({ amount: 0, kind: 'cash', glCode: null });
+  });
+
+  it('arbitrary non-numeric strings still coerce to 0 (no NaN leak)', () => {
+    expect(
+      displayCashboxBalance({ kind: 'cash', current_balance: 'abc' }),
+    ).toEqual({ amount: 0, kind: 'cash', glCode: null });
+  });
+});

@@ -27,6 +27,24 @@
  * same `accounting_balance`. The badge surfaces this honestly.
  */
 
+/**
+ * Coerce a possibly-string / possibly-NaN / possibly-null balance into
+ * a finite number, defaulting to 0.  Critical because:
+ *   * `Number('NaN')` returns `NaN` (e.g. pg numeric NaN values get
+ *     serialised as the literal string `"NaN"`).
+ *   * The naive `Number(x) || 0` idiom does NOT catch `NaN` because
+ *     `NaN` is truthy in JS — `NaN || 0 === NaN`.  Only `Number.isFinite`
+ *     reliably rejects NaN/Infinity.
+ *
+ * PR-FIX-CASHBOX-NAN — the «الخزينة الرئيسية» card showed "NaN" in
+ * production because `cashboxes.current_balance` contained pg numeric
+ * NaN; this helper makes the FE display defensive at every entry.
+ */
+function toFinite(x: unknown): number {
+  const n = typeof x === 'number' ? x : Number(x ?? 0);
+  return Number.isFinite(n) ? n : 0;
+}
+
 export type DisplayBalanceKind = 'cash' | 'accounting' | 'unlinked';
 
 export interface CashboxBalanceDisplay {
@@ -60,7 +78,7 @@ export function displayCashboxBalance(cb: {
     | string;
   if (k === 'cash') {
     return {
-      amount: Number(cb.current_balance ?? 0) || 0,
+      amount: toFinite(cb.current_balance),
       kind: 'cash',
       glCode: null,
     };
@@ -70,7 +88,7 @@ export function displayCashboxBalance(cb: {
   // — degrades to the legacy display, never throws.
   if (cb.accounting_balance == null) {
     return {
-      amount: Number(cb.current_balance ?? 0) || 0,
+      amount: toFinite(cb.current_balance),
       kind: 'cash',
       glCode: null,
     };
@@ -82,13 +100,13 @@ export function displayCashboxBalance(cb: {
   // a balance.
   if (!cb.accounting_gl_code) {
     return {
-      amount: Number(cb.accounting_balance ?? 0) || 0,
+      amount: toFinite(cb.accounting_balance),
       kind: 'unlinked',
       glCode: null,
     };
   }
   return {
-    amount: Number(cb.accounting_balance ?? 0) || 0,
+    amount: toFinite(cb.accounting_balance),
     kind: 'accounting',
     glCode: cb.accounting_gl_code,
   };

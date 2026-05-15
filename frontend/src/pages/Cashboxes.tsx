@@ -130,11 +130,18 @@ const KIND_ICON: Record<CashboxKind, any> = {
   check:   FileCheck,
 };
 
-const EGP = (n: number | string) =>
-  `${Number(n || 0).toLocaleString('en-US', {
+// PR-FIX-CASHBOX-NAN — defensive: `Number(x) || 0` does NOT catch NaN
+// because NaN is truthy.  Use `Number.isFinite` so a stray pg numeric
+// NaN (or any non-numeric input) renders as "0.00 ج.م" instead of
+// "NaN ج.م".  Same idiom mirrored in `lib/cashboxBalanceDisplay.ts`.
+const EGP = (n: number | string | null | undefined) => {
+  const raw = typeof n === 'number' ? n : Number(n ?? 0);
+  const safe = Number.isFinite(raw) ? raw : 0;
+  return `${safe.toLocaleString('en-US', {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   })} ج.م`;
+};
 
 /**
  * PR-FIN-PAYACCT-4D-UX-FIX-10 — `PaymentAccountBalance` ⇒ `PaymentAccount`.
@@ -492,8 +499,16 @@ export default function Cashboxes() {
     // caption so the operator never sees a row claiming amounts that
     // aren't actually attributed to that specific payment account. See
     // the row rendering below for the caption logic.
+    // PR-FIX-CASHBOX-NAN — defensive: coerce each cashbox's
+    // accounting_balance through `Number.isFinite` before summing.  A
+    // single non-finite value (pg numeric NaN, stale string) would
+    // otherwise propagate NaN through the entire KPI tile.
     const sumCashboxAccountingBy = (predicate: (cb: Cashbox) => boolean) =>
-      boxes.reduce((s, cb) => (predicate(cb) ? s + Number(cb.accounting_balance ?? 0) : s), 0);
+      boxes.reduce((s, cb) => {
+        if (!predicate(cb)) return s;
+        const raw = Number(cb.accounting_balance ?? 0);
+        return s + (Number.isFinite(raw) ? raw : 0);
+      }, 0);
     const walletTotal = sumCashboxAccountingBy((cb) => cb.kind === 'ewallet');
     const bankTotal   = sumCashboxAccountingBy((cb) => cb.kind === 'bank');
 
@@ -1739,11 +1754,15 @@ function BalanceSummary({
   // so we simply sum that here. Same code applied to GL 1113/1115
   // for symmetry and to prevent the same drift if banks/checks ever
   // accumulate untagged lines.
+  // PR-FIX-CASHBOX-NAN — mirror the defensive coercion from
+  // sumCashboxAccountingBy above; a single non-finite balance would
+  // otherwise blow out the entire GL-bucket sub-total.
   const sumCashboxAccountingByGl = (code: string) =>
-    cashboxes.reduce(
-      (s, cb) => (cb.accounting_gl_code === code ? s + Number(cb.accounting_balance ?? 0) : s),
-      0,
-    );
+    cashboxes.reduce((s, cb) => {
+      if (cb.accounting_gl_code !== code) return s;
+      const raw = Number(cb.accounting_balance ?? 0);
+      return s + (Number.isFinite(raw) ? raw : 0);
+    }, 0);
   const hasGlBucket = (code: string) =>
     cashboxes.some((cb) => cb.accounting_gl_code === code);
   const gl1114 = sumCashboxAccountingByGl('1114');
