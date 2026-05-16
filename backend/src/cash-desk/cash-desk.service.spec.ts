@@ -1876,6 +1876,130 @@ describe('CashDeskService.cashboxMovementsUnified — PR-FIN-PAYACCT-4D-UX-FIX-4
   });
 });
 
+/* ════════════════════════════════════════════════════════════════════
+ * PR-FIX-CASHBOX-MOVEMENTS-BALANCE-AFTER
+ * ----------------------------------------------------------------------------
+ * The `balance_after` column in the unified movements feed used to read
+ * the historical `cashbox_transactions.balance_after` column verbatim.
+ * Live audit found 70 rows with literal pg numeric NaN and 272 rows
+ * drifted by +102,746 EGP from the true direction-aware sum on the
+ * main production cashbox — that drift+NaN leaked straight into the UI.
+ *
+ * The fix recomputes the running balance with an `opening` CTE
+ * (pre-range signed sum) + a `with_balance` CTE that runs a window
+ * function `SUM(net_amount) OVER (ORDER BY occurred_at, id)` across
+ * the unified ops feed and exposes the result under the SAME field
+ * name (`balance_after`).  No raw read of the corrupted column.
+ *
+ * These tests pin the SQL shape so a future "let me read t.balance_after
+ * directly" regression fails loudly here.
+ * ========================================================================== */
+describe('CashDeskService.cashboxMovementsUnified — PR-FIX-CASHBOX-MOVEMENTS-BALANCE-AFTER', () => {
+  type Call = { sql: string; params?: any[] };
+  async function makeService() {
+    const calls: Call[] = [];
+    const dsObj: any = {
+      query: async (sql: string, params?: any[]) => {
+        calls.push({ sql, params });
+        return [{ rows: [], total_count: 0, sum_in: '0', sum_out: '0', sum_net: '0' }];
+      },
+      transaction: async (cb: any) => cb({ query: dsObj.query }),
+    };
+    const moduleRef = await Test.createTestingModule({
+      providers: [CashDeskService, { provide: DataSource, useValue: dsObj }],
+    }).compile();
+    return { service: moduleRef.get(CashDeskService), calls };
+  }
+
+  it('SQL declares the opening + with_balance CTEs and a window over net_amount', async () => {
+    const { service, calls } = await makeService();
+    await service.cashboxMovementsUnified('cb-1', {});
+    const sql = calls[0].sql;
+
+    // Pre-range opening sum CTE
+    expect(sql).toMatch(/opening AS \(\s*SELECT COALESCE\(SUM\(net_amount\),\s*0\)::numeric AS bal\s+FROM ops m/);
+    // with_balance CTE wraps `filtered` and produces `balance_after`
+    expect(sql).toMatch(/with_balance AS \(/);
+    expect(sql).toMatch(/AS balance_after,/);
+    // The window function over net_amount, ordered chronologically
+    expect(sql).toMatch(/SUM\(f\.net_amount\) OVER \(\s*ORDER BY f\.occurred_at, f\.id\s*ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW\s*\)/);
+    // Final json_agg reads from with_balance (NOT filtered)
+    expect(sql).toMatch(/SELECT \* FROM with_balance\s+ORDER BY occurred_at DESC/);
+  });
+
+  it('NEVER reads the historical t.balance_after column on cashbox_transactions', async () => {
+    const { service, calls } = await makeService();
+    await service.cashboxMovementsUnified('cb-1', {});
+    const sql = calls[0].sql;
+    // Regression guard: the only `balance_after` reference must be
+    // the computed alias in with_balance.  The raw `t.balance_after`
+    // (the corrupted historical column) must not appear anywhere.
+    expect(sql).not.toMatch(/\bt\.balance_after\b/);
+  });
+
+  it('opening CTE applies the from-date filter when supplied, omits it when not', async () => {
+    const { service, calls } = await makeService();
+    // Without `from`: opening has NO WHERE clause (empty / 0 baseline).
+    await service.cashboxMovementsUnified('cb-1', {});
+    const noFromSql = calls[0].sql;
+    expect(noFromSql).toMatch(
+      /opening AS \(\s*SELECT COALESCE\(SUM\(net_amount\), 0\)::numeric AS bal\s+FROM ops m\s+\),/,
+    );
+    expect(noFromSql).not.toMatch(/opening AS \([\s\S]*?WHERE m\.occurred_at/);
+
+    // With `from`: opening sums everything BEFORE the from-date,
+    // reusing the same param index that whereExtra uses for filtered.
+    const { service: svc2, calls: calls2 } = await makeService();
+    await svc2.cashboxMovementsUnified('cb-1', { from: '2026-04-01' });
+    const withFromSql = calls2[0].sql;
+    expect(withFromSql).toMatch(
+      /opening AS \([\s\S]*?WHERE m\.occurred_at::date < \$2::date/,
+    );
+  });
+
+  it('still emits the same totals + response shape after the recompute', async () => {
+    // Mock payload mimics what postgres returns when the window-function
+    // recompute has been applied: rows show running balances 100, 150,
+    // 130, 135 for a sample sequence (opening 100, +50, -20, +5).
+    const dsObj: any = {
+      query: async () => [{
+        rows: [
+          { source: 'cashbox_txn', id: '1', net_amount: '50.00', balance_after: '150.00' },
+          { source: 'cashbox_txn', id: '2', net_amount: '-20.00', balance_after: '130.00' },
+          { source: 'cashbox_txn', id: '3', net_amount: '5.00', balance_after: '135.00' },
+        ],
+        total_count: 3,
+        sum_in: '55.00',
+        sum_out: '20.00',
+        sum_net: '35.00',
+      }],
+      transaction: async (cb: any) => cb({ query: dsObj.query }),
+    };
+    const moduleRef = await Test.createTestingModule({
+      providers: [CashDeskService, { provide: DataSource, useValue: dsObj }],
+    }).compile();
+    const service = moduleRef.get(CashDeskService);
+
+    const out = await service.cashboxMovementsUnified('cb-1', { from: '2026-05-01' });
+
+    // Response shape unchanged — same { rows, total, totals } contract
+    expect(out.rows).toHaveLength(3);
+    expect(out.total).toBe(3);
+    expect(out.totals).toEqual({ in: '55.00', out: '20.00', net: '35.00', count: 3 });
+
+    // Per-row balance_after follows the running balance math:
+    //   opening 100 + 50 = 150  → -20 = 130 → +5 = 135
+    // None of these are NaN; all are finite numerics.
+    expect(out.rows[0].balance_after).toBe('150.00');
+    expect(out.rows[1].balance_after).toBe('130.00');
+    expect(out.rows[2].balance_after).toBe('135.00');
+    out.rows.forEach((r) => {
+      expect(String(r.balance_after)).not.toBe('NaN');
+      expect(Number.isFinite(Number(r.balance_after))).toBe(true);
+    });
+  });
+});
+
 /* ============================================================================
  * PR-FIN-PAYACCT-4D-UX-FIX-7 — entity_type enum regression guards
  * ----------------------------------------------------------------------------

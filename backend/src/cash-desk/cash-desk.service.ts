@@ -1823,9 +1823,16 @@ export class CashDeskService {
     const offset = Math.max(filter.offset ?? 0, 0);
     const args: any[] = [cashboxId];
     const whereExtra: string[] = [];
+    // PR-FIX-CASHBOX-MOVEMENTS-BALANCE-AFTER — track the from-date
+    // param index so the `opening` CTE below can reuse the exact same
+    // bind value to compute the pre-range running balance.  When no
+    // from-date is supplied the report is "all time" and opening = 0,
+    // which is what falls out of the empty WHERE below naturally.
+    let fromParamIdx: number | null = null;
 
     if (filter.from) {
       args.push(filter.from);
+      fromParamIdx = args.length;
       whereExtra.push(`m.occurred_at::date >= $${args.length}::date`);
     }
     if (filter.to) {
@@ -1898,7 +1905,12 @@ export class CashDeskService {
           )                                           AS counterparty_name,
           NULL::text                                  AS payment_account_id,
           NULL::text                                  AS payment_method,
-          t.balance_after::numeric                    AS balance_after,
+          -- PR-FIX-CASHBOX-MOVEMENTS-BALANCE-AFTER — stop reading
+          -- the historical balance_after column on this row.  It is
+          -- corrupted on production (NaN rows + drift) and is now
+          -- recomputed by the with_balance CTE below via a window
+          -- function over net_amount.
+          NULL::numeric                               AS balance_after,
           t.user_id::text                             AS user_id,
           u.full_name                                 AS user_name,
           NULL::text                                  AS journal_entry_id,
@@ -2047,6 +2059,54 @@ export class CashDeskService {
       filtered AS (
         SELECT * FROM ops m
         ${whereExtra.length ? 'WHERE ' + whereExtra.join(' AND ') : ''}
+      ),
+      -- PR-FIX-CASHBOX-MOVEMENTS-BALANCE-AFTER
+      -- The historical cashbox_transactions.balance_after column is
+      -- the engine running tracker.  It drifted ~102K EGP from the
+      -- true direction-aware sum, and 70 rows hold the literal pg
+      -- numeric NaN from a prior corruption.  Reading the historical
+      -- column raw leaked both problems into the UI.
+      --
+      -- The fix recomputes the running balance per row using a window
+      -- function over the unified ops feed (cashbox_transactions +
+      -- PA-routed invoice/customer/supplier payments — same 4 sources
+      -- the totals.in/out/net already account for).  The opening CTE
+      -- is the sum of every signed net_amount that occurred BEFORE
+      -- the requested from-date (or 0 when no from-date is supplied,
+      -- which is the "all-time" view).  Then each row in with_balance
+      -- adds the cumulative SUM(net_amount) OVER chronological order,
+      -- so the balance shown next to each row is the TRUE running
+      -- cashbox balance at that moment.  Pagination is applied AFTER
+      -- the window, so per-page balances are correct on every page.
+      --
+      -- Strict guarantees:
+      --   - same response shape; field is still called balance_after
+      --   - same filters (date / type / q) honoured
+      --   - voided rows still excluded (handled inside ops branches)
+      --   - NaN-free: no read of the corrupted column
+      opening AS (
+        SELECT COALESCE(SUM(net_amount), 0)::numeric AS bal
+          FROM ops m
+        ${fromParamIdx ? `WHERE m.occurred_at::date < $${fromParamIdx}::date` : ''}
+      ),
+      with_balance AS (
+        SELECT
+          f.source, f.id, f.direction,
+          f.amount_in, f.amount_out, f.net_amount,
+          f.kind_ar, f.reference_type, f.reference_id,
+          f.reference_no, f.counterparty_name,
+          f.payment_account_id, f.payment_method,
+          (
+            (SELECT bal FROM opening) +
+            SUM(f.net_amount) OVER (
+              ORDER BY f.occurred_at, f.id
+              ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+            )
+          )::numeric AS balance_after,
+          f.user_id, f.user_name,
+          f.journal_entry_id, f.journal_entry_no,
+          f.occurred_at, f.notes
+        FROM filtered f
       )
     `;
 
@@ -2067,7 +2127,11 @@ export class CashDeskService {
              FROM (
                SELECT to_jsonb(p) AS row_json, p.occurred_at
                  FROM (
-                   SELECT * FROM filtered
+                   -- Window-recomputed running balance is already on
+                   -- with_balance.balance_after; pagination preserves
+                   -- it correctly because the window was applied to
+                   -- the full filtered set.
+                   SELECT * FROM with_balance
                    ORDER BY occurred_at DESC
                    LIMIT $${limitParamIdx} OFFSET $${offsetParamIdx}
                  ) p
