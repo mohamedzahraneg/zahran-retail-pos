@@ -31,6 +31,7 @@
  */
 
 import { useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
   AlertTriangle,
@@ -138,16 +139,44 @@ const PRESETS: ReadonlyArray<{ key: PresetKey; label: string }> = [
 
 // ─── Page ────────────────────────────────────────────────────────────
 
+// PR-ACCT-QUICKREPORTS-1 — accept a `?tab=<StatementTab>` query
+// string so the accounting dashboard's quick-report cards can deep-
+// link the user straight into the matching statement tab.  Whitelist
+// against the StatementTab union so an arbitrary query value can't
+// crash the page; unknown / missing values fall back to `gl_account`
+// (the historical default).
+const VALID_TABS: ReadonlyArray<StatementTab> = [
+  'gl_account',
+  'cashbox_cash',
+  'cashbox_bank',
+  'cashbox_wallet',
+  'employee',
+  'customer',
+  'supplier',
+];
+
+function readInitialTab(searchParams: URLSearchParams): StatementTab {
+  const raw = searchParams.get('tab');
+  return (VALID_TABS as readonly string[]).includes(raw ?? '')
+    ? (raw as StatementTab)
+    : 'gl_account';
+}
+
 export function FinanceStatements() {
-  const [tab, setTab] = useState<StatementTab>('gl_account');
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [tab, setTab] = useState<StatementTab>(() => readInitialTab(searchParams));
   const [entityId, setEntityId] = useState<string | null>(null);
   const [range, setRange] = useState(() => defaultRange());
 
   // Reset entity selection when the tab changes — entities don't
-  // overlap across tabs.
+  // overlap across tabs.  Mirror the active tab into the URL so a
+  // refresh / share preserves the user's view.
   const handleTab = (next: StatementTab) => {
     setTab(next);
     setEntityId(null);
+    const sp = new URLSearchParams(searchParams);
+    sp.set('tab', next);
+    setSearchParams(sp, { replace: true });
   };
 
   const queryKey = useMemo(

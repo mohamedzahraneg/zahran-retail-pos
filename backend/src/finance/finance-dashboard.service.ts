@@ -1451,32 +1451,59 @@ export class FinanceDashboardService {
   }
 
   // ─── Quick reports availability map ──────────────────────────────
+  //
+  // PR-ACCT-QUICKREPORTS-1 — flip 11 cards to active by deep-linking to
+  // existing real report pages.  No new routes added; all targets are
+  // pages that already render real data through the existing APIs:
+  //
+  //   /finance/statements?tab=<key>    → StatementsService (one page,
+  //                                       all 6 entity statements; key
+  //                                       matches StatementTab enum on FE)
+  //   /reports?tab=<tab>               → ReportsService (sales/profit/
+  //                                       stock-valuation tabs)
+  //   /accounts?tab=<tab>              → AccountingReportsService
+  //                                       (balance, cashflow tabs)
+  //   /returns-analytics               → ReturnsAnalyticsService
+  //   /daily-expenses                  → AccountingService.listExpenses
+  //   /audit/financial-movements       → audit/journal listings
+  //
+  // Two cards stay disabled by design:
+  //   · `zakat-report`     — no backend yet; framing-only page
+  //                          (/finance/zakat) is intentionally NOT
+  //                          surfaced here so the card doesn't promise
+  //                          a real calculation.
+  //   · `discounts-report` — no aggregate API; discounts appear only
+  //                          as sub-columns inside sales reports.
+  //
+  // Labels are exactly as shown in the dashboard image — do not change.
   private quickReports(): FinanceDashboardResponse['quick_reports'] {
-    // Each report's `available` flag mirrors what's actually wired on
-    // the frontend today. Anything `false` should render as a disabled
-    // placeholder. The labels are exactly as shown in the dashboard
-    // image — do not change.
     return [
-      // Row A
-      { key: 'customer-statement', label_ar: 'كشف عميل',         available: false, href: null },
-      { key: 'wallet-statement',   label_ar: 'كشف محفظة',       available: false, href: null },
-      { key: 'bank-statement',     label_ar: 'كشف بنك',         available: false, href: null },
-      { key: 'cashbox-statement',  label_ar: 'كشف خزنة',        available: false, href: null },
+      // Row A — Statements (all deep-link to the unified /finance/statements
+      // page which already has entity selector + date range + opening/
+      // debit/credit/closing for every entity kind).
+      { key: 'customer-statement', label_ar: 'كشف عميل',   available: true,  href: '/finance/statements?tab=customer' },
+      { key: 'wallet-statement',   label_ar: 'كشف محفظة', available: true,  href: '/finance/statements?tab=cashbox_wallet' },
+      { key: 'bank-statement',     label_ar: 'كشف بنك',   available: true,  href: '/finance/statements?tab=cashbox_bank' },
+      { key: 'cashbox-statement',  label_ar: 'كشف خزنة',  available: true,  href: '/finance/statements?tab=cashbox_cash' },
       // Row B
-      { key: 'employee-statement', label_ar: 'كشف موظف',        available: false, href: null },
-      { key: 'supplier-statement', label_ar: 'كشف مورد',        available: false, href: null },
+      { key: 'employee-statement', label_ar: 'كشف موظف',        available: true,  href: '/finance/statements?tab=employee' },
+      { key: 'supplier-statement', label_ar: 'كشف مورد',        available: true,  href: '/finance/statements?tab=supplier' },
       { key: 'expenses-report',    label_ar: 'تقرير المصروفات', available: true,  href: '/daily-expenses' },
-      { key: 'revenues-report',    label_ar: 'تقرير الإيرادات', available: false, href: null },
+      { key: 'revenues-report',    label_ar: 'تقرير الإيرادات', available: true,  href: '/reports?tab=sales' },
       // Row C
-      { key: 'balance-sheet',      label_ar: 'تقرير المركز المالي', available: true, href: '/accounts?tab=balance' },
-      { key: 'cashflow',           label_ar: 'التدفقات النقدية',    available: false, href: null },
+      { key: 'balance-sheet',      label_ar: 'تقرير المركز المالي', available: true,  href: '/accounts?tab=balance' },
+      { key: 'cashflow',           label_ar: 'التدفقات النقدية',    available: true,  href: '/accounts?tab=cashflow' },
+      // Zakat — no real backend; keep disabled with honest tooltip
+      // until a calculation service exists.
       { key: 'zakat-report',       label_ar: 'تقرير الزكاة',        available: false, href: null },
-      { key: 'inventory-report',   label_ar: 'تقرير الجرد',         available: false, href: null },
+      { key: 'inventory-report',   label_ar: 'تقرير الجرد',         available: true,  href: '/reports?tab=stock-valuation' },
       // Row D
-      { key: 'returns-report',     label_ar: 'تقرير المرتجعات',     available: true, href: '/returns-analytics' },
-      { key: 'discounts-report',   label_ar: 'تقرير الخصومات',      available: false, href: null },
-      { key: 'profits-report',     label_ar: 'تقرير الأرباح',       available: false, href: null },
-      { key: 'audit-trail',        label_ar: 'Audit Trail',         available: false, href: null },
+      { key: 'returns-report',     label_ar: 'تقرير المرتجعات', available: true,  href: '/returns-analytics' },
+      // Discounts — appears only inside sales-side aggregations today;
+      // no standalone API.  Keep disabled.
+      { key: 'discounts-report',   label_ar: 'تقرير الخصومات',  available: false, href: null },
+      { key: 'profits-report',     label_ar: 'تقرير الأرباح',   available: true,  href: '/reports?tab=profit' },
+      { key: 'audit-trail',        label_ar: 'Audit Trail',     available: true,  href: '/audit/financial-movements' },
     ];
   }
 }
