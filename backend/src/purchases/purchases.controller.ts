@@ -64,6 +64,29 @@ export class PurchasesController {
     return this.purchases.cancelReturn(id, req.user?.id);
   }
 
+  // ── Purchases P1 (PR-PURCHASES-P1) — read-only helpers used by the
+  //    Purchase Invoice screen.  Declared BEFORE ':id' so the two
+  //    static path segments win route priority over the UUID matcher.
+  @Get('suppliers/:supplierId/context')
+  supplierContext(
+    @Param('supplierId', ParseUUIDPipe) supplierId: string,
+  ) {
+    return this.purchases.supplierContext(supplierId);
+  }
+
+  @Get('products/search')
+  productSearch(
+    @Query('q') q?: string,
+    @Query('warehouse_id') warehouseId?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.purchases.productSearch({
+      q: q ?? '',
+      warehouse_id: warehouseId,
+      limit: limit ? Number(limit) : undefined,
+    });
+  }
+
   @Get(':id')
   getOne(@Param('id', ParseUUIDPipe) id: string) {
     return this.purchases.getOne(id);

@@ -714,4 +714,235 @@ export class PurchasesService {
       return { cancelled: true };
     });
   }
+
+  // --------------------------------------------------------------------------
+  //  Purchases P1 — read-only helpers for the purchase invoice page
+  //  (PR-PURCHASES-P1).  No mutations, no schema changes — these wrap
+  //  existing tables (suppliers, purchases, product_variants, stock,
+  //  purchase_items) for the new supplier-context card and product-
+  //  search-with-exact-match-priority controls in the create-invoice UI.
+  // --------------------------------------------------------------------------
+
+  /**
+   * Supplier context for the purchase invoice header. Read-only — wraps
+   * the existing suppliers table plus aggregated purchases history into
+   * a single payload sized to the purchase page's needs (smaller than
+   * `suppliers.summary()`, which targets the full supplier profile).
+   *
+   * Balance convention:
+   *   suppliers.current_balance > 0 → "له"   (we owe the supplier)
+   *   suppliers.current_balance < 0 → "علينا" / "credit"  (rare)
+   *   suppliers.current_balance = 0 → "صفر"
+   */
+  async supplierContext(supplierId: string) {
+    const [supplier] = await this.ds.query(
+      `SELECT id, code, name, supplier_type, current_balance,
+              credit_limit, payment_terms_days, payment_day_of_week,
+              opening_balance
+         FROM suppliers
+        WHERE id = $1`,
+      [supplierId],
+    );
+    if (!supplier) {
+      throw new NotFoundException('المورد غير موجود');
+    }
+
+    const [agg] = await this.ds.query(
+      `SELECT COUNT(*)::int                                    AS purchase_count,
+              COALESCE(SUM(grand_total), 0)::numeric(14,2)     AS purchases_total,
+              COALESCE(SUM(paid_amount), 0)::numeric(14,2)     AS paid_total,
+              COALESCE(
+                SUM(GREATEST(grand_total - paid_amount, 0))
+                  FILTER (WHERE status IN ('received','partial')),
+                0
+              )::numeric(14,2)                                  AS unpaid_total
+         FROM purchases
+        WHERE supplier_id = $1
+          AND status <> 'cancelled'`,
+      [supplierId],
+    );
+
+    const [lastPurchase] = await this.ds.query(
+      `SELECT id, purchase_no, invoice_date, grand_total, paid_amount,
+              status,
+              (grand_total - paid_amount)::numeric(14,2) AS remaining
+         FROM purchases
+        WHERE supplier_id = $1
+          AND status <> 'cancelled'
+        ORDER BY invoice_date DESC, created_at DESC
+        LIMIT 1`,
+      [supplierId],
+    );
+
+    // Pick a human label for the last invoice's payment posture so the
+    // UI can render it directly.  Mirrors the status column without
+    // exposing the enum strings.
+    let lastInteraction: 'cash' | 'partial' | 'credit' | null = null;
+    if (lastPurchase) {
+      const remaining = Number(lastPurchase.remaining || 0);
+      const paid = Number(lastPurchase.paid_amount || 0);
+      if (remaining <= 0.005) lastInteraction = 'cash';
+      else if (paid > 0) lastInteraction = 'partial';
+      else lastInteraction = 'credit';
+    }
+
+    const balance = Number(supplier.current_balance || 0);
+    const balanceDirection: 'owed_to_supplier' | 'credit_to_us' | 'zero' =
+      balance > 0.005
+        ? 'owed_to_supplier'
+        : balance < -0.005
+          ? 'credit_to_us'
+          : 'zero';
+
+    return {
+      supplier: {
+        id: supplier.id,
+        code: supplier.code,
+        name: supplier.name,
+        supplier_type: supplier.supplier_type,
+        current_balance: balance,
+        balance_direction: balanceDirection,
+        credit_limit: Number(supplier.credit_limit || 0),
+        payment_terms_days: Number(supplier.payment_terms_days || 0),
+      },
+      stats: {
+        purchase_count: Number(agg?.purchase_count ?? 0),
+        purchases_total: Number(agg?.purchases_total ?? 0),
+        paid_total: Number(agg?.paid_total ?? 0),
+        unpaid_total: Number(agg?.unpaid_total ?? 0),
+      },
+      last_purchase: lastPurchase
+        ? {
+            id: lastPurchase.id,
+            purchase_no: lastPurchase.purchase_no,
+            invoice_date: lastPurchase.invoice_date,
+            grand_total: Number(lastPurchase.grand_total || 0),
+            paid_amount: Number(lastPurchase.paid_amount || 0),
+            remaining: Number(lastPurchase.remaining || 0),
+            status: lastPurchase.status,
+            interaction: lastInteraction,
+          }
+        : null,
+    };
+  }
+
+  /**
+   * Product search tuned for the purchase invoice line entry.  Returns
+   * variant-level rows (each one a sellable line target) with optional
+   * stock + last-purchase metadata so the operator can see at a glance
+   * what they previously paid for this variant.
+   *
+   * Exact match priority:
+   *   rank 1 — variant.barcode exact (case-insensitive)
+   *   rank 2 — variant.sku       exact
+   *   rank 3 — product.sku_root  exact
+   *   rank 4 — fuzzy (name_ar / name_en / color / size ILIKE)
+   *
+   * Caller signals exact-match wanted by simply typing the code; the
+   * response carries `exact_match: true` for any row whose rank is 1-3
+   * so the UI can render the "تطابق كامل" badge AND auto-select on
+   * Enter when results.length === 1 && results[0].exact_match.
+   */
+  async productSearch(args: {
+    q: string;
+    warehouse_id?: string | null;
+    limit?: number;
+  }) {
+    const qRaw = String(args.q ?? '').trim();
+    const limit = Math.min(Math.max(Number(args.limit ?? 25), 1), 100);
+    if (qRaw.length < 1) {
+      return { query: '', results: [] };
+    }
+    const warehouseId = args.warehouse_id || null;
+    const fuzzyLike = `%${qRaw}%`;
+
+    // Single round-trip: rank-scored search + per-row stock lookup +
+    // per-row most-recent purchase price via a LATERAL join.
+    const rows = await this.ds.query(
+      `WITH search_results AS (
+         SELECT v.id   AS variant_id, v.sku, v.barcode,
+                v.color, v.size, v.cost_price, v.selling_price,
+                v.image_url AS variant_image_url,
+                p.id   AS product_id, p.sku_root,
+                p.name_ar, p.name_en, p.primary_image_url,
+                p.base_price,
+                CASE
+                  WHEN LOWER(v.barcode)   = LOWER($1) THEN 1
+                  WHEN LOWER(v.sku)       = LOWER($1) THEN 2
+                  WHEN LOWER(p.sku_root)  = LOWER($1) THEN 3
+                  ELSE 4
+                END AS rank_score
+           FROM product_variants v
+           JOIN products         p ON p.id = v.product_id
+          WHERE v.is_active = TRUE
+            AND p.is_active = TRUE
+            AND (
+              LOWER(v.barcode)  = LOWER($1)
+              OR LOWER(v.sku)   = LOWER($1)
+              OR LOWER(p.sku_root) = LOWER($1)
+              OR p.name_ar  ILIKE $2
+              OR p.name_en  ILIKE $2
+              OR v.color    ILIKE $2
+              OR v.size     ILIKE $2
+              OR v.sku      ILIKE $2
+              OR v.barcode  ILIKE $2
+            )
+          ORDER BY rank_score, p.name_ar NULLS LAST, v.sku NULLS LAST
+          LIMIT $3
+       )
+       SELECT r.*,
+              COALESCE(s.quantity_on_hand, 0)::int AS available_stock,
+              lpp.unit_cost   AS last_purchase_price,
+              lpp.invoice_date AS last_purchase_at,
+              lpp.supplier_name AS last_supplier_name,
+              lpp.supplier_id   AS last_supplier_id
+         FROM search_results r
+         LEFT JOIN stock s
+           ON s.variant_id = r.variant_id
+          AND ($4::uuid IS NULL OR s.warehouse_id = $4::uuid)
+         LEFT JOIN LATERAL (
+           SELECT pi.unit_cost,
+                  pu.invoice_date,
+                  pu.supplier_id,
+                  sup.name AS supplier_name
+             FROM purchase_items pi
+             JOIN purchases  pu  ON pu.id = pi.purchase_id
+             JOIN suppliers  sup ON sup.id = pu.supplier_id
+            WHERE pi.variant_id = r.variant_id
+              AND pu.status IN ('received','partial','paid')
+            ORDER BY pu.invoice_date DESC, pu.created_at DESC
+            LIMIT 1
+         ) lpp ON TRUE
+        ORDER BY r.rank_score, r.name_ar NULLS LAST, r.sku NULLS LAST`,
+      [qRaw, fuzzyLike, limit, warehouseId],
+    );
+
+    return {
+      query: qRaw,
+      results: rows.map((r: any) => ({
+        product_id: r.product_id,
+        sku_root: r.sku_root,
+        name_ar: r.name_ar,
+        name_en: r.name_en,
+        primary_image_url: r.primary_image_url,
+        base_price: Number(r.base_price ?? 0),
+        variant_id: r.variant_id,
+        variant_sku: r.sku,
+        variant_barcode: r.barcode,
+        variant_image_url: r.variant_image_url,
+        color: r.color,
+        size: r.size,
+        cost_price: Number(r.cost_price ?? 0),
+        selling_price: Number(r.selling_price ?? 0),
+        available_stock: Number(r.available_stock ?? 0),
+        last_purchase_price:
+          r.last_purchase_price != null ? Number(r.last_purchase_price) : null,
+        last_purchase_at: r.last_purchase_at,
+        last_supplier_name: r.last_supplier_name,
+        last_supplier_id: r.last_supplier_id,
+        exact_match: r.rank_score <= 3,
+        rank_score: r.rank_score,
+      })),
+    };
+  }
 }

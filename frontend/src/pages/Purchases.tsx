@@ -16,15 +16,19 @@ import {
 } from 'lucide-react';
 import {
   purchasesApi,
-  type Purchase,
   type PurchaseDetail,
   type PurchaseStatus,
   type CreatePurchaseItemPayload,
   type CreatePurchasePayload,
+  type PurchaseProductSearchRow,
 } from '@/api/purchases.api';
 import { suppliersApi } from '@/api/suppliers.api';
 import { settingsApi } from '@/api/settings.api';
-import { productsApi } from '@/api/products.api';
+// PR-PURCHASES-P1 — new purchase-invoice helpers.
+import { SupplierContextCard } from '@/components/purchases/SupplierContextCard';
+import { PurchaseProductSearch } from '@/components/purchases/PurchaseProductSearch';
+import { PurchaseLineEntry } from '@/components/purchases/PurchaseLineEntry';
+import { QuickAddProductModal } from '@/components/purchases/QuickAddProductModal';
 import { useAuthStore } from '@/stores/auth.store';
 import { useTableSort } from '@/lib/useTableSort';
 // PR-FE-IDEM-STOCK-PURCHASES-OPS (Sprint 5 / FE-IDEM PR 7C) —
@@ -401,10 +405,6 @@ function CreatePurchaseModal({ onClose }: { onClose: () => void }) {
     queryKey: ['warehouses'],
     queryFn: () => settingsApi.listWarehouses(),
   });
-  const { data: products } = useQuery({
-    queryKey: ['products-for-purchase'],
-    queryFn: () => productsApi.list({ limit: 500 }),
-  });
 
   const [form, setForm] = useState({
     supplier_id: '',
@@ -418,23 +418,29 @@ function CreatePurchaseModal({ onClose }: { onClose: () => void }) {
     notes: '',
   });
 
-  const [items, setItems] = useState<
-    (CreatePurchaseItemPayload & { display?: string })[]
-  >([]);
-  const [newItem, setNewItem] = useState({
-    variant_id: '',
-    quantity: 1,
-    unit_cost: 0,
-    discount: 0,
-    tax: 0,
-  });
-  const [selectedProductId, setSelectedProductId] = useState('');
+  // PR-PURCHASES-P1 — line items now carry optional UI-only metadata
+  // (carton mode, cartons, pieces_per_carton, carton_cost) for the
+  // table display. The backend payload is still piece-level only —
+  // see `_ui` strip in the createMut.
+  type LineItem = CreatePurchaseItemPayload & {
+    display?: string;
+    _ui?: {
+      display: string;
+      mode: 'piece' | 'carton';
+      cartons?: number;
+      pieces_per_carton?: number;
+      carton_cost?: number;
+    };
+  };
+  const [items, setItems] = useState<LineItem[]>([]);
 
-  const { data: productDetail } = useQuery({
-    queryKey: ['product-variants', selectedProductId],
-    queryFn: () => productsApi.get(selectedProductId),
-    enabled: !!selectedProductId,
-  });
+  // Currently-picked variant awaiting line-entry confirmation. When
+  // null the operator is back on the search input.
+  const [pendingRow, setPendingRow] = useState<PurchaseProductSearchRow | null>(
+    null,
+  );
+  // Seed text for the quick-add modal; null = closed.
+  const [quickAddSeed, setQuickAddSeed] = useState<string | null>(null);
 
   const subtotal = useMemo(
     () =>
@@ -443,6 +449,14 @@ function CreatePurchaseModal({ onClose }: { onClose: () => void }) {
           s + (i.quantity * i.unit_cost - (i.discount || 0) + (i.tax || 0)),
         0,
       ),
+    [items],
+  );
+  const totalPieces = useMemo(
+    () => items.reduce((s, i) => s + (i.quantity || 0), 0),
+    [items],
+  );
+  const distinctVariants = useMemo(
+    () => new Set(items.map((i) => i.variant_id)).size,
     [items],
   );
   const grandTotal =
@@ -463,7 +477,9 @@ function CreatePurchaseModal({ onClose }: { onClose: () => void }) {
         discount_amount: Number(form.discount_amount) || undefined,
         tax_amount: Number(form.tax_amount) || undefined,
         notes: form.notes || undefined,
-        items: items.map(({ display: _d, ...rest }) => rest),
+        // Strip UI-only metadata before sending. Backend payload remains
+        // exactly the existing CreatePurchaseDto shape.
+        items: items.map(({ display: _d, _ui: _u, ...rest }) => rest),
       }),
     onSuccess: () => {
       toast.success('تم إنشاء فاتورة المشتريات');
@@ -474,18 +490,58 @@ function CreatePurchaseModal({ onClose }: { onClose: () => void }) {
       toast.error(e?.response?.data?.message || 'فشل إنشاء الفاتورة'),
   });
 
-  const addItem = () => {
-    if (!newItem.variant_id || newItem.quantity < 1 || newItem.unit_cost <= 0) {
-      toast.error('اختر صنفاً وأدخل كمية وسعر صحيحين');
-      return;
-    }
-    const v = productDetail?.variants?.find((x) => x.id === newItem.variant_id);
-    const display = v
-      ? `${productDetail?.name_ar} — ${v.sku}`
-      : newItem.variant_id;
-    setItems((xs) => [...xs, { ...newItem, display }]);
-    setNewItem({ variant_id: '', quantity: 1, unit_cost: 0, discount: 0, tax: 0 });
-    setSelectedProductId('');
+  // Confirm a line from PurchaseLineEntry → append to items.
+  const confirmLine = (
+    payload: CreatePurchaseItemPayload & {
+      _ui: NonNullable<LineItem['_ui']>;
+    },
+  ) => {
+    setItems((xs) => [
+      ...xs,
+      {
+        ...payload,
+        display: payload._ui.display,
+      } as LineItem,
+    ]);
+    setPendingRow(null);
+  };
+
+  // QuickAddProductModal → product+variant created → wrap as a search
+  // row and route to PurchaseLineEntry just like a search-result pick.
+  const onQuickAddCreated = ({
+    product,
+    variant,
+  }: {
+    product: any;
+    variant: any;
+  }) => {
+    const row: PurchaseProductSearchRow = {
+      product_id: product.id,
+      sku_root: product.sku_root,
+      name_ar: product.name_ar,
+      name_en: product.name_en ?? null,
+      primary_image_url: product.primary_image_url ?? null,
+      base_price: Number(product.base_price ?? 0),
+      variant_id: variant.id,
+      variant_sku: variant.sku,
+      variant_barcode: variant.barcode ?? null,
+      variant_image_url: variant.image_url ?? null,
+      color: variant.color ?? null,
+      size: variant.size ?? null,
+      cost_price: Number(variant.cost_price ?? product.cost_price ?? 0),
+      selling_price: Number(
+        variant.selling_price ?? product.base_price ?? 0,
+      ),
+      available_stock: 0,
+      last_purchase_price: null,
+      last_purchase_at: null,
+      last_supplier_name: null,
+      last_supplier_id: null,
+      exact_match: true,
+      rank_score: 1,
+    };
+    setQuickAddSeed(null);
+    setPendingRow(row);
   };
 
   const submit = (e: React.FormEvent) => {
@@ -596,80 +652,31 @@ function CreatePurchaseModal({ onClose }: { onClose: () => void }) {
           </div>
         </div>
 
-        {/* Items */}
+        {/* PR-PURCHASES-P1 — Supplier context card, shown once a
+            supplier is selected. Read-only single-roundtrip fetch. */}
+        {form.supplier_id ? (
+          <SupplierContextCard supplierId={form.supplier_id} />
+        ) : null}
+
+        {/* PR-PURCHASES-P1 — line entry replaces the cascading
+            product → variant dropdowns with a unified search. */}
         <div className="border border-slate-200 rounded-xl p-3 space-y-3">
           <h3 className="font-bold text-slate-700">الأصناف</h3>
 
-          <div className="grid grid-cols-1 md:grid-cols-6 gap-2 items-end">
-            <div className="md:col-span-2">
-              <label className="label">المنتج</label>
-              <select
-                className="input"
-                value={selectedProductId}
-                onChange={(e) => {
-                  setSelectedProductId(e.target.value);
-                  setNewItem((i) => ({ ...i, variant_id: '' }));
-                }}
-              >
-                <option value="">— اختر —</option>
-                {(products?.data || []).map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name_ar} ({p.sku_root})
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="label">اللون/المقاس</label>
-              <select
-                className="input"
-                value={newItem.variant_id}
-                onChange={(e) =>
-                  setNewItem({ ...newItem, variant_id: e.target.value })
-                }
-                disabled={!selectedProductId}
-              >
-                <option value="">— اختر —</option>
-                {(productDetail?.variants || []).map((v) => (
-                  <option key={v.id} value={v.id}>
-                    {v.sku}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="label">الكمية</label>
-              <input
-                type="number"
-                min={1}
-                className="input"
-                value={newItem.quantity}
-                onChange={(e) =>
-                  setNewItem({ ...newItem, quantity: Number(e.target.value) })
-                }
-              />
-            </div>
-            <div>
-              <label className="label">سعر التكلفة</label>
-              <input
-                type="number"
-                min={0}
-                step="0.01"
-                className="input"
-                value={newItem.unit_cost}
-                onChange={(e) =>
-                  setNewItem({ ...newItem, unit_cost: Number(e.target.value) })
-                }
-              />
-            </div>
-            <button
-              type="button"
-              onClick={addItem}
-              className="btn-primary h-10"
-            >
-              <Plus className="w-4 h-4" /> إضافة
-            </button>
-          </div>
+          {pendingRow ? (
+            <PurchaseLineEntry
+              row={pendingRow}
+              onConfirm={confirmLine}
+              onCancel={() => setPendingRow(null)}
+            />
+          ) : (
+            <PurchaseProductSearch
+              warehouseId={form.warehouse_id || undefined}
+              onSelect={(row) => setPendingRow(row)}
+              onQuickAdd={(q) => setQuickAddSeed(q)}
+              autoFocus={items.length === 0}
+            />
+          )}
 
           {items.length > 0 && (
             <div className="overflow-x-auto">
@@ -677,9 +684,10 @@ function CreatePurchaseModal({ onClose }: { onClose: () => void }) {
                 <thead className="bg-slate-50 text-slate-600">
                   <tr>
                     <th className="p-2 text-right">الصنف</th>
-                    <th className="p-2 text-right">الكمية</th>
-                    <th className="p-2 text-right">السعر</th>
-                    <th className="p-2 text-right">الإجمالي</th>
+                    <th className="p-2 text-right">الوحدة</th>
+                    <th className="p-2 text-right">القطع</th>
+                    <th className="p-2 text-right">سعر القطعة</th>
+                    <th className="p-2 text-right">إجمالي السطر</th>
                     <th className="p-2"></th>
                   </tr>
                 </thead>
@@ -689,9 +697,18 @@ function CreatePurchaseModal({ onClose }: { onClose: () => void }) {
                       it.quantity * it.unit_cost -
                       (it.discount || 0) +
                       (it.tax || 0);
+                    const ui = it._ui;
+                    const unitLabel = ui
+                      ? ui.mode === 'carton'
+                        ? `${ui.cartons ?? 0} × كرتونة (${ui.pieces_per_carton ?? 1})`
+                        : ui.pieces_per_carton && ui.pieces_per_carton > 1
+                          ? `قطعة (${ui.pieces_per_carton}/كرتونة)`
+                          : 'قطعة'
+                      : 'قطعة';
                     return (
                       <tr key={idx}>
                         <td className="p-2">{it.display || it.variant_id}</td>
+                        <td className="p-2 text-xs">{unitLabel}</td>
                         <td className="p-2">{it.quantity}</td>
                         <td className="p-2">{EGP(it.unit_cost)}</td>
                         <td className="p-2 font-bold">{EGP(lt)}</td>
@@ -713,6 +730,19 @@ function CreatePurchaseModal({ onClose }: { onClose: () => void }) {
               </table>
             </div>
           )}
+
+          {/* Live summary tiles */}
+          {items.length > 0 ? (
+            <div
+              data-testid="purchase-invoice-summary"
+              className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs"
+            >
+              <SummaryTile label="عدد الأصناف" value={String(distinctVariants)} />
+              <SummaryTile label="عدد القطع" value={String(totalPieces)} />
+              <SummaryTile label="إجمالي السطور" value={EGP(subtotal)} />
+              <SummaryTile label="إجمالي الفاتورة" value={EGP(grandTotal)} highlight />
+            </div>
+          ) : null}
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
@@ -776,6 +806,41 @@ function CreatePurchaseModal({ onClose }: { onClose: () => void }) {
           </button>
         </div>
       </form>
+
+      {/* PR-PURCHASES-P1 — quick-add product modal layered on top. */}
+      {quickAddSeed !== null ? (
+        <QuickAddProductModal
+          initialQuery={quickAddSeed}
+          onClose={() => setQuickAddSeed(null)}
+          onCreated={onQuickAddCreated}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+// PR-PURCHASES-P1 — tiny presentational helper used by the live
+// summary tiles in CreatePurchaseModal. Kept local so the modal stays
+// self-contained.
+function SummaryTile({
+  label,
+  value,
+  highlight,
+}: {
+  label: string;
+  value: string;
+  highlight?: boolean;
+}) {
+  return (
+    <div
+      className={`rounded-md border p-2 ${
+        highlight
+          ? 'bg-brand-50 border-brand-200 text-brand-700'
+          : 'bg-white border-slate-200 text-slate-700'
+      }`}
+    >
+      <div className="text-[10px] text-slate-500 mb-0.5">{label}</div>
+      <div className="font-bold">{value}</div>
     </div>
   );
 }
