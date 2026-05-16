@@ -3058,3 +3058,87 @@ describe('CashDeskService.listCashboxes — accounting_balance derivation', () =
   });
 });
 
+/* ════════════════════════════════════════════════════════════════════
+ * PR-FIX-CASHBOX-MOVEMENTS-BALANCE-AFTER (legacy /cash-desk page)
+ * ----------------------------------------------------------------------------
+ * `movements()` is what the /cash-desk "الصندوق اليومي" page reads via
+ * cashDeskApi.movements({ limit: 300 }).  It used to SELECT the raw
+ * cashbox_transactions.balance_after column — same corrupted source as
+ * cashboxMovementsUnified.  These tests pin the window-function
+ * recompute so the legacy path never regresses to the stale value.
+ * ========================================================================== */
+describe('CashDeskService.movements — PR-FIX-CASHBOX-MOVEMENTS-BALANCE-AFTER', () => {
+  type Call = { sql: string; params?: any[] };
+  function makeServiceWithCalls() {
+    const calls: Call[] = [];
+    const dsObj: any = {
+      query: async (sql: string, params?: any[]) => {
+        calls.push({ sql, params });
+        return [];
+      },
+      transaction: async (cb: any) => cb({ query: dsObj.query }),
+    };
+    // Pull the constructor signature directly from the class so we
+    // don't need to round-trip through Test.createTestingModule for
+    // this lightweight SQL-shape assertion.
+    const service = new CashDeskService(dsObj);
+    return { service, calls };
+  }
+
+  it('SQL declares the ops_with_balance CTE with a window function over signed amount', async () => {
+    const { service, calls } = makeServiceWithCalls();
+    await service.movements({ cashbox_id: 'cb-1' });
+    const sql = calls[0].sql;
+
+    // The CTE name + the window function are present.
+    expect(sql).toMatch(/WITH ops_with_balance AS \(/);
+    expect(sql).toMatch(/SUM\([\s\S]+?\) OVER \(\s*PARTITION BY t\.cashbox_id\s+ORDER BY t\.created_at, t\.id\s*ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW\s*\)/);
+    // Voided rows contribute 0 to the running sum.
+    expect(sql).toMatch(/WHEN t\.is_void = TRUE THEN 0::numeric/);
+    // Direction-aware net amount inside the window.
+    expect(sql).toMatch(/WHEN t\.direction = 'in' THEN t\.amount/);
+    expect(sql).toMatch(/ELSE -t\.amount/);
+    // The outer SELECT pulls balance_after from the CTE alias, NOT from
+    // the historical column.  Final output column still named the same.
+    expect(sql).toMatch(/obw\.balance_after/);
+  });
+
+  it('NEVER reads the historical t.balance_after column on cashbox_transactions', async () => {
+    const { service, calls } = makeServiceWithCalls();
+    await service.movements({ cashbox_id: 'cb-1' });
+    const sql = calls[0].sql;
+    // Regression guard — the corrupted column must never be selected.
+    expect(sql).not.toMatch(/SELECT[\s\S]*?\bt\.balance_after\b/);
+    expect(sql).not.toMatch(/AS\s+balance_after[\s\S]*?\bt\.balance_after\b/);
+  });
+
+  it('partitions the running balance by cashbox_id (multi-cashbox correctness)', async () => {
+    const { service, calls } = makeServiceWithCalls();
+    // No cashbox_id filter → response may include rows from many
+    // cashboxes; PARTITION BY ensures running balance is per-cashbox.
+    await service.movements({});
+    expect(calls[0].sql).toMatch(/PARTITION BY t\.cashbox_id/);
+  });
+
+  it('cashbox_id filter applies inside the CTE; direction/category/date apply outside', async () => {
+    const { service, calls } = makeServiceWithCalls();
+    await service.movements({
+      cashbox_id: 'cb-1',
+      direction: 'in',
+      category: 'expense',
+      from: '2026-04-01',
+      to: '2026-04-30',
+    });
+    const sql = calls[0].sql;
+    // Inner WHERE inside the CTE scopes the partition to the requested
+    // cashbox (efficient + correct).
+    expect(sql).toMatch(/FROM cashbox_transactions t\s+WHERE t\.cashbox_id = \$1/);
+    // Outer WHERE applies presentation filters against the CTE alias
+    // so they don't distort the per-row running balance.
+    expect(sql).toMatch(/obw\.direction = \$2/);
+    expect(sql).toMatch(/obw\.category = \$3/);
+    expect(sql).toMatch(/\(obw\.created_at AT TIME ZONE 'Africa\/Cairo'\)::date >= \$4::date/);
+    expect(sql).toMatch(/\(obw\.created_at AT TIME ZONE 'Africa\/Cairo'\)::date <= \$5::date/);
+  });
+});
+

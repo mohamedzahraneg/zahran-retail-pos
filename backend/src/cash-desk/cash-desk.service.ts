@@ -2162,57 +2162,102 @@ export class CashDeskService {
     limit?: number;
     offset?: number;
   }) {
-    const conds: string[] = [];
+    // PR-FIX-CASHBOX-MOVEMENTS-BALANCE-AFTER (legacy /cash-desk page)
+    // ─────────────────────────────────────────────────────────────
+    // Same root cause as cashboxMovementsUnified: the historical
+    // cashbox_transactions.balance_after column is corrupted on
+    // production (70 NaN rows + 272 rows drifted by +102,746 EGP
+    // on the main cashbox).  This method is what the /cash-desk
+    // "الصندوق اليومي" page reads (via cashDeskApi.movements), and
+    // it used to SELECT t.balance_after directly — leaking NaN +
+    // drift into the "الرصيد بعد" column.
+    //
+    // The fix mirrors the unified-report fix:
+    //   1. Split filters into inner (cashbox_id scopes the partition)
+    //      and outer (direction/category/date are presentation-only).
+    //   2. ops_with_balance CTE computes per-row running balance via
+    //      a window function PARTITION BY cashbox_id, so multi-cashbox
+    //      responses (when no cashbox_id filter) stay correct.
+    //   3. Voided rows contribute 0 to the running sum but stay visible
+    //      in the result set (preserves the legacy row visibility) —
+    //      their displayed balance_after reflects the cashbox state
+    //      AS IF the void had been zero, i.e. it doesn't double-count.
+    //   4. Pagination + outer filters are applied AFTER the window so
+    //      every page shows the true running balance at each moment.
+    //
+    // Strict guarantees:
+    //   · same response shape (field still called balance_after)
+    //   · same filters: cashbox_id, direction, category, from, to,
+    //     limit, offset
+    //   · NaN-free output (no raw read of the corrupted column)
+    const innerConds: string[] = [];
+    const outerConds: string[] = [];
     const args: any[] = [];
+
     if (params.cashbox_id) {
       args.push(params.cashbox_id);
-      conds.push(`cashbox_id = $${args.length}`);
+      innerConds.push(`t.cashbox_id = $${args.length}`);
     }
     if (params.direction === 'in' || params.direction === 'out') {
       args.push(params.direction);
-      conds.push(`direction = $${args.length}`);
+      outerConds.push(`obw.direction = $${args.length}`);
     }
     if (params.category) {
       args.push(params.category);
-      conds.push(`category = $${args.length}`);
+      outerConds.push(`obw.category = $${args.length}`);
     }
     if (params.from) {
       args.push(params.from);
-      conds.push(
-        `(created_at AT TIME ZONE 'Africa/Cairo')::date >= $${args.length}::date`,
+      outerConds.push(
+        `(obw.created_at AT TIME ZONE 'Africa/Cairo')::date >= $${args.length}::date`,
       );
     }
     if (params.to) {
       args.push(params.to);
-      conds.push(
-        `(created_at AT TIME ZONE 'Africa/Cairo')::date <= $${args.length}::date`,
+      outerConds.push(
+        `(obw.created_at AT TIME ZONE 'Africa/Cairo')::date <= $${args.length}::date`,
       );
     }
-    const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+    const innerWhere = innerConds.length
+      ? `WHERE ${innerConds.join(' AND ')}`
+      : '';
+    const outerWhere = outerConds.length
+      ? `WHERE ${outerConds.join(' AND ')}`
+      : '';
+
     args.push(Math.min(Number(params.limit ?? 200), 1000));
     args.push(Math.max(Number(params.offset ?? 0), 0));
 
-    // Inline query — equivalent to v_cashbox_movements but works even
-    // on DBs where migration 046 hasn't been applied yet. The view
-    // stays around as a convenience for direct SQL consumers.
-    const whereOnT = where
-      ? where.replace(/cashbox_id/g, 't.cashbox_id')
-             .replace(/direction/g, 't.direction')
-             .replace(/category/g, 't.category')
-             .replace(/created_at/g, 't.created_at')
-      : '';
     return this.ds.query(
       `
+      WITH ops_with_balance AS (
+        SELECT
+          t.id, t.cashbox_id, t.direction::text AS direction,
+          t.amount, t.category::text AS category,
+          t.reference_type::text AS reference_type, t.reference_id,
+          t.notes, t.user_id, t.created_at, t.is_void,
+          SUM(
+            CASE
+              WHEN t.is_void = TRUE THEN 0::numeric
+              WHEN t.direction = 'in' THEN t.amount
+              ELSE -t.amount
+            END
+          ) OVER (
+            PARTITION BY t.cashbox_id
+            ORDER BY t.created_at, t.id
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+          )::numeric(14,2) AS balance_after
+        FROM cashbox_transactions t
+        ${innerWhere}
+      )
       SELECT
-        t.id, t.cashbox_id, cb.name_ar AS cashbox_name,
-        t.direction::text AS direction,
-        t.amount::numeric(14,2) AS amount,
-        t.category::text AS category,
-        t.reference_type::text AS reference_type,
-        t.reference_id,
-        t.balance_after::numeric(14,2) AS balance_after,
-        t.notes, t.user_id, u.full_name AS user_name, t.created_at,
-        CASE t.category
+        obw.id, obw.cashbox_id, cb.name_ar AS cashbox_name,
+        obw.direction,
+        obw.amount::numeric(14,2) AS amount,
+        obw.category, obw.reference_type, obw.reference_id,
+        obw.balance_after,
+        obw.notes, obw.user_id, u.full_name AS user_name, obw.created_at,
+        CASE obw.category
           WHEN 'customer_receipt' THEN 'قبض من عميل'
           WHEN 'supplier_payment' THEN 'صرف لمورد'
           WHEN 'expense'          THEN 'مصروف'
@@ -2227,31 +2272,31 @@ export class CashDeskService {
           WHEN 'payment'          THEN 'دفعة'
           WHEN 'receipt'          THEN 'سند قبض'
           WHEN 'purchase'         THEN 'شراء'
-          ELSE COALESCE(t.category, 'أخرى')
+          ELSE COALESCE(obw.category, 'أخرى')
         END AS kind_ar,
         COALESCE(
-          (SELECT i.invoice_no FROM invoices i WHERE i.id = t.reference_id),
-          (SELECT e.expense_no FROM expenses e WHERE e.id = t.reference_id),
-          (SELECT cp.payment_no FROM customer_payments cp WHERE cp.id = t.reference_id),
-          (SELECT sp.payment_no FROM supplier_payments sp WHERE sp.id = t.reference_id),
-          (SELECT p.purchase_no FROM purchases p WHERE p.id = t.reference_id)
+          (SELECT i.invoice_no FROM invoices i WHERE i.id = obw.reference_id),
+          (SELECT e.expense_no FROM expenses e WHERE e.id = obw.reference_id),
+          (SELECT cp.payment_no FROM customer_payments cp WHERE cp.id = obw.reference_id),
+          (SELECT sp.payment_no FROM supplier_payments sp WHERE sp.id = obw.reference_id),
+          (SELECT p.purchase_no FROM purchases p WHERE p.id = obw.reference_id)
         ) AS reference_no,
         COALESCE(
           (SELECT c.full_name FROM customers c
              JOIN customer_payments cp ON cp.customer_id = c.id
-            WHERE cp.id = t.reference_id),
+            WHERE cp.id = obw.reference_id),
           (SELECT s.name FROM suppliers s
              JOIN supplier_payments sp ON sp.supplier_id = s.id
-            WHERE sp.id = t.reference_id),
+            WHERE sp.id = obw.reference_id),
           (SELECT s.name FROM suppliers s
              JOIN purchases p ON p.supplier_id = s.id
-            WHERE p.id = t.reference_id)
+            WHERE p.id = obw.reference_id)
         ) AS counterparty_name
-      FROM cashbox_transactions t
-      LEFT JOIN cashboxes cb ON cb.id = t.cashbox_id
-      LEFT JOIN users     u  ON u.id  = t.user_id
-      ${whereOnT}
-      ORDER BY t.created_at DESC
+      FROM ops_with_balance obw
+      LEFT JOIN cashboxes cb ON cb.id = obw.cashbox_id
+      LEFT JOIN users     u  ON u.id  = obw.user_id
+      ${outerWhere}
+      ORDER BY obw.created_at DESC
       LIMIT $${args.length - 1} OFFSET $${args.length}
       `,
       args,
