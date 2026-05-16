@@ -15,7 +15,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { AccountingPostingService } from '../chart-of-accounts/posting.service';
 import { FinancialEngineService } from '../chart-of-accounts/financial-engine.service';
 import { PaymentsService } from '../payments/payments.service';
-import { resolveLogoKey } from '../payments/providers.catalog';
+import { resolveLogoKey, isCashMethod } from '../payments/providers.catalog';
 import { ShiftsService } from '../shifts/shifts.service';
 
 /**
@@ -133,6 +133,185 @@ export function classifyInvoiceEdit(
   }
 
   return { monetary_only: true, delta };
+}
+
+/**
+ * PR-POS-INVOICE-PAYMENT-REDISTRIBUTION-1 — classify an invoice edit
+ * as a pure payment-composition redistribution.
+ *
+ * Runs ONLY after `classifyInvoiceEdit` returns `monetary_only: false`
+ * (i.e. the simple +Δ path doesn't apply).  Detects the specific
+ * shape: same line items + same qty + same customer + **same**
+ * grand_total/paid_total, with the per-payment-bucket deltas pairing
+ * up so the redistribution is conceptually "move cash from one
+ * payment method to another without changing total revenue".
+ *
+ * Each "bucket" is keyed by `(payment_method, payment_account_id)`.
+ * For each bucket whose old amount ≠ new amount we record the signed
+ * delta.  The shape qualifies for redistribution iff the sum of all
+ * deltas equals zero (within 0.01 EGP tolerance) — that's the
+ * invariant we need to post as a series of pure cashbox transfers
+ * (DR new cashbox / CR old cashbox) without touching revenue.
+ *
+ * Cases that DO match (Phase 1 supports):
+ *   · add a new payment method while reducing an existing one by
+ *     the same amount (the screenshot case: InstaPay 725 → InstaPay
+ *     700 + cash 25)
+ *   · swap one payment method for another at the same total
+ *   · any 1-to-1, n-to-m pairing where the deltas net to zero
+ *
+ * Cases that DO NOT match (still legacy reverse-and-repost):
+ *   · grand_total changed
+ *   · paid_amount changed (over/under-payment)
+ *   · any bucket with non-zero delta unpaired by an opposite delta
+ *     (e.g. cash dropped 100 with no other bucket growing — that's
+ *     a partial refund, not a redistribution)
+ *   · line items / qty / customer changed (those go through legacy
+ *     reverse-and-repost in Phase 1; Phase 2 will address them)
+ */
+export interface PaymentBucketDelta {
+  payment_method: string;
+  payment_account_id: string | null;
+  old_amount: number;
+  new_amount: number;
+  delta: number; // new − old
+}
+
+export function classifyPaymentRedistribution(
+  orig: {
+    customer_id: string | null;
+    grand_total: number | string;
+    paid_amount: number | string;
+  },
+  origItems: Array<{ variant_id: string; quantity: number | string }>,
+  origPayments: Array<{
+    payment_method: string;
+    amount: number | string;
+    payment_account_id: string | null;
+  }>,
+  dto: {
+    lines: Array<{ variant_id: string; qty: number }>;
+    payments?: Array<{
+      payment_method: string;
+      amount: number;
+      payment_account_id?: string | null;
+    }>;
+    customer_id?: string | null;
+  },
+):
+  | {
+      kind: 'payment_redistribution';
+      bucket_deltas: PaymentBucketDelta[];
+    }
+  | { kind: 'not_redistribution'; reason: string } {
+  // ── 1) Lines must be unchanged (variant set + per-variant qty)
+  const dtoLines = dto.lines ?? [];
+  if (dtoLines.length !== origItems.length) {
+    return { kind: 'not_redistribution', reason: 'line_count_changed' };
+  }
+  const origQtyByVariant = new Map<string, number>();
+  for (const i of origItems) {
+    origQtyByVariant.set(
+      i.variant_id,
+      (origQtyByVariant.get(i.variant_id) ?? 0) + Number(i.quantity),
+    );
+  }
+  const dtoQtyByVariant = new Map<string, number>();
+  for (const l of dtoLines) {
+    dtoQtyByVariant.set(
+      l.variant_id,
+      (dtoQtyByVariant.get(l.variant_id) ?? 0) + Number(l.qty),
+    );
+  }
+  if (origQtyByVariant.size !== dtoQtyByVariant.size) {
+    return { kind: 'not_redistribution', reason: 'variant_set_changed' };
+  }
+  for (const [variantId, qty] of origQtyByVariant) {
+    if (dtoQtyByVariant.get(variantId) !== qty) {
+      return { kind: 'not_redistribution', reason: 'qty_changed' };
+    }
+  }
+
+  // ── 2) Customer must be unchanged (when specified)
+  if (
+    dto.customer_id != null &&
+    dto.customer_id !== orig.customer_id
+  ) {
+    return { kind: 'not_redistribution', reason: 'customer_changed' };
+  }
+
+  // ── 3) Compute per-bucket deltas, keyed by (method, account)
+  const dtoPayments = dto.payments ?? [];
+  const newPaidTotal = dtoPayments.reduce(
+    (s, p) => s + Number(p.amount || 0),
+    0,
+  );
+  const oldPaidTotal = Number(orig.paid_amount || 0);
+  const oldGrand = Number(orig.grand_total || 0);
+
+  // Phase 1 requires total UNCHANGED.  Any delta in total falls back
+  // to the +Δ path (handled by classifyInvoiceEdit) or to legacy.
+  if (Math.abs(newPaidTotal - oldPaidTotal) > 0.01) {
+    return { kind: 'not_redistribution', reason: 'paid_total_changed' };
+  }
+  if (Math.abs(newPaidTotal - oldGrand) > 0.01) {
+    return { kind: 'not_redistribution', reason: 'paid_does_not_match_grand_total' };
+  }
+
+  const keyOf = (p: {
+    payment_method: string;
+    payment_account_id?: string | null;
+  }) => `${p.payment_method}|${p.payment_account_id ?? ''}`;
+
+  const oldByKey = new Map<string, number>();
+  for (const p of origPayments) {
+    oldByKey.set(
+      keyOf(p),
+      (oldByKey.get(keyOf(p)) ?? 0) + Number(p.amount || 0),
+    );
+  }
+  const newByKey = new Map<string, number>();
+  for (const p of dtoPayments) {
+    newByKey.set(
+      keyOf(p),
+      (newByKey.get(keyOf(p)) ?? 0) + Number(p.amount || 0),
+    );
+  }
+
+  const allKeys = new Set<string>([...oldByKey.keys(), ...newByKey.keys()]);
+  const buckets: PaymentBucketDelta[] = [];
+  for (const key of allKeys) {
+    const oldAmt = +(oldByKey.get(key) ?? 0).toFixed(2);
+    const newAmt = +(newByKey.get(key) ?? 0).toFixed(2);
+    const delta = +(newAmt - oldAmt).toFixed(2);
+    if (delta === 0) continue;
+    const [method, account] = key.split('|');
+    buckets.push({
+      payment_method: method,
+      payment_account_id: account || null,
+      old_amount: oldAmt,
+      new_amount: newAmt,
+      delta,
+    });
+  }
+
+  if (buckets.length === 0) {
+    // No payment changes at all — not a redistribution; nothing to do
+    // here.  The caller should fall through to the +0 monetary_only
+    // delta path or to legacy (which itself becomes a no-op).
+    return { kind: 'not_redistribution', reason: 'no_bucket_changes' };
+  }
+
+  // ── 4) Sum of all deltas must be ~0 (pure redistribution invariant)
+  const deltaSum = buckets.reduce((s, b) => s + b.delta, 0);
+  if (Math.abs(deltaSum) > 0.01) {
+    return {
+      kind: 'not_redistribution',
+      reason: 'unpaired_deltas_sum_nonzero',
+    };
+  }
+
+  return { kind: 'payment_redistribution', bucket_deltas: buckets };
 }
 
 @Injectable()
@@ -896,6 +1075,32 @@ export class PosService {
         );
       }
 
+      // ── PR-POS-INVOICE-PAYMENT-REDISTRIBUTION-1 ──────────────────
+      // Second short-circuit: detect pure payment-composition edits
+      // (lines + qty + customer + grand_total unchanged; only the
+      // payment-method split moved).  These flow through a cashbox-
+      // transfer path that NEVER calls reverseByReference and NEVER
+      // creates a `reversal_sale` CT.
+      const redistribution = classifyPaymentRedistribution(
+        orig,
+        origItems,
+        origPayments,
+        dto,
+      );
+      if (redistribution.kind === 'payment_redistribution') {
+        return this.applyPaymentRedistributionEdit(
+          em,
+          id,
+          orig,
+          origItems,
+          origPayments,
+          dto,
+          userId,
+          reason,
+          redistribution.bucket_deltas,
+        );
+      }
+
       // ── 1) Reverse stock (one adjustment-in per original line) ───
       for (const it of origItems) {
         await em.query(
@@ -1483,6 +1688,338 @@ export class PosService {
     this.realtime?.emitPosEvent({
       type: 'invoice.created',
       payload: { invoice_id: id, edited: true, edited_by: userId, path: 'monetary_delta' },
+    });
+
+    return { invoice: updated, edited: true, history_id: historyId };
+  }
+
+  /**
+   * PR-POS-INVOICE-PAYMENT-REDISTRIBUTION-1 — apply a pure payment-
+   * composition edit WITHOUT calling `postInvoiceEdit` or
+   * `reverseByReference`.  Caller (`editInvoice`) has already
+   * classified the edit via `classifyPaymentRedistribution` and is
+   * inside the outer transaction.
+   *
+   * What this method does (mutation strategy α):
+   *   1. INSERT an `invoice_edit_history` row with the before-snapshot.
+   *   2. For each new payment bucket (added method/account):
+   *      INSERT a fresh `invoice_payments` row (with frozen
+   *      payment_account_snapshot, same as createInvoice / legacy
+   *      edit do — so the GL routing stays deterministic).
+   *   3. For each existing payment bucket whose amount changed:
+   *      UPDATE the original `invoice_payments` row's amount.
+   *   4. For each removed bucket:
+   *      DELETE the `invoice_payments` row.
+   *   5. Resolve cashbox_id for each bucket (cash → shift.cashbox_id;
+   *      non-cash → payment_account.cashbox_id from the snapshot or
+   *      live).  Pair negative-delta buckets to positive-delta
+   *      buckets (greedy match) and call
+   *      `posting.postInvoicePaymentRedistribution(...)` which emits
+   *      one `engine.recordCashboxTransfer` JE+CT pair per matched
+   *      transfer.
+   *   6. UPDATE invoice metadata (notes/customer/salesperson only —
+   *      grand_total/paid_amount UNCHANGED by design).
+   *   7. Backfill history row with after-snapshot.
+   *   8. Refresh closed-shift snapshot if applicable.
+   *   9. Emit realtime event.
+   *
+   * Explicitly does NOT:
+   *   · Wipe & re-insert items (lines unchanged).
+   *   · Reverse stock (lines unchanged).
+   *   · Call `posting.postInvoiceEdit`.
+   *   · Call `posting.reverseByReference`.
+   *   · Void the original sale JE.
+   *   · Emit a `reversal_sale` CT.
+   */
+  private async applyPaymentRedistributionEdit(
+    em: any,
+    id: string,
+    orig: any,
+    origItems: Array<any>,
+    origPayments: Array<any>,
+    dto: any,
+    userId: string,
+    reason: string,
+    bucketDeltas: PaymentBucketDelta[],
+  ) {
+    // ── 1) History row with before-snapshot ────────────────────────
+    const [historyRow] = await em.query(
+      `INSERT INTO invoice_edit_history
+         (invoice_id, edited_by, reason, before_snapshot)
+       VALUES ($1,$2,$3,$4::jsonb)
+       RETURNING id`,
+      [
+        id,
+        userId,
+        reason,
+        JSON.stringify({ invoice: orig, items: origItems, payments: origPayments }),
+      ],
+    );
+    const historyId = historyRow.id;
+
+    // ── 2) Resolve cashbox per bucket (mirrors postInvoice's logic)
+    // For cash payments the cashbox is the shift's cashbox.  For non-
+    // cash, we resolve via payment_account_snapshot → live lookup.
+    // We do this once per unique bucket so the per-row mutation loop
+    // below can reuse the resolved values.
+    const bucketKeyOf = (
+      method: string,
+      accountId: string | null | undefined,
+    ) => `${method}|${accountId ?? ''}`;
+    const cashboxByBucket = new Map<string, string | null>();
+
+    const [shift] = await em.query(
+      `SELECT cashbox_id FROM shifts WHERE id = $1`,
+      [orig.shift_id],
+    );
+    const shiftCashboxId: string | null = shift?.cashbox_id ?? null;
+
+    // Resolve for every bucket appearing in old OR new payments.
+    const allBuckets = new Set<string>();
+    for (const p of origPayments) {
+      allBuckets.add(bucketKeyOf(p.payment_method, p.payment_account_id));
+    }
+    for (const p of (dto.payments ?? [])) {
+      allBuckets.add(bucketKeyOf(p.payment_method, p.payment_account_id));
+    }
+    for (const key of allBuckets) {
+      const [method, accountId] = key.split('|');
+      if (isCashMethod(method)) {
+        cashboxByBucket.set(key, shiftCashboxId);
+        continue;
+      }
+      // Non-cash: try the original payment's snapshot first (if any),
+      // then live payment_accounts lookup.
+      const candidate = origPayments.find(
+        (p: any) =>
+          p.payment_method === method &&
+          (p.payment_account_id ?? '') === (accountId || ''),
+      );
+      let cashboxId: string | null = null;
+      if (candidate?.payment_account_snapshot) {
+        const snap =
+          typeof candidate.payment_account_snapshot === 'string'
+            ? JSON.parse(candidate.payment_account_snapshot)
+            : candidate.payment_account_snapshot;
+        cashboxId = (snap?.cashbox_id as string | null) ?? null;
+      }
+      if (!cashboxId && accountId) {
+        const [row] = await em.query(
+          `SELECT cashbox_id FROM payment_accounts WHERE id = $1`,
+          [accountId],
+        );
+        cashboxId = row?.cashbox_id ?? null;
+      }
+      cashboxByBucket.set(key, cashboxId);
+    }
+
+    // ── 3) Pair negative/positive deltas into transfers ────────────
+    // Greedy match: walk both lists and emit transfers of size equal
+    // to the smaller of the two head amounts; advance whichever side
+    // hits zero.  Sum of all deltas is guaranteed zero by classify
+    // so this terminates with both queues empty.
+    const fromQueue = bucketDeltas
+      .filter((b) => b.delta < 0)
+      .map((b) => ({ ...b, remaining: Math.abs(b.delta) }));
+    const toQueue = bucketDeltas
+      .filter((b) => b.delta > 0)
+      .map((b) => ({ ...b, remaining: b.delta }));
+
+    const transfers: Array<{
+      from_cashbox_id: string;
+      to_cashbox_id: string;
+      amount: number;
+    }> = [];
+
+    while (fromQueue.length && toQueue.length) {
+      const f = fromQueue[0];
+      const t = toQueue[0];
+      const amt = +Math.min(f.remaining, t.remaining).toFixed(2);
+      const fromCb = cashboxByBucket.get(
+        bucketKeyOf(f.payment_method, f.payment_account_id),
+      );
+      const toCb = cashboxByBucket.get(
+        bucketKeyOf(t.payment_method, t.payment_account_id),
+      );
+      if (!fromCb || !toCb) {
+        throw new BadRequestException(
+          `redistribution_cashbox_not_resolvable: ${f.payment_method}→${t.payment_method}`,
+        );
+      }
+      transfers.push({
+        from_cashbox_id: fromCb,
+        to_cashbox_id: toCb,
+        amount: amt,
+      });
+      f.remaining = +(f.remaining - amt).toFixed(2);
+      t.remaining = +(t.remaining - amt).toFixed(2);
+      if (f.remaining === 0) fromQueue.shift();
+      if (t.remaining === 0) toQueue.shift();
+    }
+
+    // ── 4) Mutate invoice_payments per strategy α ─────────────────
+    // For each new/changed/removed bucket, mutate the corresponding
+    // invoice_payments rows.
+    for (const b of bucketDeltas) {
+      const existingRow = origPayments.find(
+        (p: any) =>
+          p.payment_method === b.payment_method &&
+          (p.payment_account_id ?? null) === b.payment_account_id,
+      );
+      if (b.new_amount === 0) {
+        // Bucket removed entirely → DELETE its row.
+        if (existingRow) {
+          await em.query(`DELETE FROM invoice_payments WHERE id = $1`, [
+            existingRow.id,
+          ]);
+        }
+        continue;
+      }
+      if (existingRow) {
+        // Bucket exists, amount changed → UPDATE in place.
+        await em.query(
+          `UPDATE invoice_payments SET amount = $1, updated_at = NOW() WHERE id = $2`,
+          [b.new_amount, existingRow.id],
+        );
+      } else {
+        // New bucket → INSERT with snapshot lookup (mirrors
+        // createInvoice / legacy edit path).
+        let snapshot: string | null = null;
+        if (b.payment_account_id && this.payments) {
+          const acct = await this.payments.resolveForPosting(
+            b.payment_account_id,
+            em,
+          );
+          if (acct) {
+            const meta = (acct.metadata ?? {}) as Record<string, unknown>;
+            const logoDataUrl =
+              typeof meta.logo_data_url === 'string'
+                ? (meta.logo_data_url as string)
+                : null;
+            snapshot = JSON.stringify({
+              id: acct.id,
+              method: acct.method,
+              display_name: acct.display_name,
+              provider_key: acct.provider_key,
+              identifier: acct.identifier,
+              gl_account_code: acct.gl_account_code,
+              cashbox_id: acct.cashbox_id ?? null,
+              logo_key: resolveLogoKey(acct.provider_key, acct.method),
+              logo_data_url: logoDataUrl,
+            });
+          }
+        }
+        await em.query(
+          `INSERT INTO invoice_payments
+             (invoice_id, payment_method, amount, reference,
+              payment_account_id, payment_account_snapshot)
+           VALUES ($1,$2,$3,$4,$5,$6::jsonb)`,
+          [
+            id,
+            b.payment_method,
+            b.new_amount,
+            `PR-POS-INVOICE-PAYMENT-REDISTRIBUTION-1 +${b.new_amount}`,
+            b.payment_account_id ?? null,
+            snapshot,
+          ],
+        );
+      }
+    }
+
+    // ── 5) Update invoice metadata only ────────────────────────────
+    // grand_total / paid_amount / subtotal / cogs / gross_profit are
+    // ALL unchanged by definition of redistribution.  Only
+    // notes/customer/salesperson + edit markers move.
+    const [updated] = await em.query(
+      `UPDATE invoices
+          SET customer_id      = COALESCE($2, customer_id),
+              salesperson_id   = COALESCE($3, salesperson_id),
+              notes            = $4,
+              edit_count       = edit_count + 1,
+              last_edited_at   = NOW(),
+              updated_at       = NOW()
+        WHERE id = $1
+        RETURNING *`,
+      [
+        id,
+        dto.customer_id ?? null,
+        dto.salesperson_id ?? null,
+        dto.notes ?? orig.notes ?? null,
+      ],
+    );
+
+    // ── 6) Post the GL/CT side: one cashbox_transfer per pair.  The
+    //     posting helper uses `engine.recordCashboxTransfer` so the
+    //     original sale JE stays untouched and no `reversal_sale` row
+    //     is written.
+    if (this.posting && transfers.length > 0) {
+      const postRes = (await this.posting.postInvoicePaymentRedistribution(
+        id,
+        historyId,
+        transfers,
+        userId,
+        em,
+      )) as any;
+      if (postRes?.error) {
+        throw new BadRequestException(
+          `فشل ترحيل تعديل وسيلة الدفع: ${postRes.error}`,
+        );
+      }
+    }
+
+    // ── 7) Backfill history with after-snapshot ────────────────────
+    const newPayments = await em.query(
+      `SELECT * FROM invoice_payments WHERE invoice_id = $1 ORDER BY id`,
+      [id],
+    );
+    await em.query(
+      `UPDATE invoice_edit_history
+          SET after_summary  = $2::jsonb,
+              after_snapshot = $3::jsonb
+        WHERE id = $1`,
+      [
+        historyId,
+        JSON.stringify({
+          items_count: origItems.length,
+          grand_total: Number(orig.grand_total),
+          cogs_total: Number(orig.cogs_total),
+          gross_profit:
+            Number(orig.grand_total) - Number(orig.cogs_total),
+          paid: Number(orig.paid_amount),
+          delta: 0,
+          path: 'payment_redistribution',
+          transfer_count: transfers.length,
+          bucket_deltas: bucketDeltas,
+        }),
+        JSON.stringify({
+          invoice: updated,
+          items: origItems, // unchanged
+          payments: newPayments,
+        }),
+      ],
+    );
+
+    // ── 8) Refresh closed-shift snapshot if applicable ─────────────
+    if (orig.shift_id && this.shifts) {
+      const refresh = await this.shifts.refreshClosedShiftSnapshot(
+        orig.shift_id,
+        em,
+      );
+      if (refresh.status === 'blocked') {
+        throw new ConflictException(
+          'لا يمكن تعديل فاتورة لوردية مغلقة سبق ترحيل فروقاتها محاسبياً. يجب تسوية أو إلغاء معالجة الفروقات أولاً.',
+        );
+      }
+    }
+
+    this.realtime?.emitPosEvent({
+      type: 'invoice.created',
+      payload: {
+        invoice_id: id,
+        edited: true,
+        edited_by: userId,
+        path: 'payment_redistribution',
+      },
     });
 
     return { invoice: updated, edited: true, history_id: historyId };

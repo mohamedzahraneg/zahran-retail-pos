@@ -678,6 +678,102 @@ export class AccountingPostingService {
   }
 
   /**
+   * PR-POS-INVOICE-PAYMENT-REDISTRIBUTION-1 — post the GL/CT side of
+   * a pure payment-composition edit, WITHOUT voiding the original
+   * sale JE and WITHOUT creating any `reversal_sale` CT.
+   *
+   * Companion to `applyPaymentRedistributionEdit` in pos.service.ts.
+   * Used only when `classifyPaymentRedistribution` decides:
+   *   · lines + qty + customer unchanged
+   *   · grand_total + paid_amount unchanged
+   *   · per-bucket deltas pair to zero (it's a redistribution, not a
+   *     refund or partial payment)
+   *
+   * For each "from" bucket (negative delta) paired with a "to" bucket
+   * (positive delta) we issue one cashbox transfer via
+   * `engine.recordCashboxTransfer`.  Each pair posts:
+   *   · JE: DR cash(to_cashbox) / CR cash(from_cashbox)
+   *   · CT rows: out from `from`, in to `to`, category='transfer'
+   *
+   * Result: NO `reversal_sale` row, NO "عكس:" note, the original
+   * sale JE stays `is_void=false` and untouched.  The cashbox running
+   * balances reflect reality (money actually moved between drawers).
+   *
+   * Idempotency: each transfer's `transfer_id` is a deterministic
+   * uuid-v5 hash of `(history_id, pair_index)` so retries of the same
+   * edit don't double-post.
+   *
+   * Phase 1 limitations (documented in the report; Phase 2 will lift):
+   *   · only handles deltas that pair to zero across cashboxes
+   *   · line-item / qty / customer changes still go through the legacy
+   *     reverse-and-repost path (those DO create `reversal_sale`)
+   */
+  async postInvoicePaymentRedistribution(
+    invoiceId: string,
+    historyId: string,
+    pairs: Array<{
+      from_cashbox_id: string;
+      to_cashbox_id: string;
+      amount: number;
+    }>,
+    userId: string,
+    em?: EntityManager,
+  ): Promise<{ ok: true; entry_ids: string[] } | { error: string }> {
+    if (!this.engine) return { ok: true, entry_ids: [] };
+    if (!pairs.length) return { ok: true, entry_ids: [] };
+    const runner = em ?? this.ds.manager;
+
+    // Fetch invoice_no for human-readable transfer descriptions.
+    const [inv] = await runner.query(
+      `SELECT invoice_no FROM invoices WHERE id = $1`,
+      [invoiceId],
+    );
+    const invoiceNo = inv?.invoice_no ?? invoiceId.slice(0, 8);
+    const entryIds: string[] = [];
+
+    for (let i = 0; i < pairs.length; i++) {
+      const pair = pairs[i];
+      if (!(pair.amount > 0) || !Number.isFinite(pair.amount)) {
+        return { error: `invalid_pair_amount:${pair.amount}` };
+      }
+      if (pair.from_cashbox_id === pair.to_cashbox_id) {
+        // Same cashbox both sides → no movement needed (would be
+        // a no-op transfer anyway).  Skip.
+        continue;
+      }
+
+      // Deterministic transfer_id per (history_id, pair index) so
+      // engine idempotency on (reference_type, reference_id) blocks
+      // accidental retries.
+      const [{ ref_id: transferId }] = await runner.query(
+        `SELECT uuid_generate_v5(
+           uuid_ns_dns(),
+           'invoice_payment_redistribution:' || $1::text || ':' || $2::text
+         ) AS ref_id`,
+        [historyId, i],
+      );
+
+      const res = await this.engine.recordCashboxTransfer({
+        transfer_id: transferId,
+        from_cashbox_id: pair.from_cashbox_id,
+        to_cashbox_id: pair.to_cashbox_id,
+        amount: pair.amount,
+        user_id: userId,
+        notes: `تعديل وسيلة دفع — فاتورة ${invoiceNo}`,
+        em,
+      });
+      if (!res.ok) {
+        return { error: `transfer_failed:${res.error}` };
+      }
+      if ((res as any).entry_id) {
+        entryIds.push((res as any).entry_id);
+      }
+    }
+
+    return { ok: true, entry_ids: entryIds };
+  }
+
+  /**
    * Customer return → reverses the sale:
    *   DR Sales Returns (49)       = net_refund (gross minus restocking)
    *   DR Restocking Fee revenue?  → kept in-house; we credit 'other revenue' (422)
