@@ -25,6 +25,9 @@ export interface Purchase {
   items_count?: number;
   created_at: string;
   received_at?: string | null;
+  // PR-PURCHASES-P2.1 — landed-cost aggregates (NUMERIC NOT NULL DEFAULT 0).
+  extra_costs_capitalized?: string | number;
+  extra_costs_non_capitalized?: string | number;
 }
 
 export interface PurchaseItem {
@@ -38,6 +41,12 @@ export interface PurchaseItem {
   discount: string;
   tax: string;
   line_total: string;
+  // PR-PURCHASES-P2.1 — landed-cost breakdown (numeric in DB, comes
+  // back as string under TypeORM's pg-decimal serialization).
+  base_unit_cost?: string | number;
+  allocated_cost_total?: string | number;
+  allocated_cost_per_unit?: string | number;
+  manual_allocation?: boolean;
 }
 
 export interface PurchasePayment {
@@ -53,14 +62,48 @@ export interface PurchasePayment {
 export interface PurchaseDetail extends Purchase {
   items: PurchaseItem[];
   payments: PurchasePayment[];
+  // PR-PURCHASES-P2.2 — landed-cost aggregates + child rows. Empty
+  // array on legacy purchases; backend supplies the relation.
+  extra_costs?: PurchaseExtraCostRow[];
+  extra_costs_capitalized?: string | number;
+  extra_costs_non_capitalized?: string | number;
 }
 
 export interface CreatePurchaseItemPayload {
   variant_id: string;
   quantity: number;
+  /** Operator-entered base/raw price per piece. Backend converts this
+   *  into the LANDED unit_cost after running its allocation engine. */
   unit_cost: number;
   discount?: number;
   tax?: number;
+}
+
+// PR-PURCHASES-P2.2 — landed-cost extras DTOs.
+export type ExtraCostType =
+  | 'transport'
+  | 'labor'
+  | 'shipping'
+  | 'customs'
+  | 'packaging'
+  | 'other';
+
+export type AllocationMethod = 'by_value' | 'by_quantity' | 'manual';
+
+export interface ManualAllocationPayload {
+  variant_id: string;
+  amount: number;
+}
+
+export interface CreatePurchaseExtraCostPayload {
+  cost_type: ExtraCostType;
+  label?: string;
+  amount: number;
+  capitalize_to_inventory?: boolean;
+  allocation_method?: AllocationMethod;
+  notes?: string;
+  sort_order?: number;
+  manual_allocations?: ManualAllocationPayload[];
 }
 
 export interface CreatePurchasePayload {
@@ -74,6 +117,21 @@ export interface CreatePurchasePayload {
   tax_amount?: number;
   notes?: string;
   items: CreatePurchaseItemPayload[];
+  // PR-PURCHASES-P2.2 — optional; undefined keeps the legacy shape.
+  extra_costs?: CreatePurchaseExtraCostPayload[];
+}
+
+// Detail-response shape (extras + per-line landed breakdown).
+export interface PurchaseExtraCostRow {
+  id: string;
+  cost_type: ExtraCostType;
+  label: string | null;
+  amount: string | number;
+  capitalize_to_inventory: boolean;
+  allocation_method: AllocationMethod;
+  notes: string | null;
+  sort_order: number;
+  created_at?: string;
 }
 
 export interface AddPurchasePaymentPayload {

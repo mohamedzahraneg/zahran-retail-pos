@@ -29,6 +29,14 @@ import { SupplierContextCard } from '@/components/purchases/SupplierContextCard'
 import { PurchaseProductSearch } from '@/components/purchases/PurchaseProductSearch';
 import { PurchaseLineEntry } from '@/components/purchases/PurchaseLineEntry';
 import { QuickAddProductModal } from '@/components/purchases/QuickAddProductModal';
+// PR-PURCHASES-P2.2 — landed-cost UI + preview math.
+import { LandedCostsSection } from '@/components/purchases/LandedCostsSection';
+import type { ExtraCostRow } from '@/components/purchases/landedCostState';
+import {
+  COST_TYPE_LABEL as COST_TYPE_LABEL_AR,
+  ALLOC_METHOD_LABEL as ALLOC_METHOD_LABEL_AR,
+} from '@/components/purchases/landedCostLabels';
+import { computeLandedPreview } from '@/components/purchases/landedCostMath';
 import { useAuthStore } from '@/stores/auth.store';
 import { useTableSort } from '@/lib/useTableSort';
 // PR-FE-IDEM-STOCK-PURCHASES-OPS (Sprint 5 / FE-IDEM PR 7C) —
@@ -442,15 +450,50 @@ function CreatePurchaseModal({ onClose }: { onClose: () => void }) {
   // Seed text for the quick-add modal; null = closed.
   const [quickAddSeed, setQuickAddSeed] = useState<string | null>(null);
 
-  const subtotal = useMemo(
+  // PR-PURCHASES-P2.2 — landed-cost extras state (operator-edited
+  // rows). Backend reruns the same allocation engine on save, so the
+  // frontend math here is preview-only.
+  const [extraCosts, setExtraCosts] = useState<ExtraCostRow[]>([]);
+
+  // Live allocation preview. Backend is source of truth; this is for
+  // operator visibility (per-line breakdown + summary tiles).
+  const preview = useMemo(
     () =>
-      items.reduce(
-        (s, i) =>
-          s + (i.quantity * i.unit_cost - (i.discount || 0) + (i.tax || 0)),
-        0,
-      ),
-    [items],
+      computeLandedPreview({
+        lines: items.map((i) => ({
+          variant_id: i.variant_id,
+          quantity: i.quantity,
+          base_unit_cost: i.unit_cost,
+          discount: i.discount,
+          tax: i.tax,
+        })),
+        extras: extraCosts.map((e) => ({
+          cost_type: e.cost_type,
+          amount: Number(e.amount || 0),
+          capitalize_to_inventory: e.capitalize_to_inventory !== false,
+          allocation_method: e.allocation_method ?? 'by_value',
+          manual_allocations: e.manual_allocations,
+        })),
+        shipping_cost: Number(form.shipping_cost || 0),
+        discount_amount: Number(form.discount_amount || 0),
+        tax_amount: Number(form.tax_amount || 0),
+      }),
+    [
+      items,
+      extraCosts,
+      form.shipping_cost,
+      form.discount_amount,
+      form.tax_amount,
+    ],
   );
+  // Index per-variant for fast lookup when rendering the line table.
+  const previewByVariant = useMemo(() => {
+    const m = new Map<string, (typeof preview)['lines'][number]>();
+    for (const l of preview.lines) m.set(l.variant_id, l);
+    return m;
+  }, [preview]);
+
+  const subtotal = preview.products_base_subtotal;
   const totalPieces = useMemo(
     () => items.reduce((s, i) => s + (i.quantity || 0), 0),
     [items],
@@ -459,11 +502,23 @@ function CreatePurchaseModal({ onClose }: { onClose: () => void }) {
     () => new Set(items.map((i) => i.variant_id)).size,
     [items],
   );
-  const grandTotal =
-    subtotal -
-    Number(form.discount_amount || 0) +
-    Number(form.tax_amount || 0) +
-    Number(form.shipping_cost || 0);
+  const grandTotal = preview.grand_total_preview;
+  const hasCapitalizedExtras = preview.extra_costs_capitalized > 0;
+  const hasAnyExtras =
+    preview.extra_costs_capitalized > 0
+    || preview.extra_costs_non_capitalized > 0;
+  const extraCostErrors = preview.errors;
+  const hasExtraErrors = Object.keys(extraCostErrors).length > 0;
+
+  // Drop rows with amount <= 0 before sending; manual_allocations
+  // travel as-is so the backend can revalidate.
+  const cleanExtraCosts = useMemo(
+    () =>
+      extraCosts
+        .map(({ _key: _k, ...rest }) => rest)
+        .filter((r) => Number(r.amount || 0) > 0),
+    [extraCosts],
+  );
 
   const createMut = useMutation({
     mutationFn: () =>
@@ -478,8 +533,11 @@ function CreatePurchaseModal({ onClose }: { onClose: () => void }) {
         tax_amount: Number(form.tax_amount) || undefined,
         notes: form.notes || undefined,
         // Strip UI-only metadata before sending. Backend payload remains
-        // exactly the existing CreatePurchaseDto shape.
+        // exactly the existing CreatePurchaseDto shape — items[].unit_cost
+        // stays the BASE price the operator typed; the backend allocator
+        // converts it to landed.
         items: items.map(({ display: _d, _ui: _u, ...rest }) => rest),
+        extra_costs: cleanExtraCosts.length > 0 ? cleanExtraCosts : undefined,
       }),
     onSuccess: () => {
       toast.success('تم إنشاء فاتورة المشتريات');
@@ -552,6 +610,12 @@ function CreatePurchaseModal({ onClose }: { onClose: () => void }) {
     }
     if (items.length === 0) {
       toast.error('أضف صنفاً واحداً على الأقل');
+      return;
+    }
+    if (hasExtraErrors) {
+      toast.error(
+        'يوجد خطأ في توزيع المصاريف الإضافية — راجع التوزيع اليدوي.',
+      );
       return;
     }
     createMut.mutate();
@@ -686,8 +750,19 @@ function CreatePurchaseModal({ onClose }: { onClose: () => void }) {
                     <th className="p-2 text-right">الصنف</th>
                     <th className="p-2 text-right">الوحدة</th>
                     <th className="p-2 text-right">القطع</th>
-                    <th className="p-2 text-right">سعر القطعة</th>
-                    <th className="p-2 text-right">إجمالي السطر</th>
+                    {hasCapitalizedExtras ? (
+                      <>
+                        <th className="p-2 text-right">سعر القطعة الأساسي</th>
+                        <th className="p-2 text-right">نصيب المصاريف</th>
+                        <th className="p-2 text-right">تكلفة القطعة النهائية</th>
+                        <th className="p-2 text-right">إجمالي السطر النهائي</th>
+                      </>
+                    ) : (
+                      <>
+                        <th className="p-2 text-right">سعر القطعة</th>
+                        <th className="p-2 text-right">إجمالي السطر</th>
+                      </>
+                    )}
                     <th className="p-2"></th>
                   </tr>
                 </thead>
@@ -705,13 +780,40 @@ function CreatePurchaseModal({ onClose }: { onClose: () => void }) {
                           ? `قطعة (${ui.pieces_per_carton}/كرتونة)`
                           : 'قطعة'
                       : 'قطعة';
+                    const pv = previewByVariant.get(it.variant_id);
                     return (
                       <tr key={idx}>
                         <td className="p-2">{it.display || it.variant_id}</td>
                         <td className="p-2 text-xs">{unitLabel}</td>
                         <td className="p-2">{it.quantity}</td>
-                        <td className="p-2">{EGP(it.unit_cost)}</td>
-                        <td className="p-2 font-bold">{EGP(lt)}</td>
+                        {hasCapitalizedExtras ? (
+                          <>
+                            <td className="p-2">{EGP(it.unit_cost)}</td>
+                            <td
+                              className="p-2 text-emerald-700"
+                              data-testid={`line-allocated-${idx}`}
+                            >
+                              +{EGP(pv?.allocated_cost_per_unit ?? 0)}
+                            </td>
+                            <td
+                              className="p-2 font-bold"
+                              data-testid={`line-final-unit-cost-${idx}`}
+                            >
+                              {EGP(pv?.final_unit_cost ?? it.unit_cost)}
+                            </td>
+                            <td
+                              className="p-2 font-bold"
+                              data-testid={`line-final-line-total-${idx}`}
+                            >
+                              {EGP(pv?.final_line_total ?? lt)}
+                            </td>
+                          </>
+                        ) : (
+                          <>
+                            <td className="p-2">{EGP(it.unit_cost)}</td>
+                            <td className="p-2 font-bold">{EGP(lt)}</td>
+                          </>
+                        )}
                         <td className="p-2">
                           <button
                             type="button"
@@ -731,19 +833,59 @@ function CreatePurchaseModal({ onClose }: { onClose: () => void }) {
             </div>
           )}
 
-          {/* Live summary tiles */}
+          {/* Live summary tiles — extra tiles surface when extras exist. */}
           {items.length > 0 ? (
             <div
               data-testid="purchase-invoice-summary"
-              className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs"
+              className={`grid gap-2 text-xs ${
+                hasAnyExtras
+                  ? 'grid-cols-2 md:grid-cols-4'
+                  : 'grid-cols-2 md:grid-cols-4'
+              }`}
             >
               <SummaryTile label="عدد الأصناف" value={String(distinctVariants)} />
               <SummaryTile label="عدد القطع" value={String(totalPieces)} />
-              <SummaryTile label="إجمالي السطور" value={EGP(subtotal)} />
+              <SummaryTile label="إجمالي المنتجات قبل المصاريف" value={EGP(subtotal)} />
               <SummaryTile label="إجمالي الفاتورة" value={EGP(grandTotal)} highlight />
+              {hasAnyExtras ? (
+                <>
+                  <SummaryTile
+                    label="مصاريف محملة على التكلفة"
+                    value={EGP(preview.extra_costs_capitalized)}
+                  />
+                  <SummaryTile
+                    label="مصاريف غير محملة"
+                    value={EGP(preview.extra_costs_non_capitalized)}
+                  />
+                  <SummaryTile
+                    label="إجمالي المخزون بعد التحميل"
+                    value={EGP(preview.final_inventory_total)}
+                  />
+                  <SummaryTile
+                    label="إجمالي الفاتورة النهائي"
+                    value={EGP(preview.grand_total_preview)}
+                    highlight
+                  />
+                </>
+              ) : null}
             </div>
           ) : null}
         </div>
+
+        {/* PR-PURCHASES-P2.2 — landed-cost extras section. */}
+        <LandedCostsSection
+          rows={extraCosts}
+          lines={items.map((it) => ({
+            variant_id: it.variant_id,
+            display: it.display || it.variant_id,
+            quantity: it.quantity,
+            base_unit_cost: it.unit_cost,
+          }))}
+          capitalizedTotal={preview.extra_costs_capitalized}
+          nonCapitalizedTotal={preview.extra_costs_non_capitalized}
+          errors={extraCostErrors}
+          onChange={setExtraCosts}
+        />
 
         <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
           <div>
@@ -799,8 +941,14 @@ function CreatePurchaseModal({ onClose }: { onClose: () => void }) {
           </button>
           <button
             type="submit"
-            disabled={createMut.isPending}
+            disabled={createMut.isPending || hasExtraErrors}
             className="btn-primary"
+            data-testid="purchase-submit"
+            title={
+              hasExtraErrors
+                ? 'يوجد خطأ في توزيع المصاريف الإضافية'
+                : undefined
+            }
           >
             حفظ كمسودة
           </button>
@@ -883,6 +1031,19 @@ function PurchaseDetailContent({
   onClose: () => void;
 }) {
   const remaining = Number(p.grand_total) - Number(p.paid_amount);
+  // PR-PURCHASES-P2.2 — surface backend-persisted landed-cost data.
+  // Backend writes these on receive (and on create when extras exist),
+  // so legacy purchases just render the classic 5-column layout.
+  const capitalizedTotal = Number(p.extra_costs_capitalized || 0);
+  const nonCapitalizedTotal = Number(p.extra_costs_non_capitalized || 0);
+  const extras = p.extra_costs ?? [];
+  const hasLandedColumns = p.items.some(
+    (it) =>
+      it.base_unit_cost != null
+      && Number(it.allocated_cost_total || 0) > 0,
+  );
+  const hasExtras = extras.length > 0;
+  const hasExtraTotals = capitalizedTotal > 0 || nonCapitalizedTotal > 0;
   return (
     <>
       <div className="flex items-center justify-between">
@@ -911,17 +1072,50 @@ function PurchaseDetailContent({
                 <th className="p-2 text-right">الصنف</th>
                 <th className="p-2 text-right">SKU</th>
                 <th className="p-2 text-right">الكمية</th>
-                <th className="p-2 text-right">السعر</th>
+                {hasLandedColumns ? (
+                  <>
+                    <th className="p-2 text-right">سعر القطعة الأساسي</th>
+                    <th className="p-2 text-right">نصيب المصاريف / قطعة</th>
+                    <th className="p-2 text-right">تكلفة القطعة النهائية</th>
+                  </>
+                ) : (
+                  <th className="p-2 text-right">السعر</th>
+                )}
                 <th className="p-2 text-right">الإجمالي</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {p.items.map((it) => (
-                <tr key={it.id}>
+                <tr key={it.id} data-testid={`detail-item-${it.id}`}>
                   <td className="p-2">{it.product_name}</td>
                   <td className="p-2 font-mono text-xs">{it.sku}</td>
                   <td className="p-2">{it.quantity}</td>
-                  <td className="p-2">{EGP(it.unit_cost)}</td>
+                  {hasLandedColumns ? (
+                    <>
+                      <td className="p-2">
+                        {EGP(it.base_unit_cost ?? it.unit_cost)}
+                      </td>
+                      <td
+                        className="p-2 text-emerald-700"
+                        data-testid={`detail-allocated-${it.id}`}
+                      >
+                        +{EGP(it.allocated_cost_per_unit ?? 0)}
+                        {it.manual_allocation ? (
+                          <span className="text-[10px] text-slate-500 mr-1">
+                            (يدوي)
+                          </span>
+                        ) : null}
+                      </td>
+                      <td
+                        className="p-2 font-bold"
+                        data-testid={`detail-final-unit-${it.id}`}
+                      >
+                        {EGP(it.unit_cost)}
+                      </td>
+                    </>
+                  ) : (
+                    <td className="p-2">{EGP(it.unit_cost)}</td>
+                  )}
                   <td className="p-2 font-bold">{EGP(it.line_total)}</td>
                 </tr>
               ))}
@@ -930,11 +1124,58 @@ function PurchaseDetailContent({
         </div>
       </section>
 
+      {hasExtras ? (
+        <section data-testid="detail-extras">
+          <h3 className="font-bold text-slate-700 mb-2">مصاريف إضافية</h3>
+          <div className="overflow-x-auto border border-slate-200 rounded-lg">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50">
+                <tr>
+                  <th className="p-2 text-right">النوع</th>
+                  <th className="p-2 text-right">الوصف</th>
+                  <th className="p-2 text-right">المبلغ</th>
+                  <th className="p-2 text-right">يدخل في التكلفة؟</th>
+                  <th className="p-2 text-right">طريقة التوزيع</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {extras.map((ec) => (
+                  <tr key={ec.id} data-testid={`detail-extra-${ec.id}`}>
+                    <td className="p-2">{COST_TYPE_LABEL_AR[ec.cost_type]}</td>
+                    <td className="p-2 text-xs">{ec.label || '—'}</td>
+                    <td className="p-2 font-bold">{EGP(ec.amount)}</td>
+                    <td className="p-2">
+                      {ec.capitalize_to_inventory ? 'نعم' : 'لا'}
+                    </td>
+                    <td className="p-2 text-xs">
+                      {ALLOC_METHOD_LABEL_AR[ec.allocation_method]}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : null}
+
       <section className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
         <InfoBlock label="المجموع الجزئي" value={EGP(p.subtotal)} />
         <InfoBlock label="الشحن" value={EGP(p.shipping_cost)} />
         <InfoBlock label="الخصم" value={EGP(p.discount_amount)} />
         <InfoBlock label="الضريبة" value={EGP(p.tax_amount)} />
+        {hasExtraTotals ? (
+          <>
+            <InfoBlock
+              label="مصاريف محملة"
+              value={EGP(capitalizedTotal)}
+              accent="emerald"
+            />
+            <InfoBlock
+              label="مصاريف غير محملة"
+              value={EGP(nonCapitalizedTotal)}
+            />
+          </>
+        ) : null}
         <InfoBlock
           label="المجموع الكلي"
           value={EGP(p.grand_total)}
