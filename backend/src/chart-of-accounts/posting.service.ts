@@ -1043,6 +1043,152 @@ export class AccountingPostingService {
   }
 
   /**
+   * PR-POS-INVOICE-NEGATIVE-UNPAID-DELTA-1 (Phase 2B) — post the GL
+   * side of a "safe negative unpaid delta" invoice edit (price drop,
+   * qty drop, line removal — any combination, with no implied cash
+   * refund), WITHOUT voiding the original sale JE and WITHOUT
+   * creating any `reversal_sale` CT.
+   *
+   * Companion to `applySafeNegativeUnpaidDeltaEdit` in pos.service.ts.
+   * Used only when `classifyNegativeDelta` decides:
+   *   · same customer
+   *   · no per-variant qty INCREASE, no per-variant revenue INCREASE,
+   *     no brand-new variant added
+   *   · old paid_amount stayed the same as before the edit (no
+   *     payment removal, no extra cash collected)
+   *   · old paid_amount ≤ new grand_total (no over-payment after edit)
+   *
+   * GL shape (mirrors the inverse of a sale):
+   *   DR Sales Revenue (411)  = |delta_revenue| (gross of tax portion)
+   *   DR Tax Payable (214)    = |delta_tax|
+   *   CR Accounts Receivable (1121) = |delta_grand_total|, tagged
+   *                                   with customer_id
+   *   DR Inventory (1131)     = |delta_cogs| (inventory restored)
+   *   CR COGS (51)            = |delta_cogs|
+   *
+   * NO cash_movements: the safe path never touches a cashbox. If a
+   * future variant needs to emit a CT, the engine alias
+   * `invoice_negative_unpaid_delta → invoice` is already in place.
+   *
+   * Idempotency: the JE key is
+   *   reference_type='invoice_negative_unpaid_delta'
+   *   reference_id = uuid_v5(uuid_ns_dns(),
+   *                          'invoice_negative_unpaid_delta:' || history_id)
+   * Retries of the same edit collapse via the engine's standard
+   * idempotency check.
+   */
+  async postInvoiceNegativeUnpaidDelta(
+    invoiceId: string,
+    historyId: string,
+    args: {
+      /** Magnitude of the AR / revenue reduction (= |delta_grand_total|). */
+      ar_reduction: number;
+      /** Magnitude of the revenue portion (gross of tax). */
+      revenue_reduction: number;
+      /** Magnitude of the tax portion. */
+      tax_reduction: number;
+      /** Magnitude of the inventory restoration / COGS reduction. */
+      cogs_reduction: number;
+      customer_id: string | null;
+    },
+    userId: string,
+    em?: EntityManager,
+  ): Promise<{ ok: true; entry_id: string } | { error: string }> {
+    if (!this.engine) {
+      return { error: 'engine_unavailable' };
+    }
+    if (!historyId) {
+      return { error: 'history_id_required' };
+    }
+    if (!(args.ar_reduction > 0)) {
+      return { error: 'ar_reduction_must_be_positive' };
+    }
+    const runner = em ?? this.ds.manager;
+
+    const [inv] = await runner.query(
+      `SELECT i.id, i.invoice_no, i.completed_at, i.created_at,
+              i.customer_id
+         FROM invoices i
+        WHERE i.id = $1`,
+      [invoiceId],
+    );
+    if (!inv) return { error: 'invoice_not_found' };
+
+    const [{ ref_id: referenceId }] = await runner.query(
+      `SELECT uuid_generate_v5(
+         uuid_ns_dns(),
+         'invoice_negative_unpaid_delta:' || $1::text
+       ) AS ref_id`,
+      [historyId],
+    );
+
+    const revRed = +Math.abs(args.revenue_reduction).toFixed(2);
+    const taxRed = +Math.abs(args.tax_reduction).toFixed(2);
+    const arRed = +Math.abs(args.ar_reduction).toFixed(2);
+    const cogsRed = +Math.abs(args.cogs_reduction).toFixed(2);
+
+    // Sanity: revenue + tax must equal AR portion within 0.01.
+    if (Math.abs(revRed + taxRed - arRed) > 0.01) {
+      return { error: 'revenue_plus_tax_does_not_match_ar_reduction' };
+    }
+
+    const lines: any[] = [];
+    if (revRed > 0) {
+      lines.push({
+        account_code: GL_SALES_REVENUE,
+        debit: revRed,
+        description: `إيراد - تخفيض فاتورة ${inv.invoice_no} (-${revRed})`,
+      });
+    }
+    if (taxRed > 0) {
+      lines.push({
+        account_code: GL_TAX_PAYABLE,
+        debit: taxRed,
+        description: `ضريبة - تخفيض فاتورة ${inv.invoice_no} (-${taxRed})`,
+      });
+    }
+    if (arRed > 0) {
+      lines.push({
+        account_code: '1121',
+        credit: arRed,
+        customer_id: args.customer_id ?? inv.customer_id ?? undefined,
+        description: `آجل - تخفيض فاتورة ${inv.invoice_no} (-${arRed})`,
+      });
+    }
+    if (cogsRed > 0) {
+      lines.push({
+        account_code: '1131',
+        debit: cogsRed,
+        description: `مخزون - تخفيض فاتورة ${inv.invoice_no}`,
+      });
+      lines.push({
+        account_code: GL_COGS,
+        credit: cogsRed,
+        description: `تكلفة - تخفيض فاتورة ${inv.invoice_no}`,
+      });
+    }
+
+    if (lines.length < 2) return { error: 'delta_je_too_small' };
+
+    const entryDate = this.dateOnly(inv.completed_at || inv.created_at);
+
+    const res = await this.engine.recordTransaction({
+      kind: 'manual_adjustment',
+      reference_type: 'invoice_negative_unpaid_delta',
+      reference_id: referenceId,
+      entry_date: entryDate,
+      description: `تخفيض قيد فاتورة ${inv.invoice_no} (-${arRed})`,
+      gl_lines: lines,
+      cash_movements: [],
+      user_id: userId,
+      em,
+    });
+
+    if (!res.ok) return { error: res.error };
+    return { ok: true, entry_id: (res as any).entry_id };
+  }
+
+  /**
    * Customer return → reverses the sale:
    *   DR Sales Returns (49)       = net_refund (gross minus restocking)
    *   DR Restocking Fee revenue?  → kept in-house; we credit 'other revenue' (422)

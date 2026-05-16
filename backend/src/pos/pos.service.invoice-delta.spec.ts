@@ -62,7 +62,16 @@ const ORIG_PAYMENTS = [
 // ────────────────────────────────────────────────────────────────────
 
 describe('classifyInvoiceEdit — PR-POS-INVOICE-DELTA-1', () => {
-  const orig = { paid_amount: '100.00', customer_id: null };
+  // grand_total is required for Phase 2B routing (the classifier now
+  // rejects monetary_only when the implied grand-total delta disagrees
+  // with the payment-delta). Real callers pass the full invoices row,
+  // so production usage always carries it; pure-function tests below
+  // include it explicitly.
+  const orig = {
+    paid_amount: '100.00',
+    customer_id: null,
+    grand_total: '100.00',
+  };
   const items = [
     { variant_id: 'v-1', quantity: 2 },
     { variant_id: 'v-2', quantity: 1 },
@@ -72,10 +81,12 @@ describe('classifyInvoiceEdit — PR-POS-INVOICE-DELTA-1', () => {
   ];
 
   it('positive delta monetary-only → { monetary_only: true, delta: 0.02 }', () => {
+    // dto subtotal must equal dto payment (Phase 2B routing assist):
+    // 50.01*2 + 0*1 = 100.02 matches payments 100.02. orig grand 100.
     const dto = {
       lines: [
-        { variant_id: 'v-1', qty: 2, unit_price: 51 },
-        { variant_id: 'v-2', qty: 1, unit_price: 0.02 },
+        { variant_id: 'v-1', qty: 2, unit_price: 50.01 },
+        { variant_id: 'v-2', qty: 1, unit_price: 0 },
       ],
       payments: [{ payment_method: 'cash', amount: 100.02 }],
     };
@@ -86,6 +97,8 @@ describe('classifyInvoiceEdit — PR-POS-INVOICE-DELTA-1', () => {
   });
 
   it('large positive delta (+2000) still monetary-only', () => {
+    // dto subtotal 1050*2 + 0*1 = 2100 = dto payment. orig grand 100.
+    // grand_delta 2000 == payment_delta 2000 → monetary_only.
     const dto = {
       lines: [
         { variant_id: 'v-1', qty: 2, unit_price: 1050 },
@@ -603,7 +616,12 @@ describe('editInvoice — negative-delta + structural fall through to legacy pat
     ];
   }
 
-  it('-0.02 monetary-only edit: classifyInvoiceEdit rejects (negative_delta_uses_legacy_path), legacy postInvoiceEdit called', async () => {
+  it('Phase 2B: -0.02 reduction on a FULLY-PAID invoice now blocks with the refund-required Arabic error', async () => {
+    // Originally this slot routed -0.02 to legacy postInvoiceEdit
+    // under PR-POS-INVOICE-DELTA-1. Phase 2B reclassifies a paid-down
+    // reduction as refund_required_negative_delta (old_paid 100 >
+    // new_grand 99.98) and blocks with a clear Arabic error rather
+    // than silently reversing.
     const dtoMinus02 = {
       lines: [{ variant_id: 'v-1', qty: 2, unit_price: 49.99, discount: 0 }],
       payments: [{ payment_method: 'cash', amount: 99.98 }],
@@ -613,10 +631,19 @@ describe('editInvoice — negative-delta + structural fall through to legacy pat
     const posting = makePostingMock();
     const svc = makeServiceWith(posting, ds);
 
-    await svc.editInvoice('inv-1', dtoMinus02, 'user-1', 'negative delta');
+    let thrown: unknown = null;
+    try {
+      await svc.editInvoice('inv-1', dtoMinus02, 'user-1', 'negative delta');
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(BadRequestException);
+    expect((thrown as Error).message).toContain(
+      'هذا التعديل يقلل فاتورة مدفوعة. استخدم مسار المرتجع/رد المبلغ.',
+    );
 
-    // Legacy path → postInvoiceEdit called, postInvoiceDelta NOT called.
-    expect(posting.postInvoiceEdit).toHaveBeenCalledTimes(1);
+    // No legacy path / delta path side effects.
+    expect(posting.postInvoiceEdit).not.toHaveBeenCalled();
     expect(posting.postInvoiceDelta).not.toHaveBeenCalled();
   });
 
@@ -1096,51 +1123,42 @@ describe('editInvoice — PR-POS-INVOICE-PAYMENT-REDISTRIBUTION-1', () => {
     expect(posting.postInvoiceEdit).not.toHaveBeenCalled();
   });
 
-  it('GUARD: structural QTY DECREASE / line removal STILL goes through legacy postInvoiceEdit — Phase 2B work', async () => {
-    // Phase 2A reclassifies positive qty changes as
-    // positive_structural_delta. Negative structural edits (qty down,
-    // line removed, line revenue down) still fall through to legacy
-    // reverse-and-repost; that's the Phase 2B scope.
+  it('GUARD: Phase 2B intercepts qty DECREASE on a FULLY-PAID invoice with the refund-required Arabic error', async () => {
+    // Originally this test asserted that qty-down + line-removed
+    // edits fell through to legacy postInvoiceEdit (Phase 2B pending).
+    // Phase 2B reclassifies them: a fully-paid invoice (paid 725,
+    // total 725) whose total drops requires a cash refund → block
+    // with the canonical Arabic error.
     const dtoQtyDown = {
       lines: [
-        { variant_id: 'v-1', qty: 0.5, unit_price: 350, discount: 0 }, // qty 1→0.5 (decrease)
+        { variant_id: 'v-1', qty: 0.5, unit_price: 350, discount: 0 }, // qty 1→0.5
         { variant_id: 'v-2', qty: 1, unit_price: 375, discount: 0 },
       ],
       payments: [{ payment_method: 'instapay', amount: 550, payment_account_id: 'acct-instapay' }],
       discount_total: 0,
     };
-    // Legacy path emQueue (enough entries to reach postInvoiceEdit)
     const emResults = [
-      [ORIG_INVOICE_RDS],                // [0] SELECT invoices
-      ORIG_ITEMS_RDS,                    // [1] SELECT items
-      ORIG_PAYMENTS_RDS,                 // [2] SELECT payments
-      [],                                // [3] INSERT stock_movements (item 1)
-      [],                                // [4] INSERT stock_movements (item 2)
-      [{ cashbox_id: 'cb-instapay' }],   // [5] SELECT cashbox_id FROM cashbox_transactions
-      [{ id: 'hist-legacy-1' }],         // [6] INSERT history RETURNING id
-      [],                                // [7] DELETE invoice_items
-      [],                                // [8] DELETE invoice_payments
-      [                                   // [9] SELECT variants
-        { id: 'v-1', cost_price: 0, sku: 'SKU-1', product_name: 'A', color_name: null, size_label: null },
-        { id: 'v-2', cost_price: 0, sku: 'SKU-2', product_name: 'B', color_name: null, size_label: null },
-      ],
-      [],                                // [10] INSERT invoice_items v-1
-      [],                                // [11] INSERT stock_movements sale v-1
-      [],                                // [12] INSERT invoice_items v-2
-      [],                                // [13] INSERT stock_movements sale v-2
-      [],                                // [14] INSERT invoice_payments
-      [{ ...ORIG_INVOICE_RDS, grand_total: '550.00' }], // [15] UPDATE invoices
-      ORIG_ITEMS_RDS,                    // [16] SELECT items after
-      ORIG_PAYMENTS_RDS,                 // [17] SELECT payments after
-      [],                                // [18] backfill history
+      [ORIG_INVOICE_RDS],     // SELECT invoices
+      ORIG_ITEMS_RDS,         // SELECT items
+      ORIG_PAYMENTS_RDS,      // SELECT payments
     ];
     const { ds } = makeFakeDs({ emResults });
     const posting = makePostingMockWithRedistribution();
     const svc = makeServiceWith(posting, ds);
 
-    await svc.editInvoice('inv-rds-1', dtoQtyDown, 'user-1', 'qty down');
+    let thrown: unknown = null;
+    try {
+      await svc.editInvoice('inv-rds-1', dtoQtyDown, 'user-1', 'qty down');
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(BadRequestException);
+    expect((thrown as Error).message).toContain(
+      'هذا التعديل يقلل فاتورة مدفوعة. استخدم مسار المرتجع/رد المبلغ.',
+    );
 
-    expect(posting.postInvoiceEdit).toHaveBeenCalledTimes(1);
+    // No path side effects: no postInvoiceEdit, no redistribution.
+    expect(posting.postInvoiceEdit).not.toHaveBeenCalled();
     expect(posting.postInvoicePaymentRedistribution).not.toHaveBeenCalled();
   });
 
@@ -1758,16 +1776,16 @@ describe('editInvoice — Phase 2A positive structural delta path', () => {
     expect(posting.postInvoiceEdit).toHaveBeenCalledTimes(1);
   });
 
-  it('Phase 2B pending: qty decrease falls through to legacy postInvoiceEdit', async () => {
+  it('Phase 2B now intercepts qty decrease on FULLY-PAID invoice with the refund-required Arabic error', async () => {
+    // Originally this asserted fall-through to legacy postInvoiceEdit
+    // (Phase 2B pending). Phase 2B now classifies fully-paid
+    // reductions as refund_required → block with Arabic error.
     const { ds } = makeFakeDs({
-      emResults: emQueueLegacyForPhase2A({
-        id: 'v-1',
-        cost_price: 30,
-        sku: 'SKU-1',
-        product_name: 'منتج 1',
-        color_name: null,
-        size_label: null,
-      }),
+      emResults: [
+        [ORIG_INVOICE_PSD],
+        ORIG_ITEMS_PSD,
+        ORIG_PAYMENTS_PSD,
+      ],
     });
     const posting = makePostingMockWithPositiveStructural();
     const svc = makeServiceWith(posting, ds);
@@ -1778,22 +1796,28 @@ describe('editInvoice — Phase 2A positive structural delta path', () => {
       discount_total: 0,
     };
 
-    await svc.editInvoice('inv-psd-1', dto, 'user-1', 'qty down');
+    let thrown: unknown = null;
+    try {
+      await svc.editInvoice('inv-psd-1', dto, 'user-1', 'qty down');
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(BadRequestException);
+    expect((thrown as Error).message).toContain(
+      'هذا التعديل يقلل فاتورة مدفوعة. استخدم مسار المرتجع/رد المبلغ.',
+    );
 
     expect(posting.postInvoicePositiveStructuralDelta).not.toHaveBeenCalled();
-    expect(posting.postInvoiceEdit).toHaveBeenCalledTimes(1);
+    expect(posting.postInvoiceEdit).not.toHaveBeenCalled();
   });
 
-  it('Phase 2B pending: per-line revenue decrease (price down, same qty) falls through to legacy postInvoiceEdit', async () => {
+  it('Phase 2B now intercepts per-line revenue decrease (price down) on FULLY-PAID invoice with the refund-required Arabic error', async () => {
     const { ds } = makeFakeDs({
-      emResults: emQueueLegacyForPhase2A({
-        id: 'v-1',
-        cost_price: 30,
-        sku: 'SKU-1',
-        product_name: 'منتج 1',
-        color_name: null,
-        size_label: null,
-      }),
+      emResults: [
+        [ORIG_INVOICE_PSD],
+        ORIG_ITEMS_PSD,
+        ORIG_PAYMENTS_PSD,
+      ],
     });
     const posting = makePostingMockWithPositiveStructural();
     const svc = makeServiceWith(posting, ds);
@@ -1804,10 +1828,19 @@ describe('editInvoice — Phase 2A positive structural delta path', () => {
       discount_total: 0,
     };
 
-    await svc.editInvoice('inv-psd-1', dto, 'user-1', 'reduce price');
+    let thrown: unknown = null;
+    try {
+      await svc.editInvoice('inv-psd-1', dto, 'user-1', 'reduce price');
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(BadRequestException);
+    expect((thrown as Error).message).toContain(
+      'هذا التعديل يقلل فاتورة مدفوعة. استخدم مسار المرتجع/رد المبلغ.',
+    );
 
     expect(posting.postInvoicePositiveStructuralDelta).not.toHaveBeenCalled();
-    expect(posting.postInvoiceEdit).toHaveBeenCalledTimes(1);
+    expect(posting.postInvoiceEdit).not.toHaveBeenCalled();
   });
 
   it('Phase 2A helper error bubbles as BadRequestException', async () => {
@@ -1835,5 +1868,815 @@ describe('editInvoice — Phase 2A positive structural delta path', () => {
     }
     expect(thrown).toBeInstanceOf(BadRequestException);
     expect((thrown as Error).message).toContain('no_gl_code_for_payment_method:bizarro');
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════
+// PR-POS-INVOICE-NEGATIVE-UNPAID-DELTA-1 (Phase 2B)
+// --------------------------------------------------------------------
+// Safe negative unpaid delta: reductions on a partially-paid invoice
+// where the customer still owes ≥ 0 after the edit. Routes through
+// applySafeNegativeUnpaidDeltaEdit → postInvoiceNegativeUnpaidDelta
+// (AR-side adjustment JE, no cashbox movement, no JE void, no reversal
+// vocabulary).
+//
+// Refund-required reductions and customer-changed reductions are
+// BLOCKED with explicit Arabic error messages — they never fall
+// through to legacy reverse-and-repost.
+// ════════════════════════════════════════════════════════════════════
+import { classifyNegativeDelta } from './pos.service';
+
+describe('classifyNegativeDelta — Phase 2B pure function', () => {
+  const ORIG_PARTIAL_PAID = {
+    customer_id: 'cust-1',
+    grand_total: '510.00',
+    paid_amount: '400.00',
+    tax_rate: 0,
+  };
+  const ORIG_FULLY_PAID = {
+    customer_id: 'cust-1',
+    grand_total: '510.00',
+    paid_amount: '510.00',
+    tax_rate: 0,
+  };
+  const ITEMS_PARTIAL = [
+    { variant_id: 'v-1', quantity: 2, unit_price: 200, unit_cost: 100, line_total: 400 },
+    { variant_id: 'v-2', quantity: 1, unit_price: 110, unit_cost: 50, line_total: 110 },
+  ];
+  const PAYMENTS_PARTIAL = [
+    { payment_method: 'cash', amount: '400.00', payment_account_id: null },
+  ];
+  const PAYMENTS_FULL = [
+    { payment_method: 'cash', amount: '510.00', payment_account_id: null },
+  ];
+
+  it('partial-paid + price reduction → safe_negative_unpaid_delta with AR reduction', () => {
+    const dto = {
+      lines: [
+        { variant_id: 'v-1', qty: 2, unit_price: 200 },
+        { variant_id: 'v-2', qty: 1, unit_price: 100 }, // 110 → 100
+      ],
+      payments: [{ payment_method: 'cash', amount: 400 }],
+    };
+    const r = classifyNegativeDelta(ORIG_PARTIAL_PAID, ITEMS_PARTIAL, PAYMENTS_PARTIAL, dto);
+    expect(r.kind).toBe('safe_negative_unpaid_delta');
+    if (r.kind === 'safe_negative_unpaid_delta') {
+      expect(r.delta_grand_total).toBe(-10);
+      expect(r.delta_revenue).toBe(-10);
+      expect(r.delta_tax).toBe(0);
+      expect(r.delta_cogs).toBe(0); // qty unchanged → no COGS movement
+      expect(r.ar_reduction).toBe(10);
+      expect(r.line_deltas).toEqual([
+        expect.objectContaining({
+          variant_id: 'v-2',
+          new_qty: 1,
+          new_unit_price: 100,
+          delta_qty: 0,
+          delta_revenue: -10,
+        }),
+      ]);
+    }
+  });
+
+  it('partial-paid + qty reduction → safe + inventory restored via positive delta_cogs magnitude', () => {
+    // ORIG_PARTIAL_PAID has paid=400 / grand=510. After qty 2→1 on
+    // v-1, new grand = 310 < 400 → would be refund-required. Use a
+    // smaller paid total (200) so the reduction stays safe.
+    const orig = { ...ORIG_PARTIAL_PAID, paid_amount: '200.00' };
+    const payments = [{ payment_method: 'cash', amount: '200.00', payment_account_id: null }];
+    const dto2 = {
+      lines: [
+        { variant_id: 'v-1', qty: 1, unit_price: 200 },
+        { variant_id: 'v-2', qty: 1, unit_price: 110 },
+      ],
+      payments: [{ payment_method: 'cash', amount: 200 }],
+    };
+    const r = classifyNegativeDelta(orig, ITEMS_PARTIAL, payments, dto2);
+    expect(r.kind).toBe('safe_negative_unpaid_delta');
+    if (r.kind === 'safe_negative_unpaid_delta') {
+      expect(r.delta_grand_total).toBe(-200); // 510 - 310
+      expect(r.delta_cogs).toBe(-100); // qty 2→1 on v-1 with unit_cost 100
+      expect(r.ar_reduction).toBe(200);
+    }
+  });
+
+  it('partial-paid + line removal → safe (entire line removed)', () => {
+    const orig = { ...ORIG_PARTIAL_PAID, paid_amount: '0.00' };
+    const payments: any[] = [];
+    const dto = {
+      lines: [{ variant_id: 'v-1', qty: 2, unit_price: 200 }], // v-2 removed
+      payments: [],
+    };
+    const r = classifyNegativeDelta(orig, ITEMS_PARTIAL, payments, dto);
+    expect(r.kind).toBe('safe_negative_unpaid_delta');
+    if (r.kind === 'safe_negative_unpaid_delta') {
+      expect(r.delta_grand_total).toBe(-110);
+      expect(r.delta_cogs).toBe(-50);
+      expect(r.line_deltas).toEqual([
+        expect.objectContaining({
+          variant_id: 'v-2',
+          new_qty: 0,
+          delta_qty: -1,
+          delta_revenue: -110,
+          unit_cost: 50,
+        }),
+      ]);
+    }
+  });
+
+  it('fully-paid + price reduction → refund_required_negative_delta (old_paid_exceeds_new_grand)', () => {
+    const dto = {
+      lines: [
+        { variant_id: 'v-1', qty: 2, unit_price: 200 },
+        { variant_id: 'v-2', qty: 1, unit_price: 100 }, // 110 → 100
+      ],
+      payments: [{ payment_method: 'cash', amount: 500 }],
+    };
+    const r = classifyNegativeDelta(ORIG_FULLY_PAID, ITEMS_PARTIAL, PAYMENTS_FULL, dto);
+    expect(r).toEqual({
+      kind: 'refund_required_negative_delta',
+      reason: 'old_paid_exceeds_new_grand',
+    });
+  });
+
+  it('payment_method same total but bucket dropped → refund_required (payment_removed_implies_refund)', () => {
+    const origPayments = [
+      { payment_method: 'cash', amount: '200.00', payment_account_id: null },
+      { payment_method: 'instapay', amount: '200.00', payment_account_id: 'acct-ip' },
+    ];
+    const orig = { ...ORIG_PARTIAL_PAID, paid_amount: '400.00' };
+    // Drop the instapay bucket entirely + increase cash to keep total stable.
+    const dto = {
+      lines: [
+        { variant_id: 'v-1', qty: 2, unit_price: 200 },
+        { variant_id: 'v-2', qty: 1, unit_price: 100 }, // small reduction
+      ],
+      payments: [{ payment_method: 'cash', amount: 400 }],
+    };
+    const r = classifyNegativeDelta(orig, ITEMS_PARTIAL, origPayments, dto);
+    expect(r.kind).toBe('refund_required_negative_delta');
+    if (r.kind === 'refund_required_negative_delta') {
+      expect(r.reason).toBe('payment_removed_implies_refund');
+    }
+  });
+
+  it('customer change on a reduction → blocked_customer_change_on_negative_delta', () => {
+    const dto = {
+      lines: [
+        { variant_id: 'v-1', qty: 2, unit_price: 200 },
+        { variant_id: 'v-2', qty: 1, unit_price: 100 },
+      ],
+      payments: [{ payment_method: 'cash', amount: 400 }],
+      customer_id: 'cust-other',
+    };
+    const r = classifyNegativeDelta(ORIG_PARTIAL_PAID, ITEMS_PARTIAL, PAYMENTS_PARTIAL, dto);
+    expect(r).toEqual({ kind: 'blocked_customer_change_on_negative_delta' });
+  });
+
+  it('positive structural component (new variant added) → not_negative_delta (new_variant_added)', () => {
+    const dto = {
+      lines: [
+        { variant_id: 'v-1', qty: 2, unit_price: 200 },
+        { variant_id: 'v-2', qty: 1, unit_price: 100 }, // reduction
+        { variant_id: 'v-3', qty: 1, unit_price: 50 },  // brand new
+      ],
+      payments: [{ payment_method: 'cash', amount: 450 }],
+    };
+    const r = classifyNegativeDelta(ORIG_PARTIAL_PAID, ITEMS_PARTIAL, PAYMENTS_PARTIAL, dto);
+    expect(r).toEqual({ kind: 'not_negative_delta', reason: 'new_variant_added' });
+  });
+
+  it('mixed shape: qty UP on one + qty DOWN on another → not_negative_delta (qty_increased)', () => {
+    const dto = {
+      lines: [
+        { variant_id: 'v-1', qty: 3, unit_price: 200 }, // 2→3 (up)
+        { variant_id: 'v-2', qty: 1, unit_price: 100 }, // price down
+      ],
+      payments: [{ payment_method: 'cash', amount: 400 }],
+    };
+    const r = classifyNegativeDelta(ORIG_PARTIAL_PAID, ITEMS_PARTIAL, PAYMENTS_PARTIAL, dto);
+    expect(r).toEqual({ kind: 'not_negative_delta', reason: 'qty_increased' });
+  });
+
+  it('no actual change → not_negative_delta (no_line_changes)', () => {
+    const dto = {
+      lines: [
+        { variant_id: 'v-1', qty: 2, unit_price: 200 },
+        { variant_id: 'v-2', qty: 1, unit_price: 110 },
+      ],
+      payments: [{ payment_method: 'cash', amount: 400 }],
+    };
+    const r = classifyNegativeDelta(ORIG_PARTIAL_PAID, ITEMS_PARTIAL, PAYMENTS_PARTIAL, dto);
+    expect(r).toEqual({ kind: 'not_negative_delta', reason: 'no_line_changes' });
+  });
+
+  it('payment total UP on a reduction → refund_required (payment_removed_implies_refund)', () => {
+    // Customer "paid extra" during a reduction edit. We block this too;
+    // it's an out-of-band cash collection the safe path does not post.
+    const dto = {
+      lines: [
+        { variant_id: 'v-1', qty: 2, unit_price: 200 },
+        { variant_id: 'v-2', qty: 1, unit_price: 100 }, // grand 510 → 500
+      ],
+      payments: [{ payment_method: 'cash', amount: 450 }], // paid 400 → 450
+    };
+    const r = classifyNegativeDelta(ORIG_PARTIAL_PAID, ITEMS_PARTIAL, PAYMENTS_PARTIAL, dto);
+    expect(r.kind).toBe('refund_required_negative_delta');
+  });
+
+  it('dto omits payments altogether → defaults to old_paid (allowed if safe)', () => {
+    const dto = {
+      lines: [
+        { variant_id: 'v-1', qty: 2, unit_price: 200 },
+        { variant_id: 'v-2', qty: 1, unit_price: 100 },
+      ],
+      // payments omitted entirely
+    };
+    const r = classifyNegativeDelta(ORIG_PARTIAL_PAID, ITEMS_PARTIAL, PAYMENTS_PARTIAL, dto);
+    expect(r.kind).toBe('safe_negative_unpaid_delta');
+  });
+});
+
+describe('editInvoice — Phase 2B safe-negative-unpaid-delta path', () => {
+  const ORIG_INVOICE_NEG = {
+    id: 'inv-neg-1',
+    invoice_no: 'INV-2026-NEG-1',
+    status: 'partially_paid',
+    warehouse_id: 'wh-1',
+    shift_id: 'shift-1',
+    customer_id: 'cust-1',
+    salesperson_id: 'sp-1',
+    tax_rate: 0,
+    paid_amount: '400.00',
+    grand_total: '510.00',
+    subtotal: '510.00',
+    cogs_total: '250.00',
+    notes: null,
+  };
+  const ORIG_ITEMS_NEG = [
+    {
+      id: 1,
+      invoice_id: 'inv-neg-1',
+      variant_id: 'v-1',
+      quantity: 2,
+      unit_price: 200,
+      unit_cost: 100,
+      line_total: 400,
+      product_name_snapshot: 'منتج 1',
+      sku_snapshot: 'SKU-1',
+      color_name_snapshot: null,
+      size_label_snapshot: null,
+    },
+    {
+      id: 2,
+      invoice_id: 'inv-neg-1',
+      variant_id: 'v-2',
+      quantity: 1,
+      unit_price: 110,
+      unit_cost: 50,
+      line_total: 110,
+      product_name_snapshot: 'منتج 2',
+      sku_snapshot: 'SKU-2',
+      color_name_snapshot: null,
+      size_label_snapshot: null,
+    },
+  ];
+  const ORIG_PAYMENTS_NEG = [
+    {
+      id: 1,
+      invoice_id: 'inv-neg-1',
+      payment_method: 'cash',
+      amount: '400.00',
+      payment_account_id: null,
+      payment_account_snapshot: null,
+    },
+  ];
+
+  function makePostingMockWithNegativeUnpaid() {
+    return {
+      postInvoiceDelta: jest.fn<Promise<any>, any[]>(async () => ({ entry_id: 'je-delta-1' })),
+      postInvoiceEdit: jest.fn<Promise<any>, any[]>(async () => ({ entry_id: 'je-edit-1' })),
+      postInvoicePaymentRedistribution: jest.fn<Promise<any>, any[]>(async () => ({
+        ok: true,
+        entry_ids: ['je-transfer-1'],
+      })),
+      postInvoicePositiveStructuralDelta: jest.fn<Promise<any>, any[]>(async () => ({
+        ok: true,
+        entry_id: 'je-pos-1',
+      })),
+      postInvoiceNegativeUnpaidDelta: jest.fn<Promise<any>, any[]>(async () => ({
+        ok: true,
+        entry_id: 'je-neg-1',
+      })),
+    };
+  }
+
+  function emQueuePriceDropPartial() {
+    return [
+      [ORIG_INVOICE_NEG],
+      ORIG_ITEMS_NEG,
+      ORIG_PAYMENTS_NEG,
+      // applySafeNegativeUnpaidDeltaEdit begins here:
+      [{ id: 'hist-neg-1' }],            // INSERT history
+      // No stock movement (price-only drop, no qty change)
+      [],                                  // DELETE invoice_items for v-2
+      [],                                  // INSERT invoice_items v-2 with new price
+      [{ ...ORIG_INVOICE_NEG, grand_total: '500.00' }], // UPDATE invoices
+      [                                    // SELECT items after-snapshot
+        ORIG_ITEMS_NEG[0],
+        { id: 3, variant_id: 'v-2', quantity: 1, unit_price: 100, line_total: 100 },
+      ],
+      [],                                  // UPDATE history backfill
+    ];
+  }
+
+  it('Example 1 (price drop unpaid, paid 400 / old 510 / new 500): allowed, AR reduced by 10, no cash, no reversal', async () => {
+    const { ds, emCalls } = makeFakeDs({ emResults: emQueuePriceDropPartial() });
+    const posting = makePostingMockWithNegativeUnpaid();
+    const svc = makeServiceWith(posting, ds);
+
+    const dto = {
+      lines: [
+        { variant_id: 'v-1', qty: 2, unit_price: 200, discount: 0 },
+        { variant_id: 'v-2', qty: 1, unit_price: 100, discount: 0 }, // 110 → 100
+      ],
+      payments: [{ payment_method: 'cash', amount: 400 }],
+      discount_total: 0,
+    };
+
+    const res = await svc.editInvoice('inv-neg-1', dto, 'user-1', 'price drop');
+    expect(res).toMatchObject({ edited: true });
+
+    // Phase 2B path was used; no other path was.
+    expect(posting.postInvoiceNegativeUnpaidDelta).toHaveBeenCalledTimes(1);
+    expect(posting.postInvoiceEdit).not.toHaveBeenCalled();
+    expect(posting.postInvoiceDelta).not.toHaveBeenCalled();
+    expect(posting.postInvoicePositiveStructuralDelta).not.toHaveBeenCalled();
+    expect(posting.postInvoicePaymentRedistribution).not.toHaveBeenCalled();
+
+    // Helper got the correct AR-reduction payload.
+    const args = posting.postInvoiceNegativeUnpaidDelta.mock.calls[0];
+    expect(args[0]).toBe('inv-neg-1');
+    expect(args[1]).toBe('hist-neg-1');
+    expect(args[2]).toMatchObject({
+      ar_reduction: 10,
+      revenue_reduction: 10,
+      tax_reduction: 0,
+      cogs_reduction: 0, // qty unchanged → no inventory delta
+      customer_id: 'cust-1',
+    });
+
+    // No DELETE of invoice_payments wholesale.
+    expect(sqlMatches(emCalls, /^\s*DELETE FROM invoice_payments\b/i).length).toBe(0);
+    // No stock movement (qty unchanged).
+    expect(sqlMatches(emCalls, /^\s*INSERT INTO stock_movements\b/i).length).toBe(0);
+    // DELETE FROM invoice_items only for the changed variant (v-2).
+    const itemDeletes = sqlMatches(emCalls, /^\s*DELETE FROM invoice_items\b/i);
+    expect(itemDeletes).toHaveLength(1);
+    expect(itemDeletes[0].params).toContain('v-2');
+    // Re-INSERT for v-2 with the new price.
+    const itemInserts = sqlMatches(emCalls, /^\s*INSERT INTO invoice_items\b/i);
+    expect(itemInserts).toHaveLength(1);
+    expect(itemInserts[0].params).toContain('v-2');
+    expect(itemInserts[0].params).toContain(100);
+  });
+
+  it('Phase 2B never voids the original JE and never calls reverseByReference', async () => {
+    const { ds, emCalls } = makeFakeDs({ emResults: emQueuePriceDropPartial() });
+    const posting = makePostingMockWithNegativeUnpaid();
+    (posting as any).reverseByReference = jest.fn(async () => {
+      throw new Error('reverseByReference must NOT be called from Phase 2B path');
+    });
+    const svc = makeServiceWith(posting, ds);
+
+    const dto = {
+      lines: [
+        { variant_id: 'v-1', qty: 2, unit_price: 200 },
+        { variant_id: 'v-2', qty: 1, unit_price: 100 },
+      ],
+      payments: [{ payment_method: 'cash', amount: 400 }],
+      discount_total: 0,
+    };
+
+    await svc.editInvoice('inv-neg-1', dto, 'user-1', 'price drop');
+
+    // No UPDATE journal_entries / cashbox_transactions … is_void = TRUE.
+    expect(
+      emCalls.filter((c) =>
+        /UPDATE\s+journal_entries[\s\S]{0,200}is_void\s*=\s*TRUE/i.test(c.sql),
+      ),
+    ).toHaveLength(0);
+    expect(
+      emCalls.filter((c) =>
+        /UPDATE\s+cashbox_transactions[\s\S]{0,200}is_void\s*=\s*TRUE/i.test(c.sql),
+      ),
+    ).toHaveLength(0);
+    expect((posting as any).reverseByReference).not.toHaveBeenCalled();
+  });
+
+  function emQueueQtyDownPartial() {
+    return [
+      [{ ...ORIG_INVOICE_NEG, paid_amount: '200.00', grand_total: '510.00' }],
+      ORIG_ITEMS_NEG,
+      [{ ...ORIG_PAYMENTS_NEG[0], amount: '200.00' }],
+      [{ id: 'hist-neg-q' }],            // INSERT history
+      [],                                  // INSERT stock_movements (adjustment-in for v-1)
+      [],                                  // DELETE invoice_items for v-1
+      [],                                  // INSERT invoice_items v-1 with new qty
+      [{ ...ORIG_INVOICE_NEG, grand_total: '310.00', paid_amount: '200.00' }],
+      [
+        { id: 4, variant_id: 'v-1', quantity: 1, unit_price: 200 },
+        ORIG_ITEMS_NEG[1],
+      ],
+      [],                                  // UPDATE history
+    ];
+  }
+
+  it('Example 2 (qty decrease unpaid, paid 200 / old 510 / new 310): allowed, one adjustment-in stock_movement, no reversal', async () => {
+    const { ds, emCalls } = makeFakeDs({ emResults: emQueueQtyDownPartial() });
+    const posting = makePostingMockWithNegativeUnpaid();
+    const svc = makeServiceWith(posting, ds);
+
+    const dto = {
+      lines: [
+        { variant_id: 'v-1', qty: 1, unit_price: 200, discount: 0 }, // qty 2→1
+        { variant_id: 'v-2', qty: 1, unit_price: 110, discount: 0 },
+      ],
+      payments: [{ payment_method: 'cash', amount: 200 }],
+      discount_total: 0,
+    };
+
+    await svc.editInvoice('inv-neg-1', dto, 'user-1', 'qty down');
+
+    expect(posting.postInvoiceNegativeUnpaidDelta).toHaveBeenCalledTimes(1);
+    expect(posting.postInvoiceEdit).not.toHaveBeenCalled();
+
+    const args = posting.postInvoiceNegativeUnpaidDelta.mock.calls[0][2];
+    expect(args.ar_reduction).toBe(200);
+    expect(args.cogs_reduction).toBe(100); // 1 unit × unit_cost 100
+
+    // EXACTLY one stock_movement insert — adjustment-in for v-1.
+    const stockInserts = sqlMatches(emCalls, /^\s*INSERT INTO stock_movements\b/i);
+    expect(stockInserts).toHaveLength(1);
+    expect(stockInserts[0].sql).toMatch(/'adjustment','in'/);
+    expect(stockInserts[0].sql).not.toMatch(/عكس/);
+    expect(stockInserts[0].params).toContain('v-1');
+    expect(stockInserts[0].params).toContain(1); // qty restored
+  });
+
+  function emQueueLineRemovalUnpaid() {
+    return [
+      [{ ...ORIG_INVOICE_NEG, paid_amount: '0.00', grand_total: '510.00' }],
+      ORIG_ITEMS_NEG,
+      [], // no payments
+      [{ id: 'hist-neg-rm' }],
+      [],                                  // INSERT stock_movements (v-2 restore)
+      [],                                  // DELETE invoice_items for v-2
+      // No INSERT for v-2 since new_qty=0 (line removed)
+      [{ ...ORIG_INVOICE_NEG, grand_total: '400.00', paid_amount: '0.00' }],
+      [ORIG_ITEMS_NEG[0]],
+      [],
+    ];
+  }
+
+  it('Example 3 (line removal unpaid): one DELETE for removed variant, no re-INSERT, one adjustment-in for the restored qty', async () => {
+    const { ds, emCalls } = makeFakeDs({ emResults: emQueueLineRemovalUnpaid() });
+    const posting = makePostingMockWithNegativeUnpaid();
+    const svc = makeServiceWith(posting, ds);
+
+    const dto = {
+      lines: [{ variant_id: 'v-1', qty: 2, unit_price: 200, discount: 0 }], // v-2 removed
+      payments: [],
+      discount_total: 0,
+    };
+
+    await svc.editInvoice('inv-neg-1', dto, 'user-1', 'remove v-2');
+
+    expect(posting.postInvoiceNegativeUnpaidDelta).toHaveBeenCalledTimes(1);
+    const args = posting.postInvoiceNegativeUnpaidDelta.mock.calls[0][2];
+    expect(args.ar_reduction).toBe(110);
+    expect(args.cogs_reduction).toBe(50);
+
+    // EXACTLY one DELETE FROM invoice_items (for v-2)
+    const itemDeletes = sqlMatches(emCalls, /^\s*DELETE FROM invoice_items\b/i);
+    expect(itemDeletes).toHaveLength(1);
+    expect(itemDeletes[0].params).toContain('v-2');
+
+    // No re-INSERT for v-2 (line removed, new_qty=0).
+    const itemInserts = sqlMatches(emCalls, /^\s*INSERT INTO invoice_items\b/i);
+    expect(itemInserts).toHaveLength(0);
+
+    // One adjustment-in stock_movement for the restored v-2 qty.
+    const stockInserts = sqlMatches(emCalls, /^\s*INSERT INTO stock_movements\b/i);
+    expect(stockInserts).toHaveLength(1);
+    expect(stockInserts[0].params).toContain('v-2');
+  });
+
+  it('Example 4 (fully-paid price drop): blocks with the refund-required Arabic error, no mutation', async () => {
+    const { ds, emCalls } = makeFakeDs({
+      emResults: [
+        [{ ...ORIG_INVOICE_NEG, paid_amount: '510.00' }],
+        ORIG_ITEMS_NEG,
+        [{ ...ORIG_PAYMENTS_NEG[0], amount: '510.00' }],
+      ],
+    });
+    const posting = makePostingMockWithNegativeUnpaid();
+    const svc = makeServiceWith(posting, ds);
+
+    const dto = {
+      lines: [
+        { variant_id: 'v-1', qty: 2, unit_price: 200 },
+        { variant_id: 'v-2', qty: 1, unit_price: 100 },
+      ],
+      payments: [{ payment_method: 'cash', amount: 500 }],
+      discount_total: 0,
+    };
+
+    let thrown: unknown = null;
+    try {
+      await svc.editInvoice('inv-neg-1', dto, 'user-1', 'price drop fully paid');
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(BadRequestException);
+    expect((thrown as Error).message).toContain(
+      'هذا التعديل يقلل فاتورة مدفوعة. استخدم مسار المرتجع/رد المبلغ.',
+    );
+
+    // No invoice mutation: no history INSERT, no UPDATE invoices, no JE.
+    expect(sqlMatches(emCalls, /^\s*INSERT INTO invoice_edit_history\b/i)).toHaveLength(0);
+    expect(sqlMatches(emCalls, /^\s*UPDATE invoices\b/i)).toHaveLength(0);
+    expect(posting.postInvoiceNegativeUnpaidDelta).not.toHaveBeenCalled();
+    expect(posting.postInvoiceEdit).not.toHaveBeenCalled();
+  });
+
+  it('Example 5 (fully-paid qty drop): blocks with the same Arabic error', async () => {
+    const { ds } = makeFakeDs({
+      emResults: [
+        [{ ...ORIG_INVOICE_NEG, paid_amount: '510.00' }],
+        ORIG_ITEMS_NEG,
+        [{ ...ORIG_PAYMENTS_NEG[0], amount: '510.00' }],
+      ],
+    });
+    const posting = makePostingMockWithNegativeUnpaid();
+    const svc = makeServiceWith(posting, ds);
+
+    const dto = {
+      lines: [
+        { variant_id: 'v-1', qty: 1, unit_price: 200 },
+        { variant_id: 'v-2', qty: 1, unit_price: 110 },
+      ],
+      payments: [{ payment_method: 'cash', amount: 310 }],
+      discount_total: 0,
+    };
+
+    await expect(svc.editInvoice('inv-neg-1', dto, 'user-1', 'qty drop fully paid')).rejects.toThrow(
+      'هذا التعديل يقلل فاتورة مدفوعة. استخدم مسار المرتجع/رد المبلغ.',
+    );
+    expect(posting.postInvoiceNegativeUnpaidDelta).not.toHaveBeenCalled();
+  });
+
+  it('Example 6 (fully-paid line removal): blocks with the same Arabic error', async () => {
+    const { ds } = makeFakeDs({
+      emResults: [
+        [{ ...ORIG_INVOICE_NEG, paid_amount: '510.00' }],
+        ORIG_ITEMS_NEG,
+        [{ ...ORIG_PAYMENTS_NEG[0], amount: '510.00' }],
+      ],
+    });
+    const posting = makePostingMockWithNegativeUnpaid();
+    const svc = makeServiceWith(posting, ds);
+
+    const dto = {
+      lines: [{ variant_id: 'v-1', qty: 2, unit_price: 200 }], // v-2 removed
+      payments: [{ payment_method: 'cash', amount: 400 }],
+      discount_total: 0,
+    };
+
+    await expect(svc.editInvoice('inv-neg-1', dto, 'user-1', 'remove line fully paid')).rejects.toThrow(
+      'هذا التعديل يقلل فاتورة مدفوعة. استخدم مسار المرتجع/رد المبلغ.',
+    );
+    expect(posting.postInvoiceNegativeUnpaidDelta).not.toHaveBeenCalled();
+  });
+
+  it('Customer change on a reduction blocks with a customer-specific Arabic error (not silent legacy revert)', async () => {
+    const { ds, emCalls } = makeFakeDs({
+      emResults: [
+        [ORIG_INVOICE_NEG],
+        ORIG_ITEMS_NEG,
+        ORIG_PAYMENTS_NEG,
+      ],
+    });
+    const posting = makePostingMockWithNegativeUnpaid();
+    const svc = makeServiceWith(posting, ds);
+
+    const dto = {
+      lines: [
+        { variant_id: 'v-1', qty: 2, unit_price: 200 },
+        { variant_id: 'v-2', qty: 1, unit_price: 100 }, // reduction
+      ],
+      payments: [{ payment_method: 'cash', amount: 400 }],
+      customer_id: 'cust-other',
+      discount_total: 0,
+    };
+
+    let thrown: unknown = null;
+    try {
+      await svc.editInvoice('inv-neg-1', dto, 'user-1', 'customer change + drop');
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(BadRequestException);
+    expect((thrown as Error).message).toContain('لا يمكن تغيير العميل أثناء تخفيض الفاتورة');
+
+    // No JE created, no legacy path used.
+    expect(posting.postInvoiceEdit).not.toHaveBeenCalled();
+    expect(posting.postInvoiceNegativeUnpaidDelta).not.toHaveBeenCalled();
+    expect(sqlMatches(emCalls, /^\s*UPDATE invoices\b/i)).toHaveLength(0);
+  });
+
+  it('Phase 2B helper error bubbles as BadRequestException', async () => {
+    const { ds } = makeFakeDs({ emResults: emQueuePriceDropPartial() });
+    const posting = makePostingMockWithNegativeUnpaid();
+    posting.postInvoiceNegativeUnpaidDelta.mockResolvedValueOnce({
+      error: 'revenue_plus_tax_does_not_match_ar_reduction',
+    });
+    const svc = makeServiceWith(posting, ds);
+
+    const dto = {
+      lines: [
+        { variant_id: 'v-1', qty: 2, unit_price: 200 },
+        { variant_id: 'v-2', qty: 1, unit_price: 100 },
+      ],
+      payments: [{ payment_method: 'cash', amount: 400 }],
+      discount_total: 0,
+    };
+
+    let thrown: unknown = null;
+    try {
+      await svc.editInvoice('inv-neg-1', dto, 'user-1', 'forced posting error');
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(BadRequestException);
+    expect((thrown as Error).message).toContain('revenue_plus_tax_does_not_match_ar_reduction');
+  });
+});
+
+describe('postInvoiceNegativeUnpaidDelta — Phase 2B posting helper', () => {
+  // Mirrors the postInvoiceDelta idempotency-fix tests: assert the engine
+  // spec the helper hands over without involving the full orchestrator.
+  function makeRunnerWithUuid(invoiceCustomerId: string | null = 'cust-1') {
+    const queries: Array<{ sql: string; params: any[] }> = [];
+    const runner = {
+      query: jest.fn(async (sql: string, params: any[] = []) => {
+        queries.push({ sql, params });
+        const s = sql.replace(/\s+/g, ' ').trim();
+        if (/SELECT\s+uuid_generate_v5/i.test(s)) {
+          return [{ ref_id: `mock-v5-${params[0]}` }];
+        }
+        if (/FROM invoices i/i.test(s)) {
+          return [
+            {
+              id: 'inv-1',
+              invoice_no: 'INV-2026-NEG-1',
+              completed_at: null,
+              created_at: '2026-05-01T00:00:00Z',
+              customer_id: invoiceCustomerId,
+            },
+          ];
+        }
+        return [];
+      }),
+    };
+    return { runner, queries };
+  }
+
+  function makeEngine(): { engine: any; calls: any[] } {
+    const calls: any[] = [];
+    const engine = {
+      recordTransaction: jest.fn(async (spec: any) => {
+        calls.push(spec);
+        return { ok: true, entry_id: `je-${spec.reference_id}` };
+      }),
+    };
+    return { engine, calls };
+  }
+
+  function instantiatePosting(engine: any, ds: any) {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { AccountingPostingService } = require('../chart-of-accounts/posting.service');
+    return new AccountingPostingService(ds, engine);
+  }
+
+  it('builds a balanced AR-reduction JE with no cash_movements and a non-colliding reference identity', async () => {
+    const { runner } = makeRunnerWithUuid();
+    const { engine, calls } = makeEngine();
+    const ds = { manager: runner, query: runner.query } as any;
+    const posting = instantiatePosting(engine, ds);
+
+    const res = await posting.postInvoiceNegativeUnpaidDelta(
+      'inv-1',
+      'hist-neg-abc',
+      {
+        ar_reduction: 110,
+        revenue_reduction: 110,
+        tax_reduction: 0,
+        cogs_reduction: 50,
+        customer_id: 'cust-1',
+      },
+      'user-1',
+      runner,
+    );
+
+    expect(res).toMatchObject({ entry_id: expect.any(String) });
+    expect(calls).toHaveLength(1);
+    const spec = calls[0];
+    expect(spec).toMatchObject({
+      kind: 'manual_adjustment',
+      reference_type: 'invoice_negative_unpaid_delta',
+      reference_id: 'mock-v5-hist-neg-abc',
+    });
+    // No cashbox movement on the safe path.
+    expect(spec.cash_movements).toEqual([]);
+
+    // Reference id must NOT equal the invoiceId (collision regression guard).
+    expect(spec.reference_id).not.toBe('inv-1');
+
+    // GL lines must be balanced; verify by reduction shape.
+    const debits = spec.gl_lines.filter((l: any) => l.debit > 0);
+    const credits = spec.gl_lines.filter((l: any) => l.credit > 0);
+    const sumD = debits.reduce((s: number, l: any) => s + l.debit, 0);
+    const sumC = credits.reduce((s: number, l: any) => s + l.credit, 0);
+    expect(sumD).toBeCloseTo(sumC, 2);
+
+    // No reversal vocabulary anywhere.
+    expect(JSON.stringify(spec)).not.toMatch(/reversal_/);
+    expect(JSON.stringify(spec)).not.toMatch(/عكس:/);
+  });
+
+  it('reference_id is deterministic per history_id (replay safety)', async () => {
+    const { runner } = makeRunnerWithUuid();
+    const { engine, calls } = makeEngine();
+    const ds = { manager: runner, query: runner.query } as any;
+    const posting = instantiatePosting(engine, ds);
+
+    const args = {
+      ar_reduction: 10,
+      revenue_reduction: 10,
+      tax_reduction: 0,
+      cogs_reduction: 0,
+      customer_id: 'cust-1',
+    };
+    await posting.postInvoiceNegativeUnpaidDelta('inv-1', 'hist-stable', args, 'user-1', runner);
+    await posting.postInvoiceNegativeUnpaidDelta('inv-1', 'hist-stable', args, 'user-1', runner);
+
+    expect(calls).toHaveLength(2);
+    expect(calls[0].reference_id).toBe(calls[1].reference_id);
+  });
+
+  it('rejects with revenue_plus_tax_does_not_match_ar_reduction when totals don\'t balance', async () => {
+    const { runner } = makeRunnerWithUuid();
+    const { engine } = makeEngine();
+    const ds = { manager: runner, query: runner.query } as any;
+    const posting = instantiatePosting(engine, ds);
+
+    const res = await posting.postInvoiceNegativeUnpaidDelta(
+      'inv-1',
+      'hist-bad',
+      {
+        ar_reduction: 100,
+        revenue_reduction: 90,
+        tax_reduction: 5, // sums to 95, not 100
+        cogs_reduction: 0,
+        customer_id: 'cust-1',
+      },
+      'user-1',
+      runner,
+    );
+
+    expect(res).toEqual({ error: 'revenue_plus_tax_does_not_match_ar_reduction' });
+  });
+
+  it('rejects when historyId is missing (engineering invariant)', async () => {
+    const { runner } = makeRunnerWithUuid();
+    const { engine } = makeEngine();
+    const ds = { manager: runner, query: runner.query } as any;
+    const posting = instantiatePosting(engine, ds);
+
+    const res = await posting.postInvoiceNegativeUnpaidDelta(
+      'inv-1',
+      '',
+      {
+        ar_reduction: 10,
+        revenue_reduction: 10,
+        tax_reduction: 0,
+        cogs_reduction: 0,
+        customer_id: 'cust-1',
+      },
+      'user-1',
+      runner,
+    );
+    expect(res).toEqual({ error: 'history_id_required' });
   });
 });

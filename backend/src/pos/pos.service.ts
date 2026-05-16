@@ -46,7 +46,11 @@ import { ShiftsService } from '../shifts/shifts.service';
  *               negative delta payment row.  See PR halt report.
  */
 export function classifyInvoiceEdit(
-  orig: { paid_amount: number | string; customer_id: string | null },
+  orig: {
+    paid_amount: number | string;
+    customer_id: string | null;
+    grand_total?: number | string;
+  },
   origItems: Array<{ variant_id: string; quantity: number | string }>,
   origPayments: Array<{
     payment_method: string;
@@ -130,6 +134,32 @@ export function classifyInvoiceEdit(
   // through to legacy reverse-and-repost.
   if (delta < 0) {
     return { monetary_only: false, reason: 'negative_delta_uses_legacy_path' };
+  }
+
+  // ── 5) Phase 2B routing assist (PR-POS-INVOICE-NEGATIVE-UNPAID-DELTA-1):
+  //       compute the implied grand-total delta from the DTO lines and
+  //       reject monetary_only when payment delta and grand delta
+  //       disagree. Before Phase 2B, a pure price drop with the same
+  //       payment total slipped through this classifier as
+  //       `monetary_only: true, delta: 0` — applyMonetaryDeltaEdit
+  //       then updated invoice totals but skipped the GL/CT side
+  //       (delta=0 short-circuit), leaving AR stale by exactly the
+  //       reduction amount.  Forcing payment delta == grand delta
+  //       routes those edits to Phase 2B (safe negative unpaid delta)
+  //       instead.
+  let newSubtotal = 0;
+  for (const l of dtoLines) {
+    newSubtotal +=
+      Number(l.qty || 0) * Number(l.unit_price ?? 0) - Number(l.discount ?? 0);
+  }
+  newSubtotal = +newSubtotal.toFixed(2);
+  const oldGrand = Number((orig as any).grand_total ?? newSubtotal);
+  const grandDelta = +(newSubtotal - oldGrand).toFixed(2);
+  if (Math.abs(grandDelta - delta) > 0.01) {
+    return {
+      monetary_only: false,
+      reason: 'payment_delta_mismatches_grand_delta',
+    };
   }
 
   return { monetary_only: true, delta };
@@ -578,6 +608,302 @@ export function classifyPositiveStructuralDelta(
     delta_grand_total: deltaGrand,
     delta_paid_total: deltaPaid,
     delta_unpaid: deltaUnpaid,
+  };
+}
+
+/**
+ * PR-POS-INVOICE-NEGATIVE-UNPAID-DELTA-1 (Phase 2B) — classify an
+ * invoice edit as a "safe negative unpaid delta": grand_total goes
+ * DOWN by the amount of (still-unpaid) AR, with no payment removal
+ * and no implied cash refund.
+ *
+ * Runs ONLY after classifyInvoiceEdit, classifyPaymentRedistribution,
+ * and classifyPositiveStructuralDelta have all rejected the edit.
+ * Captures the safe subset of reductive edits so they can land as a
+ * pure AR / revenue / inventory adjustment without calling
+ * postInvoiceEdit / reverseByReference and without voiding the
+ * original sale JE.
+ *
+ * Cases that MATCH (Phase 2B supports — safe_negative_unpaid_delta):
+ *   · price decrease on existing line, customer still owes ≥ 0
+ *   · qty decrease on existing line, customer still owes ≥ 0
+ *   · line removal entirely, customer still owes ≥ 0
+ *   · any combination of the above
+ *   · paid_amount stays exactly the same as before the edit (no
+ *     payment removal, no extra cash collected on this path)
+ *   · final paid_amount ≤ new grand_total (no over-payment after edit)
+ *
+ * Cases the classifier explicitly BLOCKS (refund_required_negative_delta):
+ *   · old paid_amount > new grand_total (would require cash refund)
+ *   · dto's paid total ≠ original paid total (payment removal or
+ *     extra cash collection — both imply refund or out-of-band cash flow)
+ *   · dto's paid total > new grand_total (over-payment)
+ *
+ * Cases the classifier explicitly BLOCKS (blocked_customer_change_on_negative_delta):
+ *   · customer changed AND total dropped (the legacy path would otherwise
+ *     reverse + repost; per Phase 2B safety we prefer blocking with a
+ *     clear error over silently reversing)
+ *
+ * Cases the classifier defers (not_negative_delta):
+ *   · delta_grand >= 0 (let positive structural / monetary path handle)
+ *   · any per-variant qty UP or revenue UP (mixed shape — falls to legacy)
+ *   · a brand-new variant added (positive component — Phase 2A territory)
+ *
+ * For BLOCKED kinds the orchestrator throws BadRequestException with
+ * a specific Arabic message and does not mutate the invoice. For the
+ * SAFE kind, applySafeNegativeUnpaidDeltaEdit applies the additive
+ * (in terms of accounting direction — credit revenue, debit inventory)
+ * correction.
+ */
+export interface NegativeLineDelta {
+  variant_id: string;
+  /** Final qty after edit (0 means the line was removed). */
+  new_qty: number;
+  /** Final unit_price after edit (0 if removed; informational only). */
+  new_unit_price: number;
+  /** Signed qty change: ≤ 0 (or 0 for price-only drops). */
+  delta_qty: number;
+  /** Signed revenue change: ≤ 0. */
+  delta_revenue: number;
+  /** Frozen unit_cost from the original invoice (weighted avg if
+   *  multiple orig rows exist for this variant). Used to compute the
+   *  inventory restore + COGS reduction halves of the delta JE. */
+  unit_cost: number;
+}
+
+export type NegativeDeltaClassification =
+  | {
+      kind: 'safe_negative_unpaid_delta';
+      line_deltas: NegativeLineDelta[];
+      /** Signed grand-total change: < 0 by definition. */
+      delta_grand_total: number;
+      /** Signed revenue change (gross of tax): ≤ 0. */
+      delta_revenue: number;
+      /** Signed tax change: ≤ 0. */
+      delta_tax: number;
+      /** Signed COGS change: ≤ 0 (inventory coming back). */
+      delta_cogs: number;
+      /** Magnitude of AR reduction (= |delta_grand_total|). */
+      ar_reduction: number;
+    }
+  | {
+      kind: 'refund_required_negative_delta';
+      reason:
+        | 'old_paid_exceeds_new_grand'
+        | 'dto_paid_exceeds_new_grand'
+        | 'payment_removed_implies_refund';
+    }
+  | { kind: 'blocked_customer_change_on_negative_delta' }
+  | { kind: 'not_negative_delta'; reason: string };
+
+export function classifyNegativeDelta(
+  orig: {
+    customer_id: string | null;
+    grand_total: number | string;
+    paid_amount: number | string;
+    tax_rate: number | string;
+  },
+  origItems: Array<{
+    variant_id: string;
+    quantity: number | string;
+    unit_price?: number | string;
+    unit_cost?: number | string;
+    discount_amount?: number | string;
+    line_total?: number | string;
+  }>,
+  origPayments: Array<{
+    payment_method: string;
+    amount: number | string;
+    payment_account_id: string | null;
+  }>,
+  dto: {
+    lines: Array<{
+      variant_id: string;
+      qty: number;
+      unit_price: number;
+      discount?: number;
+    }>;
+    payments?: Array<{
+      payment_method: string;
+      amount: number;
+      payment_account_id?: string | null;
+    }>;
+    customer_id?: string | null;
+  },
+): NegativeDeltaClassification {
+  // ── 1) Aggregate per-variant qty + revenue + cost from both sides.
+  type VAgg = { qty: number; revenue: number; cost: number };
+  const origAgg = new Map<string, VAgg>();
+  for (const it of origItems) {
+    const q = Number(it.quantity ?? 0);
+    const c = Number(it.unit_cost ?? 0);
+    const rev =
+      it.line_total != null
+        ? Number(it.line_total)
+        : Number(it.unit_price ?? 0) * q - Number(it.discount_amount ?? 0);
+    const cur = origAgg.get(it.variant_id) ?? { qty: 0, revenue: 0, cost: 0 };
+    origAgg.set(it.variant_id, {
+      qty: cur.qty + q,
+      revenue: cur.revenue + rev,
+      cost: cur.cost + c * q,
+    });
+  }
+  const dtoAgg = new Map<string, VAgg>();
+  for (const l of dto.lines ?? []) {
+    const q = Number(l.qty);
+    const rev = q * Number(l.unit_price) - Number(l.discount ?? 0);
+    const cur = dtoAgg.get(l.variant_id) ?? { qty: 0, revenue: 0, cost: 0 };
+    // cost intentionally tracked from orig side only — dto doesn't
+    // carry unit_cost. Per-variant cost re-derived below from orig.
+    dtoAgg.set(l.variant_id, {
+      qty: cur.qty + q,
+      revenue: cur.revenue + rev,
+      cost: cur.cost,
+    });
+  }
+
+  // ── 2) Reject anything with a positive structural component:
+  //       new variant added, or any variant whose qty or revenue went UP.
+  for (const variantId of dtoAgg.keys()) {
+    if (!origAgg.has(variantId)) {
+      return { kind: 'not_negative_delta', reason: 'new_variant_added' };
+    }
+  }
+  for (const [variantId, dtoVA] of dtoAgg) {
+    const origVA = origAgg.get(variantId)!;
+    const dQty = +(dtoVA.qty - origVA.qty).toFixed(6);
+    const dRev = +(dtoVA.revenue - origVA.revenue).toFixed(2);
+    if (dQty > 0) {
+      return { kind: 'not_negative_delta', reason: 'qty_increased' };
+    }
+    if (dRev > 0) {
+      return { kind: 'not_negative_delta', reason: 'line_revenue_increased' };
+    }
+  }
+
+  // ── 3) Build per-variant line deltas (only variants with a real
+  //       reduction; unchanged variants are skipped).
+  const lineDeltas: NegativeLineDelta[] = [];
+  let totalDeltaRevenue = 0;
+  let totalDeltaCogs = 0;
+  for (const [variantId, origVA] of origAgg) {
+    const dtoVA = dtoAgg.get(variantId);
+    const newQty = dtoVA?.qty ?? 0;
+    const newRevenue = dtoVA?.revenue ?? 0;
+    const newUnitPrice = newQty > 0 && dtoVA ? +(newRevenue / newQty).toFixed(2) : 0;
+    const dQty = +(newQty - origVA.qty).toFixed(6);
+    const dRev = +(newRevenue - origVA.revenue).toFixed(2);
+    if (dQty === 0 && dRev === 0) continue; // variant unchanged
+    // Weighted avg unit cost from the original side. For removal the
+    // full original cost comes back; for partial qty reduction we
+    // restore (orig_total_cost / orig_total_qty) per unit dropped.
+    const origUnitCost =
+      origVA.qty > 0 ? +(origVA.cost / origVA.qty).toFixed(4) : 0;
+    const dCogs = +(origUnitCost * dQty).toFixed(2); // dQty ≤ 0
+    totalDeltaRevenue += dRev;
+    totalDeltaCogs += dCogs;
+    lineDeltas.push({
+      variant_id: variantId,
+      new_qty: newQty,
+      new_unit_price: newUnitPrice,
+      delta_qty: dQty,
+      delta_revenue: dRev,
+      unit_cost: origUnitCost,
+    });
+  }
+  if (lineDeltas.length === 0) {
+    return { kind: 'not_negative_delta', reason: 'no_line_changes' };
+  }
+
+  // ── 4) Aggregate grand-total delta must be strictly negative.
+  totalDeltaRevenue = +totalDeltaRevenue.toFixed(2);
+  totalDeltaCogs = +totalDeltaCogs.toFixed(2);
+  // Tax recompute: the engine reports tax as a portion of the
+  // grand_total at the invoice's tax_rate. Phase 2B preserves the
+  // same per-invoice rate.
+  const taxRate = Number(orig.tax_rate || 0);
+  const deltaTax =
+    taxRate > 0
+      ? +((totalDeltaRevenue * taxRate) / (100 + taxRate)).toFixed(2)
+      : 0;
+  const deltaGrand = totalDeltaRevenue;
+  if (!(deltaGrand < 0)) {
+    return { kind: 'not_negative_delta', reason: 'aggregate_revenue_not_negative' };
+  }
+
+  // ── 5) Customer change on a reduction → BLOCK (don't fall through to
+  //       legacy which would silently reverse).
+  if (dto.customer_id != null && dto.customer_id !== orig.customer_id) {
+    return { kind: 'blocked_customer_change_on_negative_delta' };
+  }
+
+  // ── 6) Compute paid totals and check refund-required conditions.
+  const oldPaid = +Number(orig.paid_amount || 0).toFixed(2);
+  const newGrand = +(Number(orig.grand_total || 0) + deltaGrand).toFixed(2);
+  // dto_paid: if dto provided payments, use their sum; otherwise the
+  // operator is asserting "no payment change" → reuse old_paid.
+  const dtoPaid =
+    dto.payments != null
+      ? +dto.payments.reduce((s, p) => s + Number(p.amount || 0), 0).toFixed(2)
+      : oldPaid;
+
+  if (oldPaid > newGrand) {
+    return {
+      kind: 'refund_required_negative_delta',
+      reason: 'old_paid_exceeds_new_grand',
+    };
+  }
+  if (dtoPaid > newGrand) {
+    return {
+      kind: 'refund_required_negative_delta',
+      reason: 'dto_paid_exceeds_new_grand',
+    };
+  }
+  // Any change in paid total (up or down) on a reduction edit implies
+  // either a refund (down) or extra cash collected on a path the
+  // current model doesn't post safely (up). Defer both to the explicit
+  // returns / additional-payment flows by blocking here.
+  if (Math.abs(dtoPaid - oldPaid) > 0.01) {
+    return {
+      kind: 'refund_required_negative_delta',
+      reason: 'payment_removed_implies_refund',
+    };
+  }
+  // Per-bucket payment removal check (multi-bucket case): if any
+  // existing bucket went to zero or shrank, treat as refund-required
+  // even when totals happen to match.
+  const keyOf = (p: {
+    payment_method: string;
+    payment_account_id?: string | null;
+  }) => `${p.payment_method}|${p.payment_account_id ?? ''}`;
+  const oldByKey = new Map<string, number>();
+  for (const p of origPayments) {
+    oldByKey.set(keyOf(p), (oldByKey.get(keyOf(p)) ?? 0) + Number(p.amount || 0));
+  }
+  if (dto.payments != null) {
+    const newByKey = new Map<string, number>();
+    for (const p of dto.payments) {
+      newByKey.set(keyOf(p), (newByKey.get(keyOf(p)) ?? 0) + Number(p.amount || 0));
+    }
+    for (const [k, oldAmt] of oldByKey) {
+      const newAmt = newByKey.get(k) ?? 0;
+      if (+(newAmt - oldAmt).toFixed(2) < 0) {
+        return {
+          kind: 'refund_required_negative_delta',
+          reason: 'payment_removed_implies_refund',
+        };
+      }
+    }
+  }
+
+  return {
+    kind: 'safe_negative_unpaid_delta',
+    line_deltas: lineDeltas,
+    delta_grand_total: deltaGrand,
+    delta_revenue: +(totalDeltaRevenue - deltaTax).toFixed(2),
+    delta_tax: deltaTax,
+    delta_cogs: totalDeltaCogs,
+    ar_reduction: +Math.abs(deltaGrand).toFixed(2),
   };
 }
 
@@ -1394,6 +1720,45 @@ export class PosService {
           userId,
           reason,
           positiveStructural,
+        );
+      }
+
+      // ── PR-POS-INVOICE-NEGATIVE-UNPAID-DELTA-1 (Phase 2B) ─────────
+      // Fourth short-circuit: detect "safe negative unpaid delta" —
+      // grand_total drops + customer still owes ≥ 0 + no payment
+      // change. These flow through an AR-reduction-only delta JE that
+      // NEVER calls reverseByReference, NEVER voids the original sale
+      // JE, NEVER touches a cashbox. Refund-required and customer-
+      // changed reductions are blocked here with a clear Arabic
+      // error rather than silently falling through to the legacy
+      // reverse-and-repost path.
+      const negativeDelta = classifyNegativeDelta(
+        orig,
+        origItems,
+        origPayments,
+        dto,
+      );
+      if (negativeDelta.kind === 'safe_negative_unpaid_delta') {
+        return this.applySafeNegativeUnpaidDeltaEdit(
+          em,
+          id,
+          orig,
+          origItems,
+          origPayments,
+          dto,
+          userId,
+          reason,
+          negativeDelta,
+        );
+      }
+      if (negativeDelta.kind === 'refund_required_negative_delta') {
+        throw new BadRequestException(
+          'هذا التعديل يقلل فاتورة مدفوعة. استخدم مسار المرتجع/رد المبلغ.',
+        );
+      }
+      if (negativeDelta.kind === 'blocked_customer_change_on_negative_delta') {
+        throw new BadRequestException(
+          'لا يمكن تغيير العميل أثناء تخفيض الفاتورة. ألغِ الفاتورة وأنشئ فاتورة جديدة للعميل الصحيح.',
         );
       }
 
@@ -2667,6 +3032,302 @@ export class PosService {
         edited: true,
         edited_by: userId,
         path: 'positive_structural_delta',
+      },
+    });
+
+    return { invoice: updated, edited: true, history_id: historyId };
+  }
+
+  /**
+   * PR-POS-INVOICE-NEGATIVE-UNPAID-DELTA-1 (Phase 2B) — apply a "safe
+   * negative unpaid delta" edit (price drop / qty drop / line removal,
+   * customer still owes ≥ 0 after the edit) WITHOUT calling
+   * `postInvoiceEdit` or `reverseByReference`. Caller (`editInvoice`)
+   * has already classified the edit via `classifyNegativeDelta` and is
+   * running inside the outer transaction.
+   *
+   * Mutation strategy:
+   *   1. INSERT an `invoice_edit_history` row with the before-snapshot.
+   *   2. For each variant with delta_qty < 0: INSERT a `stock_movements`
+   *      row (movement_type='adjustment', direction='in') for the
+   *      restored qty. Existing sale stock_movements are NEVER reversed.
+   *   3. For each variant in the original that has any delta:
+   *      DELETE existing `invoice_items` rows for that variant; if the
+   *      variant survives in the dto, INSERT one new row with the
+   *      final qty + price + frozen unit_cost. Variants ONLY in the
+   *      original (line removal) are simply deleted with no re-INSERT.
+   *   4. `invoice_payments` rows are NEVER touched (the safe path
+   *      requires paid_amount stay exactly the same).
+   *   5. UPDATE invoices: grand_total / subtotal / tax_amount /
+   *      cogs_total / gross_profit shrink by the delta; paid_amount
+   *      and change_amount unchanged; edit_count++.
+   *   6. Call `posting.postInvoiceNegativeUnpaidDelta` to post a single
+   *      adjustment JE (no cashbox movement) keyed on
+   *      reference_type='invoice_negative_unpaid_delta' with a
+   *      deterministic uuid-v5 derived from the history id.
+   *   7. Backfill history with after-snapshot.
+   *   8. Refresh closed-shift snapshot if applicable.
+   *   9. Emit realtime event.
+   *
+   * Explicitly does NOT:
+   *   · Touch invoice_payments rows.
+   *   · Touch cashboxes / cashbox_transactions in any way.
+   *   · Reverse the original sale stock_movements.
+   *   · DELETE invoice_items rows for variants whose qty didn't change.
+   *   · Call `posting.postInvoiceEdit`.
+   *   · Call `posting.reverseByReference`.
+   *   · Void the original sale JE.
+   *   · Emit a `reversal_sale` CT.
+   *   · Emit any note starting with 'عكس:'.
+   */
+  private async applySafeNegativeUnpaidDeltaEdit(
+    em: any,
+    id: string,
+    orig: any,
+    origItems: Array<any>,
+    origPayments: Array<any>,
+    dto: any,
+    userId: string,
+    reason: string,
+    classification: Extract<
+      NegativeDeltaClassification,
+      { kind: 'safe_negative_unpaid_delta' }
+    >,
+  ) {
+    // ── 1) History row with before-snapshot ────────────────────────
+    const [historyRow] = await em.query(
+      `INSERT INTO invoice_edit_history
+         (invoice_id, edited_by, reason, before_snapshot)
+       VALUES ($1,$2,$3,$4::jsonb)
+       RETURNING id`,
+      [
+        id,
+        userId,
+        reason,
+        JSON.stringify({
+          invoice: orig,
+          items: origItems,
+          payments: origPayments,
+        }),
+      ],
+    );
+    const historyId = historyRow.id;
+
+    // Snapshot fields per variant from orig — we'll reuse them for any
+    // re-INSERT so the new (reduced) row still describes the product.
+    const origSnapshotByVariant = new Map<
+      string,
+      {
+        product_name_snapshot: any;
+        sku_snapshot: any;
+        color_name_snapshot: any;
+        size_label_snapshot: any;
+      }
+    >();
+    for (const it of origItems) {
+      if (!origSnapshotByVariant.has(it.variant_id)) {
+        origSnapshotByVariant.set(it.variant_id, {
+          product_name_snapshot: it.product_name_snapshot ?? null,
+          sku_snapshot: it.sku_snapshot ?? null,
+          color_name_snapshot: it.color_name_snapshot ?? null,
+          size_label_snapshot: it.size_label_snapshot ?? null,
+        });
+      }
+    }
+
+    // ── 2) Stock restoration: one adjustment-in row per variant
+    //       whose qty dropped (or that got removed entirely). Neutral
+    //       wording — no 'عكس' here so the Phase 2F guardrail stays
+    //       quiet.
+    for (const ld of classification.line_deltas) {
+      if (ld.delta_qty < 0) {
+        await em.query(
+          `INSERT INTO stock_movements
+             (variant_id, warehouse_id, movement_type, direction,
+              quantity, unit_cost, reference_type, reference_id,
+              user_id, notes)
+           VALUES ($1,$2,'adjustment','in',$3,$4,'invoice',$5,$6,$7)`,
+          [
+            ld.variant_id,
+            orig.warehouse_id,
+            Math.abs(ld.delta_qty),
+            ld.unit_cost,
+            id,
+            userId,
+            'تعديل فاتورة — تخفيض كمية (لا يستلزم استرداد نقدي)',
+          ],
+        );
+      }
+    }
+
+    // ── 3) Re-shape invoice_items to match the dto's final state.
+    //       Variants that didn't change keep their original rows
+    //       untouched; variants with any delta have all their orig
+    //       rows replaced with a single new row carrying the final
+    //       qty + unit_price + frozen unit_cost (or no row at all if
+    //       the variant was removed).
+    for (const ld of classification.line_deltas) {
+      await em.query(
+        `DELETE FROM invoice_items WHERE invoice_id = $1 AND variant_id = $2`,
+        [id, ld.variant_id],
+      );
+      if (ld.new_qty > 0) {
+        const snap = origSnapshotByVariant.get(ld.variant_id) ?? {
+          product_name_snapshot: null,
+          sku_snapshot: null,
+          color_name_snapshot: null,
+          size_label_snapshot: null,
+        };
+        const newLineSubtotal = +(ld.new_qty * ld.new_unit_price).toFixed(2);
+        await em.query(
+          `INSERT INTO invoice_items
+             (invoice_id, variant_id,
+              product_name_snapshot, sku_snapshot,
+              color_name_snapshot, size_label_snapshot,
+              quantity, unit_cost, unit_price,
+              discount_amount, line_subtotal, line_total,
+              salesperson_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+          [
+            id,
+            ld.variant_id,
+            snap.product_name_snapshot,
+            snap.sku_snapshot,
+            snap.color_name_snapshot,
+            snap.size_label_snapshot,
+            ld.new_qty,
+            ld.unit_cost,
+            ld.new_unit_price,
+            0,
+            newLineSubtotal,
+            newLineSubtotal,
+            dto.salesperson_id ?? orig.salesperson_id ?? null,
+          ],
+        );
+      }
+    }
+
+    // ── 4) UPDATE invoices: totals shrink by the delta; paid stays.
+    const oldGrand = Number(orig.grand_total || 0);
+    const oldSubtotal = Number(orig.subtotal || 0);
+    const oldCogs = Number(orig.cogs_total || 0);
+    const newGrand = +(oldGrand + classification.delta_grand_total).toFixed(2);
+    const newSubtotal = +(oldSubtotal + classification.delta_grand_total).toFixed(2);
+    const newCogs = +(oldCogs + classification.delta_cogs).toFixed(2);
+    const vatRate = Number(orig.tax_rate || 0);
+    const newTax =
+      vatRate > 0
+        ? +((newGrand * vatRate) / (100 + vatRate)).toFixed(2)
+        : 0;
+    // paid_amount is preserved — the safe path forbids payment changes.
+    const newPaid = Number(orig.paid_amount || 0);
+    const newGrossProfit = +(newGrand - newCogs).toFixed(2);
+    const newChange = Math.max(0, +(newPaid - newGrand).toFixed(2));
+
+    const [updated] = await em.query(
+      `UPDATE invoices
+          SET subtotal       = $2,
+              tax_amount     = $3,
+              grand_total    = $4,
+              paid_amount    = $5,
+              change_amount  = $6,
+              cogs_total     = $7,
+              gross_profit   = $8,
+              notes          = COALESCE($9, notes),
+              edit_count     = edit_count + 1,
+              last_edited_at = NOW(),
+              updated_at     = NOW()
+        WHERE id = $1
+        RETURNING *`,
+      [
+        id,
+        newSubtotal,
+        newTax,
+        newGrand,
+        newPaid,
+        newChange,
+        newCogs,
+        newGrossProfit,
+        dto.notes ?? null,
+      ],
+    );
+
+    // ── 5) Post the negative delta JE (no cashbox movement) ────────
+    if (this.posting) {
+      const postRes = (await this.posting.postInvoiceNegativeUnpaidDelta(
+        id,
+        historyId,
+        {
+          ar_reduction: classification.ar_reduction,
+          revenue_reduction: Math.abs(classification.delta_revenue),
+          tax_reduction: Math.abs(classification.delta_tax),
+          cogs_reduction: Math.abs(classification.delta_cogs),
+          customer_id: orig.customer_id ?? null,
+        },
+        userId,
+        em,
+      )) as any;
+      if (postRes?.error) {
+        throw new BadRequestException(
+          `فشل ترحيل دلتا تخفيض الفاتورة: ${postRes.error}`,
+        );
+      }
+    }
+
+    // ── 6) Backfill history with after-snapshot ─────────────────────
+    const newItems = await em.query(
+      `SELECT * FROM invoice_items WHERE invoice_id = $1 ORDER BY id`,
+      [id],
+    );
+    await em.query(
+      `UPDATE invoice_edit_history
+          SET after_summary  = $2::jsonb,
+              after_snapshot = $3::jsonb
+        WHERE id = $1`,
+      [
+        historyId,
+        JSON.stringify({
+          items_count: newItems.length,
+          grand_total: newGrand,
+          cogs_total: newCogs,
+          gross_profit: newGrossProfit,
+          paid: newPaid,
+          delta_grand: classification.delta_grand_total,
+          delta_revenue: classification.delta_revenue,
+          delta_tax: classification.delta_tax,
+          delta_cogs: classification.delta_cogs,
+          ar_reduction: classification.ar_reduction,
+          delta_lines: classification.line_deltas.length,
+          path: 'safe_negative_unpaid_delta',
+        }),
+        JSON.stringify({
+          invoice: updated,
+          items: newItems,
+          payments: origPayments, // unchanged on this path
+        }),
+      ],
+    );
+
+    // ── 7) Refresh closed-shift snapshot if applicable ──────────────
+    if (orig.shift_id && this.shifts) {
+      const refresh = await this.shifts.refreshClosedShiftSnapshot(
+        orig.shift_id,
+        em,
+      );
+      if (refresh.status === 'blocked') {
+        throw new ConflictException(
+          'لا يمكن تعديل فاتورة لوردية مغلقة سبق ترحيل فروقاتها محاسبياً. يجب تسوية أو إلغاء معالجة الفروقات أولاً.',
+        );
+      }
+    }
+
+    this.realtime?.emitPosEvent({
+      type: 'invoice.created',
+      payload: {
+        invoice_id: id,
+        edited: true,
+        edited_by: userId,
+        path: 'safe_negative_unpaid_delta',
       },
     });
 

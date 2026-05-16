@@ -970,6 +970,17 @@ export class FinancialEngineService {
       // tag so per-invoice cash queries see the delta alongside the
       // original sale.
       invoice_monetary_delta: 'invoice',
+      // Phase 2B (PR-POS-INVOICE-NEGATIVE-UNPAID-DELTA-1): POS invoice
+      // edits that REDUCE the sale (price/qty drop or line removal)
+      // when the customer still owes ≥ the reduced amount — i.e. no
+      // cash refund is implied. The delta posts as a non-cash GL
+      // adjustment (DR Revenue / DR Tax / CR AR / DR Inventory / CR
+      // COGS) under reference_type 'invoice_negative_unpaid_delta'.
+      // No cashbox_transactions row is created by the safe path (no
+      // physical cash movement). The alias is kept here defensively
+      // so that if a future variant ever attaches a CT row it still
+      // resolves to the 'invoice' entity for per-invoice cash queries.
+      invoice_negative_unpaid_delta: 'invoice',
     };
     const mapped = aliases[refType] ?? refType;
     return allowed.has(mapped) ? mapped : 'other';
