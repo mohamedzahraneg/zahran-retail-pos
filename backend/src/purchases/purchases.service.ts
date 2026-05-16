@@ -11,6 +11,12 @@ import {
   ListPurchasesDto,
 } from './dto/purchase.dto';
 import { AccountingPostingService } from '../chart-of-accounts/posting.service';
+import {
+  allocateLandedCosts,
+  ManualAllocationError,
+  type AllocatorExtraInput,
+  type AllocatorLineInput,
+} from './landed-cost.allocator';
 
 /**
  * Purchases module — supplier purchase orders + receiving.
@@ -101,7 +107,19 @@ export class PurchasesService {
       [id],
     );
 
-    return { ...purchase, items, payments };
+    // PR-PURCHASES-P2.1 — surface landed-cost extras alongside items
+    // + payments. Returns empty array when the purchase has no extras
+    // (legacy purchases, no schema break).
+    const extra_costs = await this.ds.query(
+      `SELECT id, cost_type, label, amount, capitalize_to_inventory,
+              allocation_method, notes, sort_order, created_at
+         FROM purchase_extra_costs
+        WHERE purchase_id = $1
+        ORDER BY sort_order, created_at`,
+      [id],
+    ).catch(() => [] as any[]);
+
+    return { ...purchase, items, payments, extra_costs };
   }
 
   // --------------------------------------------------------------------------
@@ -112,28 +130,73 @@ export class PurchasesService {
       throw new BadRequestException('يجب إضافة صنف واحد على الأقل');
     }
 
+    // PR-PURCHASES-P2.1 — run the landed-cost allocator BEFORE the
+    // transaction opens. The DTO's `unit_cost` is treated as the BASE
+    // (raw) price; the allocator turns it into the landed `unit_cost`
+    // that gets written to `purchase_items` and (via receive()) into
+    // `product_variants.cost_price`.
+    const allocatorLines: AllocatorLineInput[] = dto.items.map((i) => ({
+      variant_id: i.variant_id,
+      quantity: i.quantity,
+      base_unit_cost: i.unit_cost,
+      discount: i.discount ?? 0,
+      tax: i.tax ?? 0,
+    }));
+    const allocatorExtras: AllocatorExtraInput[] = (dto.extra_costs ?? []).map(
+      (e) => ({
+        cost_type: e.cost_type,
+        amount: e.amount,
+        // capitalize defaults to true (same default as the DB column)
+        capitalize_to_inventory: e.capitalize_to_inventory !== false,
+        // allocation_method defaults to by_value (same as DB)
+        allocation_method: e.allocation_method ?? 'by_value',
+        manual_allocations: e.manual_allocations,
+      }),
+    );
+
+    let allocation;
+    try {
+      allocation = allocateLandedCosts(allocatorLines, allocatorExtras);
+    } catch (err) {
+      if (err instanceof ManualAllocationError) {
+        // Canonical Arabic operator-facing message — the precise reason
+        // is logged via the underlying err.message + reason code.
+        throw new BadRequestException(
+          'إجمالي التوزيع اليدوي للمصاريف يجب أن يساوي قيمة المصروف.',
+        );
+      }
+      throw err;
+    }
+
     return this.ds.transaction(async (m) => {
-      const subtotal = dto.items.reduce(
-        (s, i) =>
-          s +
-          (i.quantity * i.unit_cost - (i.discount || 0) + (i.tax || 0)),
-        0,
-      );
-      const grand_total =
-        subtotal -
-        (dto.discount_amount || 0) +
-        (dto.tax_amount || 0) +
-        (dto.shipping_cost || 0);
+      // subtotal stays as the BASE products subtotal (unchanged
+      // semantics; reports keep using it as "products total before
+      // landed cost"). grand_total now adds the capitalized AND
+      // non-capitalized extras alongside the legacy shipping/tax/
+      // discount fields.
+      const base_subtotal = allocation.base_subtotal;
+      const extra_costs_capitalized = allocation.capitalized_total;
+      const extra_costs_non_capitalized = allocation.non_capitalized_total;
+      const grand_total = +(
+        base_subtotal
+        - (dto.discount_amount || 0)
+        + (dto.tax_amount || 0)
+        + (dto.shipping_cost || 0)
+        + extra_costs_capitalized
+        + extra_costs_non_capitalized
+      ).toFixed(2);
 
       const [purchase] = await m.query(
         `
         INSERT INTO purchases
             (supplier_id, warehouse_id, invoice_date, due_date, supplier_ref,
              subtotal, discount_amount, tax_amount, shipping_cost, grand_total,
+             extra_costs_capitalized, extra_costs_non_capitalized,
              notes, created_by)
         VALUES ($1,$2, COALESCE($3::date, CURRENT_DATE), $4, $5,
                 $6, $7, $8, $9, $10,
-                $11, $12)
+                $11, $12,
+                $13, $14)
         RETURNING *
         `,
         [
@@ -142,33 +205,62 @@ export class PurchasesService {
           dto.invoice_date ?? null,
           dto.due_date ?? null,
           dto.supplier_ref ?? null,
-          subtotal,
+          base_subtotal,
           dto.discount_amount || 0,
           dto.tax_amount || 0,
           dto.shipping_cost || 0,
           grand_total,
+          extra_costs_capitalized,
+          extra_costs_non_capitalized,
           dto.notes ?? null,
           userId,
         ],
       );
 
-      for (const it of dto.items) {
-        const line_total =
-          it.quantity * it.unit_cost -
-          (it.discount || 0) +
-          (it.tax || 0);
+      for (const line of allocation.lines) {
         await m.query(
           `INSERT INTO purchase_items
-             (purchase_id, variant_id, quantity, unit_cost, discount, tax, line_total)
-           VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+             (purchase_id, variant_id, quantity,
+              base_unit_cost, allocated_cost_total, allocated_cost_per_unit,
+              unit_cost, discount, tax, line_total,
+              manual_allocation)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
           [
             purchase.id,
-            it.variant_id,
-            it.quantity,
-            it.unit_cost,
-            it.discount || 0,
-            it.tax || 0,
-            line_total,
+            line.variant_id,
+            line.quantity,
+            line.base_unit_cost,
+            line.allocated_cost_total,
+            line.allocated_cost_per_unit,
+            line.unit_cost,
+            line.discount,
+            line.tax,
+            line.line_total,
+            line.manual_allocation,
+          ],
+        );
+      }
+
+      // Persist each extra cost row alongside the parent purchase.
+      const extras = dto.extra_costs ?? [];
+      for (let i = 0; i < extras.length; i++) {
+        const e = extras[i];
+        await m.query(
+          `INSERT INTO purchase_extra_costs
+             (purchase_id, cost_type, label, amount,
+              capitalize_to_inventory, allocation_method,
+              notes, sort_order, created_by)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+          [
+            purchase.id,
+            e.cost_type,
+            e.label ?? null,
+            e.amount,
+            e.capitalize_to_inventory !== false,
+            e.allocation_method ?? 'by_value',
+            e.notes ?? null,
+            e.sort_order ?? i,
+            userId,
           ],
         );
       }

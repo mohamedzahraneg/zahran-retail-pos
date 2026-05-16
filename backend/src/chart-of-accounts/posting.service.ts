@@ -1453,7 +1453,9 @@ export class AccountingPostingService {
       const [p] = await q(
         `SELECT id, purchase_no, subtotal, tax_amount, shipping_cost,
                 grand_total, paid_amount, status, received_at, invoice_date,
-                supplier_id
+                supplier_id,
+                COALESCE(extra_costs_capitalized, 0)     AS extra_costs_capitalized,
+                COALESCE(extra_costs_non_capitalized, 0) AS extra_costs_non_capitalized
            FROM purchases WHERE id = $1`,
         [purchaseId],
       );
@@ -1465,7 +1467,14 @@ export class AccountingPostingService {
       const paid = Number(p.paid_amount || 0);
       const tax = Number(p.tax_amount || 0);
       const shipping = Number(p.shipping_cost || 0);
-      const inventoryCost = Math.max(0, total - tax); // shipping already in subtotal
+      // PR-PURCHASES-P2.1 — capitalized extras are already baked into
+      // grand_total (and thus into `total - tax`) so they flow through
+      // the inventory leg automatically. Non-capitalized extras need
+      // to be PEELED off the inventory leg and routed to misc op-ex
+      // (GL 529) so the JE stays balanced and inventory valuation
+      // reflects only landed cost.
+      const nonCap = Number(p.extra_costs_non_capitalized || 0);
+      const inventoryCost = Math.max(0, total - tax - nonCap);
       if (total < 0.01) return null;
 
       const entryDate = this.dateOnly(p.received_at || p.invoice_date);
@@ -1475,6 +1484,12 @@ export class AccountingPostingService {
       // target list).
       const vatAcc = tax > 0 ? await this.accountIdByCode(q, GL_TAX_PAYABLE) : null;
       const suppAcc = await this.accountIdByCode(q, GL_SUPPLIER_PAYABLE);
+      // PR-PURCHASES-P2.1 — single-bucket non-capitalized extras lookup.
+      // GL 529 ("مصروفات متفرقة", leaf, verified in production COA at
+      // implementation time). The DR runs only when nonCap > 0, so
+      // legacy purchases (extra_costs_non_capitalized = 0) keep the
+      // exact 3-leg shape from before P2.1.
+      const miscOpexAcc = nonCap > 0 ? await this.accountIdByCode(q, '529') : null;
       // We don't know the cashbox here — PO model doesn't track it.
       // If fully paid at receive time, caller can post the supplier payment separately.
 
@@ -1494,6 +1509,18 @@ export class AccountingPostingService {
           debit: tax,
           credit: 0,
           description: `ضريبة شراء ${p.purchase_no}`,
+        });
+      }
+      if (miscOpexAcc && nonCap > 0) {
+        // PR-PURCHASES-P2.1 — non-capitalized extras (transport/labor/
+        // etc. flagged capitalize_to_inventory=false) booked as misc
+        // operating expense rather than inventory. They still belong
+        // to the supplier payable below.
+        lines.push({
+          account_id: miscOpexAcc,
+          debit: nonCap,
+          credit: 0,
+          description: `مصاريف شراء غير محملة ${p.purchase_no}`,
         });
       }
       if (suppAcc && total > 0) {

@@ -1,6 +1,8 @@
 import {
   IsArray,
+  IsBoolean,
   IsDateString,
+  IsIn,
   IsInt,
   IsNumber,
   IsOptional,
@@ -19,6 +21,41 @@ export class PurchaseItemDto {
   @IsOptional() @IsNumber() @Min(0) tax?: number;
 }
 
+// PR-PURCHASES-P2.1 — landed-cost extras DTOs.
+//
+// `unit_cost` on PurchaseItemDto continues to carry the BASE price per
+// piece (what the operator typed). The service-layer allocation engine
+// converts it into the LANDED `purchase_items.unit_cost` after running
+// through the extras list. Operators never need to think about base
+// vs. landed at submit time.
+
+export class PurchaseManualAllocationDto {
+  @IsUUID() variant_id: string;
+  @IsNumber() @Min(0.01) amount: number;
+}
+
+export class PurchaseExtraCostDto {
+  @IsIn(['transport', 'labor', 'shipping', 'customs', 'packaging', 'other'])
+  cost_type: 'transport' | 'labor' | 'shipping' | 'customs' | 'packaging' | 'other';
+
+  @IsOptional() @IsString() label?: string;
+  @IsNumber() @Min(0.01) amount: number;
+  @IsOptional() @IsBoolean() capitalize_to_inventory?: boolean;
+
+  @IsOptional()
+  @IsIn(['by_value', 'by_quantity', 'manual'])
+  allocation_method?: 'by_value' | 'by_quantity' | 'manual';
+
+  @IsOptional() @IsString() notes?: string;
+  @IsOptional() @IsInt() @Min(0) sort_order?: number;
+
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => PurchaseManualAllocationDto)
+  manual_allocations?: PurchaseManualAllocationDto[];
+}
+
 export class CreatePurchaseDto {
   @IsUUID() supplier_id: string;
   @IsUUID() warehouse_id: string;
@@ -34,6 +71,13 @@ export class CreatePurchaseDto {
   @ValidateNested({ each: true })
   @Type(() => PurchaseItemDto)
   items: PurchaseItemDto[];
+
+  // PR-PURCHASES-P2.1 — optional, undefined = legacy behavior.
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => PurchaseExtraCostDto)
+  extra_costs?: PurchaseExtraCostDto[];
 }
 
 export class AddPurchasePaymentDto {
