@@ -951,6 +951,25 @@ export class FinancialEngineService {
       // (cash-desk, drift cleanup) pick up the correction alongside the
       // original outflow without a separate join.
       expense_edit_correction: 'expense',
+      // Phase 2A (PR-POS-INVOICE-POSITIVE-STRUCTURAL-DELTA-1): POS
+      // invoice edits that grow the sale additively (add line, qty up,
+      // line revenue up, additional payment) post a single delta JE+CT
+      // under reference_type 'invoice_positive_delta'. The matching
+      // cashbox_transactions row must reuse the 'invoice' entity tag so
+      // per-invoice cash queries pick up the delta alongside the
+      // original sale without a separate join.
+      invoice_positive_delta: 'invoice',
+      // Phase 2A.1 (PR-POS-INVOICE-MONETARY-DELTA-IDEMPOTENCY-FIX-1):
+      // POS monetary-only invoice edits (same lines/qty/customer/
+      // payment shape; only the per-line price or invoice-level
+      // discount moves and the resulting +Δ payment row gets appended)
+      // post their delta JE+CT under reference_type
+      // 'invoice_monetary_delta' so the engine's idempotency key does
+      // NOT collide with the original sale JE on (`invoice`, id). The
+      // matching cashbox_transactions row reuses the 'invoice' entity
+      // tag so per-invoice cash queries see the delta alongside the
+      // original sale.
+      invoice_monetary_delta: 'invoice',
     };
     const mapped = aliases[refType] ?? refType;
     return allowed.has(mapped) ? mapped : 'other';

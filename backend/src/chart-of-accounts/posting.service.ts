@@ -521,6 +521,7 @@ export class AccountingPostingService {
    */
   async postInvoiceDelta(
     invoiceId: string,
+    historyId: string,
     delta: number,
     userId: string,
     em?: EntityManager,
@@ -530,6 +531,9 @@ export class AccountingPostingService {
       throw new Error(
         `postInvoiceDelta: delta must be a positive finite number (got ${delta})`,
       );
+    }
+    if (!historyId) {
+      throw new Error('postInvoiceDelta: historyId is required for idempotency');
     }
     const runner = em ?? this.ds.manager;
     const ctx = `engine:postInvoiceDelta`;
@@ -562,6 +566,25 @@ export class AccountingPostingService {
       [invoiceId],
     );
     if (!origPayment) return { error: 'no_original_payment' };
+
+    // PR-POS-INVOICE-MONETARY-DELTA-IDEMPOTENCY-FIX-1 (Phase 2A.1):
+    // Deterministic uuid-v5 sub-id keyed on history_id. The previous
+    // implementation passed reference_type='invoice' + reference_id=
+    // invoiceId, which collides with the original sale JE's idempotency
+    // key — every monetary-delta call silently returned `skipped: true`
+    // from the engine and never posted a GL/CT row. Production showed
+    // zero delta JEs across 295 live invoice JEs because of this bug.
+    // Using a fresh reference_type with a history-scoped reference_id
+    // (a) lets the delta JE post cleanly, and (b) still blocks duplicate
+    // posts via the engine's existing idempotency check on
+    // (reference_type, reference_id).
+    const [{ ref_id: referenceId }] = await runner.query(
+      `SELECT uuid_generate_v5(
+         uuid_ns_dns(),
+         'invoice_monetary_delta:' || $1::text
+       ) AS ref_id`,
+      [historyId],
+    );
 
     // Build delta GL lines.  Same shape as a fresh sale of `delta`.
     const taxRate = Number(inv.tax_rate || 0);
@@ -663,8 +686,8 @@ export class AccountingPostingService {
 
     const res = await this.engine.recordTransaction({
       kind: 'sale',
-      reference_type: 'invoice',
-      reference_id: invoiceId,
+      reference_type: 'invoice_monetary_delta',
+      reference_id: referenceId,
       entry_date: entryDate,
       description: `تعديل قيد فاتورة ${inv.invoice_no} (+${delta})`,
       gl_lines: lines,
@@ -771,6 +794,252 @@ export class AccountingPostingService {
     }
 
     return { ok: true, entry_ids: entryIds };
+  }
+
+  /**
+   * PR-POS-INVOICE-POSITIVE-STRUCTURAL-DELTA-1 (Phase 2A) — post the
+   * GL/CT side of a "positive structural delta" invoice edit (line
+   * added, qty increased, line revenue increased — any combination),
+   * WITHOUT voiding the original sale JE and WITHOUT creating any
+   * `reversal_sale` CT.
+   *
+   * Companion to `applyPositiveStructuralDeltaEdit` in pos.service.ts.
+   * Used only when `classifyPositiveStructuralDelta` decides:
+   *   · same customer
+   *   · no variant removed, no qty decrease, no line-revenue decrease
+   *   · per-bucket payment deltas all ≥ 0
+   *   · delta_grand_total > 0
+   *
+   * The post mirrors the legacy `postInvoice` GL+CT shape, but only
+   * for the DELTA portions:
+   *   · DR each cashbox by the payment_delta for that bucket
+   *     (split per payment_method/account, mirroring postInvoice)
+   *   · DR Accounts Receivable for the unpaid delta (if any), tagged
+   *     with customer_id so customer ledgers stay correct
+   *   · CR Revenue for (delta_grand_total − delta_tax)
+   *   · CR Tax for delta_tax (split via tax_rate on the invoice)
+   *   · DR COGS for SUM(delta_qty × unit_cost)
+   *   · CR Inventory for the same COGS amount
+   *   · cash_movements: direction='in' for each cash/bank delta
+   *
+   * Idempotency: the JE/CT key is
+   *   reference_type='invoice_positive_delta'
+   *   reference_id = uuid_v5(uuid_ns_dns(),
+   *                          'invoice_positive_structural_delta:' || history_id)
+   * The engine's `mapToEntityType` alias maps the CT's reference_type
+   * back to the 'invoice' entity tag so per-invoice cash queries pick
+   * up the delta alongside the original sale without a separate join.
+   */
+  async postInvoicePositiveStructuralDelta(
+    invoiceId: string,
+    historyId: string,
+    args: {
+      line_deltas: Array<{
+        variant_id: string;
+        delta_qty: number;
+        unit_price: number;
+        unit_cost: number;
+      }>;
+      payment_deltas: Array<{
+        payment_method: string;
+        payment_account_id: string | null;
+        delta_amount: number;
+        payment_account_snapshot?: any;
+      }>;
+      delta_unpaid: number;
+      customer_id: string | null;
+    },
+    userId: string,
+    em?: EntityManager,
+  ): Promise<{ ok: true; entry_id: string } | { error: string }> {
+    if (!this.engine) {
+      return { error: 'engine_unavailable' };
+    }
+    const runner = em ?? this.ds.manager;
+
+    // Load invoice metadata + resolve cashbox via shift (mirrors postInvoice).
+    const [inv] = await runner.query(
+      `SELECT i.id, i.invoice_no, i.tax_rate, i.completed_at, i.created_at,
+              i.warehouse_id, i.customer_id,
+              s.cashbox_id AS cashbox_id
+         FROM invoices i
+         LEFT JOIN shifts s ON s.id = i.shift_id
+        WHERE i.id = $1`,
+      [invoiceId],
+    );
+    if (!inv) return { error: 'invoice_not_found' };
+
+    // Deterministic uuid-v5 sub-id keyed on history_id so retries
+    // collapse via engine idempotency (we keep history_id stable for a
+    // given edit request, so a retry produces the same ref_id).
+    const [{ ref_id: referenceId }] = await runner.query(
+      `SELECT uuid_generate_v5(
+         uuid_ns_dns(),
+         'invoice_positive_structural_delta:' || $1::text
+       ) AS ref_id`,
+      [historyId],
+    );
+
+    // Compute deltas.
+    const deltaGrand = +args.line_deltas
+      .reduce((s, l) => s + l.delta_qty * l.unit_price, 0)
+      .toFixed(2);
+    if (!(deltaGrand > 0)) return { error: 'delta_grand_not_positive' };
+
+    const taxRate = Number(inv.tax_rate || 0);
+    const deltaTax =
+      taxRate > 0
+        ? +((deltaGrand * taxRate) / (100 + taxRate)).toFixed(2)
+        : 0;
+    const deltaRevenue = +(deltaGrand - deltaTax).toFixed(2);
+    const deltaCogs = +args.line_deltas
+      .reduce((s, l) => s + l.delta_qty * l.unit_cost, 0)
+      .toFixed(2);
+
+    const lines: any[] = [];
+    const cashMoves: Array<{
+      cashbox_id: string;
+      direction: 'in' | 'out';
+      amount: number;
+      category: string;
+      notes?: string;
+    }> = [];
+
+    // ── Per-bucket DR cash / non-cash legs (mirrors postInvoice).
+    for (const pd of args.payment_deltas) {
+      if (!(pd.delta_amount > 0)) continue;
+      if (isCashMethod(pd.payment_method)) {
+        if (!inv.cashbox_id) {
+          return { error: 'cashbox_not_resolvable_via_shift' };
+        }
+        lines.push({
+          resolve_from_cashbox_id: inv.cashbox_id,
+          debit: pd.delta_amount,
+          cashbox_id: inv.cashbox_id,
+          description: `كاش - تعديل إضافي فاتورة ${inv.invoice_no} (+${pd.delta_amount})`,
+        });
+        cashMoves.push({
+          cashbox_id: inv.cashbox_id,
+          direction: 'in',
+          amount: pd.delta_amount,
+          category: 'sale',
+          notes: `تعديل إضافي بيع — فاتورة ${inv.invoice_no} (+${pd.delta_amount})`,
+        });
+      } else {
+        // Non-cash leg — resolve GL code + cashbox from snapshot, then
+        // payment_account.live lookup, then catalog default. Same
+        // resolution order as postInvoice / postInvoiceDelta.
+        const snap = (pd.payment_account_snapshot as
+          | Record<string, unknown>
+          | null) ?? {};
+        let glCode: string | undefined =
+          (snap.gl_account_code as string | undefined) ?? undefined;
+        let paCashboxId: string | undefined =
+          (snap.cashbox_id as string | undefined) ?? undefined;
+
+        if (
+          (!glCode || !paCashboxId) &&
+          pd.payment_account_id &&
+          this.payments
+        ) {
+          const live = await this.payments.resolveForPosting(
+            pd.payment_account_id,
+            runner,
+          );
+          if (live) {
+            if (!glCode) glCode = live.gl_account_code;
+            if (!paCashboxId) paCashboxId = live.cashbox_id ?? undefined;
+          }
+        }
+        if (!glCode) {
+          glCode = PAYMENT_METHOD_ACCOUNT_CODE[pd.payment_method];
+        }
+        if (!glCode) {
+          return {
+            error: `no_gl_code_for_payment_method:${pd.payment_method}`,
+          };
+        }
+        const lineEntry: any = {
+          account_code: glCode,
+          debit: pd.delta_amount,
+          description:
+            `${pd.payment_method} - تعديل إضافي فاتورة ${inv.invoice_no} ` +
+            `(+${pd.delta_amount})`,
+        };
+        if (paCashboxId) {
+          lineEntry.cashbox_id = paCashboxId;
+          cashMoves.push({
+            cashbox_id: paCashboxId,
+            direction: 'in',
+            amount: pd.delta_amount,
+            category: 'sale',
+            notes:
+              `${pd.payment_method} — تعديل إضافي فاتورة ${inv.invoice_no} ` +
+              `(+${pd.delta_amount})`,
+          });
+        }
+        lines.push(lineEntry);
+      }
+    }
+
+    // ── Unpaid delta → DR Accounts Receivable (1121), tagged customer.
+    if (args.delta_unpaid > 0) {
+      lines.push({
+        account_code: '1121',
+        debit: args.delta_unpaid,
+        customer_id: args.customer_id ?? inv.customer_id ?? undefined,
+        description: `آجل - تعديل إضافي فاتورة ${inv.invoice_no} (+${args.delta_unpaid})`,
+      });
+    }
+
+    // ── CR Revenue + CR Tax (mirrors postInvoice).
+    if (deltaRevenue > 0) {
+      lines.push({
+        account_code: GL_SALES_REVENUE,
+        credit: deltaRevenue,
+        description: `إيراد - تعديل إضافي فاتورة ${inv.invoice_no} (+${deltaRevenue})`,
+      });
+    }
+    if (deltaTax > 0) {
+      lines.push({
+        account_code: GL_TAX_PAYABLE,
+        credit: deltaTax,
+        description: `ضريبة - تعديل إضافي فاتورة ${inv.invoice_no} (+${deltaTax})`,
+      });
+    }
+
+    // ── COGS side (only when cost > 0).
+    if (deltaCogs > 0) {
+      lines.push({
+        account_code: GL_COGS,
+        debit: deltaCogs,
+        description: `تكلفة - تعديل إضافي فاتورة ${inv.invoice_no}`,
+      });
+      lines.push({
+        account_code: '1131',
+        credit: deltaCogs,
+        description: `خصم مخزون - تعديل إضافي فاتورة ${inv.invoice_no}`,
+      });
+    }
+
+    if (lines.length < 2) return { error: 'delta_je_too_small' };
+
+    const entryDate = this.dateOnly(inv.completed_at || inv.created_at);
+
+    const res = await this.engine.recordTransaction({
+      kind: 'sale',
+      reference_type: 'invoice_positive_delta',
+      reference_id: referenceId,
+      entry_date: entryDate,
+      description: `تعديل إضافي قيد فاتورة ${inv.invoice_no} (+${deltaGrand})`,
+      gl_lines: lines,
+      cash_movements: cashMoves,
+      user_id: userId,
+      em,
+    });
+
+    if (!res.ok) return { error: res.error };
+    return { ok: true, entry_id: (res as any).entry_id };
   }
 
   /**

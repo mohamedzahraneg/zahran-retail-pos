@@ -314,6 +314,273 @@ export function classifyPaymentRedistribution(
   return { kind: 'payment_redistribution', bucket_deltas: buckets };
 }
 
+/**
+ * PR-POS-INVOICE-POSITIVE-STRUCTURAL-DELTA-1 (Phase 2A) — classify an
+ * invoice edit as a "positive structural delta": lines grew (qty up or
+ * new variants added) and/or per-line revenue grew, with no per-line
+ * or per-bucket reduction anywhere. Same customer, payment buckets
+ * only ever grow.
+ *
+ * Runs ONLY after `classifyInvoiceEdit` and `classifyPaymentRedistribution`
+ * have both rejected the edit, so the +Δ monetary path and the
+ * redistribution path get first refusal. Captures the additive subset
+ * of structural edits so they can land via per-line/per-bucket deltas
+ * without calling `postInvoiceEdit` / `reverseByReference` and without
+ * voiding the original sale JE.
+ *
+ * Cases that MATCH (Phase 2A supports):
+ *   · add a brand-new line item (variant not in original)
+ *   · increase qty of an existing variant
+ *   · combined: qty up + per-unit revenue up on the SAME variant
+ *   · combined: add line + qty increase
+ *   · any of the above paired with an additional payment on an
+ *     existing OR a brand-new payment bucket
+ *   · partial / unpaid delta (rest goes to AR)
+ *
+ * Cases that DO NOT MATCH (fall back to legacy reverse-and-repost):
+ *   · customer changed
+ *   · any variant removed entirely from the DTO
+ *   · any variant's qty decreased
+ *   · any variant's per-line revenue decreased
+ *   · price-only change on a variant whose qty didn't move (those go
+ *     through the +Δ monetary path; mixed cases reject here so we don't
+ *     double-handle the same line)
+ *   · any payment bucket whose total amount decreased
+ *   · over-payment delta (deltaPaid > deltaGrand)
+ *
+ * The classifier is purely structural — it does NOT depend on prior
+ * runs of `classifyInvoiceEdit` or `classifyPaymentRedistribution`
+ * (the caller chains them in order in `editInvoice`).
+ */
+export interface PositiveLineDelta {
+  variant_id: string;
+  delta_qty: number;
+  unit_price: number;
+  delta_revenue: number;
+}
+
+export interface PositivePaymentDelta {
+  payment_method: string;
+  payment_account_id: string | null;
+  delta_amount: number;
+  payment_account_snapshot: any | null;
+}
+
+export type PositiveStructuralDeltaClassification =
+  | {
+      kind: 'positive_structural_delta';
+      line_deltas: PositiveLineDelta[];
+      payment_deltas: PositivePaymentDelta[];
+      delta_grand_total: number;
+      delta_paid_total: number;
+      delta_unpaid: number;
+    }
+  | { kind: 'not_positive_structural'; reason: string };
+
+export function classifyPositiveStructuralDelta(
+  orig: {
+    customer_id: string | null;
+    grand_total: number | string;
+    paid_amount: number | string;
+  },
+  origItems: Array<{
+    variant_id: string;
+    quantity: number | string;
+    unit_price?: number | string;
+    discount_amount?: number | string;
+    line_total?: number | string;
+  }>,
+  origPayments: Array<{
+    id: any;
+    payment_method: string;
+    amount: number | string;
+    payment_account_id: string | null;
+    payment_account_snapshot?: any;
+  }>,
+  dto: {
+    lines: Array<{
+      variant_id: string;
+      qty: number;
+      unit_price: number;
+      discount?: number;
+    }>;
+    payments?: Array<{
+      payment_method: string;
+      amount: number;
+      payment_account_id?: string | null;
+      payment_account_snapshot?: any;
+    }>;
+    customer_id?: string | null;
+  },
+): PositiveStructuralDeltaClassification {
+  // 1) Customer unchanged when specified
+  if (dto.customer_id != null && dto.customer_id !== orig.customer_id) {
+    return { kind: 'not_positive_structural', reason: 'customer_changed' };
+  }
+
+  // 2) Aggregate per-variant qty + line_total. We prefer the stored
+  //    line_total from origItems (already net of per-line discount) so
+  //    the comparison matches the legacy ledger's totals. The DTO has
+  //    unit_price + discount which we recombine the same way.
+  type VAgg = { qty: number; revenue: number };
+  const origAgg = new Map<string, VAgg>();
+  for (const it of origItems) {
+    const q = Number(it.quantity ?? 0);
+    const rev =
+      it.line_total != null
+        ? Number(it.line_total)
+        : Number(it.unit_price ?? 0) * q - Number(it.discount_amount ?? 0);
+    const cur = origAgg.get(it.variant_id) ?? { qty: 0, revenue: 0 };
+    origAgg.set(it.variant_id, {
+      qty: cur.qty + q,
+      revenue: cur.revenue + rev,
+    });
+  }
+  const dtoAgg = new Map<string, VAgg>();
+  for (const l of dto.lines ?? []) {
+    const q = Number(l.qty);
+    const rev = q * Number(l.unit_price) - Number(l.discount ?? 0);
+    const cur = dtoAgg.get(l.variant_id) ?? { qty: 0, revenue: 0 };
+    dtoAgg.set(l.variant_id, {
+      qty: cur.qty + q,
+      revenue: cur.revenue + rev,
+    });
+  }
+
+  // 3) No variant may be removed from the DTO.
+  for (const variantId of origAgg.keys()) {
+    if (!dtoAgg.has(variantId)) {
+      return { kind: 'not_positive_structural', reason: 'variant_removed' };
+    }
+  }
+
+  // 4) Per-variant: qty and revenue may only grow. Pure price-only
+  //    changes (qty unchanged, revenue moved) are NOT handled here —
+  //    they belong to the +Δ monetary path. Mixed cases reject so the
+  //    legacy path catches them.
+  const lineDeltas: PositiveLineDelta[] = [];
+  for (const [variantId, dtoVA] of dtoAgg) {
+    const origVA = origAgg.get(variantId) ?? { qty: 0, revenue: 0 };
+    const dQty = +(dtoVA.qty - origVA.qty).toFixed(6);
+    const dRev = +(dtoVA.revenue - origVA.revenue).toFixed(2);
+    if (dQty < 0) {
+      return { kind: 'not_positive_structural', reason: 'qty_decreased' };
+    }
+    if (dRev < 0) {
+      return {
+        kind: 'not_positive_structural',
+        reason: 'line_revenue_decreased',
+      };
+    }
+    if (dQty === 0 && dRev === 0) continue;
+    if (dQty === 0 && dRev > 0) {
+      return {
+        kind: 'not_positive_structural',
+        reason: 'price_only_change_on_unchanged_qty_line',
+      };
+    }
+    const unitPrice = +(dRev / dQty).toFixed(2);
+    if (!(unitPrice > 0)) {
+      return {
+        kind: 'not_positive_structural',
+        reason: 'derived_unit_price_non_positive',
+      };
+    }
+    lineDeltas.push({
+      variant_id: variantId,
+      delta_qty: dQty,
+      unit_price: unitPrice,
+      delta_revenue: dRev,
+    });
+  }
+  if (lineDeltas.length === 0) {
+    return { kind: 'not_positive_structural', reason: 'no_line_changes' };
+  }
+
+  // 5) Aggregate grand-total delta must be positive.
+  const deltaGrand = +lineDeltas
+    .reduce((s, l) => s + l.delta_revenue, 0)
+    .toFixed(2);
+  if (!(deltaGrand > 0)) {
+    return {
+      kind: 'not_positive_structural',
+      reason: 'aggregate_revenue_not_positive',
+    };
+  }
+
+  // 6) Per-bucket payment deltas — all must be ≥ 0 (additive).
+  const keyOf = (p: {
+    payment_method: string;
+    payment_account_id?: string | null;
+  }) => `${p.payment_method}|${p.payment_account_id ?? ''}`;
+
+  const origByKey = new Map<string, number>();
+  const origRowByKey = new Map<string, any>();
+  for (const p of origPayments) {
+    const k = keyOf(p);
+    origByKey.set(k, (origByKey.get(k) ?? 0) + Number(p.amount || 0));
+    if (!origRowByKey.has(k)) origRowByKey.set(k, p);
+  }
+  const dtoByKey = new Map<string, number>();
+  const dtoMetaByKey = new Map<string, { payment_account_snapshot: any }>();
+  for (const p of dto.payments ?? []) {
+    const k = keyOf(p);
+    dtoByKey.set(k, (dtoByKey.get(k) ?? 0) + Number(p.amount || 0));
+    if (!dtoMetaByKey.has(k)) {
+      dtoMetaByKey.set(k, {
+        payment_account_snapshot: (p as any).payment_account_snapshot ?? null,
+      });
+    }
+  }
+
+  const paymentDeltas: PositivePaymentDelta[] = [];
+  for (const k of new Set<string>([...origByKey.keys(), ...dtoByKey.keys()])) {
+    const oldAmt = +(origByKey.get(k) ?? 0).toFixed(2);
+    const newAmt = +(dtoByKey.get(k) ?? 0).toFixed(2);
+    const d = +(newAmt - oldAmt).toFixed(2);
+    if (d < 0) {
+      return {
+        kind: 'not_positive_structural',
+        reason: 'payment_bucket_decreased',
+      };
+    }
+    if (d === 0) continue;
+    const [method, account] = k.split('|');
+    const origRow = origRowByKey.get(k);
+    paymentDeltas.push({
+      payment_method: method,
+      payment_account_id: account || null,
+      delta_amount: d,
+      payment_account_snapshot:
+        origRow?.payment_account_snapshot ??
+        dtoMetaByKey.get(k)?.payment_account_snapshot ??
+        null,
+    });
+  }
+
+  // 7) Compute delta paid / unpaid; reject any over-payment (we'd need
+  //    to refund — out of scope for the additive path).
+  const deltaPaid = +paymentDeltas
+    .reduce((s, p) => s + p.delta_amount, 0)
+    .toFixed(2);
+  const deltaUnpaid = +(deltaGrand - deltaPaid).toFixed(2);
+  if (deltaUnpaid < 0) {
+    return {
+      kind: 'not_positive_structural',
+      reason: 'over_payment_delta',
+    };
+  }
+
+  return {
+    kind: 'positive_structural_delta',
+    line_deltas: lineDeltas,
+    payment_deltas: paymentDeltas,
+    delta_grand_total: deltaGrand,
+    delta_paid_total: deltaPaid,
+    delta_unpaid: deltaUnpaid,
+  };
+}
+
 @Injectable()
 export class PosService {
   constructor(
@@ -1101,6 +1368,35 @@ export class PosService {
         );
       }
 
+      // ── PR-POS-INVOICE-POSITIVE-STRUCTURAL-DELTA-1 (Phase 2A) ─────
+      // Third short-circuit: detect "positive structural delta" edits
+      // (line added, qty up, line revenue up — any combination, no
+      // reduction anywhere). These flow through an additive per-line
+      // / per-bucket delta path that NEVER calls reverseByReference,
+      // NEVER voids the original sale JE, and NEVER creates a
+      // `reversal_sale` CT. Negative-delta + reduction edits still
+      // fall through to the legacy reverse-and-repost path (Phase 2B
+      // will eventually migrate them).
+      const positiveStructural = classifyPositiveStructuralDelta(
+        orig,
+        origItems,
+        origPayments,
+        dto,
+      );
+      if (positiveStructural.kind === 'positive_structural_delta') {
+        return this.applyPositiveStructuralDeltaEdit(
+          em,
+          id,
+          orig,
+          origItems,
+          origPayments,
+          dto,
+          userId,
+          reason,
+          positiveStructural,
+        );
+      }
+
       // ── 1) Reverse stock (one adjustment-in per original line) ───
       for (const it of origItems) {
         await em.query(
@@ -1658,9 +1954,13 @@ export class PosService {
     );
 
     // ── 5) Post delta JE+CT (delta > 0 only) ───────────────────────
+    // Phase 2A.1: pass historyId so postInvoiceDelta keys its JE on a
+    // fresh deterministic uuid-v5 instead of colliding with the
+    // original sale JE's (invoice, invoiceId) idempotency tuple.
     if (delta > 0 && this.posting) {
       const postRes = (await this.posting.postInvoiceDelta(
         id,
+        historyId,
         delta,
         userId,
         em,
@@ -2019,6 +2319,354 @@ export class PosService {
         edited: true,
         edited_by: userId,
         path: 'payment_redistribution',
+      },
+    });
+
+    return { invoice: updated, edited: true, history_id: historyId };
+  }
+
+  /**
+   * PR-POS-INVOICE-POSITIVE-STRUCTURAL-DELTA-1 (Phase 2A) — apply a
+   * "positive structural delta" edit WITHOUT calling `postInvoiceEdit`
+   * or `reverseByReference`. Caller (`editInvoice`) has already
+   * classified the edit via `classifyPositiveStructuralDelta` and is
+   * running inside the outer transaction.
+   *
+   * Mutation strategy (additive only):
+   *   1. INSERT an `invoice_edit_history` row with the before-snapshot.
+   *   2. Resolve unit_cost / product snapshot for each delta line via
+   *      product_variants.
+   *   3. For each line_delta: INSERT a NEW `invoice_items` row carrying
+   *      the delta qty + per-unit-price derived from delta_revenue /
+   *      delta_qty. The original line rows are NEVER mutated.
+   *   4. For each line_delta: INSERT a NEW `stock_movements` row
+   *      (sale, direction='out') for the delta qty. Existing stock
+   *      movements are NEVER reversed.
+   *   5. For each payment_delta: INSERT a NEW `invoice_payments` row
+   *      for the delta_amount on the same bucket. Existing payment
+   *      rows are NEVER mutated.
+   *   6. UPDATE invoices: grand_total/subtotal/tax/paid_amount/cogs/
+   *      gross_profit grow by the delta; edit_count++, last_edited_at.
+   *   7. Call `posting.postInvoicePositiveStructuralDelta` to post a
+   *      single additive JE+CT for the delta only (reference_type =
+   *      'invoice_positive_delta', reference_id = uuid_v5(history_id)).
+   *   8. Backfill history row with after-snapshot.
+   *   9. Refresh closed-shift snapshot if applicable.
+   *  10. Emit realtime event.
+   *
+   * Explicitly does NOT:
+   *   · Wipe & re-insert items / payments.
+   *   · Reverse original stock movements.
+   *   · Call `posting.postInvoiceEdit`.
+   *   · Call `posting.reverseByReference`.
+   *   · Void the original sale JE.
+   *   · Emit a `reversal_sale` CT.
+   */
+  private async applyPositiveStructuralDeltaEdit(
+    em: any,
+    id: string,
+    orig: any,
+    origItems: Array<any>,
+    origPayments: Array<any>,
+    dto: any,
+    userId: string,
+    reason: string,
+    classification: Extract<
+      PositiveStructuralDeltaClassification,
+      { kind: 'positive_structural_delta' }
+    >,
+  ) {
+    // ── 1) History row with before-snapshot ────────────────────────
+    const [historyRow] = await em.query(
+      `INSERT INTO invoice_edit_history
+         (invoice_id, edited_by, reason, before_snapshot)
+       VALUES ($1,$2,$3,$4::jsonb)
+       RETURNING id`,
+      [
+        id,
+        userId,
+        reason,
+        JSON.stringify({
+          invoice: orig,
+          items: origItems,
+          payments: origPayments,
+        }),
+      ],
+    );
+    const historyId = historyRow.id;
+
+    // ── 2) Resolve unit_cost + product snapshot per delta variant.
+    // For variants already present in origItems we trust their stored
+    // unit_cost (frozen at sale time); for brand-new variants we look
+    // up the live cost_price from product_variants. Snapshot fields
+    // (product_name, sku, color, size) come from product_variants in
+    // both cases to keep the new invoice_items row self-describing.
+    const origUnitCostByVariant = new Map<string, number>();
+    const origSnapshotByVariant = new Map<
+      string,
+      {
+        product_name_snapshot: any;
+        sku_snapshot: any;
+        color_name_snapshot: any;
+        size_label_snapshot: any;
+      }
+    >();
+    for (const it of origItems) {
+      if (!origUnitCostByVariant.has(it.variant_id)) {
+        origUnitCostByVariant.set(it.variant_id, Number(it.unit_cost || 0));
+        origSnapshotByVariant.set(it.variant_id, {
+          product_name_snapshot: it.product_name_snapshot ?? null,
+          sku_snapshot: it.sku_snapshot ?? null,
+          color_name_snapshot: it.color_name_snapshot ?? null,
+          size_label_snapshot: it.size_label_snapshot ?? null,
+        });
+      }
+    }
+
+    const newVariantIds = classification.line_deltas
+      .map((l) => l.variant_id)
+      .filter((vid) => !origUnitCostByVariant.has(vid));
+    if (newVariantIds.length > 0) {
+      const rows = await em.query(
+        `SELECT v.id, v.cost_price, v.sku,
+                p.name_ar AS product_name,
+                v.color   AS color_name,
+                v.size    AS size_label
+           FROM product_variants v
+           JOIN products p ON p.id = v.product_id
+          WHERE v.id = ANY($1::uuid[])`,
+        [newVariantIds],
+      );
+      for (const v of rows) {
+        origUnitCostByVariant.set(v.id, Number(v.cost_price || 0));
+        origSnapshotByVariant.set(v.id, {
+          product_name_snapshot: v.product_name,
+          sku_snapshot: v.sku,
+          color_name_snapshot: v.color_name ?? null,
+          size_label_snapshot: v.size_label ?? null,
+        });
+      }
+    }
+
+    // ── 3) INSERT one new invoice_items row per line_delta + one
+    //       stock_movements row per line_delta.
+    let deltaCogsTotal = 0;
+    const lineDeltasWithCost: Array<{
+      variant_id: string;
+      delta_qty: number;
+      unit_price: number;
+      unit_cost: number;
+    }> = [];
+    for (const ld of classification.line_deltas) {
+      const snap = origSnapshotByVariant.get(ld.variant_id);
+      if (!snap) {
+        throw new BadRequestException(`Variant ${ld.variant_id} not found`);
+      }
+      const unitCost = origUnitCostByVariant.get(ld.variant_id) ?? 0;
+      const lineSubtotal = +(ld.unit_price * ld.delta_qty).toFixed(2);
+      const lineTotal = lineSubtotal; // no per-line discount on the delta row
+      deltaCogsTotal += unitCost * ld.delta_qty;
+      lineDeltasWithCost.push({
+        variant_id: ld.variant_id,
+        delta_qty: ld.delta_qty,
+        unit_price: ld.unit_price,
+        unit_cost: unitCost,
+      });
+      await em.query(
+        `INSERT INTO invoice_items
+           (invoice_id, variant_id,
+            product_name_snapshot, sku_snapshot,
+            color_name_snapshot, size_label_snapshot,
+            quantity, unit_cost, unit_price,
+            discount_amount, line_subtotal, line_total,
+            salesperson_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+        [
+          id,
+          ld.variant_id,
+          snap.product_name_snapshot,
+          snap.sku_snapshot,
+          snap.color_name_snapshot,
+          snap.size_label_snapshot,
+          ld.delta_qty,
+          unitCost,
+          ld.unit_price,
+          0,
+          lineSubtotal,
+          lineTotal,
+          dto.salesperson_id ?? orig.salesperson_id ?? null,
+        ],
+      );
+      await em.query(
+        `INSERT INTO stock_movements
+           (variant_id, warehouse_id, movement_type, direction,
+            quantity, unit_cost, reference_type, reference_id,
+            user_id, notes)
+         VALUES ($1,$2,'sale','out',$3,$4,'invoice',$5,$6,$7)`,
+        [
+          ld.variant_id,
+          orig.warehouse_id,
+          ld.delta_qty,
+          unitCost,
+          id,
+          userId,
+          'تعديل إضافي فاتورة — بند/كمية إضافية',
+        ],
+      );
+    }
+    deltaCogsTotal = +deltaCogsTotal.toFixed(2);
+
+    // ── 4) INSERT one new invoice_payments row per payment_delta.
+    for (const pd of classification.payment_deltas) {
+      await em.query(
+        `INSERT INTO invoice_payments
+           (invoice_id, payment_method, amount, reference,
+            payment_account_id, payment_account_snapshot)
+         VALUES ($1,$2,$3,$4,$5,$6::jsonb)`,
+        [
+          id,
+          pd.payment_method,
+          pd.delta_amount,
+          `PR-POS-POSITIVE-STRUCTURAL +${pd.delta_amount}`,
+          pd.payment_account_id ?? null,
+          pd.payment_account_snapshot
+            ? JSON.stringify(pd.payment_account_snapshot)
+            : null,
+        ],
+      );
+    }
+
+    // ── 5) UPDATE invoice totals (grow by delta). Tax recompute uses
+    //       the tax_rate column so VAT-aware invoices reapportion the
+    //       new delta correctly. COGS / gross_profit grow by exact
+    //       per-line delta sums.
+    const oldGrand = Number(orig.grand_total || 0);
+    const oldPaid = Number(orig.paid_amount || 0);
+    const oldSubtotal = Number(orig.subtotal || 0);
+    const oldCogs = Number(orig.cogs_total || 0);
+    const newGrand = +(oldGrand + classification.delta_grand_total).toFixed(2);
+    const newPaid = +(oldPaid + classification.delta_paid_total).toFixed(2);
+    const newSubtotal = +(oldSubtotal + classification.delta_grand_total).toFixed(2);
+    const newCogs = +(oldCogs + deltaCogsTotal).toFixed(2);
+    const vatRate = Number(orig.tax_rate || 0);
+    const newTax =
+      vatRate > 0
+        ? +((newGrand * vatRate) / (100 + vatRate)).toFixed(2)
+        : 0;
+    const newGrossProfit = +(newGrand - newCogs).toFixed(2);
+    const newChange = Math.max(0, +(newPaid - newGrand).toFixed(2));
+
+    const [updated] = await em.query(
+      `UPDATE invoices
+          SET subtotal       = $2,
+              tax_amount     = $3,
+              grand_total    = $4,
+              paid_amount    = $5,
+              change_amount  = $6,
+              cogs_total     = $7,
+              gross_profit   = $8,
+              notes          = COALESCE($9, notes),
+              edit_count     = edit_count + 1,
+              last_edited_at = NOW(),
+              updated_at     = NOW()
+        WHERE id = $1
+        RETURNING *`,
+      [
+        id,
+        newSubtotal,
+        newTax,
+        newGrand,
+        newPaid,
+        newChange,
+        newCogs,
+        newGrossProfit,
+        dto.notes ?? null,
+      ],
+    );
+
+    // ── 6) Post delta JE+CT (sale shape, additive only) ─────────────
+    if (this.posting) {
+      const postRes = (await this.posting.postInvoicePositiveStructuralDelta(
+        id,
+        historyId,
+        {
+          line_deltas: lineDeltasWithCost,
+          payment_deltas: classification.payment_deltas.map((pd) => ({
+            payment_method: pd.payment_method,
+            payment_account_id: pd.payment_account_id,
+            delta_amount: pd.delta_amount,
+            payment_account_snapshot: pd.payment_account_snapshot,
+          })),
+          delta_unpaid: classification.delta_unpaid,
+          customer_id: orig.customer_id ?? null,
+        },
+        userId,
+        em,
+      )) as any;
+      if (postRes?.error) {
+        throw new BadRequestException(
+          `فشل ترحيل دلتا تعديل الفاتورة الإضافي: ${postRes.error}`,
+        );
+      }
+    }
+
+    // ── 7) Backfill history with after-snapshot ─────────────────────
+    const newItems = await em.query(
+      `SELECT * FROM invoice_items WHERE invoice_id = $1 ORDER BY id`,
+      [id],
+    );
+    const newPayments = await em.query(
+      `SELECT * FROM invoice_payments WHERE invoice_id = $1 ORDER BY id`,
+      [id],
+    );
+    await em.query(
+      `UPDATE invoice_edit_history
+          SET after_summary  = $2::jsonb,
+              after_snapshot = $3::jsonb
+        WHERE id = $1`,
+      [
+        historyId,
+        JSON.stringify({
+          items_count: newItems.length,
+          grand_total: newGrand,
+          cogs_total: newCogs,
+          gross_profit: newGrossProfit,
+          paid: newPaid,
+          delta_grand: classification.delta_grand_total,
+          delta_paid: classification.delta_paid_total,
+          delta_unpaid: classification.delta_unpaid,
+          delta_lines: classification.line_deltas.length,
+          delta_payments: classification.payment_deltas.length,
+          path: 'positive_structural_delta',
+        }),
+        JSON.stringify({
+          invoice: updated,
+          items: newItems,
+          payments: newPayments,
+        }),
+      ],
+    );
+
+    // ── 8) Refresh closed-shift snapshot if applicable ──────────────
+    if (orig.shift_id && this.shifts) {
+      const refresh = await this.shifts.refreshClosedShiftSnapshot(
+        orig.shift_id,
+        em,
+      );
+      if (refresh.status === 'blocked') {
+        throw new ConflictException(
+          'لا يمكن تعديل فاتورة لوردية مغلقة سبق ترحيل فروقاتها محاسبياً. يجب تسوية أو إلغاء معالجة الفروقات أولاً.',
+        );
+      }
+    }
+
+    this.realtime?.emitPosEvent({
+      type: 'invoice.created',
+      payload: {
+        invoice_id: id,
+        edited: true,
+        edited_by: userId,
+        path: 'positive_structural_delta',
       },
     });
 
