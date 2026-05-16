@@ -1618,106 +1618,30 @@ export class AccountingService {
           String((newV as any)[k] ?? '') !== String((oldV as any)[k] ?? ''),
       );
 
-      let voidedJeId: string | null = null;
+      // Phase 2E (PR-POS-EXPENSE-EDIT-CORRECTION-1): voided_je_id is
+      // permanently null on the additive-correction path — the original
+      // JE is never voided during a normal edit. It survives in the
+      // schema as `nullable` so explicit-cancel routes (out of scope
+      // here) can still record their reversal target.
+      const voidedJeId: string | null = null;
       let appliedJeId: string | null = null;
 
+      // Phase 2E (PR-POS-EXPENSE-EDIT-CORRECTION-1): normal expense edit
+      // approvals must NOT void the original JE or rebase the cashbox by
+      // voiding prior CTs. We locate the live JE only to decide between
+      // the additive-correction path (live JE exists) and a legacy
+      // first-approval fallback (no live JE — corner case where the
+      // expense was edited before its initial approval ever posted).
+      let oldJe: { id: string; entry_no: string } | null = null;
       if (accountingChanged) {
-        // Locate the live JE for this expense. There may be NONE if the
-        // expense was never approved (legacy data) — in that case we
-        // simply skip the void step and let the corrected JE post fresh.
-        const [oldJe] = await em.query(
+        const found = await em.query(
           `SELECT id, entry_no FROM journal_entries
             WHERE reference_type = 'expense' AND reference_id = $1
               AND is_void = FALSE
             ORDER BY created_at DESC LIMIT 1`,
           [r.expense_id],
         );
-
-        if (oldJe) {
-          // PR-DRIFT-2 (2026-04-26): void the old JE only — do NOT post
-          // a separate reversal JE. The previous implementation called
-          // engine.recordTransaction with BOTH reversal_of (which voids
-          // the original) AND a reversal JE body (which posted +oldAmount
-          // on cash 1111). The two corrections double-corrected the cash
-          // account and inflated 1111 by oldAmount per edit. Direct void
-          // here, then recordExpense below posts the new state cleanly.
-          // Engine context = 'engine:expense_edit_void' (24 chars) so the
-          // migration-068 trigger allows the write silently.
-          await em.query(
-            `SELECT set_config('app.engine_context', 'engine:expense_edit_void', true)`,
-          );
-          await em.query(
-            `UPDATE journal_entries
-                SET is_void     = TRUE,
-                    void_reason = $1,
-                    voided_by   = $2,
-                    voided_at   = NOW()
-              WHERE id = $3 AND is_void = FALSE`,
-            [
-              `طلب تعديل #${r.id} — ${r.reason}`,
-              approverId,
-              oldJe.id,
-            ],
-          );
-          voidedJeId = oldJe.id;
-
-          // PR-DRIFT-2.1 (2026-04-26): also void any active cashbox
-          // transaction(s) for this expense and rebase
-          // cashboxes.current_balance, otherwise recordExpense below
-          // would insert a fresh CT on top of the original — leaving
-          // the CT side stacked at -oldAmount + -newAmount per edit.
-          // Same R2 stacking pattern PR-DRIFT-2's data fix cleaned up
-          // for past edits; this prevents future ones.
-          //
-          // Look at the OLD cashbox (pre-edit). If the operator moved
-          // the expense to a different cashbox, the new CT will land
-          // on the new cashbox via recordExpense; the old cashbox's
-          // CT must still be voided so the prior outflow doesn't
-          // linger there.
-          const oldCashboxId =
-            (oldV as any).cashbox_id ?? expense.cashbox_id;
-          if (oldCashboxId) {
-            const voided: { amount: string; direction: string }[] =
-              await em.query(
-                `UPDATE cashbox_transactions
-                    SET is_void     = TRUE,
-                        void_reason = $1,
-                        voided_by   = $2,
-                        voided_at   = NOW()
-                  WHERE reference_type = 'expense'
-                    AND reference_id   = $3
-                    AND cashbox_id     = $4
-                    AND COALESCE(is_void, FALSE) = FALSE
-                  RETURNING amount, direction`,
-                [
-                  `طلب تعديل #${r.id} — ${r.reason}`,
-                  approverId,
-                  r.expense_id,
-                  oldCashboxId,
-                ],
-              );
-
-            // Each voided 'out' adds back its amount; each voided 'in'
-            // subtracts. Matches the sign convention the canonical
-            // helper fn_record_cashbox_txn uses on insert.
-            let voidedSignedSum = 0;
-            for (const row of voided) {
-              voidedSignedSum +=
-                row.direction === 'in'
-                  ? Number(row.amount)
-                  : -Number(row.amount);
-            }
-            if (voidedSignedSum !== 0) {
-              await em.query(
-                `UPDATE cashboxes
-                    SET current_balance = current_balance - $1,
-                        updated_at      = NOW()
-                  WHERE id = $2`,
-                [voidedSignedSum, oldCashboxId],
-              );
-            }
-          }
-        }
+        if (found.length > 0) oldJe = found[0];
       }
 
       // Apply field updates — merge new values onto the current row.
@@ -1762,6 +1686,12 @@ export class AccountingService {
       );
 
       if (accountingChanged) {
+        if (!this.engine || !this.posting) {
+          throw new BadRequestException(
+            'محرّك الترحيل غير مهيأ — لا يمكن تعديل المصروف',
+          );
+        }
+
         // Strict mapping — same gate the Daily Expenses create path
         // applies. If the new category isn't mapped, the request is
         // rejected (the user must map the COA leaf first).
@@ -1771,32 +1701,86 @@ export class AccountingService {
           true,
         );
 
-        if (!this.engine) {
-          throw new BadRequestException(
-            'محرّك الترحيل غير مهيأ — لا يمكن تعديل المصروف',
+        // Phase 2E (PR-POS-EXPENSE-EDIT-CORRECTION-1):
+        //   Path A — live original JE → compose additive corrections,
+        //            leave the original JE and its CTs UNTOUCHED.
+        //   Path B — no live JE (corner case: edit applied before the
+        //            expense's first approval ever posted) → fall back
+        //            to a fresh recordExpense as a first-approval post.
+        //            There is no original to preserve.
+        if (oldJe) {
+          const oldCategoryId =
+            (oldV as any).category_id ?? expense.category_id;
+          const oldCategoryAccountId =
+            (await this.resolveCategoryAccountId(em, oldCategoryId, true)) ??
+            newCategoryAccountId;
+
+          // Cash↔non-cash payment method transitions need a credit-side
+          // reroute (cashbox GL ↔ AP) plus a cash restoration. That
+          // shape is not yet covered by the three additive helpers — we
+          // reject the request to keep the no-reversal contract strict.
+          // All 63 production expenses are cash-only, so this branch is
+          // an unused edge today. Lift this guard in a follow-up phase
+          // once a dedicated postExpensePaymentMethodSwitch helper
+          // lands.
+          const oldPm = String(
+            (oldV as any).payment_method ?? expense.payment_method ?? 'cash',
           );
-        }
-        const newRes = await this.engine.recordExpense({
-          expense_id: r.expense_id,
-          expense_no: merged.expense_no,
-          amount: Number(merged.amount),
-          category_account_id: newCategoryAccountId,
-          cashbox_id: merged.cashbox_id,
-          payment_method: merged.payment_method,
-          user_id: approverId,
-          entry_date: merged.expense_date,
-          em,
-          description: merged.description ?? undefined,
-          is_advance: merged.is_advance === true,
-          employee_user_id: merged.employee_user_id ?? null,
-        });
-        if (!newRes.ok) {
-          throw new BadRequestException(
-            `فشل ترحيل المصروف بعد التعديل: ${(newRes as any).error}`,
-          );
-        }
-        if ('entry_id' in newRes && newRes.entry_id) {
-          appliedJeId = newRes.entry_id;
+          const newPm = String(merged.payment_method ?? 'cash');
+          if (oldPm !== newPm && (oldPm === 'cash') !== (newPm === 'cash')) {
+            throw new BadRequestException(
+              'تغيير وسيلة الدفع بين نقدي وغير نقدي يتطلب طلب إلغاء وإعادة إنشاء المصروف — هذا التحول غير مدعوم في تعديلات Phase 2E',
+            );
+          }
+
+          const correction = await this.applyExpenseEditCorrections(em, {
+            edit_request_id: r.id,
+            expense_id: r.expense_id,
+            expense_no: merged.expense_no ?? expense.expense_no,
+            reason: r.reason,
+            approver_id: approverId,
+            old_amount: Number(
+              (oldV as any).amount ?? expense.amount ?? 0,
+            ),
+            new_amount: Number(merged.amount),
+            old_category_account_id: oldCategoryAccountId!,
+            new_category_account_id: newCategoryAccountId!,
+            old_cashbox_id: String(
+              (oldV as any).cashbox_id ?? expense.cashbox_id,
+            ),
+            new_cashbox_id: String(merged.cashbox_id),
+          });
+          if (!correction.ok) {
+            throw new BadRequestException(
+              `فشل ترحيل تعديل المصروف: ${correction.error}`,
+            );
+          }
+          appliedJeId = correction.primary_je_id;
+        } else {
+          // Legacy fallback: no live original JE — treat as first
+          // approval. No void to skip.
+          const newRes = await this.engine.recordExpense({
+            expense_id: r.expense_id,
+            expense_no: merged.expense_no,
+            amount: Number(merged.amount),
+            category_account_id: newCategoryAccountId,
+            cashbox_id: merged.cashbox_id,
+            payment_method: merged.payment_method,
+            user_id: approverId,
+            entry_date: merged.expense_date,
+            em,
+            description: merged.description ?? undefined,
+            is_advance: merged.is_advance === true,
+            employee_user_id: merged.employee_user_id ?? null,
+          });
+          if (!newRes.ok) {
+            throw new BadRequestException(
+              `فشل ترحيل المصروف بعد التعديل: ${(newRes as any).error}`,
+            );
+          }
+          if ('entry_id' in newRes && newRes.entry_id) {
+            appliedJeId = newRes.entry_id;
+          }
         }
       }
 
@@ -1818,6 +1802,125 @@ export class AccountingService {
         applied_je_id: appliedJeId,
       };
     });
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Phase 2E (PR-POS-EXPENSE-EDIT-CORRECTION-1) — additive correction
+  // orchestrator. Composes posting.postExpenseAmountDelta /
+  // postExpenseReclassification / postExpenseCashboxCorrection per the
+  // combined-edit math rule from the approved plan:
+  //
+  //   Amount + category    → amount delta posts to OLD category;
+  //                          reclassification moves merged total
+  //                          from OLD → NEW category.
+  //   Amount + cashbox     → amount delta posts to OLD cashbox;
+  //                          cashbox correction transfers merged
+  //                          total from NEW → OLD cashbox.
+  //   Amount + category + cashbox → amount delta posts to OLD category
+  //                          and OLD cashbox; cashbox correction
+  //                          transfers merged total NEW→OLD; reclassify
+  //                          moves merged total OLD→NEW category.
+  //
+  // The orchestrator never voids the original JE or its CTs, never
+  // calls reverseByReference, and never emits 'reversal_*' categories
+  // or 'عكس:' notes.
+  // ─────────────────────────────────────────────────────────────────────
+  private async applyExpenseEditCorrections(
+    em: import('typeorm').EntityManager,
+    args: {
+      edit_request_id: string;
+      expense_id: string;
+      expense_no: string;
+      reason: string;
+      approver_id: string;
+      old_amount: number;
+      new_amount: number;
+      old_category_account_id: string;
+      new_category_account_id: string;
+      old_cashbox_id: string;
+      new_cashbox_id: string;
+    },
+  ): Promise<
+    { ok: true; primary_je_id: string | null } | { ok: false; error: string }
+  > {
+    if (!this.posting) {
+      return { ok: false, error: 'posting_unavailable' };
+    }
+
+    const amountChanged =
+      Math.abs(args.new_amount - args.old_amount) >= 0.005;
+    const categoryChanged =
+      args.old_category_account_id !== args.new_category_account_id;
+    const cashboxChanged = args.old_cashbox_id !== args.new_cashbox_id;
+
+    // No accounting-shaping field actually moved — caller should not
+    // have entered the corrections branch. Treat as a no-op.
+    if (!amountChanged && !categoryChanged && !cashboxChanged) {
+      return { ok: true, primary_je_id: null };
+    }
+
+    // Refined combined-edit rule. Amount delta lives at the OLD
+    // category / OLD cashbox whenever those are also moving, so each
+    // sub-component's algebra stays self-contained.
+    const amountDeltaCategoryAcct = categoryChanged
+      ? args.old_category_account_id
+      : args.new_category_account_id;
+    const amountDeltaCashbox = cashboxChanged
+      ? args.old_cashbox_id
+      : args.new_cashbox_id;
+
+    let primaryJeId: string | null = null;
+
+    if (amountChanged) {
+      const delta = args.new_amount - args.old_amount;
+      const r = await this.posting.postExpenseAmountDelta({
+        edit_request_id: args.edit_request_id,
+        expense_id: args.expense_id,
+        expense_no: args.expense_no,
+        delta_amount: delta,
+        category_account_id: amountDeltaCategoryAcct,
+        cashbox_id: amountDeltaCashbox,
+        user_id: args.approver_id,
+        reason: args.reason,
+        em,
+      });
+      if (!r.ok) return { ok: false, error: r.error };
+      if (!primaryJeId) primaryJeId = r.entry_id ?? null;
+    }
+
+    if (cashboxChanged) {
+      const r = await this.posting.postExpenseCashboxCorrection({
+        edit_request_id: args.edit_request_id,
+        expense_id: args.expense_id,
+        expense_no: args.expense_no,
+        amount: args.new_amount,
+        old_cashbox_id: args.old_cashbox_id,
+        new_cashbox_id: args.new_cashbox_id,
+        user_id: args.approver_id,
+        reason: args.reason,
+        em,
+      });
+      if (!r.ok) return { ok: false, error: r.error };
+      if (!primaryJeId) primaryJeId = r.entry_id ?? null;
+    }
+
+    if (categoryChanged) {
+      const r = await this.posting.postExpenseReclassification({
+        edit_request_id: args.edit_request_id,
+        expense_id: args.expense_id,
+        expense_no: args.expense_no,
+        amount: args.new_amount,
+        old_category_account_id: args.old_category_account_id,
+        new_category_account_id: args.new_category_account_id,
+        user_id: args.approver_id,
+        reason: args.reason,
+        em,
+      });
+      if (!r.ok) return { ok: false, error: r.error };
+      if (!primaryJeId) primaryJeId = r.entry_id ?? null;
+    }
+
+    return { ok: true, primary_je_id: primaryJeId };
   }
 
   /** Resolve a category id to its COA leaf via the existing resolver

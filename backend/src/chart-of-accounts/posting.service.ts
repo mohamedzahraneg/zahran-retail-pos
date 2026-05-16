@@ -1708,6 +1708,268 @@ export class AccountingPostingService {
     return res.ok ? { entry_id: (res as any).entry_id } : null;
   }
 
+  // ─────────────────────────────────────────────────────────────────────
+  // Phase 2E (PR-POS-EXPENSE-EDIT-CORRECTION-1) — expense edit-request
+  // correction helpers. These compose existing engine primitives to post
+  // ADDITIVE corrections without voiding the original expense JE or its
+  // cashbox transactions. Each correction is keyed on the
+  // expense_edit_requests.id plus a component-kind tag so engine
+  // idempotency on (reference_type, reference_id) blocks accidental
+  // retries while letting amount-delta, reclassification, and
+  // cashbox-swap components coexist under the same edit request.
+  //
+  // None of these helpers call reverseByReference, set is_void = TRUE on
+  // any prior row, or emit 'reversal_*' categories / 'عكس:' notes —
+  // those remain reserved for explicit cancel/void/refund routes.
+  // ─────────────────────────────────────────────────────────────────────
+
+  /**
+   * Amount delta — posts a single additive expense entry whose magnitude
+   * is `|delta_amount|`. Sign of the delta picks the GL shape:
+   *
+   *   delta > 0  (increase)  →  kind='expense'
+   *       DR <category_account_id> = +delta
+   *       CR <cashbox_id> = +delta
+   *       cash_movement: direction='out', category='expense'
+   *
+   *   delta < 0  (decrease)  →  kind='manual_adjustment'
+   *       DR <cashbox_id> = |delta|
+   *       CR <category_account_id> = |delta|
+   *       cash_movement: direction='in', category='expense_correction'
+   *
+   * Caller MUST pass the category that should bear the delta. When the
+   * edit also reclassifies the category, the orchestrator passes the
+   * OLD category here and follows up with a separate reclassification
+   * for the full merged amount — see applyExpenseEditCorrections.
+   */
+  async postExpenseAmountDelta(args: {
+    edit_request_id: string;
+    expense_id: string;
+    expense_no: string;
+    delta_amount: number;
+    category_account_id: string;
+    cashbox_id: string;
+    user_id: string;
+    reason: string;
+    em: EntityManager;
+  }): Promise<{ ok: true; entry_id: string | null } | { ok: false; error: string }> {
+    if (!this.engine) {
+      return { ok: false, error: 'engine_unavailable' };
+    }
+    if (!Number.isFinite(args.delta_amount) || args.delta_amount === 0) {
+      return { ok: false, error: 'delta_amount_must_be_nonzero_finite' };
+    }
+    if (!args.category_account_id || !args.cashbox_id) {
+      return { ok: false, error: 'category_and_cashbox_required' };
+    }
+
+    const [{ ref_id: refId }] = await args.em.query(
+      `SELECT uuid_generate_v5(
+         uuid_ns_dns(),
+         'expense_edit_correction:' || $1::text || ':' || $2::text
+       ) AS ref_id`,
+      [args.edit_request_id, 'amount_delta'],
+    );
+
+    const magnitude = Math.abs(args.delta_amount);
+    const isIncrease = args.delta_amount > 0;
+    const sign = isIncrease ? '+' : '-';
+    const description =
+      `فرق ${isIncrease ? 'زيادة' : 'تخفيض'} مصروف ${args.expense_no} ` +
+      `${sign}${magnitude.toFixed(2)} — طلب تعديل ${args.edit_request_id.slice(0, 8)}: ${args.reason}`;
+
+    const spec = isIncrease
+      ? {
+          kind: 'expense' as const,
+          reference_type: 'expense_edit_correction',
+          reference_id: refId,
+          description,
+          gl_lines: [
+            { account_id: args.category_account_id, debit: magnitude },
+            {
+              resolve_from_cashbox_id: args.cashbox_id,
+              credit: magnitude,
+              cashbox_id: args.cashbox_id,
+            },
+          ],
+          cash_movements: [
+            {
+              cashbox_id: args.cashbox_id,
+              direction: 'out' as const,
+              amount: magnitude,
+              category: 'expense',
+              notes: description,
+            },
+          ],
+          user_id: args.user_id,
+          em: args.em,
+        }
+      : {
+          kind: 'manual_adjustment' as const,
+          reference_type: 'expense_edit_correction',
+          reference_id: refId,
+          description,
+          gl_lines: [
+            {
+              resolve_from_cashbox_id: args.cashbox_id,
+              debit: magnitude,
+              cashbox_id: args.cashbox_id,
+            },
+            { account_id: args.category_account_id, credit: magnitude },
+          ],
+          cash_movements: [
+            {
+              cashbox_id: args.cashbox_id,
+              direction: 'in' as const,
+              amount: magnitude,
+              category: 'expense_correction',
+              notes: description,
+            },
+          ],
+          user_id: args.user_id,
+          em: args.em,
+        };
+
+    const res = await this.engine.recordTransaction(spec);
+    if (!res.ok) {
+      return { ok: false, error: `amount_delta_failed:${(res as any).error}` };
+    }
+    return { ok: true, entry_id: (res as any).entry_id ?? null };
+  }
+
+  /**
+   * Category reclassification — moves the full `amount` from the OLD
+   * expense GL account to the NEW one. No cash movement. Used when the
+   * approver swaps the expense category without changing the amount or
+   * the cashbox.
+   *
+   *   kind='manual_adjustment'
+   *       DR <new_category_account_id> = amount
+   *       CR <old_category_account_id> = amount
+   */
+  async postExpenseReclassification(args: {
+    edit_request_id: string;
+    expense_id: string;
+    expense_no: string;
+    amount: number;
+    old_category_account_id: string;
+    new_category_account_id: string;
+    user_id: string;
+    reason: string;
+    em: EntityManager;
+  }): Promise<{ ok: true; entry_id: string | null } | { ok: false; error: string }> {
+    if (!this.engine) {
+      return { ok: false, error: 'engine_unavailable' };
+    }
+    if (!(args.amount > 0) || !Number.isFinite(args.amount)) {
+      return { ok: false, error: 'reclassify_amount_must_be_positive' };
+    }
+    if (!args.old_category_account_id || !args.new_category_account_id) {
+      return { ok: false, error: 'category_account_ids_required' };
+    }
+    if (args.old_category_account_id === args.new_category_account_id) {
+      return { ok: false, error: 'category_unchanged' };
+    }
+
+    const [{ ref_id: refId }] = await args.em.query(
+      `SELECT uuid_generate_v5(
+         uuid_ns_dns(),
+         'expense_edit_correction:' || $1::text || ':' || $2::text
+       ) AS ref_id`,
+      [args.edit_request_id, 'reclassify'],
+    );
+
+    const description =
+      `إعادة تصنيف مصروف ${args.expense_no} — المبلغ ${args.amount.toFixed(2)} ` +
+      `— طلب تعديل ${args.edit_request_id.slice(0, 8)}: ${args.reason}`;
+
+    const res = await this.engine.recordTransaction({
+      kind: 'manual_adjustment',
+      reference_type: 'expense_edit_correction',
+      reference_id: refId,
+      description,
+      gl_lines: [
+        { account_id: args.new_category_account_id, debit: args.amount },
+        { account_id: args.old_category_account_id, credit: args.amount },
+      ],
+      cash_movements: [],
+      user_id: args.user_id,
+      em: args.em,
+    });
+    if (!res.ok) {
+      return { ok: false, error: `reclassify_failed:${(res as any).error}` };
+    }
+    return { ok: true, entry_id: (res as any).entry_id ?? null };
+  }
+
+  /**
+   * Cashbox correction — restores the OLD cashbox to a pristine state
+   * and drains the NEW cashbox by the full `amount`. Implemented as a
+   * single engine cashbox_transfer FROM new TO old, amount = merged
+   * total. The transfer's idempotency key is derived from the edit
+   * request so retries are safe.
+   *
+   * Direction reasoning:
+   *   - Original expense outflow lives on OLD cashbox (direction='out').
+   *   - To make the final state "as if paid from NEW", OLD must gain
+   *     back +amount and NEW must lose -amount.
+   *   - recordCashboxTransfer(from=X, to=Y, amount=A) emits X:out -A
+   *     and Y:in +A.  Plug in from=NEW, to=OLD → NEW:out -A, OLD:in +A.
+   *
+   * Skips silently when old == new (caller already filtered, but we
+   * belt-and-brace).
+   */
+  async postExpenseCashboxCorrection(args: {
+    edit_request_id: string;
+    expense_id: string;
+    expense_no: string;
+    amount: number;
+    old_cashbox_id: string;
+    new_cashbox_id: string;
+    user_id: string;
+    reason: string;
+    em: EntityManager;
+  }): Promise<{ ok: true; entry_id: string | null } | { ok: false; error: string }> {
+    if (!this.engine) {
+      return { ok: false, error: 'engine_unavailable' };
+    }
+    if (!(args.amount > 0) || !Number.isFinite(args.amount)) {
+      return { ok: false, error: 'cashbox_correction_amount_must_be_positive' };
+    }
+    if (!args.old_cashbox_id || !args.new_cashbox_id) {
+      return { ok: false, error: 'cashbox_ids_required' };
+    }
+    if (args.old_cashbox_id === args.new_cashbox_id) {
+      return { ok: false, error: 'cashbox_unchanged' };
+    }
+
+    const [{ ref_id: transferId }] = await args.em.query(
+      `SELECT uuid_generate_v5(
+         uuid_ns_dns(),
+         'expense_edit_correction:' || $1::text || ':' || $2::text
+       ) AS ref_id`,
+      [args.edit_request_id, 'cashbox_swap'],
+    );
+
+    const notes =
+      `تصحيح خزنة مصروف ${args.expense_no} — تحويل ${args.amount.toFixed(2)} ` +
+      `— طلب تعديل ${args.edit_request_id.slice(0, 8)}: ${args.reason}`;
+
+    const res = await this.engine.recordCashboxTransfer({
+      transfer_id: transferId,
+      from_cashbox_id: args.new_cashbox_id,
+      to_cashbox_id: args.old_cashbox_id,
+      amount: args.amount,
+      user_id: args.user_id,
+      notes,
+      em: args.em,
+    });
+    if (!res.ok) {
+      return { ok: false, error: `cashbox_correction_failed:${(res as any).error}` };
+    }
+    return { ok: true, entry_id: (res as any).entry_id ?? null };
+  }
+
   /**
    * Shift close with variance → delegates to
    * FinancialEngineService.recordShiftVariance (migration 063).

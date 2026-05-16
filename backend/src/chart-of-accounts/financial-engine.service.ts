@@ -943,6 +943,14 @@ export class FinancialEngineService {
       reversal: 'other',
       fx_revaluation: 'cashbox',
       purchase_return: 'purchase',
+      // Phase 2E (PR-POS-EXPENSE-EDIT-CORRECTION-1): expense edit-request
+      // approval emits additive correction posts (amount delta, category
+      // reclassification, cashbox swap) under reference_type
+      // 'expense_edit_correction'. The matching cashbox_transactions row
+      // must reuse the 'expense' entity tag so per-expense cash queries
+      // (cash-desk, drift cleanup) pick up the correction alongside the
+      // original outflow without a separate join.
+      expense_edit_correction: 'expense',
     };
     const mapped = aliases[refType] ?? refType;
     return allowed.has(mapped) ? mapped : 'other';
