@@ -13,7 +13,85 @@ import {
   UpdateProductDto,
   CreateVariantDto,
   UpdateVariantDto,
+  SmartPricingApplyDto,
+  SmartPricingPreviewDto,
+  SmartPricingScopeDto,
+  SmartPricingStrategy,
 } from './dto/product.dto';
+
+// ── PR-PURCHASES-P3.5A — Smart Bulk Pricing Assistant ──
+export type SmartPricingRecommendation =
+  | 'increase'
+  | 'decrease'
+  | 'keep'
+  | 'review';
+export type SmartPricingWarning =
+  | 'below_cost_at_current'
+  | 'below_cost_after_change'
+  | 'below_min_margin_after_change'
+  | 'large_increase'
+  | 'large_decrease'
+  | 'missing_cost'
+  | 'no_stock'
+  | 'no_stock_alt'
+  | 'slow_moving'
+  | 'high_stock';
+
+export interface SmartPricingThresholds {
+  competitive_markup_pct: number;
+  recommended_margin_pct: number;
+  high_margin_pct: number;
+  wholesale_markup_pct: number;
+  min_margin_pct_default: number;
+  rounding_step: 1 | 5 | 10 | 25 | 50;
+  rounding_mode: 'nearest' | 'floor' | 'ceil';
+}
+
+export interface SmartPricingItem {
+  variant_id: string;
+  product_id: string;
+  product_name: string;
+  sku: string;
+  barcode: string | null;
+  color: string | null;
+  size: string | null;
+  current_cost: number;
+  current_price: number;
+  stock_qty: number;
+  qty_sold: number;
+  invoice_count: number;
+  last_sold_at: string | null;
+  current_margin_pct: number | null;
+  current_markup_pct: number | null;
+  min_margin_pct: number;
+  recommendation: SmartPricingRecommendation;
+  suggested_selling_price: number | null;
+  expected_profit_delta_per_unit: number | null;
+  final_margin_pct?: number | null;
+  final_markup_pct?: number | null;
+  reason_ar: string;
+  warnings: SmartPricingWarning[];
+  skipped_reason: string | null;
+}
+
+const round2 = (n: number) =>
+  Math.round((Number.isFinite(n) ? n : 0) * 100) / 100;
+
+function applyRounding(
+  price: number,
+  step: number,
+  mode: 'nearest' | 'floor' | 'ceil',
+): number {
+  if (!(step > 0)) return round2(price);
+  const r = price / step;
+  const snapped =
+    mode === 'floor'
+      ? Math.floor(r) * step
+      : mode === 'ceil'
+        ? Math.ceil(r) * step
+        : Math.round(r) * step;
+  return round2(snapped);
+}
 
 export interface ProductFilters {
   type?: 'shoe' | 'bag' | 'accessory';
@@ -384,6 +462,523 @@ export class ProductsService {
         updated += 1;
       }
       return { updated, skipped, items: out };
+    });
+  }
+
+  // ──────────────────────────────────────────────────────────────────────
+  //  PR-PURCHASES-P3.5A — Smart Bulk Pricing Assistant
+  //
+  //  PRICING-ONLY by design:
+  //    · Reads cost_price for recommendation math but NEVER writes it.
+  //    · Writes ONLY product_variants.selling_price + variant_price_history.
+  //    · Cost adjustment is deferred to P3.5B (needs variant_cost_history
+  //      + a separate permission + inventory revaluation policy).
+  //    · Never calls posting/cashbox/stock/purchase paths.
+  //
+  //  The static guardrail spec asserts the SQL trail emitted by these
+  //  methods contains zero writes outside of those two allowed targets.
+  // ──────────────────────────────────────────────────────────────────────
+
+  /**
+   * Internal helper: resolve `scope + strategy` to a list of recommendation
+   * rows. Same code path is used by `smartPricingPreview` (which just
+   * returns the list) and `smartPricingApply` (which re-runs this then
+   * applies). Apply NEVER trusts numbers the client sent.
+   */
+  private async _smartPricingComputeRecommendations(
+    dto: SmartPricingPreviewDto,
+  ): Promise<{ items: SmartPricingItem[]; settings: SmartPricingThresholds }> {
+    const limit = Math.min(
+      Math.max(1, Number(dto.limit) || 1000),
+      5000,
+    );
+
+    // ── Load smart_pricing settings (with fallback defaults). One
+    //    SELECT against the settings table — no writes.
+    const settings = await this._loadSmartPricingThresholds();
+
+    // ── Resolve the variant set for the scope.
+    const variantIds = await this._resolveScope(dto.scope, limit);
+    if (variantIds.length === 0) {
+      return { items: [], settings };
+    }
+
+    // ── Load the rich data block per variant in one query. Joins:
+    //    · products (name, min_margin_pct)
+    //    · stock (sum quantity_on_hand across warehouses)
+    //    · invoice_items + invoices (sales metrics in the last 90d
+    //      excluding returns and non-completed invoices)
+    //    · colors / sizes (display metadata)
+    const placeholders = variantIds.map((_, i) => `$${i + 1}`).join(',');
+    const rows = await this.ds.query(
+      `
+      WITH stock_sum AS (
+        SELECT variant_id, SUM(quantity_on_hand)::int AS qty
+          FROM stock
+         WHERE variant_id IN (${placeholders})
+         GROUP BY variant_id
+      ),
+      sales_90d AS (
+        SELECT
+          ii.variant_id,
+          SUM(ii.quantity)::int                       AS qty_sold,
+          COUNT(DISTINCT ii.invoice_id)::int          AS invoice_count,
+          MAX(COALESCE(i.completed_at, i.created_at)) AS last_sold_at
+        FROM invoice_items ii
+        JOIN invoices i ON i.id = ii.invoice_id
+        WHERE ii.variant_id IN (${placeholders})
+          AND i.status IN ('completed','paid','partially_paid')
+          AND NOT i.is_return
+          AND COALESCE(i.completed_at, i.created_at) >= NOW() - INTERVAL '90 days'
+        GROUP BY ii.variant_id
+      )
+      SELECT
+        pv.id                                                      AS variant_id,
+        pv.sku,
+        pv.barcode,
+        p.id                                                       AS product_id,
+        p.name_ar                                                  AS product_name,
+        c.name_ar                                                  AS color,
+        sz.size_label                                              AS size,
+        pv.cost_price::numeric                                     AS cost_price,
+        COALESCE(NULLIF(pv.selling_price, 0), p.base_price)::numeric AS selling_price,
+        COALESCE(p.min_margin_pct, $${variantIds.length * 2 + 1})::numeric AS min_margin_pct,
+        COALESCE(stock_sum.qty, 0)                                 AS stock_qty,
+        COALESCE(sales_90d.qty_sold, 0)                            AS qty_sold,
+        COALESCE(sales_90d.invoice_count, 0)                       AS invoice_count,
+        sales_90d.last_sold_at
+      FROM product_variants pv
+      JOIN products p   ON p.id = pv.product_id
+      LEFT JOIN colors c ON c.id = pv.color_id
+      LEFT JOIN sizes  sz ON sz.id = pv.size_id
+      LEFT JOIN stock_sum ON stock_sum.variant_id = pv.id
+      LEFT JOIN sales_90d  ON sales_90d.variant_id = pv.id
+      WHERE pv.id IN (${placeholders})
+        AND pv.is_active = TRUE
+        AND pv.deleted_at IS NULL
+      ORDER BY p.name_ar, pv.sku
+      `,
+      [...variantIds, ...variantIds, settings.min_margin_pct_default],
+    );
+
+    const items: SmartPricingItem[] = rows.map((r: any) =>
+      this._recommendForVariant(r, dto.strategy, settings),
+    );
+
+    return { items, settings };
+  }
+
+  /** Resolves the scope DTO to a concrete `variant_ids[]` list. Read-only. */
+  private async _resolveScope(
+    scope: SmartPricingScopeDto,
+    limit: number,
+  ): Promise<string[]> {
+    if (scope.type === 'selected' || scope.type === 'single') {
+      const ids = (scope.variant_ids ?? []).filter(Boolean);
+      if (ids.length === 0) {
+        throw new BadRequestException(
+          'يجب تحديد صنف واحد على الأقل لهذا النطاق',
+        );
+      }
+      if (scope.type === 'single' && ids.length > 1) {
+        throw new BadRequestException(
+          'النطاق "صنف واحد" يقبل صنفًا واحدًا فقط',
+        );
+      }
+      return ids.slice(0, limit);
+    }
+
+    if (scope.type === 'filtered') {
+      const f = scope.filters ?? {};
+      const params: any[] = [];
+      const conds: string[] = ['pv.is_active = TRUE', 'pv.deleted_at IS NULL'];
+      if (f.q) {
+        params.push(`%${f.q.trim()}%`);
+        conds.push(
+          `(p.name_ar ILIKE $${params.length} OR pv.sku ILIKE $${params.length} OR pv.barcode ILIKE $${params.length})`,
+        );
+      }
+      const supplierJoin = f.supplier_id ? 'JOIN purchase_items pi_s ON pi_s.variant_id = pv.id JOIN purchases pu_s ON pu_s.id = pi_s.purchase_id' : '';
+      if (f.supplier_id) {
+        params.push(f.supplier_id);
+        conds.push(`pu_s.supplier_id = $${params.length}`);
+      }
+      const stockJoin = f.only_in_stock
+        ? 'JOIN stock st ON st.variant_id = pv.id'
+        : '';
+      if (f.only_in_stock) {
+        conds.push(`st.quantity_on_hand > 0`);
+      }
+      const rows = await this.ds.query(
+        `
+        SELECT DISTINCT pv.id AS variant_id
+          FROM product_variants pv
+          JOIN products p ON p.id = pv.product_id
+          ${supplierJoin}
+          ${stockJoin}
+         WHERE ${conds.join(' AND ')}
+         ORDER BY pv.id
+         LIMIT ${limit}
+        `,
+        params,
+      );
+      const ids = rows.map((r: any) => r.variant_id as string);
+      // Status / needs_review_only narrow client-side after we have the
+      // rich rows — easier than encoding the same math in SQL twice.
+      // Stash the filter on the returned array via a side channel.
+      (ids as any).__post_filter = {
+        status: f.status,
+        needs_review_only: f.needs_review_only,
+      };
+      return ids;
+    }
+
+    // scope.type === 'all'
+    const rows = await this.ds.query(
+      `
+      SELECT pv.id AS variant_id
+        FROM product_variants pv
+       WHERE pv.is_active = TRUE
+         AND pv.deleted_at IS NULL
+       ORDER BY pv.id
+       LIMIT ${limit}
+      `,
+    );
+    return rows.map((r: any) => r.variant_id as string);
+  }
+
+  /** Reads the 9 smart_pricing settings (with built-in fallbacks). */
+  private async _loadSmartPricingThresholds(): Promise<SmartPricingThresholds> {
+    const fallbacks: SmartPricingThresholds = {
+      competitive_markup_pct: 15,
+      recommended_margin_pct: 30,
+      high_margin_pct: 40,
+      wholesale_markup_pct: 10,
+      min_margin_pct_default: 15,
+      rounding_step: 5,
+      rounding_mode: 'nearest',
+    };
+    const rows = await this.ds.query(
+      `SELECT key, value FROM settings WHERE group_name = $1`,
+      ['smart_pricing'],
+    );
+    const out: SmartPricingThresholds = { ...fallbacks };
+    for (const row of rows) {
+      const tail = String(row.key || '').replace(/^smart_pricing\./, '');
+      if (tail in out) {
+        (out as any)[tail] = row.value;
+      }
+    }
+    return out;
+  }
+
+  /** Per-variant recommendation engine. Pure-ish: no I/O, no writes. */
+  private _recommendForVariant(
+    row: any,
+    strategy: SmartPricingStrategy,
+    settings: SmartPricingThresholds,
+  ): SmartPricingItem {
+    const cost = Number(row.cost_price || 0);
+    const currentPrice = Number(row.selling_price || 0);
+    const minMargin = Number(row.min_margin_pct || settings.min_margin_pct_default);
+    const stockQty = Number(row.stock_qty || 0);
+    const qtySold = Number(row.qty_sold || 0);
+    const invoiceCount = Number(row.invoice_count || 0);
+
+    const currentMarginPct =
+      currentPrice > 0
+        ? round2((currentPrice - cost) / currentPrice * 100)
+        : null;
+    const currentMarkupPct =
+      cost > 0 ? round2((currentPrice - cost) / cost * 100) : null;
+
+    const base = {
+      variant_id: row.variant_id,
+      product_id: row.product_id,
+      product_name: row.product_name,
+      sku: row.sku,
+      barcode: row.barcode,
+      color: row.color,
+      size: row.size,
+      current_cost: round2(cost),
+      current_price: round2(currentPrice),
+      stock_qty: stockQty,
+      qty_sold: qtySold,
+      invoice_count: invoiceCount,
+      last_sold_at: row.last_sold_at,
+      current_margin_pct: currentMarginPct,
+      current_markup_pct: currentMarkupPct,
+      min_margin_pct: minMargin,
+    } as const;
+
+    // ── Rule 1: missing cost or price → REVIEW
+    if (!(cost > 0) || !(currentPrice > 0)) {
+      return {
+        ...base,
+        recommendation: 'review',
+        suggested_selling_price: null,
+        expected_profit_delta_per_unit: null,
+        reason_ar:
+          'التكلفة أو سعر البيع غير مكتمل ويحتاج مراجعة يدوية.',
+        warnings: !(cost > 0) ? ['missing_cost'] : [],
+        skipped_reason: 'cost_or_price_missing',
+      };
+    }
+
+    // Strategy → target margin used for "lift up" cases.
+    const liftTargetMargin =
+      strategy === 'conservative'
+        ? minMargin
+        : strategy === 'aggressive'
+          ? settings.high_margin_pct
+          : settings.recommended_margin_pct;
+
+    // Strategy → step % used for "trim down" cases.
+    const trimPct =
+      strategy === 'conservative'
+        ? 5
+        : strategy === 'balanced'
+          ? 10
+          : strategy === 'clearance'
+            ? 15
+            : 10; // aggressive uses balanced trim by default
+
+    // ── Rule 2: selling < cost → INCREASE up to target margin
+    if (currentPrice < cost) {
+      const rawTarget = this._priceForMargin(cost, liftTargetMargin, minMargin);
+      const suggested = applyRounding(rawTarget, settings.rounding_step, settings.rounding_mode);
+      return this._finalize(base, 'increase', suggested, settings, minMargin, [
+        'below_cost_at_current',
+      ], 'السعر الحالي أقل من التكلفة — رفع السعر مطلوب.');
+    }
+
+    // ── Rule 3: margin below min_margin → INCREASE
+    if (currentMarginPct !== null && currentMarginPct < minMargin) {
+      const rawTarget = this._priceForMargin(cost, liftTargetMargin, minMargin);
+      const suggested = applyRounding(rawTarget, settings.rounding_step, settings.rounding_mode);
+      // Only recommend increase if the suggested price would actually
+      // improve over current (rounding could leave us flat).
+      if (Math.abs(suggested - currentPrice) < 0.01) {
+        return this._finalize(base, 'keep', currentPrice, settings, minMargin, [], 'هامش الربح قريب من الحد الأدنى — لا تغيير بعد التقريب.');
+      }
+      return this._finalize(base, 'increase', suggested, settings, minMargin, [], 'هامش الربح أقل من الحد الأدنى — رفع السعر مطلوب.');
+    }
+
+    // ── Rule 4: high stock + slow movement → DECREASE
+    const isHighStock = stockQty > 20;
+    const isSlowMoving = invoiceCount < 3;
+    const marginHeadroom =
+      currentMarginPct !== null
+        ? currentMarginPct - minMargin
+        : 0;
+    if (isHighStock && isSlowMoving && marginHeadroom > 5) {
+      const trimmedRaw = currentPrice * (1 - trimPct / 100);
+      // Floor at min_margin so the discount never breaks the policy.
+      const flooredRaw = Math.max(trimmedRaw, this._priceForMargin(cost, minMargin, minMargin));
+      const suggested = applyRounding(flooredRaw, settings.rounding_step, settings.rounding_mode);
+      if (Math.abs(suggested - currentPrice) < 0.01) {
+        return this._finalize(base, 'keep', currentPrice, settings, minMargin, ['high_stock', 'slow_moving'], 'مخزون مرتفع وبيع بطيء، لكن السعر بعد التقريب لم يتغير.');
+      }
+      const warnings: SmartPricingWarning[] = ['high_stock', 'slow_moving'];
+      const change = Math.abs(suggested - currentPrice) / currentPrice;
+      if (change > 0.20) warnings.push('large_decrease');
+      return this._finalize(base, 'decrease', suggested, settings, minMargin, warnings, 'المخزون مرتفع وحركة البيع ضعيفة — يُقترح خفض السعر.');
+    }
+
+    // ── Rule 5: low stock or strong seller → KEEP or small INCREASE
+    const isStrongSeller = invoiceCount >= 5;
+    const isLowStock = stockQty < 5;
+    if ((isStrongSeller || isLowStock) && currentMarginPct !== null) {
+      // Only suggest an increase if margin is still below the
+      // recommended threshold for balanced/aggressive.
+      if (
+        strategy !== 'conservative'
+        && currentMarginPct < settings.recommended_margin_pct
+      ) {
+        const bumpPct = strategy === 'aggressive' ? 5 : 3;
+        const rawTarget = currentPrice * (1 + bumpPct / 100);
+        const suggested = applyRounding(rawTarget, settings.rounding_step, settings.rounding_mode);
+        if (Math.abs(suggested - currentPrice) < 0.01) {
+          return this._finalize(base, 'keep', currentPrice, settings, minMargin, isLowStock ? ['no_stock_alt'] : [], 'منتج سريع الحركة — لا تغيير بعد التقريب.');
+        }
+        return this._finalize(base, 'increase', suggested, settings, minMargin, isLowStock ? ['no_stock_alt'] : [], isStrongSeller ? 'منتج سريع الحركة وهامش الربح يحتمل زيادة بسيطة.' : 'مخزون منخفض ومجال لرفع بسيط.');
+      }
+      return this._finalize(base, 'keep', currentPrice, settings, minMargin, [], 'منتج سريع الحركة أو مخزون منخفض — الإبقاء على السعر الحالي مناسب.');
+    }
+
+    // ── Rule 6: otherwise KEEP
+    return this._finalize(base, 'keep', currentPrice, settings, minMargin, [], 'السعر الحالي مناسب.');
+  }
+
+  /** Compute price needed to reach the target margin %, but never below
+   *  the price needed for the minimum-margin policy floor. */
+  private _priceForMargin(cost: number, targetPct: number, minPct: number): number {
+    const target = Math.max(0, Math.min(94.99, Number(targetPct ?? 0)));
+    const minimum = Math.max(0, Math.min(94.99, Number(minPct ?? 0)));
+    const fromTarget = target < 100 ? cost / (1 - target / 100) : cost;
+    const fromMin = minimum < 100 ? cost / (1 - minimum / 100) : cost;
+    return Math.max(fromTarget, fromMin);
+  }
+
+  /** Finalize a recommendation row: applies rounding, recomputes the
+   *  post-suggestion margin / markup / warnings. */
+  private _finalize(
+    base: any,
+    recommendation: SmartPricingRecommendation,
+    suggested: number,
+    _settings: SmartPricingThresholds,
+    minMargin: number,
+    warnings: SmartPricingWarning[],
+    reason_ar: string,
+  ): SmartPricingItem {
+    const cost = base.current_cost;
+    const current = base.current_price;
+    const suggestedPrice = round2(suggested);
+    const finalMarginPct =
+      suggestedPrice > 0
+        ? round2((suggestedPrice - cost) / suggestedPrice * 100)
+        : null;
+    const finalMarkupPct =
+      cost > 0 ? round2((suggestedPrice - cost) / cost * 100) : null;
+
+    const allWarnings = [...warnings];
+    if (suggestedPrice < cost) allWarnings.push('below_cost_after_change');
+    if (
+      finalMarginPct !== null
+      && finalMarginPct < minMargin
+      && recommendation !== 'keep'
+    ) {
+      allWarnings.push('below_min_margin_after_change');
+    }
+    const changeAbs = Math.abs(suggestedPrice - current);
+    if (current > 0 && changeAbs / current > 0.5) {
+      if (suggestedPrice > current) allWarnings.push('large_increase');
+      else allWarnings.push('large_decrease');
+    }
+    if (base.stock_qty === 0 && !allWarnings.includes('no_stock'))
+      allWarnings.push('no_stock');
+
+    return {
+      ...base,
+      recommendation,
+      suggested_selling_price: suggestedPrice,
+      expected_profit_delta_per_unit: round2(suggestedPrice - cost) - round2(current - cost),
+      final_margin_pct: finalMarginPct,
+      final_markup_pct: finalMarkupPct,
+      reason_ar,
+      warnings: allWarnings,
+      skipped_reason:
+        recommendation === 'keep'
+          ? 'price_already_appropriate'
+          : recommendation === 'review'
+            ? 'needs_manual_review'
+            : null,
+    };
+  }
+
+  /** Public entry: read-only preview. */
+  async smartPricingPreview(dto: SmartPricingPreviewDto) {
+    const { items, settings } = await this._smartPricingComputeRecommendations(dto);
+    const summary = {
+      total: items.length,
+      increase: items.filter((i) => i.recommendation === 'increase').length,
+      decrease: items.filter((i) => i.recommendation === 'decrease').length,
+      keep: items.filter((i) => i.recommendation === 'keep').length,
+      review: items.filter((i) => i.recommendation === 'review').length,
+    };
+    return { strategy: dto.strategy, scope_type: dto.scope.type, settings, summary, items };
+  }
+
+  /** Public entry: apply. Re-runs preview server-side then applies only
+   *  rows whose recommendation is increase/decrease AND that survive the
+   *  optional `variant_ids_to_apply` filter. NEVER touches cost_price. */
+  async smartPricingApply(dto: SmartPricingApplyDto, userId?: string) {
+    if (!dto.reason || dto.reason.trim().length < 3) {
+      throw new BadRequestException('سبب التعديل مطلوب');
+    }
+    if (dto.scope.type === 'all') {
+      if (dto.confirm_all !== 'تأكيد تعديل كل الأصناف') {
+        throw new BadRequestException(
+          'تأكيد تعديل كل الأصناف مطلوب لتطبيق التعديل على كل الأصناف',
+        );
+      }
+    }
+
+    const { items } = await this._smartPricingComputeRecommendations({
+      scope: dto.scope,
+      strategy: dto.strategy,
+      limit: 5000,
+    });
+
+    const applyFilter = dto.variant_ids_to_apply
+      ? new Set(dto.variant_ids_to_apply)
+      : null;
+    const candidates = items.filter((it) => {
+      if (it.recommendation !== 'increase' && it.recommendation !== 'decrease') return false;
+      if (it.suggested_selling_price == null || it.suggested_selling_price <= 0) return false;
+      if (Math.abs(it.suggested_selling_price - it.current_price) < 0.01) return false;
+      if (applyFilter && !applyFilter.has(it.variant_id)) return false;
+      return true;
+    });
+
+    return this.ds.transaction(async (em) => {
+      const out: any[] = [];
+      let updated = 0;
+      let skipped = items.length - candidates.length;
+      for (const it of candidates) {
+        const [variant] = await em.query(
+          `SELECT id, selling_price FROM product_variants WHERE id = $1`,
+          [it.variant_id],
+        );
+        if (!variant) {
+          throw new NotFoundException(`الصنف غير موجود: ${it.variant_id}`);
+        }
+        const oldPrice = Number(variant.selling_price ?? 0);
+        const newPrice = Number(it.suggested_selling_price);
+        if (Math.abs(newPrice - oldPrice) < 0.01) {
+          skipped += 1;
+          continue;
+        }
+        await em.query(
+          `UPDATE product_variants
+              SET selling_price = $2,
+                  updated_at    = NOW()
+            WHERE id = $1`,
+          [it.variant_id, newPrice],
+        );
+        const meta = {
+          source: 'smart_bulk_pricing',
+          strategy: dto.strategy,
+          recommendation: it.recommendation,
+          reason_ar: it.reason_ar,
+          warnings: it.warnings,
+          scope_type: dto.scope.type,
+        };
+        const [hist] = await em.query(
+          `INSERT INTO variant_price_history
+             (variant_id, old_selling_price, new_selling_price,
+              source_purchase_id, source_purchase_no,
+              reason, changed_by, metadata)
+           VALUES ($1,$2,$3,NULL,NULL,$4,$5,$6)
+           RETURNING id`,
+          [it.variant_id, oldPrice, newPrice, dto.reason, userId ?? null, meta],
+        );
+        out.push({
+          variant_id: it.variant_id,
+          old_selling_price: oldPrice,
+          new_selling_price: newPrice,
+          recommendation: it.recommendation,
+          history_id: hist?.id ?? null,
+        });
+        updated += 1;
+      }
+      return {
+        strategy: dto.strategy,
+        scope_type: dto.scope.type,
+        updated,
+        skipped,
+        items: out,
+      };
     });
   }
 

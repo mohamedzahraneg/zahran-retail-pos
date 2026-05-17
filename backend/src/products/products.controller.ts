@@ -16,6 +16,8 @@ import {
   ApplyVariantPricesDto,
   CreateProductDto,
   CreateVariantDto,
+  SmartPricingApplyDto,
+  SmartPricingPreviewDto,
   UpdateProductDto,
   UpdateVariantDto,
 } from './dto/product.dto';
@@ -131,6 +133,29 @@ export class ProductsController {
     @Req() req: any,
   ) {
     return this.products.applyVariantPrices(dto, req.user?.userId);
+  }
+
+  // ─── PR-PURCHASES-P3.5A — Smart Bulk Pricing Assistant ─────────────
+  // Pricing-only by design:
+  //   · Preview is read-only — open to authenticated callers under the
+  //     existing class-level @Permissions('products.view').
+  //   · Apply mutates only product_variants.selling_price + inserts
+  //     variant_price_history audit rows — gated by
+  //     @Permissions('products.price_change').
+  // Never touches accounting / cashbox / stock / POS / purchases.
+  // Cost adjustment is explicitly deferred to P3.5B.
+  @Post('variants/smart-pricing/preview')
+  smartPricingPreview(@Body() dto: SmartPricingPreviewDto) {
+    return this.products.smartPricingPreview(dto);
+  }
+
+  @Post('variants/smart-pricing/apply')
+  @Permissions('products.price_change')
+  smartPricingApply(
+    @Body() dto: SmartPricingApplyDto,
+    @Req() req: any,
+  ) {
+    return this.products.smartPricingApply(dto, req.user?.userId);
   }
 
   @Patch('variants/:id')

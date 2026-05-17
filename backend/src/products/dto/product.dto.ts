@@ -1,12 +1,16 @@
 import {
   ArrayMinSize,
   IsArray,
+  IsBoolean,
   IsEnum,
+  IsIn,
   IsNumber,
   IsOptional,
   IsString,
   IsUUID,
+  Max,
   Min,
+  MinLength,
   ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
@@ -108,4 +112,107 @@ export class ApplyVariantPricesDto {
   @ValidateNested({ each: true })
   @Type(() => ApplyVariantPriceItemDto)
   items: ApplyVariantPriceItemDto[];
+}
+
+// ─── PR-PURCHASES-P3.5A — Smart Bulk Pricing Assistant ─────────────────
+// Preview + apply DTOs. PRICING-ONLY:
+//   · Reads cost_price for recommendation math but NEVER writes it.
+//   · Writes only product_variants.selling_price + variant_price_history.
+//   · Never calls posting/cashbox/stock/purchase paths.
+// Cost adjustment is explicitly deferred to P3.5B (needs
+// variant_cost_history + a separate permission + inventory revaluation
+// policy).
+
+export type SmartPricingScopeType = 'selected' | 'filtered' | 'all' | 'single';
+export type SmartPricingStrategy =
+  | 'conservative'
+  | 'balanced'
+  | 'aggressive'
+  | 'clearance';
+export type SmartPricingStatusFilter =
+  | 'below_cost'
+  | 'below_min_margin'
+  | 'ok'
+  | 'unknown_cost';
+
+export class SmartPricingFiltersDto {
+  @ApiPropertyOptional() @IsOptional() @IsString() q?: string;
+  @ApiPropertyOptional({
+    enum: ['below_cost', 'below_min_margin', 'ok', 'unknown_cost'],
+  })
+  @IsOptional()
+  @IsIn(['below_cost', 'below_min_margin', 'ok', 'unknown_cost'])
+  status?: SmartPricingStatusFilter;
+  @ApiPropertyOptional() @IsOptional() @IsBoolean() only_in_stock?: boolean;
+  @ApiPropertyOptional() @IsOptional() @IsUUID() supplier_id?: string;
+  @ApiPropertyOptional() @IsOptional() @IsBoolean() needs_review_only?: boolean;
+}
+
+export class SmartPricingScopeDto {
+  @ApiProperty({ enum: ['selected', 'filtered', 'all', 'single'] })
+  @IsIn(['selected', 'filtered', 'all', 'single'])
+  type: SmartPricingScopeType;
+
+  /** Required when type ∈ {selected, single}. Ignored otherwise. */
+  @ApiPropertyOptional({ type: [String] })
+  @IsOptional()
+  @IsArray()
+  @IsUUID('all', { each: true })
+  variant_ids?: string[];
+
+  /** Required when type=filtered. Ignored otherwise. */
+  @ApiPropertyOptional({ type: () => SmartPricingFiltersDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => SmartPricingFiltersDto)
+  filters?: SmartPricingFiltersDto;
+}
+
+export class SmartPricingPreviewDto {
+  @ApiProperty({ type: () => SmartPricingScopeDto })
+  @ValidateNested()
+  @Type(() => SmartPricingScopeDto)
+  scope: SmartPricingScopeDto;
+
+  @ApiProperty({
+    enum: ['conservative', 'balanced', 'aggressive', 'clearance'],
+  })
+  @IsIn(['conservative', 'balanced', 'aggressive', 'clearance'])
+  strategy: SmartPricingStrategy;
+
+  @ApiPropertyOptional({ default: 1000 })
+  @IsOptional() @IsNumber() @Min(1) @Max(5000)
+  limit?: number;
+}
+
+export class SmartPricingApplyDto {
+  @ApiProperty({ type: () => SmartPricingScopeDto })
+  @ValidateNested()
+  @Type(() => SmartPricingScopeDto)
+  scope: SmartPricingScopeDto;
+
+  @ApiProperty({
+    enum: ['conservative', 'balanced', 'aggressive', 'clearance'],
+  })
+  @IsIn(['conservative', 'balanced', 'aggressive', 'clearance'])
+  strategy: SmartPricingStrategy;
+
+  /** When set, only these variant_ids out of the scope's preview will
+   *  be applied. When omitted, every previewed row whose recommendation
+   *  is `increase` / `decrease` will be applied. */
+  @ApiPropertyOptional({ type: [String] })
+  @IsOptional()
+  @IsArray()
+  @IsUUID('all', { each: true })
+  variant_ids_to_apply?: string[];
+
+  @ApiProperty()
+  @IsString()
+  @MinLength(3)
+  reason: string;
+
+  /** Mandatory ONLY when scope.type === 'all'. Must match exactly the
+   *  Arabic phrase the FE displays so a stray API caller can't
+   *  accidentally rewrite every price. */
+  @ApiPropertyOptional() @IsOptional() @IsString() confirm_all?: string;
 }

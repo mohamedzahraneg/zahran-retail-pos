@@ -129,6 +129,19 @@ export const productsApi = {
     unwrap<ApplyVariantPricesResponse>(
       api.post('/products/variants/apply-prices', body),
     ),
+
+  // ─── PR-PURCHASES-P3.5A — Smart Bulk Pricing Assistant ───────────────
+  // Preview is read-only. Apply mutates ONLY product_variants.selling_price
+  // + inserts variant_price_history audit rows. Cost adjustment is
+  // explicitly deferred to P3.5B.
+  smartPricingPreview: (body: SmartPricingPreviewPayload) =>
+    unwrap<SmartPricingPreviewResponse>(
+      api.post('/products/variants/smart-pricing/preview', body),
+    ),
+  smartPricingApply: (body: SmartPricingApplyPayload) =>
+    unwrap<SmartPricingApplyResponse>(
+      api.post('/products/variants/smart-pricing/apply', body),
+    ),
 };
 
 // PR-PURCHASES-P3.2 — wire types for the apply-prices payload + response.
@@ -155,4 +168,132 @@ export interface ApplyVariantPricesResponse {
   updated: number;
   skipped: number;
   items: ApplyVariantPricesResultItem[];
+}
+
+// ─── PR-PURCHASES-P3.5A — Smart Bulk Pricing Assistant types ─────────
+export type SmartPricingStrategy =
+  | 'conservative'
+  | 'balanced'
+  | 'aggressive'
+  | 'clearance';
+
+export type SmartPricingScopeType =
+  | 'selected'
+  | 'filtered'
+  | 'all'
+  | 'single';
+
+export type SmartPricingStatusFilter =
+  | 'below_cost'
+  | 'below_min_margin'
+  | 'ok'
+  | 'unknown_cost';
+
+export type SmartPricingRecommendation =
+  | 'increase'
+  | 'decrease'
+  | 'keep'
+  | 'review';
+
+export type SmartPricingWarning =
+  | 'below_cost_at_current'
+  | 'below_cost_after_change'
+  | 'below_min_margin_after_change'
+  | 'large_increase'
+  | 'large_decrease'
+  | 'missing_cost'
+  | 'no_stock'
+  | 'no_stock_alt'
+  | 'slow_moving'
+  | 'high_stock';
+
+export interface SmartPricingScope {
+  type: SmartPricingScopeType;
+  variant_ids?: string[];
+  filters?: {
+    q?: string;
+    status?: SmartPricingStatusFilter;
+    only_in_stock?: boolean;
+    supplier_id?: string;
+    needs_review_only?: boolean;
+  };
+}
+
+export interface SmartPricingPreviewPayload {
+  scope: SmartPricingScope;
+  strategy: SmartPricingStrategy;
+  limit?: number;
+}
+
+export interface SmartPricingApplyPayload {
+  scope: SmartPricingScope;
+  strategy: SmartPricingStrategy;
+  variant_ids_to_apply?: string[];
+  reason: string;
+  confirm_all?: string;
+}
+
+export interface SmartPricingItem {
+  variant_id: string;
+  product_id: string;
+  product_name: string;
+  sku: string;
+  barcode: string | null;
+  color: string | null;
+  size: string | null;
+  current_cost: number;
+  current_price: number;
+  stock_qty: number;
+  qty_sold: number;
+  invoice_count: number;
+  last_sold_at: string | null;
+  current_margin_pct: number | null;
+  current_markup_pct: number | null;
+  min_margin_pct: number;
+  recommendation: SmartPricingRecommendation;
+  suggested_selling_price: number | null;
+  expected_profit_delta_per_unit: number | null;
+  final_margin_pct?: number | null;
+  final_markup_pct?: number | null;
+  reason_ar: string;
+  warnings: SmartPricingWarning[];
+  skipped_reason: string | null;
+}
+
+export interface SmartPricingPreviewResponse {
+  strategy: SmartPricingStrategy;
+  scope_type: SmartPricingScopeType;
+  settings: {
+    competitive_markup_pct: number;
+    recommended_margin_pct: number;
+    high_margin_pct: number;
+    wholesale_markup_pct: number;
+    min_margin_pct_default: number;
+    rounding_step: 1 | 5 | 10 | 25 | 50;
+    rounding_mode: 'nearest' | 'floor' | 'ceil';
+  };
+  summary: {
+    total: number;
+    increase: number;
+    decrease: number;
+    keep: number;
+    review: number;
+  };
+  items: SmartPricingItem[];
+}
+
+export interface SmartPricingApplyResultItem {
+  variant_id: string;
+  old_selling_price: number;
+  new_selling_price: number;
+  recommendation: SmartPricingRecommendation;
+  history_id: string | null;
+}
+
+export interface SmartPricingApplyResponse {
+  strategy: SmartPricingStrategy;
+  scope_type: SmartPricingScopeType;
+  updated: number;
+  skipped: number;
+  items: SmartPricingApplyResultItem[];
 }

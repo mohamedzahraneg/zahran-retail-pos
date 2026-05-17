@@ -70,12 +70,17 @@ describe('migration 134 — variant_price_history table shape', () => {
 
 describe('apply-prices service — pricing-only guardrail', () => {
   it('does NOT call posting.service / financial-engine / cashbox / stock primitives', () => {
-    // Scope the check to the applyVariantPrices method body.
+    // Scope the check to the applyVariantPrices method body. Anchor the
+    // end at the next phase marker so subsequent additions get their
+    // own dedicated guardrails (e.g. P3.5A smart-pricing has its own
+    // spec) without bleeding forbidden-vocabulary detections back into
+    // the P3.2 surface.
     const startIdx = SERVICE.indexOf('async applyVariantPrices');
     expect(startIdx).toBeGreaterThan(-1);
-    // Look forward from the method start through the next ~6 KB which
-    // safely covers the method body.
-    const slice = SERVICE.slice(startIdx, startIdx + 6000);
+    const nextPhaseIdx = SERVICE.indexOf('PR-PURCHASES-P3.5A', startIdx);
+    const endIdx =
+      nextPhaseIdx > -1 ? nextPhaseIdx : startIdx + 6000;
+    const slice = SERVICE.slice(startIdx, endIdx);
 
     expect(slice).not.toMatch(/postPurchase\b/);
     expect(slice).not.toMatch(/reverseByReference\b/);

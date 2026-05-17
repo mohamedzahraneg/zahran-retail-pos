@@ -14,7 +14,7 @@
  * Markup vs margin are shown side-by-side everywhere so the operator
  * never confuses one with the other.
  */
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
   TrendingDown,
@@ -24,6 +24,7 @@ import {
   Package,
   History as HistoryIcon,
   DollarSign,
+  Sparkles,
 } from 'lucide-react';
 import {
   reportsApi,
@@ -37,6 +38,26 @@ import {
   type SoldProfitSort,
   type SoldProfitStatus,
 } from '@/api/reports.api';
+import type {
+  SmartPricingScope,
+  SmartPricingStatusFilter,
+} from '@/api/products.api';
+import { SmartPricingAssistantModal } from '@/components/pricing/SmartPricingAssistantModal';
+
+// Map the frontend's wider PricingStatus to the smart-pricing-allowed subset.
+const SMART_PRICING_STATUS_FILTER = new Set<SmartPricingStatusFilter>([
+  'below_cost',
+  'below_min_margin',
+  'ok',
+  'unknown_cost',
+]);
+function toSmartPricingStatus(
+  s: PricingStatus | '',
+): SmartPricingStatusFilter | undefined {
+  return s && SMART_PRICING_STATUS_FILTER.has(s as SmartPricingStatusFilter)
+    ? (s as SmartPricingStatusFilter)
+    : undefined;
+}
 
 const EGP = (n: number | string | null | undefined) =>
   `${Number(n || 0).toLocaleString('en-US', {
@@ -69,6 +90,65 @@ const STATUS_COLOR: Record<PricingStatus, string> = {
 };
 
 type Tab = 'health' | 'losses' | 'history' | 'landed' | 'sold-profit';
+
+/**
+ * Local toolbar trigger that opens the SmartPricingAssistantModal.
+ *
+ * The modal itself is pricing-only: it ONLY mutates
+ * product_variants.selling_price + inserts variant_price_history audit
+ * rows. It never calls /products/variants/apply-prices, never touches
+ * cost_price (deferred to P3.5B), and never calls any
+ * purchases/POS/accounting endpoint.
+ */
+interface SmartPricingTriggerProps {
+  selectedVariantIds: Set<string>;
+  filters?: SmartPricingScope['filters'];
+  onApplied: () => void;
+  /** data-testid suffix to disambiguate per-tab triggers. */
+  testIdSuffix: string;
+}
+
+function SmartPricingTrigger({
+  selectedVariantIds,
+  filters,
+  onApplied,
+  testIdSuffix,
+}: SmartPricingTriggerProps) {
+  const [open, setOpen] = useState(false);
+  const ids = useMemo(
+    () => Array.from(selectedVariantIds),
+    [selectedVariantIds],
+  );
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        data-testid={`open-smart-pricing-${testIdSuffix}`}
+        className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-bold bg-amber-500 text-white hover:bg-amber-600 shadow-sm"
+      >
+        <Sparkles className="w-4 h-4" />
+        مساعد تعديل الأسعار
+        {ids.length > 0 && (
+          <span className="bg-white/20 rounded px-1 text-xs">
+            {ids.length}
+          </span>
+        )}
+      </button>
+      <SmartPricingAssistantModal
+        open={open}
+        context={{
+          selectedVariantIds: ids,
+          filters,
+        }}
+        onClose={() => setOpen(false)}
+        onApplied={() => {
+          onApplied();
+        }}
+      />
+    </>
+  );
+}
 
 const TABS: { key: Tab; label: string; icon: any }[] = [
   { key: 'health', label: 'صحة الأسعار', icon: TrendingUp },
@@ -134,6 +214,7 @@ function HealthTab() {
   const [q, setQ] = useState('');
   const [status, setStatus] = useState<PricingStatus | ''>('');
   const [onlyInStock, setOnlyInStock] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
   const { data, isLoading } = useQuery({
     queryKey: ['pricing-health', q, status, onlyInStock],
@@ -145,6 +226,15 @@ function HealthTab() {
         limit: 1000,
       }),
   });
+
+  const smartFilters = useMemo<SmartPricingScope['filters']>(() => {
+    const f: SmartPricingScope['filters'] = {};
+    if (q.trim()) f.q = q.trim();
+    const mappedStatus = toSmartPricingStatus(status);
+    if (mappedStatus) f.status = mappedStatus;
+    if (onlyInStock) f.only_in_stock = true;
+    return f;
+  }, [q, status, onlyInStock]);
 
   return (
     <div className="space-y-3">
@@ -183,6 +273,15 @@ function HealthTab() {
         </label>
       </div>
 
+      <div className="flex justify-end">
+        <SmartPricingTrigger
+          selectedVariantIds={selectedIds}
+          filters={smartFilters}
+          onApplied={() => setSelectedIds(new Set())}
+          testIdSuffix="health"
+        />
+      </div>
+
       <SummaryStrip>
         <Tile label="إجمالي الأصناف" value={String(data?.summary.total_variants ?? 0)} />
         <Tile
@@ -213,18 +312,36 @@ function HealthTab() {
       {isLoading ? (
         <div className="p-6 text-center text-slate-400">جاري التحميل...</div>
       ) : (
-        <HealthTable rows={data?.items ?? []} />
+        <HealthTable
+          rows={data?.items ?? []}
+          selectedIds={selectedIds}
+          onToggle={(id) =>
+            setSelectedIds((s) => {
+              const next = new Set(s);
+              if (next.has(id)) next.delete(id);
+              else next.add(id);
+              return next;
+            })
+          }
+        />
       )}
     </div>
   );
 }
 
-function HealthTable({ rows }: { rows: PricingHealthRow[] }) {
+interface HealthTableProps {
+  rows: PricingHealthRow[];
+  selectedIds: Set<string>;
+  onToggle: (id: string) => void;
+}
+
+function HealthTable({ rows, selectedIds, onToggle }: HealthTableProps) {
   return (
     <div className="overflow-x-auto border border-slate-200 rounded-lg">
       <table className="w-full text-sm">
         <thead className="bg-slate-50 text-slate-600 text-xs">
           <tr>
+            <th className="p-2"></th>
             <th className="p-2 text-right">الصنف</th>
             <th className="p-2 text-right">SKU</th>
             <th className="p-2 text-right">التكلفة</th>
@@ -239,13 +356,21 @@ function HealthTable({ rows }: { rows: PricingHealthRow[] }) {
         <tbody className="divide-y divide-slate-100">
           {rows.length === 0 ? (
             <tr>
-              <td colSpan={9} className="p-6 text-center text-slate-400">
+              <td colSpan={10} className="p-6 text-center text-slate-400">
                 لا توجد بيانات للعرض
               </td>
             </tr>
           ) : (
             rows.map((r) => (
               <tr key={r.variant_id} data-testid={`pricing-health-row-${r.variant_id}`}>
+                <td className="p-2">
+                  <input
+                    type="checkbox"
+                    checked={selectedIds.has(r.variant_id)}
+                    onChange={() => onToggle(r.variant_id)}
+                    data-testid={`pricing-row-select-${r.variant_id}`}
+                  />
+                </td>
                 <td className="p-2">
                   <div className="font-medium">{r.product_name}</div>
                   <div className="text-[10px] text-slate-400 font-mono">
@@ -286,15 +411,24 @@ function HealthTable({ rows }: { rows: PricingHealthRow[] }) {
 
 function LossesTab() {
   const [onlyInStock, setOnlyInStock] = useState(true);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const { data, isLoading } = useQuery({
     queryKey: ['pricing-losses', onlyInStock],
     queryFn: () =>
       reportsApi.pricingLosses({ only_in_stock: onlyInStock, limit: 1000 }),
   });
 
+  // Losses report is implicitly below_cost + below_min_margin only,
+  // so we don't bind a single status filter through to smart pricing —
+  // we just pass only_in_stock so "filtered" scope mirrors the UI.
+  const smartFilters = useMemo<SmartPricingScope['filters']>(
+    () => (onlyInStock ? { only_in_stock: true } : {}),
+    [onlyInStock],
+  );
+
   return (
     <div className="space-y-3">
-      <div className="flex items-center gap-2">
+      <div className="flex items-center justify-between gap-2">
         <label className="flex items-center gap-2 text-sm">
           <input
             type="checkbox"
@@ -304,6 +438,12 @@ function LossesTab() {
           />
           الأصناف في المخزون فقط
         </label>
+        <SmartPricingTrigger
+          selectedVariantIds={selectedIds}
+          filters={smartFilters}
+          onApplied={() => setSelectedIds(new Set())}
+          testIdSuffix="losses"
+        />
       </div>
 
       <SummaryStrip>
@@ -327,18 +467,36 @@ function LossesTab() {
       {isLoading ? (
         <div className="p-6 text-center text-slate-400">جاري التحميل...</div>
       ) : (
-        <LossesTable rows={data?.items ?? []} />
+        <LossesTable
+          rows={data?.items ?? []}
+          selectedIds={selectedIds}
+          onToggle={(id) =>
+            setSelectedIds((s) => {
+              const next = new Set(s);
+              if (next.has(id)) next.delete(id);
+              else next.add(id);
+              return next;
+            })
+          }
+        />
       )}
     </div>
   );
 }
 
-function LossesTable({ rows }: { rows: PricingLossRow[] }) {
+interface LossesTableProps {
+  rows: PricingLossRow[];
+  selectedIds: Set<string>;
+  onToggle: (id: string) => void;
+}
+
+function LossesTable({ rows, selectedIds, onToggle }: LossesTableProps) {
   return (
     <div className="overflow-x-auto border border-slate-200 rounded-lg">
       <table className="w-full text-sm">
         <thead className="bg-slate-50 text-slate-600 text-xs">
           <tr>
+            <th className="p-2"></th>
             <th className="p-2 text-right">الصنف</th>
             <th className="p-2 text-right">SKU</th>
             <th className="p-2 text-right">التكلفة</th>
@@ -354,7 +512,7 @@ function LossesTable({ rows }: { rows: PricingLossRow[] }) {
         <tbody className="divide-y divide-slate-100">
           {rows.length === 0 ? (
             <tr>
-              <td colSpan={10} className="p-6 text-center text-slate-400">
+              <td colSpan={11} className="p-6 text-center text-slate-400">
                 <AlertTriangle className="w-5 h-5 inline-block ml-2 text-emerald-500" />
                 لا توجد منتجات تحت الحد الأدنى
               </td>
@@ -362,6 +520,14 @@ function LossesTable({ rows }: { rows: PricingLossRow[] }) {
           ) : (
             rows.map((r) => (
               <tr key={r.variant_id} data-testid={`pricing-loss-row-${r.variant_id}`}>
+                <td className="p-2">
+                  <input
+                    type="checkbox"
+                    checked={selectedIds.has(r.variant_id)}
+                    onChange={() => onToggle(r.variant_id)}
+                    data-testid={`pricing-row-select-${r.variant_id}`}
+                  />
+                </td>
                 <td className="p-2">
                   <div className="font-medium">{r.product_name}</div>
                 </td>
@@ -531,6 +697,7 @@ function HistoryTable({ rows }: { rows: PricingHistoryRow[] }) {
 
 function LandedImpactTab() {
   const [needsReviewOnly, setNeedsReviewOnly] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const { data, isLoading } = useQuery({
     queryKey: ['pricing-landed-impact', needsReviewOnly],
     queryFn: () =>
@@ -540,9 +707,14 @@ function LandedImpactTab() {
       }),
   });
 
+  const smartFilters = useMemo<SmartPricingScope['filters']>(
+    () => (needsReviewOnly ? { needs_review_only: true } : {}),
+    [needsReviewOnly],
+  );
+
   return (
     <div className="space-y-3">
-      <div className="flex items-center gap-2">
+      <div className="flex items-center justify-between gap-2">
         <label className="flex items-center gap-2 text-sm">
           <input
             type="checkbox"
@@ -552,6 +724,12 @@ function LandedImpactTab() {
           />
           عرض المنتجات التي تحتاج مراجعة سعر فقط
         </label>
+        <SmartPricingTrigger
+          selectedVariantIds={selectedIds}
+          filters={smartFilters}
+          onApplied={() => setSelectedIds(new Set())}
+          testIdSuffix="landed"
+        />
       </div>
 
       <SummaryStrip>
@@ -566,18 +744,36 @@ function LandedImpactTab() {
       {isLoading ? (
         <div className="p-6 text-center text-slate-400">جاري التحميل...</div>
       ) : (
-        <LandedTable rows={data?.items ?? []} />
+        <LandedTable
+          rows={data?.items ?? []}
+          selectedIds={selectedIds}
+          onToggle={(id) =>
+            setSelectedIds((s) => {
+              const next = new Set(s);
+              if (next.has(id)) next.delete(id);
+              else next.add(id);
+              return next;
+            })
+          }
+        />
       )}
     </div>
   );
 }
 
-function LandedTable({ rows }: { rows: PricingLandedImpactRow[] }) {
+interface LandedTableProps {
+  rows: PricingLandedImpactRow[];
+  selectedIds: Set<string>;
+  onToggle: (id: string) => void;
+}
+
+function LandedTable({ rows, selectedIds, onToggle }: LandedTableProps) {
   return (
     <div className="overflow-x-auto border border-slate-200 rounded-lg">
       <table className="w-full text-sm">
         <thead className="bg-slate-50 text-slate-600 text-xs">
           <tr>
+            <th className="p-2"></th>
             <th className="p-2 text-right">الصنف</th>
             <th className="p-2 text-right">آخر فاتورة</th>
             <th className="p-2 text-right">المورد</th>
@@ -593,7 +789,7 @@ function LandedTable({ rows }: { rows: PricingLandedImpactRow[] }) {
         <tbody className="divide-y divide-slate-100">
           {rows.length === 0 ? (
             <tr>
-              <td colSpan={10} className="p-6 text-center text-slate-400">
+              <td colSpan={11} className="p-6 text-center text-slate-400">
                 لا توجد بيانات للعرض
               </td>
             </tr>
@@ -603,6 +799,14 @@ function LandedTable({ rows }: { rows: PricingLandedImpactRow[] }) {
                 key={r.variant_id}
                 data-testid={`pricing-landed-row-${r.variant_id}`}
               >
+                <td className="p-2">
+                  <input
+                    type="checkbox"
+                    checked={selectedIds.has(r.variant_id)}
+                    onChange={() => onToggle(r.variant_id)}
+                    data-testid={`pricing-row-select-${r.variant_id}`}
+                  />
+                </td>
                 <td className="p-2">
                   <div className="font-medium">{r.product_name}</div>
                   <div className="text-[10px] text-slate-400 font-mono">
@@ -699,6 +903,19 @@ function SoldProfitTab() {
   const [status, setStatus] = useState<SoldProfitStatus | ''>('');
   const [sort, setSort] = useState<SoldProfitSort>('gross_profit_desc');
   const [view, setView] = useState<'products' | 'invoices'>('products');
+  // Sold-profit selections only make sense for the products view —
+  // the invoices view doesn't expose variant_ids one-per-row.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+
+  // Sold-profit's status enum (low_margin / loss / …) doesn't map to
+  // SmartPricingStatusFilter, and its date filters don't apply to the
+  // current-state smart-pricing scope. We pass only `q` so "filtered"
+  // scope mirrors the visible search.
+  const smartFilters = useMemo<SmartPricingScope['filters']>(() => {
+    const f: SmartPricingScope['filters'] = {};
+    if (q.trim()) f.q = q.trim();
+    return f;
+  }, [q]);
 
   const summaryQ = useQuery({
     queryKey: ['sold-profit-summary', from, to],
@@ -891,22 +1108,30 @@ function SoldProfitTab() {
         </div>
       )}
 
-      {/* Sort selector — only meaningful for products view */}
+      {/* Sort selector + smart-pricing trigger — only meaningful for products view */}
       {view === 'products' && (
-        <div className="flex items-center gap-2">
-          <label className="text-xs font-bold text-slate-700">ترتيب:</label>
-          <select
-            value={sort}
-            onChange={(e) => setSort(e.target.value as SoldProfitSort)}
-            data-testid="sold-profit-sort"
-            className="border border-slate-200 rounded-lg px-3 py-2 text-sm"
-          >
-            <option value="gross_profit_desc">الربح من الأعلى للأقل</option>
-            <option value="gross_profit_asc">الربح من الأقل للأعلى</option>
-            <option value="margin_desc">الهامش من الأعلى للأقل</option>
-            <option value="margin_asc">الهامش من الأقل للأعلى</option>
-            <option value="qty_desc">الكمية المباعة</option>
-          </select>
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <label className="text-xs font-bold text-slate-700">ترتيب:</label>
+            <select
+              value={sort}
+              onChange={(e) => setSort(e.target.value as SoldProfitSort)}
+              data-testid="sold-profit-sort"
+              className="border border-slate-200 rounded-lg px-3 py-2 text-sm"
+            >
+              <option value="gross_profit_desc">الربح من الأعلى للأقل</option>
+              <option value="gross_profit_asc">الربح من الأقل للأعلى</option>
+              <option value="margin_desc">الهامش من الأعلى للأقل</option>
+              <option value="margin_asc">الهامش من الأقل للأعلى</option>
+              <option value="qty_desc">الكمية المباعة</option>
+            </select>
+          </div>
+          <SmartPricingTrigger
+            selectedVariantIds={selectedIds}
+            filters={smartFilters}
+            onApplied={() => setSelectedIds(new Set())}
+            testIdSuffix="sold-profit"
+          />
         </div>
       )}
 
@@ -915,7 +1140,18 @@ function SoldProfitTab() {
         productsQ.isLoading ? (
           <div className="p-6 text-center text-slate-400">جاري التحميل...</div>
         ) : (
-          <SoldProductsTable rows={productsQ.data?.items ?? []} />
+          <SoldProductsTable
+            rows={productsQ.data?.items ?? []}
+            selectedIds={selectedIds}
+            onToggle={(id) =>
+              setSelectedIds((s) => {
+                const next = new Set(s);
+                if (next.has(id)) next.delete(id);
+                else next.add(id);
+                return next;
+              })
+            }
+          />
         )
       ) : invoicesQ.isLoading ? (
         <div className="p-6 text-center text-slate-400">جاري التحميل...</div>
@@ -926,12 +1162,19 @@ function SoldProfitTab() {
   );
 }
 
-function SoldProductsTable({ rows }: { rows: SoldProfitProductRow[] }) {
+interface SoldProductsTableProps {
+  rows: SoldProfitProductRow[];
+  selectedIds: Set<string>;
+  onToggle: (id: string) => void;
+}
+
+function SoldProductsTable({ rows, selectedIds, onToggle }: SoldProductsTableProps) {
   return (
     <div className="overflow-x-auto border border-slate-200 rounded-lg">
       <table className="w-full text-sm">
         <thead className="bg-slate-50 text-slate-600 text-xs">
           <tr>
+            <th className="p-2"></th>
             <th className="p-2 text-right">الصنف</th>
             <th className="p-2 text-right">SKU</th>
             <th className="p-2 text-right">كمية مباعة</th>
@@ -947,7 +1190,7 @@ function SoldProductsTable({ rows }: { rows: SoldProfitProductRow[] }) {
         <tbody className="divide-y divide-slate-100">
           {rows.length === 0 ? (
             <tr>
-              <td colSpan={10} className="p-6 text-center text-slate-400">
+              <td colSpan={11} className="p-6 text-center text-slate-400">
                 لا توجد مبيعات في النطاق المختار
               </td>
             </tr>
@@ -957,6 +1200,14 @@ function SoldProductsTable({ rows }: { rows: SoldProfitProductRow[] }) {
                 key={r.variant_id}
                 data-testid={`sold-profit-product-row-${r.variant_id}`}
               >
+                <td className="p-2">
+                  <input
+                    type="checkbox"
+                    checked={selectedIds.has(r.variant_id)}
+                    onChange={() => onToggle(r.variant_id)}
+                    data-testid={`pricing-row-select-${r.variant_id}`}
+                  />
+                </td>
                 <td className="p-2">
                   <div className="font-medium">{r.product_name}</div>
                   <div className="text-[10px] text-slate-400 font-mono">
