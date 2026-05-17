@@ -526,6 +526,318 @@ describe('smartPricingApply — transaction footprint (P3.5A)', () => {
   });
 });
 
+// P3.5A.1 — Manual Bulk Sale Price Adjustment tests. The manual mode
+// bypasses the strategy engine and applies a flat operation/value to
+// every previewed row. Same `SmartPricingItem` shape, same write
+// footprint (selling_price + variant_price_history). Cost adjustment
+// stays deferred to P3.5B.
+describe('smartPricingPreview — manual mode (P3.5A.1)', () => {
+  it('M1. increase_percent: lifts current price by N% and marks increase', async () => {
+    const { service } = await makeService({
+      responses: [
+        SETTINGS_ROWS,
+        [richRow({ cost_price: '100', selling_price: '100' })],
+      ],
+    });
+    const res = await service.smartPricingPreview({
+      scope: { type: 'selected', variant_ids: [VID] },
+      strategy: 'balanced',
+      mode: 'manual',
+      manual_adjustment: { operation: 'increase_percent', value: 10 },
+    });
+    expect(res.mode).toBe('manual');
+    const r = res.items[0];
+    expect(r.recommendation).toBe('increase');
+    expect(r.suggested_selling_price).toBe(110);
+    expect(r.reason_ar).toContain('زيادة يدوية بنسبة 10');
+  });
+
+  it('M2. decrease_percent: trims current price by N% and marks decrease', async () => {
+    const { service } = await makeService({
+      responses: [
+        SETTINGS_ROWS,
+        [richRow({ cost_price: '50', selling_price: '200' })],
+      ],
+    });
+    const res = await service.smartPricingPreview({
+      scope: { type: 'selected', variant_ids: [VID] },
+      strategy: 'balanced',
+      mode: 'manual',
+      manual_adjustment: { operation: 'decrease_percent', value: 20 },
+    });
+    const r = res.items[0];
+    expect(r.recommendation).toBe('decrease');
+    expect(r.suggested_selling_price).toBe(160);
+    expect(r.reason_ar).toContain('تخفيض يدوي بنسبة 20');
+  });
+
+  it('M3. increase_amount: adds a flat amount to the current price', async () => {
+    const { service } = await makeService({
+      responses: [
+        SETTINGS_ROWS,
+        [richRow({ cost_price: '100', selling_price: '150' })],
+      ],
+    });
+    const res = await service.smartPricingPreview({
+      scope: { type: 'selected', variant_ids: [VID] },
+      strategy: 'balanced',
+      mode: 'manual',
+      manual_adjustment: { operation: 'increase_amount', value: 25 },
+    });
+    expect(res.items[0].suggested_selling_price).toBe(175);
+    expect(res.items[0].recommendation).toBe('increase');
+    expect(res.items[0].reason_ar).toContain('زيادة يدوية بقيمة 25');
+  });
+
+  it('M4. decrease_amount: subtracts a flat amount from the current price', async () => {
+    const { service } = await makeService({
+      responses: [
+        SETTINGS_ROWS,
+        [richRow({ cost_price: '50', selling_price: '200' })],
+      ],
+    });
+    const res = await service.smartPricingPreview({
+      scope: { type: 'selected', variant_ids: [VID] },
+      strategy: 'balanced',
+      mode: 'manual',
+      manual_adjustment: { operation: 'decrease_amount', value: 30 },
+    });
+    expect(res.items[0].suggested_selling_price).toBe(170);
+    expect(res.items[0].recommendation).toBe('decrease');
+  });
+
+  it('M5. set_price: assigns the value verbatim', async () => {
+    const { service } = await makeService({
+      responses: [
+        SETTINGS_ROWS,
+        [richRow({ cost_price: '100', selling_price: '120' })],
+      ],
+    });
+    const res = await service.smartPricingPreview({
+      scope: { type: 'selected', variant_ids: [VID] },
+      strategy: 'balanced',
+      mode: 'manual',
+      manual_adjustment: { operation: 'set_price', value: 150 },
+    });
+    expect(res.items[0].suggested_selling_price).toBe(150);
+    expect(res.items[0].recommendation).toBe('increase');
+    expect(res.items[0].reason_ar).toContain('تعيين سعر بيع ثابت 150');
+  });
+
+  it('M6. invalid resulting price (≤ 0) → review with skipped_reason', async () => {
+    const { service } = await makeService({
+      responses: [
+        SETTINGS_ROWS,
+        [richRow({ cost_price: '50', selling_price: '20' })],
+      ],
+    });
+    const res = await service.smartPricingPreview({
+      scope: { type: 'selected', variant_ids: [VID] },
+      strategy: 'balanced',
+      mode: 'manual',
+      manual_adjustment: { operation: 'decrease_amount', value: 25 },
+    });
+    expect(res.items[0].recommendation).toBe('review');
+    expect(res.items[0].suggested_selling_price).toBeNull();
+    expect(res.items[0].skipped_reason).toBe('manual_price_non_positive');
+  });
+
+  it('M7. below cost after change adds below_cost_after_change warning', async () => {
+    const { service } = await makeService({
+      responses: [
+        SETTINGS_ROWS,
+        [richRow({ cost_price: '100', selling_price: '150' })],
+      ],
+    });
+    const res = await service.smartPricingPreview({
+      scope: { type: 'selected', variant_ids: [VID] },
+      strategy: 'balanced',
+      mode: 'manual',
+      manual_adjustment: { operation: 'set_price', value: 80 },
+    });
+    expect(res.items[0].recommendation).toBe('decrease');
+    expect(res.items[0].warnings).toContain('below_cost_after_change');
+  });
+
+  it('M8. unchanged price (set_price equals current) → keep', async () => {
+    const { service } = await makeService({
+      responses: [
+        SETTINGS_ROWS,
+        [richRow({ cost_price: '100', selling_price: '150' })],
+      ],
+    });
+    const res = await service.smartPricingPreview({
+      scope: { type: 'selected', variant_ids: [VID] },
+      strategy: 'balanced',
+      mode: 'manual',
+      manual_adjustment: { operation: 'set_price', value: 150 },
+    });
+    expect(res.items[0].recommendation).toBe('keep');
+  });
+
+  it('M9. percent > 500 is rejected at preview', async () => {
+    const { service } = await makeService();
+    await expect(
+      service.smartPricingPreview({
+        scope: { type: 'selected', variant_ids: [VID] },
+        strategy: 'balanced',
+        mode: 'manual',
+        manual_adjustment: { operation: 'increase_percent', value: 600 },
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('M10. manual mode without manual_adjustment is rejected', async () => {
+    const { service } = await makeService();
+    await expect(
+      service.smartPricingPreview({
+        scope: { type: 'selected', variant_ids: [VID] },
+        strategy: 'balanced',
+        mode: 'manual',
+      } as any),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+});
+
+describe('smartPricingApply — manual mode (P3.5A.1)', () => {
+  it('M11. apply manual reruns server preview and writes audit with mode/operation/value', async () => {
+    const { service, calls } = await makeService({
+      responses: [
+        SETTINGS_ROWS,
+        [richRow({ cost_price: '100', selling_price: '100' })],
+        [{ id: VID, selling_price: '100.00' }], // SELECT inside txn
+        [], // UPDATE
+        [{ id: 'hist-1' }], // INSERT history
+      ],
+    });
+    const res = await service.smartPricingApply(
+      {
+        scope: { type: 'selected', variant_ids: [VID] },
+        strategy: 'balanced',
+        mode: 'manual',
+        manual_adjustment: { operation: 'increase_percent', value: 10 },
+        reason: 'إعادة تسعير يدوية',
+      },
+      USER,
+    );
+    expect(res.updated).toBe(1);
+    expect(res.mode).toBe('manual');
+    const updateCall = calls.find((c) =>
+      /UPDATE product_variants\s+SET\s+selling_price/i.test(c.sql),
+    )!;
+    // Server-side computed price = 100 * 1.10 = 110 — NOT something the
+    // client supplied.
+    expect(updateCall.params[1]).toBe(110);
+
+    const histInsert = calls.find((c) =>
+      /INSERT INTO variant_price_history\b/.test(c.sql),
+    )!;
+    const meta = histInsert.params[5];
+    expect(meta).toMatchObject({
+      source: 'smart_bulk_pricing',
+      mode: 'manual',
+      operation: 'increase_percent',
+      value: 10,
+      strategy: null,
+      recommendation: 'increase',
+      scope_type: 'selected',
+    });
+  });
+
+  it('M12. apply manual respects variant_ids_to_apply filter', async () => {
+    const { service, calls } = await makeService({
+      responses: [
+        SETTINGS_ROWS,
+        [
+          richRow({ cost_price: '100', selling_price: '100' }),
+          richRow({ variant_id: VID2, cost_price: '100', selling_price: '100' }),
+        ],
+        [{ id: VID, selling_price: '100.00' }],
+        [],
+        [{ id: 'hist-1' }],
+      ],
+    });
+    const res = await service.smartPricingApply(
+      {
+        scope: { type: 'selected', variant_ids: [VID, VID2] },
+        strategy: 'balanced',
+        mode: 'manual',
+        manual_adjustment: { operation: 'increase_amount', value: 10 },
+        variant_ids_to_apply: [VID],
+        reason: 'narrowed manual',
+      },
+      USER,
+    );
+    expect(res.updated).toBe(1);
+    expect(
+      calls.filter((c) => /UPDATE product_variants\b/.test(c.sql)),
+    ).toHaveLength(1);
+  });
+
+  it('M13. apply scope=all still requires the exact confirm phrase (manual or smart)', async () => {
+    const { service } = await makeService();
+    await expect(
+      service.smartPricingApply(
+        {
+          scope: { type: 'all' },
+          strategy: 'balanced',
+          mode: 'manual',
+          manual_adjustment: { operation: 'increase_percent', value: 5 },
+          reason: 'all manual',
+          confirm_all: 'wrong',
+        },
+        USER,
+      ),
+    ).rejects.toMatchObject({
+      message:
+        'تأكيد تعديل كل الأصناف مطلوب لتطبيق التعديل على كل الأصناف',
+    });
+  });
+
+  it('M14. manual review/keep rows are skipped (no UPDATE, no INSERT)', async () => {
+    const { service, calls } = await makeService({
+      responses: [
+        SETTINGS_ROWS,
+        // set_price == current → keep (no write expected)
+        [richRow({ cost_price: '100', selling_price: '150' })],
+      ],
+    });
+    const res = await service.smartPricingApply(
+      {
+        scope: { type: 'selected', variant_ids: [VID] },
+        strategy: 'balanced',
+        mode: 'manual',
+        manual_adjustment: { operation: 'set_price', value: 150 },
+        reason: 'keep manual',
+      },
+      USER,
+    );
+    expect(res.updated).toBe(0);
+    expect(res.skipped).toBeGreaterThanOrEqual(1);
+    expect(
+      calls.filter((c) => /UPDATE product_variants\b/.test(c.sql)),
+    ).toHaveLength(0);
+    expect(
+      calls.filter((c) => /INSERT INTO variant_price_history\b/.test(c.sql)),
+    ).toHaveLength(0);
+  });
+
+  it('M15. manual mode WITHOUT manual_adjustment is rejected at apply', async () => {
+    const { service } = await makeService();
+    await expect(
+      service.smartPricingApply(
+        {
+          scope: { type: 'selected', variant_ids: [VID] },
+          strategy: 'balanced',
+          mode: 'manual',
+          reason: 'missing adjustment',
+        } as any,
+        USER,
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+});
+
 // HOTFIX (post-fd30cee) — Regression block for the "could not determine
 // data type of parameter $2" bug. The original main rich-data query
 // reused a `$1..$N` placeholder string in three IN clauses while the

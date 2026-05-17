@@ -20,8 +20,11 @@ import {
 } from 'lucide-react';
 import {
   productsApi,
+  type ManualAdjustment,
+  type ManualAdjustmentOperation,
   type SmartPricingApplyPayload,
   type SmartPricingItem,
+  type SmartPricingMode,
   type SmartPricingPreviewPayload,
   type SmartPricingPreviewResponse,
   type SmartPricingRecommendation,
@@ -55,6 +58,23 @@ const STRATEGY_HINT_AR: Record<SmartPricingStrategy, string> = {
   balanced: 'يستهدف هامش الربح الموصى به، مع تعديلات معقولة.',
   aggressive: 'يدفع نحو هامش ربح عالٍ مع زيادات أكبر.',
   clearance: 'يقترح تخفيضات أكبر لتحريك مخزون راكد.',
+};
+
+// ─── P3.5A.1 — Manual adjustment labels ────────────────────────────
+const OPERATION_LABEL_AR: Record<ManualAdjustmentOperation, string> = {
+  increase_percent: 'زيادة بنسبة %',
+  decrease_percent: 'تخفيض بنسبة %',
+  increase_amount: 'زيادة بقيمة ج.م',
+  decrease_amount: 'تخفيض بقيمة ج.م',
+  set_price: 'تعيين سعر بيع ثابت ج.م',
+};
+
+const OPERATION_UNIT: Record<ManualAdjustmentOperation, string> = {
+  increase_percent: '%',
+  decrease_percent: '%',
+  increase_amount: 'ج.م',
+  decrease_amount: 'ج.م',
+  set_price: 'ج.م',
 };
 
 const RECOMMENDATION_LABEL_AR: Record<SmartPricingRecommendation, string> = {
@@ -115,6 +135,12 @@ export function SmartPricingAssistantModal({
   const [step, setStep] = useState<Step>('scope');
   const [scopeKey, setScopeKey] = useState<ScopeKey>('selected');
   const [strategy, setStrategy] = useState<SmartPricingStrategy>('balanced');
+  // P3.5A.1: mode + manual adjustment state. Smart is the default so the
+  // P3.5A flow is unchanged.
+  const [mode, setMode] = useState<SmartPricingMode>('smart');
+  const [manualOperation, setManualOperation] =
+    useState<ManualAdjustmentOperation>('increase_percent');
+  const [manualValue, setManualValue] = useState<string>('');
   const [reason, setReason] = useState('');
   const [confirmAll, setConfirmAll] = useState('');
   const [preview, setPreview] = useState<SmartPricingPreviewResponse | null>(null);
@@ -135,7 +161,19 @@ export function SmartPricingAssistantModal({
       setScopeKey('filtered');
     else setScopeKey('all');
     setStrategy('balanced');
+    setMode('smart');
+    setManualOperation('increase_percent');
+    setManualValue('');
   }, [open, context]);
+
+  // Whether the manual adjustment value parses to a valid number > 0.
+  // Used to gate the "توليد المعاينة" button when in manual mode.
+  const manualValueNum = Number(manualValue);
+  const manualValueValid =
+    Number.isFinite(manualValueNum)
+    && manualValueNum > 0
+    && (!(manualOperation === 'increase_percent' || manualOperation === 'decrease_percent')
+      || manualValueNum <= 500);
 
   const scopePayload: SmartPricingScope = useMemo(() => {
     if (scopeKey === 'single' && context.singleVariantId) {
@@ -240,8 +278,26 @@ export function SmartPricingAssistantModal({
     },
   ];
 
+  const buildManualAdjustment = (): ManualAdjustment | undefined =>
+    mode === 'manual'
+      ? { operation: manualOperation, value: manualValueNum }
+      : undefined;
+
   const runPreview = () => {
-    previewMut.mutate({ scope: scopePayload, strategy, limit: 1000 });
+    if (mode === 'manual' && !manualValueValid) {
+      toast.error('قيمة التعديل غير صالحة');
+      return;
+    }
+    const payload: SmartPricingPreviewPayload = {
+      scope: scopePayload,
+      strategy,
+      limit: 1000,
+    };
+    if (mode === 'manual') {
+      payload.mode = 'manual';
+      payload.manual_adjustment = buildManualAdjustment();
+    }
+    previewMut.mutate(payload);
   };
 
   const runApply = () => {
@@ -255,6 +311,10 @@ export function SmartPricingAssistantModal({
       reason: reason.trim(),
       variant_ids_to_apply: applicableItems.map((i) => i.variant_id),
     };
+    if (mode === 'manual') {
+      payload.mode = 'manual';
+      payload.manual_adjustment = buildManualAdjustment();
+    }
     if (scopePayload.type === 'all') {
       payload.confirm_all = confirmAll;
       if (confirmAll !== 'تأكيد تعديل كل الأصناف') {
@@ -339,42 +399,153 @@ export function SmartPricingAssistantModal({
             </div>
           )}
 
-          {/* STEP 2 — strategy */}
+          {/* STEP 2 — strategy / manual mode */}
           {step === 'strategy' && (
             <div className="space-y-3" data-testid="smart-pricing-step-strategy">
               <h4 className="font-bold text-slate-800">
-                الخطوة 2 — اختر الاستراتيجية
+                الخطوة 2 — اختر طريقة التعديل
               </h4>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                {(Object.keys(STRATEGY_LABEL_AR) as SmartPricingStrategy[]).map(
-                  (s) => (
-                    <label
-                      key={s}
-                      className={`block rounded-lg border p-3 cursor-pointer ${
-                        strategy === s
-                          ? 'border-amber-500 bg-amber-50/40'
-                          : 'border-slate-200 hover:bg-slate-50'
-                      }`}
-                    >
-                      <input
-                        type="radio"
-                        name="strategy"
-                        value={s}
-                        checked={strategy === s}
-                        onChange={() => setStrategy(s)}
-                        className="ml-2"
-                        data-testid={`smart-pricing-strategy-${s}`}
-                      />
-                      <span className="font-bold text-sm text-slate-800">
-                        {STRATEGY_LABEL_AR[s]}
-                      </span>
-                      <div className="text-[11px] text-slate-600 mt-1">
-                        {STRATEGY_HINT_AR[s]}
-                      </div>
-                    </label>
-                  ),
-                )}
+              {/* P3.5A.1 — mode toggle. Smart keeps the existing
+                  strategy engine; Manual exposes a flat operation +
+                  value the operator chooses. */}
+              <div className="flex gap-2" data-testid="smart-pricing-mode-toggle">
+                <button
+                  type="button"
+                  onClick={() => setMode('smart')}
+                  className={`flex-1 px-3 py-2 rounded-lg text-sm font-bold border ${
+                    mode === 'smart'
+                      ? 'bg-amber-500 text-white border-amber-500'
+                      : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
+                  }`}
+                  data-testid="smart-pricing-mode-smart"
+                >
+                  اقتراح ذكي
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMode('manual')}
+                  className={`flex-1 px-3 py-2 rounded-lg text-sm font-bold border ${
+                    mode === 'manual'
+                      ? 'bg-amber-500 text-white border-amber-500'
+                      : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
+                  }`}
+                  data-testid="smart-pricing-mode-manual"
+                >
+                  تعديل يدوي
+                </button>
               </div>
+
+              {mode === 'smart' && (
+                <div
+                  className="grid grid-cols-1 md:grid-cols-2 gap-2"
+                  data-testid="smart-pricing-strategy-panel"
+                >
+                  {(Object.keys(STRATEGY_LABEL_AR) as SmartPricingStrategy[]).map(
+                    (s) => (
+                      <label
+                        key={s}
+                        className={`block rounded-lg border p-3 cursor-pointer ${
+                          strategy === s
+                            ? 'border-amber-500 bg-amber-50/40'
+                            : 'border-slate-200 hover:bg-slate-50'
+                        }`}
+                      >
+                        <input
+                          type="radio"
+                          name="strategy"
+                          value={s}
+                          checked={strategy === s}
+                          onChange={() => setStrategy(s)}
+                          className="ml-2"
+                          data-testid={`smart-pricing-strategy-${s}`}
+                        />
+                        <span className="font-bold text-sm text-slate-800">
+                          {STRATEGY_LABEL_AR[s]}
+                        </span>
+                        <div className="text-[11px] text-slate-600 mt-1">
+                          {STRATEGY_HINT_AR[s]}
+                        </div>
+                      </label>
+                    ),
+                  )}
+                </div>
+              )}
+
+              {mode === 'manual' && (
+                <div
+                  className="space-y-3 rounded-lg border border-slate-200 p-3 bg-slate-50/40"
+                  data-testid="smart-pricing-manual-panel"
+                >
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">
+                      نوع التعديل
+                    </label>
+                    <select
+                      value={manualOperation}
+                      onChange={(e) =>
+                        setManualOperation(
+                          e.target.value as ManualAdjustmentOperation,
+                        )
+                      }
+                      className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm"
+                      data-testid="manual-operation-select"
+                    >
+                      {(
+                        Object.keys(OPERATION_LABEL_AR) as ManualAdjustmentOperation[]
+                      ).map((op) => (
+                        <option key={op} value={op}>
+                          {OPERATION_LABEL_AR[op]}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">
+                      القيمة
+                      <span className="text-slate-400 mr-1">
+                        ({OPERATION_UNIT[manualOperation]})
+                      </span>
+                    </label>
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      step="0.01"
+                      min="0.01"
+                      max={
+                        manualOperation === 'increase_percent'
+                        || manualOperation === 'decrease_percent'
+                          ? 500
+                          : undefined
+                      }
+                      value={manualValue}
+                      onChange={(e) => setManualValue(e.target.value)}
+                      placeholder={
+                        manualOperation === 'set_price'
+                          ? 'مثال: 150.00'
+                          : OPERATION_UNIT[manualOperation] === '%'
+                            ? 'مثال: 10'
+                            : 'مثال: 20'
+                      }
+                      className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm"
+                      data-testid="manual-adjustment-value"
+                    />
+                    {!manualValueValid && manualValue !== '' && (
+                      <div className="text-[11px] text-rose-700 mt-1">
+                        أدخل قيمة موجبة
+                        {(manualOperation === 'increase_percent'
+                          || manualOperation === 'decrease_percent') &&
+                          ' لا تتجاوز 500%'}
+                        .
+                      </div>
+                    )}
+                  </div>
+                  <div className="text-[11px] text-slate-600 leading-relaxed">
+                    سيتم تطبيق العملية على سعر البيع الحالي لكل صنف داخل
+                    النطاق. التكلفة لا تتأثر — تعديل التكلفة مرحلة منفصلة
+                    لاحقة.
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -483,8 +654,14 @@ export function SmartPricingAssistantModal({
             <span className="font-bold">
               {scopeOptions.find((o) => o.key === scopeKey)?.label}
             </span>{' '}
-            · الاستراتيجية:{' '}
-            <span className="font-bold">{STRATEGY_LABEL_AR[strategy]}</span>
+            · الطريقة:{' '}
+            <span className="font-bold">
+              {mode === 'manual'
+                ? `يدوي · ${OPERATION_LABEL_AR[manualOperation]}${
+                    manualValueValid ? ` · ${manualValueNum}` : ''
+                  }`
+                : `ذكي · ${STRATEGY_LABEL_AR[strategy]}`}
+            </span>
           </div>
           <div className="flex gap-2">
             {step !== 'scope' && (
@@ -516,7 +693,10 @@ export function SmartPricingAssistantModal({
               <button
                 type="button"
                 onClick={runPreview}
-                disabled={previewMut.isPending}
+                disabled={
+                  previewMut.isPending
+                  || (mode === 'manual' && !manualValueValid)
+                }
                 className="btn-primary"
                 data-testid="smart-pricing-generate-preview"
               >

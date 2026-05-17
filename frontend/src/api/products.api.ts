@@ -207,6 +207,20 @@ export type SmartPricingWarning =
   | 'slow_moving'
   | 'high_stock';
 
+// ─── PR-PURCHASES-P3.5A.1 — Manual Bulk Sale Price Adjustment ────────
+export type SmartPricingMode = 'smart' | 'manual';
+export type ManualAdjustmentOperation =
+  | 'increase_percent'
+  | 'decrease_percent'
+  | 'increase_amount'
+  | 'decrease_amount'
+  | 'set_price';
+
+export interface ManualAdjustment {
+  operation: ManualAdjustmentOperation;
+  value: number;
+}
+
 export interface SmartPricingScope {
   type: SmartPricingScopeType;
   variant_ids?: string[];
@@ -222,12 +236,20 @@ export interface SmartPricingScope {
 export interface SmartPricingPreviewPayload {
   scope: SmartPricingScope;
   strategy: SmartPricingStrategy;
+  /** P3.5A.1 — defaults to 'smart' on the server. */
+  mode?: SmartPricingMode;
+  /** Required when mode === 'manual'. */
+  manual_adjustment?: ManualAdjustment;
   limit?: number;
 }
 
 export interface SmartPricingApplyPayload {
   scope: SmartPricingScope;
   strategy: SmartPricingStrategy;
+  /** P3.5A.1 — defaults to 'smart' on the server. */
+  mode?: SmartPricingMode;
+  /** Required when mode === 'manual'. */
+  manual_adjustment?: ManualAdjustment;
   variant_ids_to_apply?: string[];
   reason: string;
   confirm_all?: string;
@@ -263,6 +285,8 @@ export interface SmartPricingItem {
 export interface SmartPricingPreviewResponse {
   strategy: SmartPricingStrategy;
   scope_type: SmartPricingScopeType;
+  mode?: SmartPricingMode;
+  manual_adjustment?: ManualAdjustment | null;
   settings: {
     competitive_markup_pct: number;
     recommended_margin_pct: number;
@@ -293,6 +317,7 @@ export interface SmartPricingApplyResultItem {
 export interface SmartPricingApplyResponse {
   strategy: SmartPricingStrategy;
   scope_type: SmartPricingScopeType;
+  mode?: SmartPricingMode;
   updated: number;
   skipped: number;
   items: SmartPricingApplyResultItem[];

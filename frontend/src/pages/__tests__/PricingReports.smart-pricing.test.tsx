@@ -558,3 +558,235 @@ describe('PricingReports — P3.5A pricing-only contract', () => {
     expect(journalCreateMock).not.toHaveBeenCalled();
   });
 });
+
+// ───────────── P3.5A.1 — Manual mode + Select All + Sticky ─────────
+describe('PricingReports — P3.5A.1 manual mode', () => {
+  it('M-FE1. modal toggles between smart and manual; manual reveals operation picker', async () => {
+    await openAssistantOnHealth();
+    fireEvent.click(screen.getByTestId('smart-pricing-next-strategy'));
+    // Smart is the default.
+    expect(screen.getByTestId('smart-pricing-mode-smart')).toBeInTheDocument();
+    expect(screen.getByTestId('smart-pricing-mode-manual')).toBeInTheDocument();
+    expect(
+      screen.getByTestId('smart-pricing-strategy-panel'),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByTestId('smart-pricing-manual-panel'),
+    ).toBeNull();
+    // Switch to manual.
+    fireEvent.click(screen.getByTestId('smart-pricing-mode-manual'));
+    expect(
+      screen.getByTestId('smart-pricing-manual-panel'),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTestId('manual-operation-select'),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTestId('manual-adjustment-value'),
+    ).toBeInTheDocument();
+  });
+
+  it('M-FE2. manual increase_percent → preview payload carries mode + manual_adjustment', async () => {
+    await openAssistantOnHealth();
+    fireEvent.click(screen.getByTestId('smart-pricing-next-strategy'));
+    fireEvent.click(screen.getByTestId('smart-pricing-mode-manual'));
+    fireEvent.change(screen.getByTestId('manual-operation-select'), {
+      target: { value: 'increase_percent' },
+    });
+    fireEvent.change(screen.getByTestId('manual-adjustment-value'), {
+      target: { value: '10' },
+    });
+    fireEvent.click(screen.getByTestId('smart-pricing-generate-preview'));
+    await waitFor(() => expect(smartPreviewMock).toHaveBeenCalled());
+    expect(smartPreviewMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        mode: 'manual',
+        manual_adjustment: { operation: 'increase_percent', value: 10 },
+        scope: expect.objectContaining({
+          type: 'selected',
+          variant_ids: ['v-bc'],
+        }),
+      }),
+    );
+  });
+
+  it('M-FE3. invalid manual value disables the preview button', async () => {
+    await openAssistantOnHealth();
+    fireEvent.click(screen.getByTestId('smart-pricing-next-strategy'));
+    fireEvent.click(screen.getByTestId('smart-pricing-mode-manual'));
+    // Empty value → button disabled.
+    expect(
+      screen.getByTestId('smart-pricing-generate-preview'),
+    ).toBeDisabled();
+    // Zero is rejected.
+    fireEvent.change(screen.getByTestId('manual-adjustment-value'), {
+      target: { value: '0' },
+    });
+    expect(
+      screen.getByTestId('smart-pricing-generate-preview'),
+    ).toBeDisabled();
+    // Out-of-range percent is rejected.
+    fireEvent.change(screen.getByTestId('manual-adjustment-value'), {
+      target: { value: '600' },
+    });
+    expect(
+      screen.getByTestId('smart-pricing-generate-preview'),
+    ).toBeDisabled();
+    // Valid percent.
+    fireEvent.change(screen.getByTestId('manual-adjustment-value'), {
+      target: { value: '15' },
+    });
+    expect(
+      screen.getByTestId('smart-pricing-generate-preview'),
+    ).not.toBeDisabled();
+  });
+
+  it('M-FE4. apply sends mode/manual_adjustment + selected variant ids + reason', async () => {
+    // Override the preview mock for this test so the modal renders an
+    // applicable row matching the manual increase.
+    smartPreviewMock.mockResolvedValueOnce({
+      strategy: 'balanced',
+      mode: 'manual',
+      scope_type: 'selected',
+      settings: PREVIEW_RESPONSE.settings,
+      summary: { total: 1, increase: 1, decrease: 0, keep: 0, review: 0 },
+      items: [
+        {
+          ...PREVIEW_RESPONSE.items[0],
+          current_price: 100,
+          suggested_selling_price: 110,
+          recommendation: 'increase',
+          reason_ar: 'زيادة يدوية بنسبة 10%',
+        },
+      ],
+    });
+
+    await openAssistantOnHealth();
+    fireEvent.click(screen.getByTestId('smart-pricing-next-strategy'));
+    fireEvent.click(screen.getByTestId('smart-pricing-mode-manual'));
+    fireEvent.change(screen.getByTestId('manual-adjustment-value'), {
+      target: { value: '10' },
+    });
+    fireEvent.click(screen.getByTestId('smart-pricing-generate-preview'));
+    await screen.findByTestId('smart-pricing-step-preview');
+    fireEvent.click(screen.getByTestId('smart-pricing-go-apply'));
+    fireEvent.change(screen.getByTestId('smart-pricing-reason'), {
+      target: { value: 'تعديل يدوي تجريبي' },
+    });
+    fireEvent.click(screen.getByTestId('smart-pricing-apply'));
+    await waitFor(() => expect(smartApplyMock).toHaveBeenCalled());
+    expect(smartApplyMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        mode: 'manual',
+        manual_adjustment: { operation: 'increase_percent', value: 10 },
+        reason: 'تعديل يدوي تجريبي',
+        variant_ids_to_apply: ['v-bc'],
+      }),
+    );
+  });
+
+  it('M-FE5. manual mode still shows cost-adjustment note and NO cost input', async () => {
+    await openAssistantOnHealth();
+    fireEvent.click(screen.getByTestId('smart-pricing-next-strategy'));
+    fireEvent.click(screen.getByTestId('smart-pricing-mode-manual'));
+    expect(
+      screen.getByTestId('smart-pricing-cost-note'),
+    ).toHaveTextContent('تعديل التكلفة');
+    const modal = screen.getByTestId('smart-pricing-modal');
+    expect(within(modal).queryByLabelText(/التكلفة الجديدة/)).toBeNull();
+  });
+
+  it('M-FE6. manual mode never calls applyVariantPrices or cost-edit endpoints', async () => {
+    smartPreviewMock.mockResolvedValueOnce({
+      strategy: 'balanced',
+      mode: 'manual',
+      scope_type: 'selected',
+      settings: PREVIEW_RESPONSE.settings,
+      summary: { total: 1, increase: 1, decrease: 0, keep: 0, review: 0 },
+      items: [
+        {
+          ...PREVIEW_RESPONSE.items[0],
+          current_price: 100,
+          suggested_selling_price: 105,
+          recommendation: 'increase',
+        },
+      ],
+    });
+    await openAssistantOnHealth();
+    fireEvent.click(screen.getByTestId('smart-pricing-next-strategy'));
+    fireEvent.click(screen.getByTestId('smart-pricing-mode-manual'));
+    fireEvent.change(screen.getByTestId('manual-adjustment-value'), {
+      target: { value: '5' },
+    });
+    fireEvent.click(screen.getByTestId('smart-pricing-generate-preview'));
+    await screen.findByTestId('smart-pricing-step-preview');
+    fireEvent.click(screen.getByTestId('smart-pricing-go-apply'));
+    fireEvent.change(screen.getByTestId('smart-pricing-reason'), {
+      target: { value: 'manual no-cost' },
+    });
+    fireEvent.click(screen.getByTestId('smart-pricing-apply'));
+    await waitFor(() => expect(smartApplyMock).toHaveBeenCalled());
+    expect(applyPricesMock).not.toHaveBeenCalled();
+    expect(productPatchMock).not.toHaveBeenCalled();
+    expect(variantPatchMock).not.toHaveBeenCalled();
+    expect(purchaseCreateMock).not.toHaveBeenCalled();
+    expect(purchasePatchMock).not.toHaveBeenCalled();
+    expect(posCreateMock).not.toHaveBeenCalled();
+    expect(journalCreateMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('PricingReports — P3.5A.1 Select-All + sticky controls', () => {
+  it('S1. sticky controls container is rendered', async () => {
+    renderPage();
+    await screen.findByTestId('pricing-health-row-v-ok');
+    expect(
+      screen.getByTestId('pricing-sticky-controls'),
+    ).toBeInTheDocument();
+    // sticky CSS class is present (Tailwind applies the position).
+    expect(
+      screen.getByTestId('pricing-sticky-controls').className,
+    ).toMatch(/sticky/);
+  });
+
+  it('S2. select-all checkbox selects every visible health row, count reflects it', async () => {
+    renderPage();
+    await screen.findByTestId('pricing-health-row-v-ok');
+    const all = screen.getByTestId('pricing-select-all-visible');
+    expect(all).not.toBeChecked();
+    fireEvent.click(all);
+    // Count is N visible rows = 3 (v-ok, v-bc).
+    await waitFor(() =>
+      expect(
+        screen.getByTestId('pricing-selected-count'),
+      ).toHaveTextContent('المحدد: 2'),
+    );
+    // Toggling again clears.
+    fireEvent.click(screen.getByTestId('pricing-select-all-visible'));
+    expect(
+      screen.getByTestId('pricing-selected-count'),
+    ).toHaveTextContent('المحدد: 0');
+  });
+
+  it('S3. when some rows are selected, select-all is indeterminate', async () => {
+    renderPage();
+    await screen.findByTestId('pricing-health-row-v-ok');
+    fireEvent.click(screen.getByTestId('pricing-row-select-v-bc'));
+    const all = screen.getByTestId('pricing-select-all-visible') as HTMLInputElement;
+    expect(all.indeterminate).toBe(true);
+    expect(all.checked).toBe(false);
+  });
+
+  it('S4. clear-selection link removes all selected ids', async () => {
+    renderPage();
+    await screen.findByTestId('pricing-health-row-v-ok');
+    fireEvent.click(screen.getByTestId('pricing-select-all-visible'));
+    expect(
+      screen.getByTestId('pricing-selected-count'),
+    ).toHaveTextContent('المحدد: 2');
+    fireEvent.click(screen.getByTestId('pricing-clear-selection'));
+    expect(
+      screen.getByTestId('pricing-selected-count'),
+    ).toHaveTextContent('المحدد: 0');
+  });
+});

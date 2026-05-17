@@ -162,19 +162,27 @@ export default function PricingReports() {
   const [tab, setTab] = useState<Tab>('health');
   return (
     <div className="space-y-4" dir="rtl" data-testid="pricing-reports-page">
-      <header>
-        <h1 className="text-xl font-black text-slate-800 flex items-center gap-2">
-          <TrendingUp className="w-5 h-5 text-amber-500" />
-          تقارير التسعير والربحية
-        </h1>
-        <p className="text-xs text-slate-600 mt-1">
-          تقارير قراءة فقط مبنية على بيانات المشتريات والمخزون وسجل تغييرات
-          الأسعار. لا تغيّر أي سعر أو فاتورة.
-        </p>
-      </header>
+      {/* P3.5A.1 — Sticky controls. The page title + tab strip stay
+          pinned to the top of the scroll container so the user never
+          has to scroll back up to switch tabs or open the assistant.
+          `top-0` sits below any outer app shell padding; the page is
+          already rendered inside the app layout container.            */}
+      <div
+        className="sticky top-0 z-30 -mx-4 px-4 pt-2 pb-3 bg-slate-50/95 backdrop-blur supports-[backdrop-filter]:bg-slate-50/70 border-b border-slate-200"
+        data-testid="pricing-sticky-controls"
+      >
+        <header>
+          <h1 className="text-xl font-black text-slate-800 flex items-center gap-2">
+            <TrendingUp className="w-5 h-5 text-amber-500" />
+            تقارير التسعير والربحية
+          </h1>
+          <p className="text-xs text-slate-600 mt-1">
+            تقارير قراءة فقط مبنية على بيانات المشتريات والمخزون وسجل تغييرات
+            الأسعار. لا تغيّر أي سعر أو فاتورة.
+          </p>
+        </header>
 
-      <div className="bg-white rounded-xl border border-slate-200 shadow-sm">
-        <div className="flex flex-wrap gap-2 p-3 border-b border-slate-200">
+        <div className="flex flex-wrap gap-2 mt-3">
           {TABS.map((t) => {
             const Icon = t.icon;
             const active = tab === t.key;
@@ -195,7 +203,9 @@ export default function PricingReports() {
             );
           })}
         </div>
+      </div>
 
+      <div className="bg-white rounded-xl border border-slate-200 shadow-sm">
         <div className="p-4">
           {tab === 'health' && <HealthTab />}
           {tab === 'losses' && <LossesTab />}
@@ -206,6 +216,95 @@ export default function PricingReports() {
       </div>
     </div>
   );
+}
+
+/* ────────────────── Shared selection helpers (P3.5A.1) ────────────── */
+
+/**
+ * Tri-state header checkbox. Reflects whether all visible rows are
+ * selected (✓), some are (indeterminate), or none are (☐). Clicking
+ * cycles between "select all visible" and "clear visible".
+ */
+interface SelectAllHeaderProps {
+  visibleIds: string[];
+  selectedIds: Set<string>;
+  onToggleAll: () => void;
+  testId?: string;
+}
+
+function SelectAllHeader({
+  visibleIds,
+  selectedIds,
+  onToggleAll,
+  testId,
+}: SelectAllHeaderProps) {
+  const visibleSelected = visibleIds.filter((id) => selectedIds.has(id)).length;
+  const allChecked = visibleIds.length > 0 && visibleSelected === visibleIds.length;
+  const someChecked = visibleSelected > 0 && visibleSelected < visibleIds.length;
+  const ref = (el: HTMLInputElement | null) => {
+    if (el) el.indeterminate = someChecked;
+  };
+  return (
+    <input
+      type="checkbox"
+      ref={ref}
+      checked={allChecked}
+      disabled={visibleIds.length === 0}
+      onChange={onToggleAll}
+      aria-label="تحديد كل الظاهر"
+      data-testid={testId ?? 'pricing-select-all-visible'}
+    />
+  );
+}
+
+/**
+ * Compact toolbar showing the selected count + a clear-selection link.
+ * Renders inline next to the smart-pricing trigger; always rendered so
+ * the count area has stable layout.
+ */
+interface SelectionToolbarProps {
+  selectedIds: Set<string>;
+  onClear: () => void;
+}
+
+function SelectionToolbar({ selectedIds, onClear }: SelectionToolbarProps) {
+  return (
+    <div className="flex items-center gap-2 text-xs text-slate-600">
+      <span data-testid="pricing-selected-count">
+        المحدد: <span className="font-bold">{selectedIds.size}</span>
+      </span>
+      {selectedIds.size > 0 && (
+        <button
+          type="button"
+          onClick={onClear}
+          data-testid="pricing-clear-selection"
+          className="text-amber-700 hover:text-amber-900 underline-offset-2 hover:underline"
+        >
+          إلغاء التحديد
+        </button>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Toggles the selected set against a list of currently visible row ids:
+ *   · if every visible id is already selected → remove them
+ *   · otherwise add the missing ones (without dropping previously-selected
+ *     ids from other filter views)
+ */
+function toggleAllVisible(
+  prev: Set<string>,
+  visibleIds: string[],
+): Set<string> {
+  const next = new Set(prev);
+  const allIn = visibleIds.every((id) => next.has(id));
+  if (allIn) {
+    for (const id of visibleIds) next.delete(id);
+  } else {
+    for (const id of visibleIds) next.add(id);
+  }
+  return next;
 }
 
 /* ────────────────── Health tab (Report A) ────────────────── */
@@ -273,7 +372,11 @@ function HealthTab() {
         </label>
       </div>
 
-      <div className="flex justify-end">
+      <div className="flex items-center justify-between gap-2">
+        <SelectionToolbar
+          selectedIds={selectedIds}
+          onClear={() => setSelectedIds(new Set())}
+        />
         <SmartPricingTrigger
           selectedVariantIds={selectedIds}
           filters={smartFilters}
@@ -323,6 +426,9 @@ function HealthTab() {
               return next;
             })
           }
+          onToggleAll={(visibleIds) =>
+            setSelectedIds((s) => toggleAllVisible(s, visibleIds))
+          }
         />
       )}
     </div>
@@ -333,15 +439,23 @@ interface HealthTableProps {
   rows: PricingHealthRow[];
   selectedIds: Set<string>;
   onToggle: (id: string) => void;
+  onToggleAll: (visibleIds: string[]) => void;
 }
 
-function HealthTable({ rows, selectedIds, onToggle }: HealthTableProps) {
+function HealthTable({ rows, selectedIds, onToggle, onToggleAll }: HealthTableProps) {
+  const visibleIds = rows.map((r) => r.variant_id);
   return (
     <div className="overflow-x-auto border border-slate-200 rounded-lg">
       <table className="w-full text-sm">
         <thead className="bg-slate-50 text-slate-600 text-xs">
           <tr>
-            <th className="p-2"></th>
+            <th className="p-2">
+              <SelectAllHeader
+                visibleIds={visibleIds}
+                selectedIds={selectedIds}
+                onToggleAll={() => onToggleAll(visibleIds)}
+              />
+            </th>
             <th className="p-2 text-right">الصنف</th>
             <th className="p-2 text-right">SKU</th>
             <th className="p-2 text-right">التكلفة</th>
@@ -428,16 +542,22 @@ function LossesTab() {
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between gap-2">
-        <label className="flex items-center gap-2 text-sm">
-          <input
-            type="checkbox"
-            checked={onlyInStock}
-            onChange={(e) => setOnlyInStock(e.target.checked)}
-            data-testid="pricing-losses-only-in-stock"
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div className="flex items-center gap-3">
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={onlyInStock}
+              onChange={(e) => setOnlyInStock(e.target.checked)}
+              data-testid="pricing-losses-only-in-stock"
+            />
+            الأصناف في المخزون فقط
+          </label>
+          <SelectionToolbar
+            selectedIds={selectedIds}
+            onClear={() => setSelectedIds(new Set())}
           />
-          الأصناف في المخزون فقط
-        </label>
+        </div>
         <SmartPricingTrigger
           selectedVariantIds={selectedIds}
           filters={smartFilters}
@@ -478,6 +598,9 @@ function LossesTab() {
               return next;
             })
           }
+          onToggleAll={(visibleIds) =>
+            setSelectedIds((s) => toggleAllVisible(s, visibleIds))
+          }
         />
       )}
     </div>
@@ -488,15 +611,23 @@ interface LossesTableProps {
   rows: PricingLossRow[];
   selectedIds: Set<string>;
   onToggle: (id: string) => void;
+  onToggleAll: (visibleIds: string[]) => void;
 }
 
-function LossesTable({ rows, selectedIds, onToggle }: LossesTableProps) {
+function LossesTable({ rows, selectedIds, onToggle, onToggleAll }: LossesTableProps) {
+  const visibleIds = rows.map((r) => r.variant_id);
   return (
     <div className="overflow-x-auto border border-slate-200 rounded-lg">
       <table className="w-full text-sm">
         <thead className="bg-slate-50 text-slate-600 text-xs">
           <tr>
-            <th className="p-2"></th>
+            <th className="p-2">
+              <SelectAllHeader
+                visibleIds={visibleIds}
+                selectedIds={selectedIds}
+                onToggleAll={() => onToggleAll(visibleIds)}
+              />
+            </th>
             <th className="p-2 text-right">الصنف</th>
             <th className="p-2 text-right">SKU</th>
             <th className="p-2 text-right">التكلفة</th>
@@ -714,16 +845,22 @@ function LandedImpactTab() {
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between gap-2">
-        <label className="flex items-center gap-2 text-sm">
-          <input
-            type="checkbox"
-            checked={needsReviewOnly}
-            onChange={(e) => setNeedsReviewOnly(e.target.checked)}
-            data-testid="pricing-landed-needs-review-only"
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div className="flex items-center gap-3">
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={needsReviewOnly}
+              onChange={(e) => setNeedsReviewOnly(e.target.checked)}
+              data-testid="pricing-landed-needs-review-only"
+            />
+            عرض المنتجات التي تحتاج مراجعة سعر فقط
+          </label>
+          <SelectionToolbar
+            selectedIds={selectedIds}
+            onClear={() => setSelectedIds(new Set())}
           />
-          عرض المنتجات التي تحتاج مراجعة سعر فقط
-        </label>
+        </div>
         <SmartPricingTrigger
           selectedVariantIds={selectedIds}
           filters={smartFilters}
@@ -755,6 +892,9 @@ function LandedImpactTab() {
               return next;
             })
           }
+          onToggleAll={(visibleIds) =>
+            setSelectedIds((s) => toggleAllVisible(s, visibleIds))
+          }
         />
       )}
     </div>
@@ -765,15 +905,23 @@ interface LandedTableProps {
   rows: PricingLandedImpactRow[];
   selectedIds: Set<string>;
   onToggle: (id: string) => void;
+  onToggleAll: (visibleIds: string[]) => void;
 }
 
-function LandedTable({ rows, selectedIds, onToggle }: LandedTableProps) {
+function LandedTable({ rows, selectedIds, onToggle, onToggleAll }: LandedTableProps) {
+  const visibleIds = rows.map((r) => r.variant_id);
   return (
     <div className="overflow-x-auto border border-slate-200 rounded-lg">
       <table className="w-full text-sm">
         <thead className="bg-slate-50 text-slate-600 text-xs">
           <tr>
-            <th className="p-2"></th>
+            <th className="p-2">
+              <SelectAllHeader
+                visibleIds={visibleIds}
+                selectedIds={selectedIds}
+                onToggleAll={() => onToggleAll(visibleIds)}
+              />
+            </th>
             <th className="p-2 text-right">الصنف</th>
             <th className="p-2 text-right">آخر فاتورة</th>
             <th className="p-2 text-right">المورد</th>
@@ -1108,10 +1256,11 @@ function SoldProfitTab() {
         </div>
       )}
 
-      {/* Sort selector + smart-pricing trigger — only meaningful for products view */}
+      {/* Sort selector + selection toolbar + smart-pricing trigger —
+          only meaningful for the products view */}
       {view === 'products' && (
-        <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <div className="flex items-center gap-3 flex-wrap">
             <label className="text-xs font-bold text-slate-700">ترتيب:</label>
             <select
               value={sort}
@@ -1125,6 +1274,10 @@ function SoldProfitTab() {
               <option value="margin_asc">الهامش من الأقل للأعلى</option>
               <option value="qty_desc">الكمية المباعة</option>
             </select>
+            <SelectionToolbar
+              selectedIds={selectedIds}
+              onClear={() => setSelectedIds(new Set())}
+            />
           </div>
           <SmartPricingTrigger
             selectedVariantIds={selectedIds}
@@ -1151,6 +1304,9 @@ function SoldProfitTab() {
                 return next;
               })
             }
+            onToggleAll={(visibleIds) =>
+              setSelectedIds((s) => toggleAllVisible(s, visibleIds))
+            }
           />
         )
       ) : invoicesQ.isLoading ? (
@@ -1166,15 +1322,28 @@ interface SoldProductsTableProps {
   rows: SoldProfitProductRow[];
   selectedIds: Set<string>;
   onToggle: (id: string) => void;
+  onToggleAll: (visibleIds: string[]) => void;
 }
 
-function SoldProductsTable({ rows, selectedIds, onToggle }: SoldProductsTableProps) {
+function SoldProductsTable({
+  rows,
+  selectedIds,
+  onToggle,
+  onToggleAll,
+}: SoldProductsTableProps) {
+  const visibleIds = rows.map((r) => r.variant_id);
   return (
     <div className="overflow-x-auto border border-slate-200 rounded-lg">
       <table className="w-full text-sm">
         <thead className="bg-slate-50 text-slate-600 text-xs">
           <tr>
-            <th className="p-2"></th>
+            <th className="p-2">
+              <SelectAllHeader
+                visibleIds={visibleIds}
+                selectedIds={selectedIds}
+                onToggleAll={() => onToggleAll(visibleIds)}
+              />
+            </th>
             <th className="p-2 text-right">الصنف</th>
             <th className="p-2 text-right">SKU</th>
             <th className="p-2 text-right">كمية مباعة</th>

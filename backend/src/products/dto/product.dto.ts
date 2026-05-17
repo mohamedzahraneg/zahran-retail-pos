@@ -135,6 +135,46 @@ export type SmartPricingStatusFilter =
   | 'ok'
   | 'unknown_cost';
 
+// ─── PR-PURCHASES-P3.5A.1 — Manual Bulk Sale Price Adjustment ────────
+// Lets the operator bypass the strategy engine and apply a flat
+// percentage / amount / fixed-price change to the previewed rows. Still
+// pricing-only: writes the same UPDATE product_variants SET selling_price
+// + INSERT INTO variant_price_history. Cost adjustment stays deferred to
+// P3.5B.
+export type SmartPricingMode = 'smart' | 'manual';
+export type ManualAdjustmentOperation =
+  | 'increase_percent'
+  | 'decrease_percent'
+  | 'increase_amount'
+  | 'decrease_amount'
+  | 'set_price';
+
+export class ManualAdjustmentDto {
+  @ApiProperty({
+    enum: [
+      'increase_percent',
+      'decrease_percent',
+      'increase_amount',
+      'decrease_amount',
+      'set_price',
+    ],
+  })
+  @IsIn([
+    'increase_percent',
+    'decrease_percent',
+    'increase_amount',
+    'decrease_amount',
+    'set_price',
+  ])
+  operation: ManualAdjustmentOperation;
+
+  /** Must be > 0. Percentage operations are also capped at 500%. */
+  @ApiProperty()
+  @IsNumber()
+  @Min(0.01)
+  value: number;
+}
+
 export class SmartPricingFiltersDto {
   @ApiPropertyOptional() @IsOptional() @IsString() q?: string;
   @ApiPropertyOptional({
@@ -180,6 +220,21 @@ export class SmartPricingPreviewDto {
   @IsIn(['conservative', 'balanced', 'aggressive', 'clearance'])
   strategy: SmartPricingStrategy;
 
+  /** P3.5A.1: when 'manual', the strategy engine is bypassed and the
+   *  manual_adjustment is applied to every previewed row. Defaults to
+   *  'smart' so existing P3.5A callers keep working unchanged. */
+  @ApiPropertyOptional({ enum: ['smart', 'manual'], default: 'smart' })
+  @IsOptional()
+  @IsIn(['smart', 'manual'])
+  mode?: SmartPricingMode;
+
+  /** Required when mode === 'manual'. Ignored otherwise. */
+  @ApiPropertyOptional({ type: () => ManualAdjustmentDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => ManualAdjustmentDto)
+  manual_adjustment?: ManualAdjustmentDto;
+
   @ApiPropertyOptional({ default: 1000 })
   @IsOptional() @IsNumber() @Min(1) @Max(5000)
   limit?: number;
@@ -196,6 +251,20 @@ export class SmartPricingApplyDto {
   })
   @IsIn(['conservative', 'balanced', 'aggressive', 'clearance'])
   strategy: SmartPricingStrategy;
+
+  /** P3.5A.1: see SmartPricingPreviewDto.mode. */
+  @ApiPropertyOptional({ enum: ['smart', 'manual'], default: 'smart' })
+  @IsOptional()
+  @IsIn(['smart', 'manual'])
+  mode?: SmartPricingMode;
+
+  /** Required when mode === 'manual'. Server re-runs preview with this
+   *  same adjustment — the client price is never trusted. */
+  @ApiPropertyOptional({ type: () => ManualAdjustmentDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => ManualAdjustmentDto)
+  manual_adjustment?: ManualAdjustmentDto;
 
   /** When set, only these variant_ids out of the scope's preview will
    *  be applied. When omitted, every previewed row whose recommendation

@@ -13,6 +13,7 @@ import {
   UpdateProductDto,
   CreateVariantDto,
   UpdateVariantDto,
+  ManualAdjustmentDto,
   SmartPricingApplyDto,
   SmartPricingPreviewDto,
   SmartPricingScopeDto,
@@ -570,8 +571,20 @@ export class ProductsService {
       [variantIds, settings.min_margin_pct_default],
     );
 
+    // P3.5A.1: when mode === 'manual' we bypass the strategy engine and
+    // apply the operator-supplied formula to every row. The "smart" path
+    // is unchanged.
+    const isManual = dto.mode === 'manual';
+    if (isManual && !dto.manual_adjustment) {
+      throw new BadRequestException(
+        'manual_adjustment مطلوب لتعديل يدوي',
+      );
+    }
+
     const items: SmartPricingItem[] = rows.map((r: any) =>
-      this._recommendForVariant(r, dto.strategy, settings),
+      isManual
+        ? this._recommendForVariantManual(r, dto.manual_adjustment!, settings)
+        : this._recommendForVariant(r, dto.strategy, settings),
     );
 
     return { items, settings };
@@ -823,6 +836,157 @@ export class ProductsService {
     return this._finalize(base, 'keep', currentPrice, settings, minMargin, [], 'السعر الحالي مناسب.');
   }
 
+  /**
+   * P3.5A.1 — Manual recommender. Same `SmartPricingItem` shape as the
+   * smart path, but the suggested price comes from the operator's
+   * flat formula (percent / amount / fixed price), not from the
+   * strategy engine. Pure compute, no I/O.
+   *
+   * Recommendation rules:
+   *   · cost or current_price missing → review (no suggested price)
+   *   · resulting price <= 0.01 → review (skipped on apply)
+   *   · resulting price == current within 0.01 EGP → keep
+   *   · resulting price > current → increase
+   *   · resulting price < current → decrease
+   * Warnings are emitted by `_finalize` (e.g. below_cost_after_change,
+   * below_min_margin_after_change, large_increase/decrease).
+   */
+  private _recommendForVariantManual(
+    row: any,
+    adj: ManualAdjustmentDto,
+    settings: SmartPricingThresholds,
+  ): SmartPricingItem {
+    const cost = Number(row.cost_price || 0);
+    const currentPrice = Number(row.selling_price || 0);
+    const minMargin = Number(row.min_margin_pct || settings.min_margin_pct_default);
+    const stockQty = Number(row.stock_qty || 0);
+    const qtySold = Number(row.qty_sold || 0);
+    const invoiceCount = Number(row.invoice_count || 0);
+
+    const currentMarginPct =
+      currentPrice > 0
+        ? round2((currentPrice - cost) / currentPrice * 100)
+        : null;
+    const currentMarkupPct =
+      cost > 0 ? round2((currentPrice - cost) / cost * 100) : null;
+
+    const base = {
+      variant_id: row.variant_id,
+      product_id: row.product_id,
+      product_name: row.product_name,
+      sku: row.sku,
+      barcode: row.barcode,
+      color: row.color,
+      size: row.size,
+      current_cost: round2(cost),
+      current_price: round2(currentPrice),
+      stock_qty: stockQty,
+      qty_sold: qtySold,
+      invoice_count: invoiceCount,
+      last_sold_at: row.last_sold_at,
+      current_margin_pct: currentMarginPct,
+      current_markup_pct: currentMarkupPct,
+      min_margin_pct: minMargin,
+    } as const;
+
+    // Missing current price → can't apply a relative change. Set-price
+    // is still allowed even when current price is missing.
+    const op = adj.operation;
+    const value = Number(adj.value);
+    if (op !== 'set_price' && !(currentPrice > 0)) {
+      return {
+        ...base,
+        recommendation: 'review',
+        suggested_selling_price: null,
+        expected_profit_delta_per_unit: null,
+        reason_ar: 'لا يوجد سعر بيع حالي — لا يمكن تطبيق تعديل نسبي أو بقيمة.',
+        warnings: !(cost > 0) ? ['missing_cost'] : [],
+        skipped_reason: 'cost_or_price_missing',
+      };
+    }
+
+    let raw = 0;
+    let reason_ar = '';
+    switch (op) {
+      case 'increase_percent':
+        raw = currentPrice * (1 + value / 100);
+        reason_ar = `زيادة يدوية بنسبة ${value}%`;
+        break;
+      case 'decrease_percent':
+        raw = currentPrice * (1 - value / 100);
+        reason_ar = `تخفيض يدوي بنسبة ${value}%`;
+        break;
+      case 'increase_amount':
+        raw = currentPrice + value;
+        reason_ar = `زيادة يدوية بقيمة ${value} ج.م`;
+        break;
+      case 'decrease_amount':
+        raw = currentPrice - value;
+        reason_ar = `تخفيض يدوي بقيمة ${value} ج.م`;
+        break;
+      case 'set_price':
+        raw = value;
+        reason_ar = `تعيين سعر بيع ثابت ${value} ج.م`;
+        break;
+      default:
+        return {
+          ...base,
+          recommendation: 'review',
+          suggested_selling_price: null,
+          expected_profit_delta_per_unit: null,
+          reason_ar: 'نوع تعديل غير معروف.',
+          warnings: [],
+          skipped_reason: 'invalid_manual_operation',
+        };
+    }
+
+    const suggested = round2(raw);
+
+    // Resulting price must be > 0.01. Anything else → review.
+    if (!(suggested >= 0.01)) {
+      return {
+        ...base,
+        recommendation: 'review',
+        suggested_selling_price: null,
+        expected_profit_delta_per_unit: null,
+        reason_ar: 'السعر الناتج أقل من أو يساوي صفر ويحتاج مراجعة.',
+        warnings: [],
+        skipped_reason: 'manual_price_non_positive',
+      };
+    }
+
+    // Below-cost guard is informational — we attach the warning but the
+    // operator can still choose to apply if they explicitly tick the
+    // row in preview. (Same policy as the smart path.)
+    const preWarnings: SmartPricingWarning[] = [];
+    if (cost > 0 && currentPrice > 0 && currentPrice < cost) {
+      preWarnings.push('below_cost_at_current');
+    }
+
+    if (Math.abs(suggested - currentPrice) < 0.01) {
+      return this._finalize(
+        base,
+        'keep',
+        currentPrice,
+        settings,
+        minMargin,
+        preWarnings,
+        `${reason_ar} — السعر الجديد يساوي السعر الحالي.`,
+      );
+    }
+    const dir: SmartPricingRecommendation =
+      suggested > currentPrice ? 'increase' : 'decrease';
+    return this._finalize(
+      base,
+      dir,
+      suggested,
+      settings,
+      minMargin,
+      preWarnings,
+      reason_ar,
+    );
+  }
+
   /** Compute price needed to reach the target margin %, but never below
    *  the price needed for the minimum-margin policy floor. */
   private _priceForMargin(cost: number, targetPct: number, minPct: number): number {
@@ -891,6 +1055,25 @@ export class ProductsService {
 
   /** Public entry: read-only preview. */
   async smartPricingPreview(dto: SmartPricingPreviewDto) {
+    // P3.5A.1 — defensive validation for manual mode (matches the rule
+    // documented in the DTO comments: value > 0, percent ≤ 500,
+    // set_price ≥ 0.01). The DTO already enforces `value > 0` via the
+    // `Min(0.01)` decorator; this extra branch covers the ceiling.
+    if (dto.mode === 'manual') {
+      const adj = dto.manual_adjustment;
+      if (!adj) {
+        throw new BadRequestException('manual_adjustment مطلوب لتعديل يدوي');
+      }
+      if (
+        (adj.operation === 'increase_percent' ||
+          adj.operation === 'decrease_percent') &&
+        adj.value > 500
+      ) {
+        throw new BadRequestException(
+          'النسبة لا يمكن أن تتجاوز 500%',
+        );
+      }
+    }
     const { items, settings } = await this._smartPricingComputeRecommendations(dto);
     const summary = {
       total: items.length,
@@ -899,7 +1082,15 @@ export class ProductsService {
       keep: items.filter((i) => i.recommendation === 'keep').length,
       review: items.filter((i) => i.recommendation === 'review').length,
     };
-    return { strategy: dto.strategy, scope_type: dto.scope.type, settings, summary, items };
+    return {
+      strategy: dto.strategy,
+      scope_type: dto.scope.type,
+      mode: dto.mode ?? 'smart',
+      manual_adjustment: dto.mode === 'manual' ? dto.manual_adjustment : null,
+      settings,
+      summary,
+      items,
+    };
   }
 
   /** Public entry: apply. Re-runs preview server-side then applies only
@@ -916,10 +1107,20 @@ export class ProductsService {
         );
       }
     }
+    // P3.5A.1 — server re-runs preview with the same mode + manual
+    // adjustment; client-supplied prices are NEVER trusted.
+    const isManual = dto.mode === 'manual';
+    if (isManual && !dto.manual_adjustment) {
+      throw new BadRequestException(
+        'manual_adjustment مطلوب لتعديل يدوي',
+      );
+    }
 
     const { items } = await this._smartPricingComputeRecommendations({
       scope: dto.scope,
       strategy: dto.strategy,
+      mode: dto.mode,
+      manual_adjustment: dto.manual_adjustment,
       limit: 5000,
     });
 
@@ -959,14 +1160,19 @@ export class ProductsService {
             WHERE id = $1`,
           [it.variant_id, newPrice],
         );
-        const meta = {
+        const meta: Record<string, any> = {
           source: 'smart_bulk_pricing',
-          strategy: dto.strategy,
+          mode: isManual ? 'manual' : 'smart',
+          strategy: isManual ? null : dto.strategy,
           recommendation: it.recommendation,
           reason_ar: it.reason_ar,
           warnings: it.warnings,
           scope_type: dto.scope.type,
         };
+        if (isManual && dto.manual_adjustment) {
+          meta.operation = dto.manual_adjustment.operation;
+          meta.value = dto.manual_adjustment.value;
+        }
         const [hist] = await em.query(
           `INSERT INTO variant_price_history
              (variant_id, old_selling_price, new_selling_price,
@@ -988,6 +1194,7 @@ export class ProductsService {
       return {
         strategy: dto.strategy,
         scope_type: dto.scope.type,
+        mode: isManual ? 'manual' : 'smart',
         updated,
         skipped,
         items: out,
