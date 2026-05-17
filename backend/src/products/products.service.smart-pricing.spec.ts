@@ -526,6 +526,193 @@ describe('smartPricingApply — transaction footprint (P3.5A)', () => {
   });
 });
 
+// HOTFIX (post-fd30cee) — Regression block for the "could not determine
+// data type of parameter $2" bug. The original main rich-data query
+// reused a `$1..$N` placeholder string in three IN clauses while the
+// params array carried `[...variantIds, ...variantIds, default]`, so
+// the second batch of variant_ids ($N+1..$2N) was bound but never
+// referenced in SQL and PostgreSQL aborted at bind-time.
+//
+// These tests pin:
+//   · every $-placeholder in the main rich-query has a corresponding
+//     param and every passed param is referenced
+//   · the main rich-query uses `ANY($1::uuid[])` (explicit cast) and
+//     `$2::numeric` for the min-margin fallback
+//   · the filtered-scope SQL casts q → text and supplier_id → uuid
+//   · preview works for every scope shape (single / selected /
+//     filtered / all) with no SQL-bind error
+describe('smartPricingPreview — SQL bind shape (HOTFIX regression)', () => {
+  // Helper: extract the SQL of the second call (= main rich-data query).
+  // Order of calls for selected/single scope:
+  //   0 — settings
+  //   1 — main rich-data query
+  // For filtered/all scope:
+  //   0 — settings
+  //   1 — scope-resolution query
+  //   2 — main rich-data query
+  function placeholdersIn(sql: string): number[] {
+    return Array.from(
+      new Set(
+        (sql.match(/\$(\d+)/g) ?? []).map((m) => Number(m.slice(1))),
+      ),
+    ).sort((a, b) => a - b);
+  }
+
+  it('R1. selected (1 variant): main query uses ANY($1::uuid[]) + $2::numeric, params length = 2', async () => {
+    const { service, calls } = await makeService({
+      responses: [SETTINGS_ROWS, [richRow()]],
+    });
+    await service.smartPricingPreview({
+      scope: { type: 'selected', variant_ids: [VID] },
+      strategy: 'balanced',
+    });
+    expect(calls).toHaveLength(2);
+    const main = calls[1];
+    expect(main.sql).toMatch(/ANY\(\$1::uuid\[\]\)/);
+    // Three references to the variant-id array: stock_sum, sales_90d,
+    // and the outer WHERE.
+    const occurrences = main.sql.match(/ANY\(\$1::uuid\[\]\)/g) ?? [];
+    expect(occurrences.length).toBe(3);
+    expect(main.sql).toMatch(/\$2::numeric/);
+    // Params: [uuid[], defaultMargin] — exactly two.
+    expect(main.params).toHaveLength(2);
+    expect(Array.isArray(main.params[0])).toBe(true);
+    expect(main.params[0]).toEqual([VID]);
+    expect(typeof main.params[1]).toBe('number');
+  });
+
+  it('R2. selected (multi): array param carries all ids, still only 2 bind slots', async () => {
+    const { service, calls } = await makeService({
+      responses: [SETTINGS_ROWS, [richRow(), richRow({ variant_id: VID2 })]],
+    });
+    await service.smartPricingPreview({
+      scope: { type: 'selected', variant_ids: [VID, VID2] },
+      strategy: 'balanced',
+    });
+    const main = calls[1];
+    expect(main.params).toHaveLength(2);
+    expect(main.params[0]).toEqual([VID, VID2]);
+  });
+
+  it('R3. single scope: rich query bind shape is identical to selected', async () => {
+    const { service, calls } = await makeService({
+      responses: [SETTINGS_ROWS, [richRow()]],
+    });
+    await service.smartPricingPreview({
+      scope: { type: 'single', variant_ids: [VID] },
+      strategy: 'balanced',
+    });
+    const main = calls[1];
+    expect(main.sql).toMatch(/ANY\(\$1::uuid\[\]\)/);
+    expect(main.sql).toMatch(/\$2::numeric/);
+    expect(main.params).toHaveLength(2);
+  });
+
+  it('R4. filtered scope (q + only_in_stock): scope SQL uses ::text cast + stock join', async () => {
+    const { service, calls } = await makeService({
+      responses: [
+        SETTINGS_ROWS,
+        [{ variant_id: VID }],            // scope resolution
+        [richRow()],                       // rich rows
+      ],
+    });
+    await service.smartPricingPreview({
+      scope: {
+        type: 'filtered',
+        filters: { q: 'حذاء', only_in_stock: true },
+      },
+      strategy: 'balanced',
+    });
+    const scopeSql = calls[1].sql;
+    expect(scopeSql).toMatch(/ILIKE \$\d+::text/);
+    expect(scopeSql).toMatch(/JOIN stock st ON st.variant_id = pv.id/);
+    expect(scopeSql).toMatch(/st\.quantity_on_hand > 0/);
+    // Rich-data query (3rd call) still has the same fixed bind shape.
+    const main = calls[2];
+    expect(main.sql).toMatch(/ANY\(\$1::uuid\[\]\)/);
+    expect(main.sql).toMatch(/\$2::numeric/);
+    expect(main.params).toHaveLength(2);
+  });
+
+  it('R5. filtered scope (supplier_id): SQL casts supplier filter to ::uuid', async () => {
+    const supplier = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+    const { service, calls } = await makeService({
+      responses: [
+        SETTINGS_ROWS,
+        [{ variant_id: VID }],
+        [richRow()],
+      ],
+    });
+    await service.smartPricingPreview({
+      scope: {
+        type: 'filtered',
+        filters: { supplier_id: supplier },
+      },
+      strategy: 'balanced',
+    });
+    const scopeSql = calls[1].sql;
+    expect(scopeSql).toMatch(/pu_s\.supplier_id = \$\d+::uuid/);
+    expect(calls[1].params).toContain(supplier);
+  });
+
+  it('R6. all scope (no filters): scope SQL has zero params, rich query keeps fixed bind shape', async () => {
+    const { service, calls } = await makeService({
+      responses: [
+        SETTINGS_ROWS,
+        [{ variant_id: VID }],
+        [richRow()],
+      ],
+    });
+    await service.smartPricingPreview({
+      scope: { type: 'all' },
+      strategy: 'balanced',
+    });
+    expect(calls[1].params).toEqual([]);
+    // No bound placeholders in the all-scope resolution.
+    expect(placeholdersIn(calls[1].sql)).toEqual([]);
+    const main = calls[2];
+    expect(main.sql).toMatch(/ANY\(\$1::uuid\[\]\)/);
+    expect(main.params).toHaveLength(2);
+  });
+
+  it('R7. dangling-param regression: every $N in the main query has a param and vice versa', async () => {
+    const { service, calls } = await makeService({
+      responses: [SETTINGS_ROWS, [richRow()]],
+    });
+    await service.smartPricingPreview({
+      scope: { type: 'selected', variant_ids: [VID] },
+      strategy: 'balanced',
+    });
+    const main = calls[1];
+    const refs = placeholdersIn(main.sql);
+    // No gaps and no out-of-range references.
+    expect(refs[0]).toBe(1);
+    expect(refs[refs.length - 1]).toBe(main.params.length);
+    // Sequence is exactly 1..N (no holes).
+    refs.forEach((n, i) => expect(n).toBe(i + 1));
+  });
+
+  it('R8. static regex: main rich-query source contains ANY($1::uuid[]) and $2::numeric (no $3+)', () => {
+    const SRC = readFileSync(
+      join(__dirname, 'products.service.ts'),
+      'utf8',
+    );
+    // Grab the literal template inside _smartPricingComputeRecommendations.
+    const start = SRC.indexOf('_smartPricingComputeRecommendations');
+    expect(start).toBeGreaterThan(-1);
+    const blockEnd = SRC.indexOf('private async _resolveScope', start);
+    const block = SRC.slice(start, blockEnd > -1 ? blockEnd : start + 6000);
+    expect(block).toMatch(/ANY\(\$1::uuid\[\]\)/);
+    expect(block).toMatch(/\$2::numeric/);
+    // No $3, $4, … in the main query template — only $1 + $2 are used.
+    expect(block).not.toMatch(/\$3\b/);
+    expect(block).not.toMatch(/\$4\b/);
+    expect(block).not.toMatch(/variantIds\.length \* 2/);
+    // No IS NULL with a raw $-placeholder (defensive).
+    expect(block).not.toMatch(/\$\d+\s+IS NULL/i);
+  });
+});
+
 describe('STATIC GUARDRAIL — smart pricing assistant write footprint', () => {
   const SRC = readFileSync(
     join(__dirname, 'products.service.ts'),

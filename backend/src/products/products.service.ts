@@ -509,13 +509,22 @@ export class ProductsService {
     //    · invoice_items + invoices (sales metrics in the last 90d
     //      excluding returns and non-completed invoices)
     //    · colors / sizes (display metadata)
-    const placeholders = variantIds.map((_, i) => `$${i + 1}`).join(',');
+    //
+    // HOTFIX (post-fd30cee): use ANY($1::uuid[]) for the variant-id list
+    // and $2::numeric for the min-margin fallback. The previous form
+    // reused a `$1..$N` placeholder string in three IN clauses while the
+    // params array carried `[...variantIds, ...variantIds, default]` —
+    // so the second batch (`$N+1..$2N`) was bound but never referenced
+    // in SQL, and PostgreSQL aborted with "could not determine data type
+    // of parameter $2" for the smallest dangling slot. Explicit casts
+    // also let the planner pick the index path on stock.variant_id and
+    // invoice_items.variant_id without an implicit coercion step.
     const rows = await this.ds.query(
       `
       WITH stock_sum AS (
         SELECT variant_id, SUM(quantity_on_hand)::int AS qty
           FROM stock
-         WHERE variant_id IN (${placeholders})
+         WHERE variant_id = ANY($1::uuid[])
          GROUP BY variant_id
       ),
       sales_90d AS (
@@ -526,7 +535,7 @@ export class ProductsService {
           MAX(COALESCE(i.completed_at, i.created_at)) AS last_sold_at
         FROM invoice_items ii
         JOIN invoices i ON i.id = ii.invoice_id
-        WHERE ii.variant_id IN (${placeholders})
+        WHERE ii.variant_id = ANY($1::uuid[])
           AND i.status IN ('completed','paid','partially_paid')
           AND NOT i.is_return
           AND COALESCE(i.completed_at, i.created_at) >= NOW() - INTERVAL '90 days'
@@ -542,7 +551,7 @@ export class ProductsService {
         sz.size_label                                              AS size,
         pv.cost_price::numeric                                     AS cost_price,
         COALESCE(NULLIF(pv.selling_price, 0), p.base_price)::numeric AS selling_price,
-        COALESCE(p.min_margin_pct, $${variantIds.length * 2 + 1})::numeric AS min_margin_pct,
+        COALESCE(p.min_margin_pct, $2::numeric)::numeric           AS min_margin_pct,
         COALESCE(stock_sum.qty, 0)                                 AS stock_qty,
         COALESCE(sales_90d.qty_sold, 0)                            AS qty_sold,
         COALESCE(sales_90d.invoice_count, 0)                       AS invoice_count,
@@ -553,12 +562,12 @@ export class ProductsService {
       LEFT JOIN sizes  sz ON sz.id = pv.size_id
       LEFT JOIN stock_sum ON stock_sum.variant_id = pv.id
       LEFT JOIN sales_90d  ON sales_90d.variant_id = pv.id
-      WHERE pv.id IN (${placeholders})
+      WHERE pv.id = ANY($1::uuid[])
         AND pv.is_active = TRUE
         AND pv.deleted_at IS NULL
       ORDER BY p.name_ar, pv.sku
       `,
-      [...variantIds, ...variantIds, settings.min_margin_pct_default],
+      [variantIds, settings.min_margin_pct_default],
     );
 
     const items: SmartPricingItem[] = rows.map((r: any) =>
@@ -592,16 +601,20 @@ export class ProductsService {
       const f = scope.filters ?? {};
       const params: any[] = [];
       const conds: string[] = ['pv.is_active = TRUE', 'pv.deleted_at IS NULL'];
+      // HOTFIX (post-fd30cee): every optional placeholder carries an
+      // explicit type cast so PostgreSQL can resolve the bind type even
+      // when neighbouring placeholders dangle or get added in different
+      // orders by future filters.
       if (f.q) {
         params.push(`%${f.q.trim()}%`);
         conds.push(
-          `(p.name_ar ILIKE $${params.length} OR pv.sku ILIKE $${params.length} OR pv.barcode ILIKE $${params.length})`,
+          `(p.name_ar ILIKE $${params.length}::text OR pv.sku ILIKE $${params.length}::text OR pv.barcode ILIKE $${params.length}::text)`,
         );
       }
       const supplierJoin = f.supplier_id ? 'JOIN purchase_items pi_s ON pi_s.variant_id = pv.id JOIN purchases pu_s ON pu_s.id = pi_s.purchase_id' : '';
       if (f.supplier_id) {
         params.push(f.supplier_id);
-        conds.push(`pu_s.supplier_id = $${params.length}`);
+        conds.push(`pu_s.supplier_id = $${params.length}::uuid`);
       }
       const stockJoin = f.only_in_stock
         ? 'JOIN stock st ON st.variant_id = pv.id'
