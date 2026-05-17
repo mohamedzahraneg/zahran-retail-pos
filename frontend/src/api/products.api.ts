@@ -120,4 +120,39 @@ export const productsApi = {
         params: { product_id, color_id, size_id: size_id || undefined },
       }),
     ),
+
+  // ─── PR-PURCHASES-P3.2 — manual apply suggested sale price ───────────
+  // Pricing-only endpoint. Updates product_variants.selling_price and
+  // inserts a variant_price_history audit row per change. Never touches
+  // accounting / cashbox / stock / POS lines.
+  applyVariantPrices: (body: ApplyVariantPricesPayload) =>
+    unwrap<ApplyVariantPricesResponse>(
+      api.post('/products/variants/apply-prices', body),
+    ),
 };
+
+// PR-PURCHASES-P3.2 — wire types for the apply-prices payload + response.
+export interface ApplyVariantPriceItem {
+  variant_id: string;
+  new_selling_price: number;
+}
+
+export interface ApplyVariantPricesPayload {
+  source_purchase_id?: string;
+  reason?: string;
+  items: ApplyVariantPriceItem[];
+}
+
+export interface ApplyVariantPricesResultItem {
+  variant_id: string;
+  old_selling_price: number;
+  new_selling_price: number;
+  history_id: string | null;
+  skipped: boolean;
+}
+
+export interface ApplyVariantPricesResponse {
+  updated: number;
+  skipped: number;
+  items: ApplyVariantPricesResultItem[];
+}

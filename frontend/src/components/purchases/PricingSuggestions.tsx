@@ -134,7 +134,8 @@ export function PricingSuggestions({
             data-testid="pricing-local-marker"
             className="text-[11px] text-slate-500 bg-white border border-slate-200 rounded p-2"
           >
-            سعر مقترح محدد محليًا فقط — لن يتم تحديث سعر البيع في هذه المرحلة.
+            هذا السعر محدد محليًا. لن يتم تحديث سعر البيع إلا عند الضغط
+            على «تطبيق الأسعار المحددة».
           </div>
         </>
       )}

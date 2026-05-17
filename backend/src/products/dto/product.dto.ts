@@ -1,11 +1,15 @@
 import {
+  ArrayMinSize,
+  IsArray,
   IsEnum,
   IsNumber,
   IsOptional,
   IsString,
   IsUUID,
   Min,
+  ValidateNested,
 } from 'class-validator';
+import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional, PartialType } from '@nestjs/swagger';
 
 export class CreateProductDto {
@@ -74,3 +78,34 @@ export class CreateVariantDto {
 }
 
 export class UpdateVariantDto extends PartialType(CreateVariantDto) {}
+
+// ─── PR-PURCHASES-P3.2 — manual apply suggested sale price ────────────────
+// Pricing-only payload. Drives `POST /products/variants/apply-prices`.
+// The endpoint updates `product_variants.selling_price` and inserts a
+// `variant_price_history` audit row per change — nothing else.
+export class ApplyVariantPriceItemDto {
+  @ApiProperty({ example: '00000000-0000-0000-0000-000000000000' })
+  @IsUUID()
+  variant_id: string;
+
+  @ApiProperty({ example: 145.0, minimum: 0.01 })
+  @IsNumber()
+  @Min(0.01)
+  new_selling_price: number;
+}
+
+export class ApplyVariantPricesDto {
+  /** Optional source purchase id — when the apply was triggered from
+   *  the purchase flow we store it on every history row for traceability. */
+  @ApiPropertyOptional() @IsOptional() @IsUUID() source_purchase_id?: string;
+
+  /** Optional free-form reason; stored verbatim on every history row. */
+  @ApiPropertyOptional() @IsOptional() @IsString() reason?: string;
+
+  @ApiProperty({ type: () => [ApplyVariantPriceItemDto] })
+  @IsArray()
+  @ArrayMinSize(1)
+  @ValidateNested({ each: true })
+  @Type(() => ApplyVariantPriceItemDto)
+  items: ApplyVariantPriceItemDto[];
+}

@@ -121,11 +121,13 @@ describe('PricingSuggestions — local-only behavior', () => {
         onApply={() => {}}
       />,
     );
+    // P3.2 marker text now references the explicit apply button so
+    // operators know exactly what triggers the DB update.
     expect(screen.getByTestId('pricing-local-marker')).toHaveTextContent(
-      'سعر مقترح محدد محليًا فقط',
+      'هذا السعر محدد محليًا.',
     );
     expect(screen.getByTestId('pricing-local-marker')).toHaveTextContent(
-      'لن يتم تحديث سعر البيع في هذه المرحلة',
+      'تطبيق الأسعار المحددة',
     );
   });
 

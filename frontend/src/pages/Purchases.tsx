@@ -44,6 +44,11 @@ import {
   suggestPrices,
   type PricingStrategy,
 } from '@/components/purchases/pricingMath';
+// PR-PURCHASES-P3.2 — manual apply suggested sale price modal.
+import {
+  ApplyPricesModal,
+  type ApplyPricesItem,
+} from '@/components/purchases/ApplyPricesModal';
 import { useAuthStore } from '@/stores/auth.store';
 import { useTableSort } from '@/lib/useTableSort';
 // PR-FE-IDEM-STOCK-PURCHASES-OPS (Sprint 5 / FE-IDEM PR 7C) —
@@ -478,6 +483,10 @@ function CreatePurchaseModal({ onClose }: { onClose: () => void }) {
   const [pendingPrices, setPendingPrices] = useState<
     Record<number, { strategy: PricingStrategy; price: number }>
   >({});
+  // PR-PURCHASES-P3.2 — opens the apply-prices confirmation modal.
+  // The modal calls a separate endpoint and is INDEPENDENT of the
+  // purchase create payload, which still strips pendingPrices entirely.
+  const [showApplyPrices, setShowApplyPrices] = useState(false);
 
   // Live allocation preview. Backend is source of truth; this is for
   // operator visibility (per-line breakdown + summary tiles).
@@ -1028,23 +1037,41 @@ function CreatePurchaseModal({ onClose }: { onClose: () => void }) {
           </div>
         </div>
 
-        <div className="flex justify-end gap-2 pt-2">
-          <button type="button" onClick={onClose} className="btn-ghost">
-            إلغاء
-          </button>
-          <button
-            type="submit"
-            disabled={createMut.isPending || hasExtraErrors}
-            className="btn-primary"
-            data-testid="purchase-submit"
-            title={
-              hasExtraErrors
-                ? 'يوجد خطأ في توزيع المصاريف الإضافية'
-                : undefined
-            }
-          >
-            حفظ كمسودة
-          </button>
+        <div className="flex justify-between items-center gap-2 pt-2">
+          {/* PR-PURCHASES-P3.2 — manual apply button. INDEPENDENT of
+              the purchase save mutation: clicking it opens a
+              confirmation modal that calls /products/variants/apply-
+              prices on its own. Visible only when ≥1 pending price. */}
+          <div>
+            {Object.keys(pendingPrices).length > 0 ? (
+              <button
+                type="button"
+                onClick={() => setShowApplyPrices(true)}
+                className="btn-ghost text-amber-700 border border-amber-300 hover:bg-amber-50"
+                data-testid="apply-prices-open"
+              >
+                تطبيق الأسعار المحددة ({Object.keys(pendingPrices).length})
+              </button>
+            ) : null}
+          </div>
+          <div className="flex gap-2">
+            <button type="button" onClick={onClose} className="btn-ghost">
+              إلغاء
+            </button>
+            <button
+              type="submit"
+              disabled={createMut.isPending || hasExtraErrors}
+              className="btn-primary"
+              data-testid="purchase-submit"
+              title={
+                hasExtraErrors
+                  ? 'يوجد خطأ في توزيع المصاريف الإضافية'
+                  : undefined
+              }
+            >
+              حفظ كمسودة
+            </button>
+          </div>
         </div>
       </form>
 
@@ -1056,6 +1083,35 @@ function CreatePurchaseModal({ onClose }: { onClose: () => void }) {
           onCreated={onQuickAddCreated}
         />
       ) : null}
+
+      {/* PR-PURCHASES-P3.2 — apply-prices confirmation modal. */}
+      <ApplyPricesModal
+        open={showApplyPrices}
+        items={Object.entries(pendingPrices).map(([rowIdxStr, pp]) => {
+          const rowIndex = Number(rowIdxStr);
+          const line = items[rowIndex];
+          return {
+            row_index: rowIndex,
+            variant_id: line?.variant_id ?? '',
+            display:
+              line?.display
+              || line?._ui?.display
+              || line?.variant_id
+              || '',
+            current_selling_price: line?._ui?.selling_price,
+            new_selling_price: pp.price,
+            strategy: pp.strategy,
+          } satisfies ApplyPricesItem;
+        })}
+        onClose={() => setShowApplyPrices(false)}
+        onApplied={(rowIndexes) =>
+          setPendingPrices((m) => {
+            const next = { ...m };
+            for (const idx of rowIndexes) delete next[idx];
+            return next;
+          })
+        }
+      />
     </div>
   );
 }
@@ -1570,6 +1626,8 @@ export function EditPurchaseModal({
   const [pendingPrices, setPendingPrices] = useState<
     Record<number, { strategy: PricingStrategy; price: number }>
   >({});
+  // PR-PURCHASES-P3.2 — controlled apply-prices modal trigger.
+  const [showApplyPrices, setShowApplyPrices] = useState(false);
 
   useEffect(() => {
     if (!detail) return;
@@ -2123,38 +2181,83 @@ export function EditPurchaseModal({
           )}
         </div>
 
-        <div className="p-4 border-t flex items-center justify-end gap-2">
-          <button onClick={onClose} className="btn-ghost">
-            إلغاء
-          </button>
-          <button
-            data-testid="edit-purchase-submit"
-            onClick={() => save.mutate()}
-            disabled={
-              save.isPending ||
-              items.length === 0 ||
-              isLoading ||
-              (!isDraft && !reason.trim()) ||
-              hasExtraErrors ||
-              nonDraftLandedBlocked
-            }
-            className="btn-primary"
-            title={
-              nonDraftLandedBlocked
-                ? 'لا يمكن تعديل مصاريف فاتورة مشتريات مستلمة أو مدفوعة حاليًا.'
-                : hasExtraErrors
-                  ? 'يوجد خطأ في توزيع المصاريف الإضافية'
-                  : undefined
-            }
-          >
-            {save.isPending
-              ? 'جاري الحفظ...'
-              : isDraft
-                ? 'حفظ التعديل'
-                : 'إصدار فاتورة بديلة'}
-          </button>
+        <div className="p-4 border-t flex items-center justify-between gap-2">
+          {/* PR-PURCHASES-P3.2 — manual apply button (edit modal).
+              Available regardless of draft/non-draft; pricing flow is
+              independent of the purchase edit save. */}
+          <div>
+            {Object.keys(pendingPrices).length > 0 ? (
+              <button
+                type="button"
+                onClick={() => setShowApplyPrices(true)}
+                className="btn-ghost text-amber-700 border border-amber-300 hover:bg-amber-50"
+                data-testid="edit-apply-prices-open"
+              >
+                تطبيق الأسعار المحددة ({Object.keys(pendingPrices).length})
+              </button>
+            ) : null}
+          </div>
+          <div className="flex items-center gap-2">
+            <button onClick={onClose} className="btn-ghost">
+              إلغاء
+            </button>
+            <button
+              data-testid="edit-purchase-submit"
+              onClick={() => save.mutate()}
+              disabled={
+                save.isPending ||
+                items.length === 0 ||
+                isLoading ||
+                (!isDraft && !reason.trim()) ||
+                hasExtraErrors ||
+                nonDraftLandedBlocked
+              }
+              className="btn-primary"
+              title={
+                nonDraftLandedBlocked
+                  ? 'لا يمكن تعديل مصاريف فاتورة مشتريات مستلمة أو مدفوعة حاليًا.'
+                  : hasExtraErrors
+                    ? 'يوجد خطأ في توزيع المصاريف الإضافية'
+                    : undefined
+              }
+            >
+              {save.isPending
+                ? 'جاري الحفظ...'
+                : isDraft
+                  ? 'حفظ التعديل'
+                  : 'إصدار فاتورة بديلة'}
+            </button>
+          </div>
         </div>
       </div>
+      {/* PR-PURCHASES-P3.2 — apply-prices confirmation modal. */}
+      <ApplyPricesModal
+        open={showApplyPrices}
+        sourcePurchaseId={detail?.id}
+        items={Object.entries(pendingPrices).map(([rowIdxStr, pp]) => {
+          const rowIndex = Number(rowIdxStr);
+          const line = items[rowIndex];
+          return {
+            row_index: rowIndex,
+            variant_id: line?.variant_id ?? '',
+            display: line?.product_name || line?.sku || line?.variant_id || '',
+            // Edit detail does not surface variant.selling_price, so
+            // the diff column will be "—". Apply still works server-
+            // side because the endpoint reads the current price live.
+            current_selling_price: undefined,
+            new_selling_price: pp.price,
+            strategy: pp.strategy,
+          } satisfies ApplyPricesItem;
+        })}
+        onClose={() => setShowApplyPrices(false)}
+        onApplied={(rowIndexes) =>
+          setPendingPrices((m) => {
+            const next = { ...m };
+            for (const idx of rowIndexes) delete next[idx];
+            return next;
+          })
+        }
+      />
     </div>
   );
 }

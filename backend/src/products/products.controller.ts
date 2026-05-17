@@ -8,10 +8,12 @@ import {
   Patch,
   Post,
   Query,
+  Req,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { ProductsService } from './products.service';
 import {
+  ApplyVariantPricesDto,
   CreateProductDto,
   CreateVariantDto,
   UpdateProductDto,
@@ -115,6 +117,20 @@ export class ProductsController {
   @Roles('admin', 'manager')
   addVariant(@Body() dto: CreateVariantDto) {
     return this.products.addVariant(dto);
+  }
+
+  // ─── PR-PURCHASES-P3.2 — manual apply suggested sale price ──────────
+  // Gated by the `products.price_change` permission slug (registered in
+  // settings since the role-permission framework went live). Pricing-
+  // only: updates product_variants.selling_price + inserts an audit row
+  // per change. Never touches accounting / cashbox / stock / POS.
+  @Post('variants/apply-prices')
+  @Permissions('products.price_change')
+  applyVariantPrices(
+    @Body() dto: ApplyVariantPricesDto,
+    @Req() req: any,
+  ) {
+    return this.products.applyVariantPrices(dto, req.user?.userId);
   }
 
   @Patch('variants/:id')

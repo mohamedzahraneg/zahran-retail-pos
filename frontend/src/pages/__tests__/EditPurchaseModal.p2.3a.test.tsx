@@ -31,6 +31,9 @@ const editMock = vi.fn(async (_id: string, _body: any) => ({
   purchase: {},
 }));
 const getMock = vi.fn(async (_id: string): Promise<any> => ({}));
+// PR-PURCHASES-P3.2 — products.api.applyVariantPrices spy, declared
+// at module top so the file-level beforeEach can reset it.
+const applyPricesMock = vi.fn();
 
 vi.mock('react-hot-toast', () => ({
   default: {
@@ -46,6 +49,20 @@ vi.mock('@/api/purchases.api', async () => {
     purchasesApi: {
       get: (id: string) => getMock(id),
       edit: (id: string, body: any) => editMock(id, body),
+    },
+  };
+});
+
+// PR-PURCHASES-P3.2 — mock the apply-prices endpoint at the products
+// API layer. P3.2 introduces an independent endpoint; the purchase
+// edit payload must remain pure regardless of pricing apply state.
+vi.mock('@/api/products.api', async () => {
+  const actual = await vi.importActual<any>('@/api/products.api');
+  return {
+    ...actual,
+    productsApi: {
+      ...((actual as any).productsApi ?? {}),
+      applyVariantPrices: (body: any) => applyPricesMock(body),
     },
   };
 });
@@ -138,6 +155,10 @@ function renderModal() {
 beforeEach(() => {
   editMock.mockClear();
   getMock.mockReset();
+  // PR-PURCHASES-P3.2 — keep the apply-prices spy reset across the
+  // whole file so tests further up don't see leaked promises from
+  // tests further down.
+  applyPricesMock.mockReset();
 });
 
 describe('EditPurchaseModal P2.3A — draft', () => {
@@ -261,5 +282,60 @@ describe('EditPurchaseModal P3.1 — pricing suggestions', () => {
     // base unit cost remains BASE — pricing apply must not double-bake
     // anything into the items payload.
     expect(body.items[0].unit_cost).toBe(100);
+  });
+});
+
+describe('EditPurchaseModal P3.2 — manual apply suggested sale price', () => {
+  it('9. footer "تطبيق الأسعار المحددة" button appears only after a strategy is selected', async () => {
+    getMock.mockResolvedValue(DRAFT_DETAIL);
+    renderModal();
+    await screen.findByText('صنف 1');
+    // No selections yet → no apply button.
+    expect(screen.queryByTestId('edit-apply-prices-open')).toBeNull();
+    fireEvent.click(screen.getByTestId('edit-pricing-toggle-0'));
+    fireEvent.click(screen.getByTestId('pricing-apply-recommended'));
+    expect(screen.getByTestId('edit-apply-prices-open')).toBeInTheDocument();
+    expect(
+      screen.getByTestId('edit-apply-prices-open'),
+    ).toHaveTextContent('تطبيق الأسعار المحددة (1)');
+  });
+
+  it('10. confirming the apply modal posts to apply-prices with source_purchase_id', async () => {
+    applyPricesMock.mockResolvedValue({
+      updated: 1,
+      skipped: 0,
+      items: [
+        {
+          variant_id: 'v-1',
+          old_selling_price: 0,
+          new_selling_price: 190,
+          history_id: 'hist-1',
+          skipped: false,
+        },
+      ],
+    });
+    getMock.mockResolvedValue(DRAFT_DETAIL);
+    renderModal();
+    await screen.findByText('صنف 1');
+    fireEvent.click(screen.getByTestId('edit-pricing-toggle-0'));
+    fireEvent.click(screen.getByTestId('pricing-apply-recommended'));
+    fireEvent.click(screen.getByTestId('edit-apply-prices-open'));
+    expect(screen.getByTestId('apply-prices-modal')).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('apply-prices-confirm'));
+    await waitFor(() => expect(applyPricesMock).toHaveBeenCalledTimes(1));
+    const body = applyPricesMock.mock.calls[0][0];
+    expect(body.source_purchase_id).toBe(DRAFT_DETAIL.id);
+    expect(body.items).toHaveLength(1);
+    expect(body.items[0].variant_id).toBe('v-1');
+    // Edit modal preloads DRAFT_DETAIL.extra_costs (100 EGP transport
+    // by_value) into the allocator on render. With 2 lines of base 100
+    // each + 1 line of base 100, the by_value share for v-1 is 200/300
+    // × 100 = 66.67 → per piece 33.33 → final landed unit_cost
+    // = 100 + 33.33 = 133.33. Recommended margin 30% on 133.33 → 190.48
+    // → rounded to nearest 5 = 190.
+    expect(body.items[0].new_selling_price).toBe(190);
+    expect(body.items[0]).not.toHaveProperty('strategy');
+    // Edit payload was NOT touched by the apply action.
+    expect(editMock).not.toHaveBeenCalled();
   });
 });

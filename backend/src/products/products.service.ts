@@ -8,6 +8,7 @@ import { DataSource, ILike, Repository } from 'typeorm';
 import { ProductEntity } from './entities/product.entity';
 import { VariantEntity } from './entities/variant.entity';
 import {
+  ApplyVariantPricesDto,
   CreateProductDto,
   UpdateProductDto,
   CreateVariantDto,
@@ -273,6 +274,117 @@ export class ProductsService {
   async removeVariant(id: string) {
     await this.variants.update(id, { is_active: false });
     return { archived: true };
+  }
+
+  // ─── PR-PURCHASES-P3.2 — manual apply suggested sale price ──────────
+  /**
+   * Apply operator-confirmed selling prices to a batch of variants.
+   *
+   * STRICTLY pricing-only:
+   *   · Updates ONLY `product_variants.selling_price`.
+   *   · Inserts ONE `variant_price_history` row per changed variant.
+   *   · No journal_entries / journal_lines / cashbox_transactions /
+   *     stock_movements writes. No call into posting.service /
+   *     financial-engine / purchases.service. Stock and accounting
+   *     are intentionally untouched — pricing is not a financial
+   *     event in this system.
+   *
+   * Skips (without inserting a history row) when the new price equals
+   * the current price within 0.01 EGP. Throws NotFoundException when a
+   * variant is missing, which rolls back the whole transaction so the
+   * caller sees an all-or-nothing result.
+   */
+  async applyVariantPrices(dto: ApplyVariantPricesDto, userId?: string) {
+    if (!dto.items || dto.items.length === 0) {
+      throw new BadRequestException('يجب تحديد صنف واحد على الأقل لتطبيق السعر');
+    }
+    for (const it of dto.items) {
+      if (!(Number(it.new_selling_price) > 0)) {
+        throw new BadRequestException(
+          `سعر البيع يجب أن يكون أكبر من صفر للصنف ${it.variant_id}`,
+        );
+      }
+    }
+
+    // sourcePurchaseNo is captured at apply-time so the history row
+    // stays meaningful even if the purchase is later renumbered. The
+    // read is OUTSIDE the transaction — purely informational.
+    let sourcePurchaseNo: string | null = null;
+    if (dto.source_purchase_id) {
+      const [row] = await this.ds.query(
+        `SELECT purchase_no FROM purchases WHERE id = $1`,
+        [dto.source_purchase_id],
+      );
+      if (row?.purchase_no) sourcePurchaseNo = row.purchase_no;
+    }
+
+    return this.ds.transaction(async (em) => {
+      const out: Array<{
+        variant_id: string;
+        old_selling_price: number;
+        new_selling_price: number;
+        history_id: string | null;
+        skipped: boolean;
+      }> = [];
+      let updated = 0;
+      let skipped = 0;
+      for (const it of dto.items) {
+        const [variant] = await em.query(
+          `SELECT id, selling_price FROM product_variants WHERE id = $1`,
+          [it.variant_id],
+        );
+        if (!variant) {
+          throw new NotFoundException(`الصنف غير موجود: ${it.variant_id}`);
+        }
+        const oldPrice = Number(variant.selling_price ?? 0);
+        const newPrice = Number(it.new_selling_price);
+        if (Math.abs(newPrice - oldPrice) < 0.01) {
+          out.push({
+            variant_id: it.variant_id,
+            old_selling_price: oldPrice,
+            new_selling_price: newPrice,
+            history_id: null,
+            skipped: true,
+          });
+          skipped += 1;
+          continue;
+        }
+        await em.query(
+          `UPDATE product_variants
+              SET selling_price = $2,
+                  updated_at    = NOW()
+            WHERE id = $1`,
+          [it.variant_id, newPrice],
+        );
+        const [hist] = await em.query(
+          `INSERT INTO variant_price_history
+             (variant_id, old_selling_price, new_selling_price,
+              source_purchase_id, source_purchase_no,
+              reason, changed_by, metadata)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+           RETURNING id`,
+          [
+            it.variant_id,
+            oldPrice,
+            newPrice,
+            dto.source_purchase_id ?? null,
+            sourcePurchaseNo,
+            dto.reason ?? null,
+            userId ?? null,
+            {},
+          ],
+        );
+        out.push({
+          variant_id: it.variant_id,
+          old_selling_price: oldPrice,
+          new_selling_price: newPrice,
+          history_id: hist?.id ?? null,
+          skipped: false,
+        });
+        updated += 1;
+      }
+      return { updated, skipped, items: out };
+    });
   }
 
   listVariants(productId: string) {
