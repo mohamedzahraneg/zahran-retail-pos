@@ -92,4 +92,13 @@ export class ListPurchasesDto {
   @IsOptional() @IsUUID() supplier_id?: string;
   @IsOptional() @IsDateString() from?: string;
   @IsOptional() @IsDateString() to?: string;
+  /**
+   * Purchases UX fixes — cancelled invoices are excluded from the
+   * default list view (the operator complained they were noise). Pass
+   * `include_cancelled=true` to surface them again, OR pass an explicit
+   * `status=cancelled` to filter for just cancelled. The cancelled
+   * rows are never deleted from the DB; this only controls list
+   * visibility.
+   */
+  @IsOptional() @IsBoolean() include_cancelled?: boolean;
 }

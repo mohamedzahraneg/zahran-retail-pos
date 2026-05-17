@@ -42,8 +42,15 @@ export class PurchasesService {
     const where: string[] = ['1=1'];
     const params: any[] = [];
     if (query.status) {
+      // Explicit status filter — the operator asked for a specific
+      // status (including 'cancelled'), honour it verbatim.
       params.push(query.status);
       where.push(`p.status = $${params.length}`);
+    } else if (!query.include_cancelled) {
+      // Purchases UX fixes — by default hide cancelled invoices from
+      // the list. The rows still exist in the DB and remain reachable
+      // by passing `status=cancelled` or `include_cancelled=true`.
+      where.push(`p.status <> 'cancelled'`);
     }
     if (query.supplier_id) {
       params.push(query.supplier_id);

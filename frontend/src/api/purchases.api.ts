@@ -146,6 +146,12 @@ export interface ListPurchasesParams {
   supplier_id?: string;
   from?: string;
   to?: string;
+  /** Purchases UX fixes — opt-in to include cancelled invoices in the
+   *  default list view. When omitted the server hides cancelled rows
+   *  (operator complaint: cancelled invoices were noise). Setting an
+   *  explicit `status='cancelled'` filter still returns the cancelled
+   *  rows regardless of this flag. */
+  include_cancelled?: boolean;
 }
 
 // ─── Purchases P1 (PR-PURCHASES-P1) ────────────────────────────────

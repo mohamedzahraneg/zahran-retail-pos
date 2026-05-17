@@ -112,9 +112,9 @@ export function LandedCostsSection({
       <div className="flex items-center justify-between gap-2 flex-wrap">
         <div>
           <h3 className="font-bold text-slate-700">مصاريف إضافية على الفاتورة</h3>
-          <p className="text-xs text-slate-500">
-            مصاريف الشحن الحالية منفصلة. استخدم المصاريف الإضافية إذا أردت
-            توزيعها على تكلفة المنتجات.
+          <p className="text-xs text-slate-500" data-testid="landed-costs-hint">
+            أضف مصاريف النقل أو العمالة أو الشحن من هنا ليتم توزيعها على
+            تكلفة المنتجات.
           </p>
         </div>
         <button

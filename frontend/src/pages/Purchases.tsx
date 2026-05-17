@@ -23,7 +23,7 @@ import {
   type CreatePurchasePayload,
   type PurchaseProductSearchRow,
 } from '@/api/purchases.api';
-import { suppliersApi } from '@/api/suppliers.api';
+import { suppliersApi, type Supplier } from '@/api/suppliers.api';
 import {
   settingsApi,
   SMART_PRICING_DEFAULTS,
@@ -31,6 +31,7 @@ import {
 } from '@/api/settings.api';
 // PR-PURCHASES-P1 — new purchase-invoice helpers.
 import { SupplierContextCard } from '@/components/purchases/SupplierContextCard';
+import { SupplierSearch } from '@/components/purchases/SupplierSearch';
 import { PurchaseProductSearch } from '@/components/purchases/PurchaseProductSearch';
 import { PurchaseLineEntry } from '@/components/purchases/PurchaseLineEntry';
 import { QuickAddProductModal } from '@/components/purchases/QuickAddProductModal';
@@ -89,7 +90,13 @@ const STATUS_COLORS: Record<PurchaseStatus, string> = {
 };
 
 export default function PurchasesPage() {
-  const [filter, setFilter] = useState<PurchaseStatus | ''>('');
+  // Purchases UX fixes — the default list view hides cancelled
+  // invoices (the operator complaint that triggered this fix). The
+  // filter dropdown now carries a virtual "all + cancelled" choice
+  // that flips `include_cancelled` on; picking the explicit
+  // `cancelled` status still returns just cancelled rows.
+  type ListMode = '' | PurchaseStatus | 'all_with_cancelled';
+  const [filter, setFilter] = useState<ListMode>('');
   const [supplierFilter, setSupplierFilter] = useState('');
   const [showCreate, setShowCreate] = useState(false);
   const [detailId, setDetailId] = useState<string | null>(null);
@@ -110,8 +117,12 @@ export default function PurchasesPage() {
     queryKey: ['purchases', filter, supplierFilter],
     queryFn: () =>
       purchasesApi.list({
-        status: (filter || undefined) as PurchaseStatus | undefined,
+        status:
+          filter === '' || filter === 'all_with_cancelled'
+            ? undefined
+            : (filter as PurchaseStatus),
         supplier_id: supplierFilter || undefined,
+        include_cancelled: filter === 'all_with_cancelled' ? true : undefined,
       }),
   });
 
@@ -210,16 +221,20 @@ export default function PurchasesPage() {
           </select>
         </div>
         <select
-          className="input w-48"
+          className="input w-56"
           value={filter}
-          onChange={(e) => setFilter(e.target.value as PurchaseStatus | '')}
+          onChange={(e) => setFilter(e.target.value as ListMode)}
+          data-testid="purchases-status-filter"
         >
-          <option value="">كل الحالات</option>
+          {/* Default — hides cancelled invoices. */}
+          <option value="">كل الفواتير النشطة</option>
           <option value="draft">مسودة</option>
           <option value="received">مستلمة</option>
           <option value="partial">سداد جزئي</option>
           <option value="paid">مسددة</option>
-          <option value="cancelled">ملغاة</option>
+          <option value="cancelled">ملغاة فقط</option>
+          {/* Explicit "show cancelled too" option. */}
+          <option value="all_with_cancelled">كل الفواتير + الملغاة</option>
         </select>
       </div>
 
@@ -421,10 +436,10 @@ function StatCard({
 
 function CreatePurchaseModal({ onClose }: { onClose: () => void }) {
   const qc = useQueryClient();
-  const { data: suppliers = [] } = useQuery({
-    queryKey: ['suppliers-all'],
-    queryFn: () => suppliersApi.list(),
-  });
+  // Purchases UX fixes — supplier is now picked via the SupplierSearch
+  // typeahead. We keep a Supplier object alongside the id so the
+  // SupplierContextCard + search component both render correctly.
+  const [supplier, setSupplier] = useState<Supplier | null>(null);
   // PR-PURCHASES-P3.3 — load smart_pricing settings once per modal
   // mount. Falls back to built-in defaults on failure so suggestion
   // cards always render — pricing config is non-blocking by design.
@@ -441,16 +456,22 @@ function CreatePurchaseModal({ onClose }: { onClose: () => void }) {
   });
 
   const [form, setForm] = useState({
-    supplier_id: '',
     warehouse_id: '',
     invoice_date: new Date().toISOString().slice(0, 10),
     due_date: '',
     supplier_ref: '',
-    shipping_cost: 0,
     discount_amount: 0,
     tax_amount: 0,
     notes: '',
   });
+  // Purchases UX fixes — invoice payment intent (cash/credit). This
+  // is a UI-only toggle for now: the backend has no `payment_type`
+  // column and there is NO official cashbox-write path attached to
+  // purchase creation. Picking "كاش" only locks `due_date` to today;
+  // it does NOT post a payment, debit the cashbox, or move money. A
+  // future migration can promote this to a real column when the
+  // payment flow at create time is designed end-to-end.
+  const [paymentType, setPaymentType] = useState<'cash' | 'credit'>('credit');
 
   // PR-PURCHASES-P1 — line items now carry optional UI-only metadata
   // (carton mode, cartons, pieces_per_carton, carton_cost) for the
@@ -521,14 +542,17 @@ function CreatePurchaseModal({ onClose }: { onClose: () => void }) {
           allocation_method: e.allocation_method ?? 'by_value',
           manual_allocations: e.manual_allocations,
         })),
-        shipping_cost: Number(form.shipping_cost || 0),
+        // Purchases UX fixes — the legacy `shipping_cost` input was
+        // removed from the create modal in favour of the "إضافة مصروف"
+        // (LandedCostsSection) flow. The preview always receives 0 so
+        // landed-cost math stays anchored on extras + line costs only.
+        shipping_cost: 0,
         discount_amount: Number(form.discount_amount || 0),
         tax_amount: Number(form.tax_amount || 0),
       }),
     [
       items,
       extraCosts,
-      form.shipping_cost,
       form.discount_amount,
       form.tax_amount,
     ],
@@ -570,12 +594,25 @@ function CreatePurchaseModal({ onClose }: { onClose: () => void }) {
   const createMut = useMutation({
     mutationFn: () =>
       purchasesApi.create({
-        supplier_id: form.supplier_id,
+        supplier_id: supplier?.id ?? '',
         warehouse_id: form.warehouse_id,
         invoice_date: form.invoice_date || undefined,
-        due_date: form.due_date || undefined,
+        // Purchases UX fixes — cash invoice means "paid on the invoice
+        // date" intent, expressed as `due_date == invoice_date`. The
+        // backend has no `payment_type` column and we deliberately do
+        // NOT post a cashbox transaction here (no official path for
+        // payment-at-create exists yet — see HOLD report). Credit
+        // invoices honour the operator-supplied due_date.
+        due_date:
+          paymentType === 'cash'
+            ? form.invoice_date || undefined
+            : form.due_date || undefined,
         supplier_ref: form.supplier_ref || undefined,
-        shipping_cost: Number(form.shipping_cost) || undefined,
+        // Legacy `shipping_cost` is intentionally omitted — operators
+        // enter shipping/transport/labour through "إضافة مصروف" now.
+        // Sending 0 keeps the backend happy without altering existing
+        // landed-cost math (the extras path is the source of truth).
+        shipping_cost: 0,
         discount_amount: Number(form.discount_amount) || undefined,
         tax_amount: Number(form.tax_amount) || undefined,
         notes: form.notes || undefined,
@@ -658,7 +695,7 @@ function CreatePurchaseModal({ onClose }: { onClose: () => void }) {
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!form.supplier_id || !form.warehouse_id) {
+    if (!supplier?.id || !form.warehouse_id) {
       toast.error('المورد والمخزن مطلوبان');
       return;
     }
@@ -680,6 +717,23 @@ function CreatePurchaseModal({ onClose }: { onClose: () => void }) {
       <form
         onSubmit={submit}
         onClick={(e) => e.stopPropagation()}
+        // Purchases UX fixes — disable Enter-submits-form globally so
+        // the keyboard flow (product → qty → price → Enter adds the
+        // line) never accidentally fires the parent "Save" action. The
+        // Save button (type=submit) still works on click; per-input
+        // Enter handlers in SupplierSearch / PurchaseLineEntry call
+        // their own `e.preventDefault()` so this is a belt-and-braces
+        // guard for the remaining text inputs (notes / supplier_ref /
+        // discount / tax).
+        onKeyDown={(e) => {
+          if (
+            e.key === 'Enter'
+            && !(e.target instanceof HTMLTextAreaElement)
+            && !(e.target instanceof HTMLButtonElement)
+          ) {
+            e.preventDefault();
+          }
+        }}
         className="modal-panel w-full max-w-4xl space-y-4 max-h-[95vh] overflow-y-auto"
       >
         <div className="flex items-center justify-between">
@@ -692,25 +746,17 @@ function CreatePurchaseModal({ onClose }: { onClose: () => void }) {
           </button>
         </div>
 
+        {/* Purchases UX fixes — supplier is now typeahead-searchable. */}
+        <div>
+          <label className="label">المورد *</label>
+          <SupplierSearch
+            value={supplier}
+            onSelect={setSupplier}
+            onClear={() => setSupplier(null)}
+          />
+        </div>
+
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          <div>
-            <label className="label">المورد *</label>
-            <select
-              className="input"
-              value={form.supplier_id}
-              onChange={(e) =>
-                setForm({ ...form, supplier_id: e.target.value })
-              }
-              required
-            >
-              <option value="">— اختر —</option>
-              {suppliers.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name}
-                </option>
-              ))}
-            </select>
-          </div>
           <div>
             <label className="label">المخزن *</label>
             <select
@@ -740,14 +786,66 @@ function CreatePurchaseModal({ onClose }: { onClose: () => void }) {
               }
             />
           </div>
+          {/* Purchases UX fixes — payment intent toggle. UI-only;
+              "كاش" snaps due_date = invoice_date but does NOT post a
+              cashbox transaction (no official path for that yet). */}
+          <div>
+            <label className="label">نوع الفاتورة</label>
+            <div
+              className="inline-flex w-full rounded-lg border border-slate-200 overflow-hidden text-sm"
+              role="tablist"
+              data-testid="purchase-payment-type"
+            >
+              <button
+                type="button"
+                role="tab"
+                aria-selected={paymentType === 'credit'}
+                onClick={() => setPaymentType('credit')}
+                className={`flex-1 px-3 py-2 ${
+                  paymentType === 'credit'
+                    ? 'bg-brand-500 text-white font-bold'
+                    : 'bg-white text-slate-700 hover:bg-slate-50'
+                }`}
+                data-testid="purchase-payment-type-credit"
+              >
+                أجل
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={paymentType === 'cash'}
+                onClick={() => setPaymentType('cash')}
+                className={`flex-1 px-3 py-2 ${
+                  paymentType === 'cash'
+                    ? 'bg-brand-500 text-white font-bold'
+                    : 'bg-white text-slate-700 hover:bg-slate-50'
+                }`}
+                data-testid="purchase-payment-type-cash"
+              >
+                كاش
+              </button>
+            </div>
+          </div>
           <div>
             <label className="label">تاريخ الاستحقاق</label>
             <input
               type="date"
               className="input"
-              value={form.due_date}
+              value={paymentType === 'cash' ? form.invoice_date : form.due_date}
+              disabled={paymentType === 'cash'}
               onChange={(e) => setForm({ ...form, due_date: e.target.value })}
+              data-testid="purchase-due-date"
             />
+            {paymentType === 'cash' ? (
+              <p
+                className="text-[11px] text-slate-500 mt-1"
+                data-testid="purchase-payment-type-cash-hint"
+              >
+                فواتير الكاش يكون تاريخ الاستحقاق فيها هو نفس تاريخ الفاتورة.
+                لا يتم تسجيل دفع تلقائي للخزينة الآن — سجّل الدفع لاحقًا من
+                زر السداد.
+              </p>
+            ) : null}
           </div>
           <div>
             <label className="label">مرجع المورد</label>
@@ -772,8 +870,8 @@ function CreatePurchaseModal({ onClose }: { onClose: () => void }) {
 
         {/* PR-PURCHASES-P1 — Supplier context card, shown once a
             supplier is selected. Read-only single-roundtrip fetch. */}
-        {form.supplier_id ? (
-          <SupplierContextCard supplierId={form.supplier_id} />
+        {supplier?.id ? (
+          <SupplierContextCard supplierId={supplier.id} />
         ) : null}
 
         {/* PR-PURCHASES-P1 — line entry replaces the cascading
@@ -1019,20 +1117,12 @@ function CreatePurchaseModal({ onClose }: { onClose: () => void }) {
           onChange={setExtraCosts}
         />
 
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-          <div>
-            <label className="label">الشحن</label>
-            <input
-              type="number"
-              min={0}
-              step="0.01"
-              className="input"
-              value={form.shipping_cost}
-              onChange={(e) =>
-                setForm({ ...form, shipping_cost: Number(e.target.value) })
-              }
-            />
-          </div>
+        {/* Purchases UX fixes — the standalone "الشحن" input was
+            removed. Shipping / transport / labour costs now flow
+            through the LandedCostsSection ("إضافة مصروف") block above
+            so the allocator can distribute them onto product costs
+            consistently. */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
           <div>
             <label className="label">خصم إجمالي</label>
             <input
@@ -2090,20 +2180,23 @@ export function EditPurchaseModal({
                 </table>
               </div>
 
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                <div>
-                  <label className="text-xs text-slate-600 block mb-1">
-                    شحن
-                  </label>
-                  <input
-                    type="number"
-                    className="input"
-                    value={shippingCost}
-                    onChange={(e) =>
-                      setShippingCost(Number(e.target.value) || 0)
-                    }
-                  />
+              {/* Purchases UX fixes — the standalone شحن input was
+                  removed from the edit modal too. Legacy invoices that
+                  carry a non-zero shipping_cost still load it into the
+                  edit modal's state (read-only echo below) and the
+                  value is re-sent on save so the totals don't drift.
+                  New shipping/transport/labour costs go through the
+                  LandedCostsSection ("إضافة مصروف") block above. */}
+              {shippingCost > 0 ? (
+                <div
+                  className="rounded-md border border-slate-200 bg-slate-50 p-2 text-xs text-slate-600 flex items-center justify-between"
+                  data-testid="edit-legacy-shipping-readonly"
+                >
+                  <span>شحن قديم (للقراءة فقط)</span>
+                  <span className="font-bold">{EGP(shippingCost)}</span>
                 </div>
+              ) : null}
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
                 <div>
                   <label className="text-xs text-slate-600 block mb-1">
                     خصم إجمالي

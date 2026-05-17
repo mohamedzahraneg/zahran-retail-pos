@@ -16,7 +16,7 @@
  * Backend payload remains piece-level (`quantity` + `unit_cost`).
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Boxes, Package, Plus, XCircle } from 'lucide-react';
 import {
   computeLine,
@@ -72,6 +72,20 @@ export function PurchaseLineEntry({
       Math.max(1, defaultPiecesPerCarton),
   );
   const [discount, setDiscount] = useState(0);
+
+  // Purchases UX fixes — Enter keyboard flow.
+  //   1. Picking a product (parent search) lands us here → focus qty.
+  //   2. Enter on qty   → focus price (unit_cost or carton_cost).
+  //   3. Enter on price → trigger submit() (parent re-renders search).
+  // Refs are also exposed so end-to-end tests can target each step.
+  const quantityRef = useRef<HTMLInputElement | null>(null);
+  const priceRef = useRef<HTMLInputElement | null>(null);
+  // Auto-focus the qty input as soon as a row is selected. The mount
+  // happens AFTER the search clears, so this is the natural next step.
+  useEffect(() => {
+    quantityRef.current?.focus();
+    quantityRef.current?.select();
+  }, [row.variant_id, mode]);
 
   // Switching mode: copy state across so the operator's other input
   // stays meaningful.  carton_cost = unit_cost × ppc when entering
@@ -192,23 +206,38 @@ export function PurchaseLineEntry({
           <div>
             <label className="label">الكمية (قطعة)</label>
             <input
+              ref={quantityRef}
               type="number"
               min={1}
               className="input"
               value={quantity}
               onChange={(e) => setQuantity(Number(e.target.value))}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  priceRef.current?.focus();
+                  priceRef.current?.select();
+                }
+              }}
               data-testid="purchase-line-piece-qty"
             />
           </div>
           <div>
             <label className="label">سعر القطعة</label>
             <input
+              ref={priceRef}
               type="number"
               min={0}
               step="0.01"
               className="input"
               value={unitCost}
               onChange={(e) => setUnitCost(Number(e.target.value))}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  submit();
+                }
+              }}
               data-testid="purchase-line-piece-cost"
             />
           </div>
@@ -229,11 +258,19 @@ export function PurchaseLineEntry({
           <div>
             <label className="label">عدد الكراتين</label>
             <input
+              ref={quantityRef}
               type="number"
               min={1}
               className="input"
               value={cartons}
               onChange={(e) => setCartons(Number(e.target.value))}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  priceRef.current?.focus();
+                  priceRef.current?.select();
+                }
+              }}
               data-testid="purchase-line-cartons"
             />
           </div>
@@ -251,12 +288,19 @@ export function PurchaseLineEntry({
           <div>
             <label className="label">سعر الكرتونة</label>
             <input
+              ref={priceRef}
               type="number"
               min={0}
               step="0.01"
               className="input"
               value={cartonCost}
               onChange={(e) => setCartonCost(Number(e.target.value))}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  submit();
+                }
+              }}
               data-testid="purchase-line-carton-cost"
             />
           </div>
