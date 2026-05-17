@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import {
@@ -13,6 +13,7 @@ import {
   FileText,
   Pencil,
   Minus,
+  Tag,
 } from 'lucide-react';
 import {
   purchasesApi,
@@ -37,6 +38,12 @@ import {
   ALLOC_METHOD_LABEL as ALLOC_METHOD_LABEL_AR,
 } from '@/components/purchases/landedCostLabels';
 import { computeLandedPreview } from '@/components/purchases/landedCostMath';
+// PR-PURCHASES-P3.1 — sale price suggestions (frontend-only).
+import { PricingSuggestions } from '@/components/purchases/PricingSuggestions';
+import {
+  suggestPrices,
+  type PricingStrategy,
+} from '@/components/purchases/pricingMath';
 import { useAuthStore } from '@/stores/auth.store';
 import { useTableSort } from '@/lib/useTableSort';
 // PR-FE-IDEM-STOCK-PURCHASES-OPS (Sprint 5 / FE-IDEM PR 7C) —
@@ -430,6 +437,9 @@ function CreatePurchaseModal({ onClose }: { onClose: () => void }) {
   // (carton mode, cartons, pieces_per_carton, carton_cost) for the
   // table display. The backend payload is still piece-level only —
   // see `_ui` strip in the createMut.
+  // PR-PURCHASES-P3.1 — `_ui.selling_price` captures the variant's
+  // current sale price at search-pick time so the per-line pricing
+  // suggestions panel can compute vs-current deltas without a refetch.
   type LineItem = CreatePurchaseItemPayload & {
     display?: string;
     _ui?: {
@@ -438,6 +448,7 @@ function CreatePurchaseModal({ onClose }: { onClose: () => void }) {
       cartons?: number;
       pieces_per_carton?: number;
       carton_cost?: number;
+      selling_price?: number;
     };
   };
   const [items, setItems] = useState<LineItem[]>([]);
@@ -454,6 +465,19 @@ function CreatePurchaseModal({ onClose }: { onClose: () => void }) {
   // rows). Backend reruns the same allocation engine on save, so the
   // frontend math here is preview-only.
   const [extraCosts, setExtraCosts] = useState<ExtraCostRow[]>([]);
+
+  // PR-PURCHASES-P3.1 — per-line pricing-suggestions UI state. Both
+  // are LOCAL-ONLY. `expandedPricingRows` toggles the suggestion
+  // panel; `pendingPrices` records which strategy + price the
+  // operator marked. P3.1 NEVER persists either of these — the
+  // purchase create payload below strips them out completely. P3.2
+  // will introduce an explicit apply path.
+  const [expandedPricingRows, setExpandedPricingRows] = useState<
+    Record<number, boolean>
+  >({});
+  const [pendingPrices, setPendingPrices] = useState<
+    Record<number, { strategy: PricingStrategy; price: number }>
+  >({});
 
   // Live allocation preview. Backend is source of truth; this is for
   // operator visibility (per-line breakdown + summary tiles).
@@ -549,6 +573,9 @@ function CreatePurchaseModal({ onClose }: { onClose: () => void }) {
   });
 
   // Confirm a line from PurchaseLineEntry → append to items.
+  // PR-PURCHASES-P3.1 — capture the picked variant's current
+  // selling_price into `_ui` so the per-line pricing-suggestions
+  // panel can compute vs-current deltas without a re-fetch.
   const confirmLine = (
     payload: CreatePurchaseItemPayload & {
       _ui: NonNullable<LineItem['_ui']>;
@@ -559,6 +586,10 @@ function CreatePurchaseModal({ onClose }: { onClose: () => void }) {
       {
         ...payload,
         display: payload._ui.display,
+        _ui: {
+          ...payload._ui,
+          selling_price: pendingRow?.selling_price,
+        },
       } as LineItem,
     ]);
     setPendingRow(null);
@@ -782,50 +813,103 @@ function CreatePurchaseModal({ onClose }: { onClose: () => void }) {
                       : 'قطعة';
                     const pv = previewByVariant.get(it.variant_id);
                     return (
-                      <tr key={idx}>
-                        <td className="p-2">{it.display || it.variant_id}</td>
-                        <td className="p-2 text-xs">{unitLabel}</td>
-                        <td className="p-2">{it.quantity}</td>
-                        {hasCapitalizedExtras ? (
-                          <>
-                            <td className="p-2">{EGP(it.unit_cost)}</td>
-                            <td
-                              className="p-2 text-emerald-700"
-                              data-testid={`line-allocated-${idx}`}
-                            >
-                              +{EGP(pv?.allocated_cost_per_unit ?? 0)}
-                            </td>
-                            <td
-                              className="p-2 font-bold"
-                              data-testid={`line-final-unit-cost-${idx}`}
-                            >
-                              {EGP(pv?.final_unit_cost ?? it.unit_cost)}
-                            </td>
-                            <td
-                              className="p-2 font-bold"
-                              data-testid={`line-final-line-total-${idx}`}
-                            >
-                              {EGP(pv?.final_line_total ?? lt)}
-                            </td>
-                          </>
-                        ) : (
-                          <>
-                            <td className="p-2">{EGP(it.unit_cost)}</td>
-                            <td className="p-2 font-bold">{EGP(lt)}</td>
-                          </>
-                        )}
-                        <td className="p-2">
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setItems((xs) => xs.filter((_, i) => i !== idx))
-                            }
-                            className="icon-btn text-rose-500"
+                      <Fragment key={idx}>
+                        <tr>
+                          <td className="p-2">{it.display || it.variant_id}</td>
+                          <td className="p-2 text-xs">{unitLabel}</td>
+                          <td className="p-2">{it.quantity}</td>
+                          {hasCapitalizedExtras ? (
+                            <>
+                              <td className="p-2">{EGP(it.unit_cost)}</td>
+                              <td
+                                className="p-2 text-emerald-700"
+                                data-testid={`line-allocated-${idx}`}
+                              >
+                                +{EGP(pv?.allocated_cost_per_unit ?? 0)}
+                              </td>
+                              <td
+                                className="p-2 font-bold"
+                                data-testid={`line-final-unit-cost-${idx}`}
+                              >
+                                {EGP(pv?.final_unit_cost ?? it.unit_cost)}
+                              </td>
+                              <td
+                                className="p-2 font-bold"
+                                data-testid={`line-final-line-total-${idx}`}
+                              >
+                                {EGP(pv?.final_line_total ?? lt)}
+                              </td>
+                            </>
+                          ) : (
+                            <>
+                              <td className="p-2">{EGP(it.unit_cost)}</td>
+                              <td className="p-2 font-bold">{EGP(lt)}</td>
+                            </>
+                          )}
+                          <td className="p-2">
+                            <div className="flex items-center gap-1 justify-end">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setExpandedPricingRows((m) => ({
+                                    ...m,
+                                    [idx]: !m[idx],
+                                  }))
+                                }
+                                className="icon-btn text-amber-600"
+                                title="اقتراحات السعر"
+                                data-testid={`pricing-toggle-${idx}`}
+                              >
+                                <Tag className="w-4 h-4" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setItems((xs) =>
+                                    xs.filter((_, i) => i !== idx),
+                                  )
+                                }
+                                className="icon-btn text-rose-500"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                        {expandedPricingRows[idx] ? (
+                          <tr
+                            data-testid={`pricing-row-${idx}`}
+                            className="bg-amber-50/30"
                           >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </td>
-                      </tr>
+                            <td
+                              colSpan={hasCapitalizedExtras ? 8 : 6}
+                              className="p-2"
+                            >
+                              <PricingSuggestions
+                                result={suggestPrices({
+                                  cost:
+                                    pv?.final_unit_cost ??
+                                    Number(it.unit_cost || 0),
+                                  currentSellingPrice: it._ui?.selling_price,
+                                  minMarginPct: 15,
+                                })}
+                                appliedStrategy={
+                                  pendingPrices[idx]?.strategy ?? null
+                                }
+                                onApply={(s) =>
+                                  setPendingPrices((m) => ({
+                                    ...m,
+                                    [idx]: {
+                                      strategy: s.strategy,
+                                      price: s.price,
+                                    },
+                                  }))
+                                }
+                              />
+                            </td>
+                          </tr>
+                        ) : null}
+                      </Fragment>
                     );
                   })}
                 </tbody>
@@ -867,6 +951,15 @@ function CreatePurchaseModal({ onClose }: { onClose: () => void }) {
                     highlight
                   />
                 </>
+              ) : null}
+              {/* PR-PURCHASES-P3.1 — pending-prices count tile. Surfaces
+                  when the operator marked at least one suggested price.
+                  Marker is LOCAL-ONLY; nothing is sent on save. */}
+              {Object.keys(pendingPrices).length > 0 ? (
+                <SummaryTile
+                  label="أسعار مقترحة محددة"
+                  value={`${Object.keys(pendingPrices).length} / ${items.length}`}
+                />
               ) : null}
             </div>
           ) : null}
@@ -1466,6 +1559,17 @@ export function EditPurchaseModal({
   // detail.extra_costs on first render. Only sent back to the API for
   // DRAFT purchases (non-draft surfaces a blocking banner instead).
   const [extraCosts, setExtraCosts] = useState<ExtraCostRow[]>([]);
+  // PR-PURCHASES-P3.1 — local-only pricing-suggestions state. Same
+  // shape and rules as CreatePurchaseModal: no payload leak, no DB
+  // write. `currentSellingPrice` is unavailable on the edit detail
+  // load (the read model doesn't surface variant.selling_price), so
+  // suggestions render without the vs-current comparison.
+  const [expandedPricingRows, setExpandedPricingRows] = useState<
+    Record<number, boolean>
+  >({});
+  const [pendingPrices, setPendingPrices] = useState<
+    Record<number, { strategy: PricingStrategy; price: number }>
+  >({});
 
   useEffect(() => {
     if (!detail) return;
@@ -1690,7 +1794,8 @@ export function EditPurchaseModal({
                         ? (pv?.final_line_total ?? baseTotal)
                         : baseTotal;
                       return (
-                        <tr key={`${it.variant_id}-${idx}`}>
+                        <Fragment key={`${it.variant_id}-${idx}`}>
+                        <tr>
                           <td className="p-2">
                             <div className="font-medium">
                               {it.product_name || '—'}
@@ -1794,15 +1899,70 @@ export function EditPurchaseModal({
                             {EGP(total)}
                           </td>
                           <td className="p-2">
-                            <button
-                              onClick={() => remove(idx)}
-                              className="icon-btn text-rose-600"
-                              title="حذف"
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </button>
+                            <div className="flex items-center gap-1 justify-end">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setExpandedPricingRows((m) => ({
+                                    ...m,
+                                    [idx]: !m[idx],
+                                  }))
+                                }
+                                className="icon-btn text-amber-600"
+                                title="اقتراحات السعر"
+                                data-testid={`edit-pricing-toggle-${idx}`}
+                              >
+                                <Tag className="w-4 h-4" />
+                              </button>
+                              <button
+                                onClick={() => remove(idx)}
+                                className="icon-btn text-rose-600"
+                                title="حذف"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
                           </td>
                         </tr>
+                        {expandedPricingRows[idx] ? (
+                          <tr
+                            data-testid={`edit-pricing-row-${idx}`}
+                            className="bg-amber-50/30"
+                          >
+                            <td
+                              colSpan={hasCapitalizedExtras ? 9 : 7}
+                              className="p-2"
+                            >
+                              <PricingSuggestions
+                                result={suggestPrices({
+                                  cost:
+                                    pv?.final_unit_cost ??
+                                    Number(it.unit_cost || 0),
+                                  // Edit detail does not carry the
+                                  // variant's current selling_price (out
+                                  // of scope for P3.1 — would need a
+                                  // backend join). Suggestions still
+                                  // render; vs-current just goes blank.
+                                  currentSellingPrice: undefined,
+                                  minMarginPct: 15,
+                                })}
+                                appliedStrategy={
+                                  pendingPrices[idx]?.strategy ?? null
+                                }
+                                onApply={(s) =>
+                                  setPendingPrices((m) => ({
+                                    ...m,
+                                    [idx]: {
+                                      strategy: s.strategy,
+                                      price: s.price,
+                                    },
+                                  }))
+                                }
+                              />
+                            </td>
+                          </tr>
+                        ) : null}
+                        </Fragment>
                       );
                     })}
                     {items.length === 0 && (

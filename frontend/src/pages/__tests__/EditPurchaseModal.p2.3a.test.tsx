@@ -229,3 +229,37 @@ describe('EditPurchaseModal P2.3A — received with extras', () => {
     expect(submit).toBeDisabled();
   });
 });
+
+describe('EditPurchaseModal P3.1 — pricing suggestions', () => {
+  it('7. toggling the pricing-tag button surfaces the suggestion panel', async () => {
+    getMock.mockResolvedValue(DRAFT_DETAIL);
+    renderModal();
+    await screen.findByText('صنف 1');
+    // No panels expanded by default.
+    expect(screen.queryByTestId('edit-pricing-row-0')).toBeNull();
+    fireEvent.click(screen.getByTestId('edit-pricing-toggle-0'));
+    expect(screen.getByTestId('edit-pricing-row-0')).toBeInTheDocument();
+    expect(screen.getByTestId('pricing-suggestions')).toBeInTheDocument();
+    expect(screen.getByTestId('pricing-card-recommended')).toBeInTheDocument();
+  });
+
+  it('8. selecting a suggested price does NOT add it to the edit payload', async () => {
+    getMock.mockResolvedValue(DRAFT_DETAIL);
+    renderModal();
+    await screen.findByText('صنف 1');
+    fireEvent.click(screen.getByTestId('edit-pricing-toggle-0'));
+    fireEvent.click(screen.getByTestId('pricing-apply-recommended'));
+    // Applied marker confirms the local state changed.
+    expect(screen.getByTestId('pricing-applied-recommended')).toBeInTheDocument();
+    // Save the form — payload must not contain any suggested-price field.
+    fireEvent.click(screen.getByTestId('edit-purchase-submit'));
+    await waitFor(() => expect(editMock).toHaveBeenCalledTimes(1));
+    const [, body] = editMock.mock.calls[0] as any;
+    expect(body).not.toHaveProperty('pending_prices');
+    expect(body).not.toHaveProperty('suggested_prices');
+    expect(body.items[0]).not.toHaveProperty('suggested_selling_price');
+    // base unit cost remains BASE — pricing apply must not double-bake
+    // anything into the items payload.
+    expect(body.items[0].unit_cost).toBe(100);
+  });
+});
