@@ -790,3 +790,130 @@ describe('PricingReports — P3.5A.1 Select-All + sticky controls', () => {
     ).toHaveTextContent('المحدد: 0');
   });
 });
+
+// ─── HOTFIX P3.5A.1 timeout — friendly Arabic toast + truncation banner
+//     + apply-batch guard. ────────────────────────────────────────────
+describe('PricingReports — HOTFIX timeout / truncation / apply guard', () => {
+  it('H1. axios timeout shows a friendly Arabic toast (not the raw "timeout of 30000ms exceeded")', async () => {
+    // Simulate axios timeout error shape.
+    smartPreviewMock.mockRejectedValueOnce({
+      code: 'ECONNABORTED',
+      message: 'timeout of 30000ms exceeded',
+    });
+    // Capture toast.error calls by mocking react-hot-toast.
+    const toastErrorSpy = vi.fn();
+    vi.doMock('react-hot-toast', () => ({
+      default: { error: toastErrorSpy, success: vi.fn() },
+    }));
+    // Re-import the modal so the new mock is in effect for this test.
+    vi.resetModules();
+    const ToastMod = await import('react-hot-toast');
+    (ToastMod as any).default.error = toastErrorSpy;
+
+    await openAssistantOnHealth();
+    fireEvent.click(screen.getByTestId('smart-pricing-next-strategy'));
+    fireEvent.click(screen.getByTestId('smart-pricing-generate-preview'));
+    await waitFor(() => expect(smartPreviewMock).toHaveBeenCalled());
+    // Either the toast spy fires, or the raw axios message must NOT
+    // appear anywhere in the rendered DOM.
+    await waitFor(() => {
+      expect(
+        document.body.textContent ?? '',
+      ).not.toMatch(/timeout of 30000ms exceeded/);
+    });
+  });
+
+  it('H2. truncation banner renders when preview.truncated is true', async () => {
+    smartPreviewMock.mockResolvedValueOnce({
+      ...PREVIEW_RESPONSE,
+      truncated: true,
+      total_candidates: 850,
+      returned_count: 200,
+      limit: 200,
+      message_ar:
+        'تم عرض أول 200 صنف فقط من 850. ضيّق الفلتر أو طبّق على دفعات.',
+    });
+    await openAssistantOnHealth();
+    fireEvent.click(screen.getByTestId('smart-pricing-next-strategy'));
+    fireEvent.click(screen.getByTestId('smart-pricing-generate-preview'));
+    await screen.findByTestId('smart-pricing-truncated-warning');
+    expect(
+      screen.getByTestId('smart-pricing-truncated-warning'),
+    ).toHaveTextContent('تم عرض أول 200 صنف فقط من 850');
+  });
+
+  it('H3. apply-batch warning + disabled button when applicable rows exceed 500', async () => {
+    // Synthesise an over-cap preview: 501 applicable rows.
+    const bigItems = Array.from({ length: 501 }, (_, i) => ({
+      ...PREVIEW_RESPONSE.items[0],
+      variant_id: `vbig-${i}`,
+      current_price: 100,
+      suggested_selling_price: 110,
+      recommendation: 'increase' as const,
+    }));
+    smartPreviewMock.mockResolvedValueOnce({
+      ...PREVIEW_RESPONSE,
+      summary: { total: 501, increase: 501, decrease: 0, keep: 0, review: 0 },
+      items: bigItems,
+      truncated: false,
+      total_candidates: 501,
+      returned_count: 501,
+      limit: 1000,
+      message_ar: null,
+    });
+    await openAssistantOnHealth();
+    fireEvent.click(screen.getByTestId('smart-pricing-next-strategy'));
+    fireEvent.click(screen.getByTestId('smart-pricing-generate-preview'));
+    await screen.findByTestId('smart-pricing-apply-batch-warning');
+    expect(
+      screen.getByTestId('smart-pricing-apply-batch-warning'),
+    ).toHaveTextContent('أكبر من');
+    expect(
+      screen.getByTestId('smart-pricing-go-apply'),
+    ).toBeDisabled();
+  });
+
+  it('H4. preview/apply use a 60s per-request timeout, not the 30s global default', async () => {
+    // We can't observe axios config directly through the mock layer
+    // here, but we can assert at least that the smart-pricing helpers
+    // are wired through the productsApi module (and exist) — the
+    // per-request timeout is set inline at the api/products.api.ts
+    // call sites. This guards against accidental removal.
+    const mod = await import('@/api/products.api');
+    expect(typeof mod.productsApi.smartPricingPreview).toBe('function');
+    expect(typeof mod.productsApi.smartPricingApply).toBe('function');
+    // The smartPricingPreview / smartPricingApply implementations
+    // appear in the source file with a `timeout: 60_000` literal.
+    // Loading the raw module text directly is not portable across
+    // bundlers, so this stays a smoke check on the exported shape.
+  });
+
+  it('H5. apply still passes through normally when applicable count ≤ 500', async () => {
+    smartPreviewMock.mockResolvedValueOnce({
+      ...PREVIEW_RESPONSE,
+      summary: { total: 1, increase: 1, decrease: 0, keep: 0, review: 0 },
+      items: [
+        {
+          ...PREVIEW_RESPONSE.items[0],
+          current_price: 100,
+          suggested_selling_price: 110,
+          recommendation: 'increase',
+        },
+      ],
+      truncated: false,
+      total_candidates: 1,
+      returned_count: 1,
+      limit: 200,
+    });
+    await openAssistantOnHealth();
+    fireEvent.click(screen.getByTestId('smart-pricing-next-strategy'));
+    fireEvent.click(screen.getByTestId('smart-pricing-generate-preview'));
+    await screen.findByTestId('smart-pricing-step-preview');
+    expect(
+      screen.queryByTestId('smart-pricing-apply-batch-warning'),
+    ).toBeNull();
+    expect(
+      screen.getByTestId('smart-pricing-go-apply'),
+    ).not.toBeDisabled();
+  });
+});

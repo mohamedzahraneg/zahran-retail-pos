@@ -477,18 +477,20 @@ describe('smartPricingApply — transaction footprint (P3.5A)', () => {
     ).rejects.toBeInstanceOf(BadRequestException);
   });
 
-  it('17. apply with scope=all + correct confirm_all proceeds', async () => {
+  it('17. apply with scope=all + correct confirm_all + variant_ids_to_apply proceeds', async () => {
+    // HOTFIX P3.5A.1 timeout — all-scope apply now requires explicit
+    // variant_ids_to_apply narrowing. The confirm phrase is still
+    // required, but the operator must also tick rows from the preview.
+    // Call sequence: settings → COUNT(*) for all → SELECT ids → rich rows
+    // → SELECT current → UPDATE → INSERT history.
     const { service, ds } = await makeService({
       responses: [
-        // _resolveScope for scope=all
-        [{ variant_id: VID }],
-        // settings
         SETTINGS_ROWS,
-        // rich rows — return one that wants increase
+        [{ n: 1 }],                                   // COUNT(*) for all-scope
+        [{ variant_id: VID }],                        // sliced id list
         [richRow({ cost_price: '100', selling_price: '80' })],
-        // SELECT current
         [{ id: VID, selling_price: '80.00' }],
-        [], // UPDATE
+        [],
         [{ id: 'hist-1' }],
       ],
     });
@@ -498,6 +500,7 @@ describe('smartPricingApply — transaction footprint (P3.5A)', () => {
         strategy: 'balanced',
         reason: 'all apply',
         confirm_all: 'تأكيد تعديل كل الأصناف',
+        variant_ids_to_apply: [VID],
       },
       USER,
     );
@@ -523,6 +526,150 @@ describe('smartPricingApply — transaction footprint (P3.5A)', () => {
         USER,
       ),
     ).rejects.toBeInstanceOf(NotFoundException);
+  });
+});
+
+// HOTFIX P3.5A.1 timeout — preview must be bounded and apply must
+// refuse oversized batches. These tests pin the safe-default limit, the
+// truncation metadata, and the SMART_APPLY_BATCH_MAX guard.
+describe('smartPricingPreview — HOTFIX timeout bounds', () => {
+  it('T1. omitting limit defaults to 200 (not the previous 1000/5000)', async () => {
+    const { service, calls } = await makeService({
+      responses: [SETTINGS_ROWS, [{ n: 1 }], [{ variant_id: VID }], [richRow()]],
+    });
+    const res = await service.smartPricingPreview({
+      scope: { type: 'all' },
+      strategy: 'balanced',
+    });
+    expect(res.limit).toBe(200);
+    // SELECT-id query for all-scope embeds the limit literally.
+    const idSql = calls[2].sql;
+    expect(idSql).toMatch(/LIMIT 200/);
+  });
+
+  it('T2. limit is hard-capped at 1000 even when client requests more', async () => {
+    const { service, calls } = await makeService({
+      responses: [SETTINGS_ROWS, [{ n: 1 }], [{ variant_id: VID }], [richRow()]],
+    });
+    const res = await service.smartPricingPreview({
+      scope: { type: 'all' },
+      strategy: 'balanced',
+      limit: 9999 as any,                // DTO @Max(1000) blocks at the wire — the service hard-caps too
+    });
+    expect(res.limit).toBe(1000);
+    expect(calls[2].sql).toMatch(/LIMIT 1000/);
+  });
+
+  it('T3. truncated metadata is true when total_candidates > limit', async () => {
+    const { service } = await makeService({
+      responses: [
+        SETTINGS_ROWS,
+        [{ n: 850 }],                    // 850 total candidates
+        [{ variant_id: VID }],           // sliced
+        [richRow()],
+      ],
+    });
+    const res = await service.smartPricingPreview({
+      scope: { type: 'all' },
+      strategy: 'balanced',
+      limit: 200,
+    });
+    expect(res.truncated).toBe(true);
+    expect(res.total_candidates).toBe(850);
+    expect(res.returned_count).toBe(1);
+    expect(res.limit).toBe(200);
+    expect(res.message_ar).toMatch(/تم عرض أول \d+ صنف فقط من 850/);
+  });
+
+  it('T4. truncated is false when total ≤ returned (selected scope counts ids.length)', async () => {
+    const { service } = await makeService({
+      responses: [SETTINGS_ROWS, [richRow()]],
+    });
+    const res = await service.smartPricingPreview({
+      scope: { type: 'selected', variant_ids: [VID] },
+      strategy: 'balanced',
+    });
+    expect(res.truncated).toBe(false);
+    expect(res.total_candidates).toBe(1);
+    expect(res.message_ar).toBeNull();
+  });
+});
+
+describe('smartPricingApply — HOTFIX batch cap', () => {
+  it('T5. apply refuses variant_ids_to_apply.length > 500 with Arabic message', async () => {
+    const { service } = await makeService();
+    const ids = Array.from({ length: 501 }, (_, i) =>
+      `0000000${i.toString(16).padStart(8, '0')}-0000-0000-0000-000000000000`.slice(-36),
+    );
+    await expect(
+      service.smartPricingApply(
+        {
+          scope: { type: 'selected', variant_ids: ids },
+          strategy: 'balanced',
+          variant_ids_to_apply: ids,
+          reason: 'oversized batch',
+        },
+        USER,
+      ),
+    ).rejects.toMatchObject({
+      message: 'عدد الأصناف كبير جدًا للتطبيق مرة واحدة. طبّق على دفعات أصغر.',
+    });
+  });
+
+  it('T6. apply scope=all without variant_ids_to_apply is refused', async () => {
+    const { service } = await makeService();
+    await expect(
+      service.smartPricingApply(
+        {
+          scope: { type: 'all' },
+          strategy: 'balanced',
+          reason: 'unbounded apply',
+          confirm_all: 'تأكيد تعديل كل الأصناف',
+        },
+        USER,
+      ),
+    ).rejects.toMatchObject({
+      message:
+        'حدد الأصناف من المعاينة قبل التطبيق على نطاق واسع. طبّق على دفعات.',
+    });
+  });
+
+  it('T7. apply scope=filtered without variant_ids_to_apply is refused', async () => {
+    const { service } = await makeService();
+    await expect(
+      service.smartPricingApply(
+        {
+          scope: { type: 'filtered', filters: { q: 'حذاء' } },
+          strategy: 'balanced',
+          reason: 'no narrowing',
+        },
+        USER,
+      ),
+    ).rejects.toMatchObject({
+      message:
+        'حدد الأصناف من المعاينة قبل التطبيق على نطاق واسع. طبّق على دفعات.',
+    });
+  });
+
+  it('T8. apply scope=selected with ≤ 500 ids still works end-to-end', async () => {
+    const { service } = await makeService({
+      responses: [
+        SETTINGS_ROWS,
+        [richRow({ cost_price: '100', selling_price: '80' })],
+        [{ id: VID, selling_price: '80.00' }],
+        [],
+        [{ id: 'hist-1' }],
+      ],
+    });
+    const res = await service.smartPricingApply(
+      {
+        scope: { type: 'selected', variant_ids: [VID] },
+        strategy: 'balanced',
+        reason: 'normal apply',
+      },
+      USER,
+    );
+    expect(res.updated).toBe(1);
   });
 });
 
@@ -921,10 +1068,14 @@ describe('smartPricingPreview — SQL bind shape (HOTFIX regression)', () => {
   });
 
   it('R4. filtered scope (q + only_in_stock): scope SQL uses ::text cast + stock join', async () => {
+    // HOTFIX P3.5A.1 timeout — filtered/all scope now also runs a
+    // cheap COUNT(*) before the slice for truncation metadata. Call
+    // sequence is: settings → count → ids → rich.
     const { service, calls } = await makeService({
       responses: [
         SETTINGS_ROWS,
-        [{ variant_id: VID }],            // scope resolution
+        [{ n: 1 }],                        // COUNT(*) for total_candidates
+        [{ variant_id: VID }],             // sliced id list
         [richRow()],                       // rich rows
       ],
     });
@@ -935,12 +1086,14 @@ describe('smartPricingPreview — SQL bind shape (HOTFIX regression)', () => {
       },
       strategy: 'balanced',
     });
-    const scopeSql = calls[1].sql;
-    expect(scopeSql).toMatch(/ILIKE \$\d+::text/);
-    expect(scopeSql).toMatch(/JOIN stock st ON st.variant_id = pv.id/);
-    expect(scopeSql).toMatch(/st\.quantity_on_hand > 0/);
-    // Rich-data query (3rd call) still has the same fixed bind shape.
-    const main = calls[2];
+    const idSql = calls[2].sql; // SELECT DISTINCT pv.id …
+    expect(idSql).toMatch(/ILIKE \$\d+::text/);
+    expect(idSql).toMatch(/JOIN stock st ON st.variant_id = pv.id/);
+    expect(idSql).toMatch(/st\.quantity_on_hand > 0/);
+    // COUNT query shares the same FROM/WHERE shape with the same params.
+    expect(calls[1].sql).toMatch(/SELECT COUNT\(DISTINCT pv\.id\)/);
+    // Rich-data query (4th call) still has the same fixed bind shape.
+    const main = calls[3];
     expect(main.sql).toMatch(/ANY\(\$1::uuid\[\]\)/);
     expect(main.sql).toMatch(/\$2::numeric/);
     expect(main.params).toHaveLength(2);
@@ -951,6 +1104,7 @@ describe('smartPricingPreview — SQL bind shape (HOTFIX regression)', () => {
     const { service, calls } = await makeService({
       responses: [
         SETTINGS_ROWS,
+        [{ n: 1 }],                        // COUNT(*)
         [{ variant_id: VID }],
         [richRow()],
       ],
@@ -962,15 +1116,16 @@ describe('smartPricingPreview — SQL bind shape (HOTFIX regression)', () => {
       },
       strategy: 'balanced',
     });
-    const scopeSql = calls[1].sql;
-    expect(scopeSql).toMatch(/pu_s\.supplier_id = \$\d+::uuid/);
-    expect(calls[1].params).toContain(supplier);
+    const idSql = calls[2].sql;
+    expect(idSql).toMatch(/pu_s\.supplier_id = \$\d+::uuid/);
+    expect(calls[2].params).toContain(supplier);
   });
 
   it('R6. all scope (no filters): scope SQL has zero params, rich query keeps fixed bind shape', async () => {
     const { service, calls } = await makeService({
       responses: [
         SETTINGS_ROWS,
+        [{ n: 1 }],                        // COUNT(*) for all-scope total
         [{ variant_id: VID }],
         [richRow()],
       ],
@@ -979,10 +1134,12 @@ describe('smartPricingPreview — SQL bind shape (HOTFIX regression)', () => {
       scope: { type: 'all' },
       strategy: 'balanced',
     });
+    // COUNT and SELECT for all-scope both run with zero params.
+    expect(calls[1].sql).toMatch(/SELECT COUNT\(\*\)/);
     expect(calls[1].params).toEqual([]);
-    // No bound placeholders in the all-scope resolution.
-    expect(placeholdersIn(calls[1].sql)).toEqual([]);
-    const main = calls[2];
+    expect(calls[2].params).toEqual([]);
+    expect(placeholdersIn(calls[2].sql)).toEqual([]);
+    const main = calls[3];
     expect(main.sql).toMatch(/ANY\(\$1::uuid\[\]\)/);
     expect(main.params).toHaveLength(2);
   });

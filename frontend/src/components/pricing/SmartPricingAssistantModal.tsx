@@ -188,6 +188,18 @@ export function SmartPricingAssistantModal({
     return { type: 'all' };
   }, [scopeKey, context]);
 
+  // HOTFIX P3.5A.1 timeout — friendly Arabic message when axios aborts
+  // a slow preview/apply request. Recognises both the explicit axios
+  // ECONNABORTED code and the canonical "timeout of …ms exceeded" body.
+  const friendlyError = (e: any, fallback: string): string => {
+    const msg = e?.message ?? '';
+    const code = e?.code;
+    if (code === 'ECONNABORTED' || /timeout of \d+ms exceeded/i.test(msg)) {
+      return 'انتهت مهلة الطلب. قلّل عدد الأصناف أو استخدم فلتر أدق ثم حاول مرة أخرى.';
+    }
+    return e?.response?.data?.message ?? msg ?? fallback;
+  };
+
   const previewMut = useMutation({
     mutationFn: (payload: SmartPricingPreviewPayload) =>
       productsApi.smartPricingPreview(payload),
@@ -197,11 +209,7 @@ export function SmartPricingAssistantModal({
       setStep('preview');
     },
     onError: (e: any) => {
-      toast.error(
-        e?.response?.data?.message
-          || e?.message
-          || 'فشل توليد المعاينة',
-      );
+      toast.error(friendlyError(e, 'فشل توليد المعاينة'));
     },
   });
 
@@ -229,11 +237,7 @@ export function SmartPricingAssistantModal({
       if (status === 403) {
         toast.error('ليس لديك صلاحية تعديل أسعار البيع.');
       } else {
-        toast.error(
-          e?.response?.data?.message
-            || e?.message
-            || 'فشل تطبيق الأسعار',
-        );
+        toast.error(friendlyError(e, 'فشل تطبيق الأسعار'));
       }
     },
   });
@@ -249,6 +253,12 @@ export function SmartPricingAssistantModal({
       ),
     [preview, excludedIds],
   );
+
+  // HOTFIX P3.5A.1 timeout — front-end guard mirrors the server's
+  // SMART_APPLY_BATCH_MAX. Keeps the operator from queueing a request
+  // we already know the server will reject.
+  const APPLY_BATCH_MAX = 500;
+  const applyExceedsBatch = applicableItems.length > APPLY_BATCH_MAX;
 
   if (!open) return null;
 
@@ -552,6 +562,28 @@ export function SmartPricingAssistantModal({
           {/* STEP 3 — preview */}
           {step === 'preview' && preview && (
             <div className="space-y-3" data-testid="smart-pricing-step-preview">
+              {/* HOTFIX P3.5A.1 timeout — truncation banner. Surfaces
+                  the server-supplied Arabic message so the operator
+                  knows they're only seeing the first N rows. */}
+              {preview.truncated && (
+                <div
+                  className="rounded-md border border-amber-300 bg-amber-50 p-2 text-[12px] text-amber-800"
+                  data-testid="smart-pricing-truncated-warning"
+                >
+                  {preview.message_ar
+                    ?? `تم عرض أول ${preview.returned_count ?? preview.items.length} صنف فقط من ${preview.total_candidates ?? '?'}. ضيّق الفلتر أو طبّق على دفعات.`}
+                </div>
+              )}
+              {applyExceedsBatch && (
+                <div
+                  className="rounded-md border border-rose-300 bg-rose-50 p-2 text-[12px] text-rose-800"
+                  data-testid="smart-pricing-apply-batch-warning"
+                >
+                  عدد الأصناف القابلة للتطبيق ({applicableItems.length}) أكبر من
+                  الحد المسموح في دفعة واحدة ({APPLY_BATCH_MAX}). استبعد بعض
+                  الصفوف أو طبّق على دفعات أصغر.
+                </div>
+              )}
               <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
                 <SummaryTile label="إجمالي الصفوف" value={String(preview.summary.total)} />
                 <SummaryTile label="مقترح زيادة" value={String(preview.summary.increase)} accent="emerald" />
@@ -707,9 +739,14 @@ export function SmartPricingAssistantModal({
               <button
                 type="button"
                 onClick={() => setStep('apply')}
-                disabled={applicableItems.length === 0}
+                disabled={applicableItems.length === 0 || applyExceedsBatch}
                 className="btn-primary"
                 data-testid="smart-pricing-go-apply"
+                title={
+                  applyExceedsBatch
+                    ? `الحد الأقصى للتطبيق دفعة واحدة هو ${APPLY_BATCH_MAX} صنف. استبعد بعض الصفوف أو طبّق على دفعات.`
+                    : undefined
+                }
               >
                 التالي ({applicableItems.length} صنف)
               </button>

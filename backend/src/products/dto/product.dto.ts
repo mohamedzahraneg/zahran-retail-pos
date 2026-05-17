@@ -235,8 +235,12 @@ export class SmartPricingPreviewDto {
   @Type(() => ManualAdjustmentDto)
   manual_adjustment?: ManualAdjustmentDto;
 
-  @ApiPropertyOptional({ default: 1000 })
-  @IsOptional() @IsNumber() @Min(1) @Max(5000)
+  /** HOTFIX P3.5A.1 timeout — bounded to a safe range so the preview
+   *  rich-data query (stock_sum + sales_90d + colors/sizes joins)
+   *  finishes well under the 60s client deadline. The service hard-caps
+   *  at 1000 and defaults to 200 when omitted. */
+  @ApiPropertyOptional({ default: 200 })
+  @IsOptional() @IsNumber() @Min(1) @Max(1000)
   limit?: number;
 }
 

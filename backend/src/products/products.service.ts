@@ -488,20 +488,40 @@ export class ProductsService {
    */
   private async _smartPricingComputeRecommendations(
     dto: SmartPricingPreviewDto,
-  ): Promise<{ items: SmartPricingItem[]; settings: SmartPricingThresholds }> {
-    const limit = Math.min(
-      Math.max(1, Number(dto.limit) || 1000),
-      5000,
+  ): Promise<{
+    items: SmartPricingItem[];
+    settings: SmartPricingThresholds;
+    total_candidates: number;
+    effective_limit: number;
+  }> {
+    // HOTFIX P3.5A.1 timeout — sane default and hard cap. The rich-data
+    // query (stock_sum + sales_90d 90-day window + colors/sizes joins)
+    // can take ~30s for a thousand variants, which trips the 30s axios
+    // client timeout. Bound the work here so the request finishes well
+    // under the 60s per-endpoint client timeout the frontend sets for
+    // smart-pricing calls.
+    const SMART_PREVIEW_DEFAULT = 200;
+    const SMART_PREVIEW_MAX = 1000;
+    const effective_limit = Math.min(
+      Math.max(1, Number(dto.limit) || SMART_PREVIEW_DEFAULT),
+      SMART_PREVIEW_MAX,
     );
 
     // ── Load smart_pricing settings (with fallback defaults). One
     //    SELECT against the settings table — no writes.
     const settings = await this._loadSmartPricingThresholds();
 
-    // ── Resolve the variant set for the scope.
-    const variantIds = await this._resolveScope(dto.scope, limit);
+    // ── Resolve the variant set for the scope. Returns the (already
+    //    sliced) id list AND the total candidate count for truncation
+    //    metadata. For selected/single, total === ids.length. For
+    //    filtered/all the resolver runs a cheap COUNT(*) before the
+    //    slice.
+    const { ids: variantIds, total_candidates } = await this._resolveScope(
+      dto.scope,
+      effective_limit,
+    );
     if (variantIds.length === 0) {
-      return { items: [], settings };
+      return { items: [], settings, total_candidates, effective_limit };
     }
 
     // ── Load the rich data block per variant in one query. Joins:
@@ -587,14 +607,23 @@ export class ProductsService {
         : this._recommendForVariant(r, dto.strategy, settings),
     );
 
-    return { items, settings };
+    return { items, settings, total_candidates, effective_limit };
   }
 
-  /** Resolves the scope DTO to a concrete `variant_ids[]` list. Read-only. */
+  /**
+   * Resolves the scope DTO to a concrete `variant_ids[]` slice AND the
+   * total candidate count (used for truncation metadata in preview).
+   * Read-only.
+   *
+   * For `selected` / `single`, total === the (pre-slice) caller-supplied
+   * list length. For `filtered` / `all`, a cheap COUNT(*) runs alongside
+   * the sliced fetch so the UI can warn the operator that some rows
+   * weren't included in the preview.
+   */
   private async _resolveScope(
     scope: SmartPricingScopeDto,
     limit: number,
-  ): Promise<string[]> {
+  ): Promise<{ ids: string[]; total_candidates: number }> {
     if (scope.type === 'selected' || scope.type === 'single') {
       const ids = (scope.variant_ids ?? []).filter(Boolean);
       if (ids.length === 0) {
@@ -607,7 +636,7 @@ export class ProductsService {
           'النطاق "صنف واحد" يقبل صنفًا واحدًا فقط',
         );
       }
-      return ids.slice(0, limit);
+      return { ids: ids.slice(0, limit), total_candidates: ids.length };
     }
 
     if (scope.type === 'filtered') {
@@ -635,31 +664,37 @@ export class ProductsService {
       if (f.only_in_stock) {
         conds.push(`st.quantity_on_hand > 0`);
       }
-      const rows = await this.ds.query(
-        `
-        SELECT DISTINCT pv.id AS variant_id
-          FROM product_variants pv
+      const fromClause = `FROM product_variants pv
           JOIN products p ON p.id = pv.product_id
           ${supplierJoin}
           ${stockJoin}
-         WHERE ${conds.join(' AND ')}
+         WHERE ${conds.join(' AND ')}`;
+      // HOTFIX timeout — cheap COUNT(*) so the UI can warn when the
+      // preview is truncated. Read-only.
+      const [countRow] = await this.ds.query(
+        `SELECT COUNT(DISTINCT pv.id)::int AS n ${fromClause}`,
+        params,
+      );
+      const total_candidates = Number(countRow?.n ?? 0);
+      const rows = await this.ds.query(
+        `SELECT DISTINCT pv.id AS variant_id
+           ${fromClause}
          ORDER BY pv.id
-         LIMIT ${limit}
-        `,
+         LIMIT ${limit}`,
         params,
       );
       const ids = rows.map((r: any) => r.variant_id as string);
-      // Status / needs_review_only narrow client-side after we have the
-      // rich rows — easier than encoding the same math in SQL twice.
-      // Stash the filter on the returned array via a side channel.
-      (ids as any).__post_filter = {
-        status: f.status,
-        needs_review_only: f.needs_review_only,
-      };
-      return ids;
+      return { ids, total_candidates };
     }
 
     // scope.type === 'all'
+    const [countRow] = await this.ds.query(
+      `SELECT COUNT(*)::int AS n
+         FROM product_variants pv
+        WHERE pv.is_active = TRUE
+          AND pv.deleted_at IS NULL`,
+    );
+    const total_candidates = Number(countRow?.n ?? 0);
     const rows = await this.ds.query(
       `
       SELECT pv.id AS variant_id
@@ -670,7 +705,10 @@ export class ProductsService {
        LIMIT ${limit}
       `,
     );
-    return rows.map((r: any) => r.variant_id as string);
+    return {
+      ids: rows.map((r: any) => r.variant_id as string),
+      total_candidates,
+    };
   }
 
   /** Reads the 9 smart_pricing settings (with built-in fallbacks). */
@@ -1074,7 +1112,8 @@ export class ProductsService {
         );
       }
     }
-    const { items, settings } = await this._smartPricingComputeRecommendations(dto);
+    const { items, settings, total_candidates, effective_limit } =
+      await this._smartPricingComputeRecommendations(dto);
     const summary = {
       total: items.length,
       increase: items.filter((i) => i.recommendation === 'increase').length,
@@ -1082,6 +1121,14 @@ export class ProductsService {
       keep: items.filter((i) => i.recommendation === 'keep').length,
       review: items.filter((i) => i.recommendation === 'review').length,
     };
+    // HOTFIX P3.5A.1 timeout — surface truncation metadata so the UI
+    // can warn the operator that they're only seeing the first N of M
+    // candidates and tell them to narrow the filter or apply in
+    // batches.
+    const truncated = total_candidates > items.length;
+    const message_ar = truncated
+      ? `تم عرض أول ${items.length} صنف فقط من ${total_candidates}. ضيّق الفلتر أو طبّق على دفعات.`
+      : null;
     return {
       strategy: dto.strategy,
       scope_type: dto.scope.type,
@@ -1090,6 +1137,11 @@ export class ProductsService {
       settings,
       summary,
       items,
+      truncated,
+      total_candidates,
+      returned_count: items.length,
+      limit: effective_limit,
+      message_ar,
     };
   }
 
@@ -1116,12 +1168,38 @@ export class ProductsService {
       );
     }
 
+    // HOTFIX P3.5A.1 timeout — apply must not loop over thousands of
+    // variants in one request. Reject early if the client asked for a
+    // batch larger than SMART_APPLY_BATCH_MAX; otherwise re-run the
+    // preview at the same hard cap so the in-memory candidates list is
+    // bounded too.
+    const SMART_APPLY_BATCH_MAX = 500;
+    if (
+      dto.variant_ids_to_apply
+      && dto.variant_ids_to_apply.length > SMART_APPLY_BATCH_MAX
+    ) {
+      throw new BadRequestException(
+        'عدد الأصناف كبير جدًا للتطبيق مرة واحدة. طبّق على دفعات أصغر.',
+      );
+    }
+    // For all/filtered scope without an explicit variant_ids_to_apply
+    // narrowing, refuse to walk the whole catalog in one request. The
+    // operator must tick rows from the preview first.
+    if (
+      (dto.scope.type === 'all' || dto.scope.type === 'filtered')
+      && (!dto.variant_ids_to_apply || dto.variant_ids_to_apply.length === 0)
+    ) {
+      throw new BadRequestException(
+        'حدد الأصناف من المعاينة قبل التطبيق على نطاق واسع. طبّق على دفعات.',
+      );
+    }
+
     const { items } = await this._smartPricingComputeRecommendations({
       scope: dto.scope,
       strategy: dto.strategy,
       mode: dto.mode,
       manual_adjustment: dto.manual_adjustment,
-      limit: 5000,
+      limit: SMART_APPLY_BATCH_MAX * 2, // headroom for keep/review skips
     });
 
     const applyFilter = dto.variant_ids_to_apply
@@ -1134,6 +1212,14 @@ export class ProductsService {
       if (applyFilter && !applyFilter.has(it.variant_id)) return false;
       return true;
     });
+
+    // Final safety check: even after preview narrowing, refuse to
+    // touch more than the batch cap in one transaction.
+    if (candidates.length > SMART_APPLY_BATCH_MAX) {
+      throw new BadRequestException(
+        'عدد الأصناف كبير جدًا للتطبيق مرة واحدة. طبّق على دفعات أصغر.',
+      );
+    }
 
     return this.ds.transaction(async (em) => {
       const out: any[] = [];

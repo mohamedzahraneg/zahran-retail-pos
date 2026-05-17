@@ -134,13 +134,22 @@ export const productsApi = {
   // Preview is read-only. Apply mutates ONLY product_variants.selling_price
   // + inserts variant_price_history audit rows. Cost adjustment is
   // explicitly deferred to P3.5B.
+  // HOTFIX P3.5A.1 timeout — smart-pricing preview can take longer than
+  // the 30s global axios default when the operator widens the scope.
+  // The server hard-caps at 1000 rows and surfaces truncation metadata,
+  // so 60s is a comfortable client deadline. Apply uses the same window
+  // because it re-runs the preview server-side.
   smartPricingPreview: (body: SmartPricingPreviewPayload) =>
     unwrap<SmartPricingPreviewResponse>(
-      api.post('/products/variants/smart-pricing/preview', body),
+      api.post('/products/variants/smart-pricing/preview', body, {
+        timeout: 60_000,
+      }),
     ),
   smartPricingApply: (body: SmartPricingApplyPayload) =>
     unwrap<SmartPricingApplyResponse>(
-      api.post('/products/variants/smart-pricing/apply', body),
+      api.post('/products/variants/smart-pricing/apply', body, {
+        timeout: 60_000,
+      }),
     ),
 };
 
@@ -287,6 +296,15 @@ export interface SmartPricingPreviewResponse {
   scope_type: SmartPricingScopeType;
   mode?: SmartPricingMode;
   manual_adjustment?: ManualAdjustment | null;
+  /** HOTFIX P3.5A.1 timeout — truncation metadata. When `truncated`
+   *  is true the preview only included the first `returned_count` of
+   *  `total_candidates`; `message_ar` is a ready-to-render Arabic
+   *  notice the operator should see. */
+  truncated?: boolean;
+  total_candidates?: number;
+  returned_count?: number;
+  limit?: number;
+  message_ar?: string | null;
   settings: {
     competitive_markup_pct: number;
     recommended_margin_pct: number;
