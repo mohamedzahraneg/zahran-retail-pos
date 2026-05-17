@@ -239,6 +239,70 @@ export class ReportsController {
     );
   }
 
+  // ── PR-PURCHASES-P3.4A — Pricing reports (read-only) ─────────────────
+  // All four endpoints are strictly SELECT — they never mutate prices,
+  // accounting, cashbox, stock, or purchases. The service's static
+  // guardrail spec asserts this with regex scans.
+
+  @Get('pricing/health')
+  @ApiOperation({ summary: 'Per-variant current pricing health' })
+  pricingHealth(
+    @Query('q') q?: string,
+    @Query('status') status?: string,
+    @Query('only_in_stock') onlyInStock?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.svc.pricingHealth({
+      q,
+      status: status as any,
+      only_in_stock: onlyInStock === 'true' || onlyInStock === '1',
+      limit: limit ? Number(limit) : undefined,
+    });
+  }
+
+  @Get('pricing/losses')
+  @ApiOperation({ summary: 'Below-cost / below-min-margin products' })
+  pricingLosses(
+    @Query('only_in_stock') onlyInStock?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.svc.pricingLosses({
+      only_in_stock: onlyInStock === 'true' || onlyInStock === '1',
+      limit: limit ? Number(limit) : undefined,
+    });
+  }
+
+  @Get('pricing/history')
+  @ApiOperation({ summary: 'Variant selling-price change history' })
+  pricingHistory(
+    @Query('variant_id') variant_id?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.svc.pricingHistory({
+      variant_id,
+      from,
+      to,
+      limit: limit ? Number(limit) : undefined,
+    });
+  }
+
+  @Get('pricing/landed-impact')
+  @ApiOperation({ summary: 'Last-purchase landed cost vs current price' })
+  pricingLandedImpact(
+    @Query('supplier_id') supplier_id?: string,
+    @Query('needs_review_only') needsReviewOnly?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.svc.pricingLandedImpact({
+      supplier_id,
+      needs_review_only:
+        needsReviewOnly === 'true' || needsReviewOnly === '1',
+      limit: limit ? Number(limit) : undefined,
+    });
+  }
+
   // ── Helper ───────────────────────────────────────────────────────────
   private async respond(
     res: Response,

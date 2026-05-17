@@ -188,6 +188,44 @@ export const reportsApi = {
   suppliersOutstanding: () =>
     unwrap<any[]>(api.get('/reports/suppliers-outstanding')),
 
+  // PR-PURCHASES-P3.4A — pricing reports (read-only).
+  pricingHealth: (params: {
+    q?: string;
+    status?: PricingStatus;
+    only_in_stock?: boolean;
+    limit?: number;
+  } = {}) =>
+    unwrap<PricingHealthResponse>(
+      api.get('/reports/pricing/health', { params }),
+    ),
+  pricingLosses: (
+    params: { only_in_stock?: boolean; limit?: number } = {},
+  ) =>
+    unwrap<PricingLossesResponse>(
+      api.get('/reports/pricing/losses', { params }),
+    ),
+  pricingHistory: (
+    params: {
+      variant_id?: string;
+      from?: string;
+      to?: string;
+      limit?: number;
+    } = {},
+  ) =>
+    unwrap<PricingHistoryResponse>(
+      api.get('/reports/pricing/history', { params }),
+    ),
+  pricingLandedImpact: (
+    params: {
+      supplier_id?: string;
+      needs_review_only?: boolean;
+      limit?: number;
+    } = {},
+  ) =>
+    unwrap<PricingLandedImpactResponse>(
+      api.get('/reports/pricing/landed-impact', { params }),
+    ),
+
   export: (
     slug: string,
     format: 'xlsx' | 'pdf',
@@ -199,3 +237,122 @@ export const reportsApi = {
       `${slug}-${new Date().toISOString().slice(0, 10)}.${format}`,
     ),
 };
+
+// ─── PR-PURCHASES-P3.4A — pricing report response types ────────────
+export type PricingStatus =
+  | 'ok'
+  | 'below_min_margin'
+  | 'below_cost'
+  | 'no_price'
+  | 'unknown_cost';
+
+export interface PricingHealthRow {
+  variant_id: string;
+  product_id: string;
+  product_name: string;
+  product_type: string;
+  sku: string;
+  barcode: string | null;
+  color: string | null;
+  size: string | null;
+  cost_price: number;
+  selling_price: number;
+  profit: number;
+  markup_pct: number | null;
+  margin_pct: number | null;
+  min_margin_pct: number;
+  status: PricingStatus;
+  stock_qty: number;
+  stock_value_at_cost: number;
+  potential_revenue: number;
+  potential_profit: number;
+}
+
+export interface PricingHealthResponse {
+  summary: {
+    total_variants: number;
+    below_cost: number;
+    below_min_margin: number;
+    no_price: number;
+    unknown_cost: number;
+    ok: number;
+    stock_value_at_cost: number;
+    potential_revenue: number;
+    potential_profit: number;
+  };
+  items: PricingHealthRow[];
+}
+
+export interface PricingLossRow extends PricingHealthRow {
+  loss_exposure: number;
+  margin_gap_pct: number | null;
+}
+
+export interface PricingLossesResponse {
+  summary: {
+    below_cost: number;
+    below_min_margin: number;
+    total_loss_exposure: number;
+  };
+  items: PricingLossRow[];
+}
+
+export interface PricingHistoryRow {
+  id: string;
+  variant_id: string;
+  product_id: string;
+  product_name: string;
+  sku: string;
+  barcode: string | null;
+  old_selling_price: string;
+  new_selling_price: string;
+  delta_amount: string;
+  delta_pct: string | null;
+  source_purchase_id: string | null;
+  source_purchase_no: string | null;
+  reason: string | null;
+  changed_by: string | null;
+  changed_by_name: string | null;
+  changed_at: string;
+}
+
+export interface PricingHistoryResponse {
+  summary: { total: number; last_change: string | null };
+  items: PricingHistoryRow[];
+}
+
+export interface PricingLandedImpactRow {
+  variant_id: string;
+  product_id: string;
+  product_name: string;
+  sku: string;
+  barcode: string | null;
+  last_purchase: {
+    purchase_id: string;
+    purchase_no: string;
+    supplier_id: string | null;
+    supplier_name: string | null;
+    received_at: string | null;
+    invoice_date: string | null;
+    manual_allocation: boolean;
+  };
+  base_unit_cost: number;
+  allocated_cost_per_unit: number;
+  landed_unit_cost: number;
+  current_selling_price: number;
+  profit: number;
+  markup_pct: number | null;
+  margin_pct: number | null;
+  min_margin_pct: number;
+  needs_review: boolean;
+  needs_review_reason:
+    | 'no_price'
+    | 'below_cost'
+    | 'below_min_margin'
+    | null;
+}
+
+export interface PricingLandedImpactResponse {
+  summary: { total: number; needs_review: number };
+  items: PricingLandedImpactRow[];
+}

@@ -247,6 +247,8 @@ const groups: NavGroup[] = [
     items: [
       { to: '/reports', label: 'التقارير', icon: BarChart3, roles: ['admin', 'manager', 'accountant'], permission: 'reports.view' },
       { to: '/shift-reports', label: 'تقارير الورديات', icon: FileText, roles: ['admin', 'manager', 'accountant', 'cashier'], permission: ['reports.view', 'shifts.view'] },
+      // PR-PURCHASES-P3.4A — pricing/profitability reports (read-only).
+      { to: '/pricing-reports', label: 'تقارير التسعير', icon: BarChart3, roles: ['admin', 'manager', 'accountant'], permission: 'reports.view' },
       { to: '/alerts', label: 'التنبيهات', icon: Bell, roles: ['admin', 'manager', 'accountant'], permission: 'alerts.view' },
     ],
   },

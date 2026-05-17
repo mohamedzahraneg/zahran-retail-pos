@@ -48,6 +48,7 @@ import FinanceDashboard from '@/pages/FinanceDashboard';
 import FinanceStatements from '@/pages/FinanceStatements';
 import Zakat from '@/pages/Zakat';
 import FinancialReports from '@/pages/FinancialReports';
+import PricingReports from '@/pages/PricingReports';
 import FinancialMovements from '@/pages/FinancialMovements';
 import CustomerGroups from '@/pages/CustomerGroups';
 import Settings from '@/pages/Settings';
@@ -134,6 +135,15 @@ export default function App() {
           element={
             <ProtectedRoute permissions={['reports.view']}>
               <Reports />
+            </ProtectedRoute>
+          }
+        />
+        {/* PR-PURCHASES-P3.4A — pricing/profitability reports. */}
+        <Route
+          path="pricing-reports"
+          element={
+            <ProtectedRoute permissions={['reports.view']}>
+              <PricingReports />
             </ProtectedRoute>
           }
         />

@@ -660,4 +660,439 @@ export class ReportsService {
     const pad = (n: number) => String(n).padStart(2, '0');
     return `${cairo.getFullYear()}-${pad(cairo.getMonth() + 1)}-${pad(cairo.getDate())}`;
   }
+
+  // ──────────────────────────────────────────────────────────────────────
+  //  PR-PURCHASES-P3.4A — Pricing reports (read-only)
+  //
+  //  Strictly SELECT-only — never writes to product_variants, prices,
+  //  variant_price_history, journal_entries, journal_lines,
+  //  cashbox_transactions, stock_movements, supplier_ledger,
+  //  purchase_items, or purchases. The static guardrail spec
+  //  `reports.service.pricing.spec.ts` enforces this with regex scans.
+  //
+  //  Formulas (clearly labeled — markup vs margin):
+  //    profit     = selling_price - cost_price
+  //    markup_pct = (selling_price - cost_price) / cost_price * 100
+  //    margin_pct = (selling_price - cost_price) / selling_price * 100
+  // ──────────────────────────────────────────────────────────────────────
+
+  /**
+   * Report A — Current pricing health per variant.
+   *
+   * Computes margin / markup / pricing_status for every active
+   * variant, joined with the current stock total (across all
+   * warehouses), product name, and the min_margin_pct policy
+   * threshold (product-level override, falling back to the global
+   * setting `smart_pricing.min_margin_pct_default`).
+   */
+  async pricingHealth(filters: {
+    q?: string;
+    status?: 'ok' | 'below_min_margin' | 'below_cost' | 'no_price' | 'unknown_cost';
+    only_in_stock?: boolean;
+    limit?: number;
+  } = {}) {
+    const params: any[] = [];
+    const conds: string[] = ['pv.is_active = TRUE', 'pv.deleted_at IS NULL'];
+    if (filters.q) {
+      params.push(`%${filters.q.trim()}%`);
+      conds.push(
+        `(p.name_ar ILIKE $${params.length} OR pv.sku ILIKE $${params.length} OR pv.barcode ILIKE $${params.length})`,
+      );
+    }
+    if (filters.only_in_stock) {
+      conds.push(`COALESCE(stock_sum.qty, 0) > 0`);
+    }
+    const where = `WHERE ${conds.join(' AND ')}`;
+    const limit = Math.min(Math.max(1, Number(filters.limit) || 500), 5000);
+
+    const rows = await this.ds.query(
+      `
+      WITH
+      min_margin_default AS (
+        SELECT COALESCE(
+          (SELECT (value)::text::numeric
+             FROM settings
+            WHERE key = 'smart_pricing.min_margin_pct_default'
+            LIMIT 1),
+          15
+        ) AS pct
+      ),
+      stock_sum AS (
+        SELECT variant_id, SUM(quantity_on_hand)::int AS qty
+          FROM stock
+         GROUP BY variant_id
+      )
+      SELECT
+        pv.id                                       AS variant_id,
+        pv.sku,
+        pv.barcode,
+        c.name_ar                                   AS color,
+        s.size_label                                AS size,
+        p.id                                        AS product_id,
+        p.name_ar                                   AS product_name,
+        p.product_type,
+        pv.cost_price                               AS cost_price,
+        COALESCE(NULLIF(pv.selling_price, 0), p.base_price) AS selling_price,
+        COALESCE(p.min_margin_pct, (SELECT pct FROM min_margin_default))::numeric(6,2)
+                                                    AS min_margin_pct,
+        COALESCE(stock_sum.qty, 0)                  AS stock_qty,
+        ROUND(COALESCE(stock_sum.qty, 0) * pv.cost_price, 2)
+                                                    AS stock_value_at_cost
+      FROM product_variants pv
+      JOIN products p   ON p.id = pv.product_id
+      LEFT JOIN colors c ON c.id = pv.color_id
+      LEFT JOIN sizes  s ON s.id = pv.size_id
+      LEFT JOIN stock_sum ON stock_sum.variant_id = pv.id
+      ${where}
+      ORDER BY p.name_ar, pv.sku
+      LIMIT ${limit}
+      `,
+      params,
+    );
+
+    // Compute status / margin / markup in JS so the SQL stays portable
+    // and the math matches the frontend helper exactly.
+    const enriched = rows.map((r: any) => {
+      const cost = Number(r.cost_price || 0);
+      const sell = Number(r.selling_price || 0);
+      const profit = +(sell - cost).toFixed(2);
+      const markup_pct =
+        cost > 0 ? +((profit / cost) * 100).toFixed(2) : null;
+      const margin_pct =
+        sell > 0 ? +((profit / sell) * 100).toFixed(2) : null;
+      const min_pct = Number(r.min_margin_pct || 0);
+      let status: string;
+      if (!(cost > 0)) status = 'unknown_cost';
+      else if (!(sell > 0)) status = 'no_price';
+      else if (sell < cost) status = 'below_cost';
+      else if (margin_pct !== null && margin_pct < min_pct)
+        status = 'below_min_margin';
+      else status = 'ok';
+      const qty = Number(r.stock_qty || 0);
+      const potential_revenue = +(qty * sell).toFixed(2);
+      const potential_profit = +(qty * profit).toFixed(2);
+      return {
+        variant_id: r.variant_id,
+        product_id: r.product_id,
+        product_name: r.product_name,
+        product_type: r.product_type,
+        sku: r.sku,
+        barcode: r.barcode,
+        color: r.color,
+        size: r.size,
+        cost_price: cost,
+        selling_price: sell,
+        profit,
+        markup_pct,
+        margin_pct,
+        min_margin_pct: min_pct,
+        status,
+        stock_qty: qty,
+        stock_value_at_cost: Number(r.stock_value_at_cost || 0),
+        potential_revenue,
+        potential_profit,
+      };
+    });
+
+    const filtered = filters.status
+      ? enriched.filter((r: any) => r.status === filters.status)
+      : enriched;
+
+    const summary = {
+      total_variants: filtered.length,
+      below_cost: filtered.filter((r: any) => r.status === 'below_cost').length,
+      below_min_margin: filtered.filter(
+        (r: any) => r.status === 'below_min_margin',
+      ).length,
+      no_price: filtered.filter((r: any) => r.status === 'no_price').length,
+      unknown_cost: filtered.filter((r: any) => r.status === 'unknown_cost')
+        .length,
+      ok: filtered.filter((r: any) => r.status === 'ok').length,
+      stock_value_at_cost: +filtered
+        .reduce((s: number, r: any) => s + (r.stock_value_at_cost || 0), 0)
+        .toFixed(2),
+      potential_revenue: +filtered
+        .reduce((s: number, r: any) => s + (r.potential_revenue || 0), 0)
+        .toFixed(2),
+      potential_profit: +filtered
+        .reduce((s: number, r: any) => s + (r.potential_profit || 0), 0)
+        .toFixed(2),
+    };
+
+    return { summary, items: filtered };
+  }
+
+  /**
+   * Report B — Loss / below-min-margin products.
+   * Convenience filter on top of pricingHealth(), pre-sorted by the
+   * largest potential loss.
+   */
+  async pricingLosses(filters: { only_in_stock?: boolean; limit?: number } = {}) {
+    const base = await this.pricingHealth({
+      only_in_stock: filters.only_in_stock,
+      limit: filters.limit,
+    });
+    const items = base.items
+      .filter((r: any) =>
+        ['below_cost', 'below_min_margin'].includes(r.status),
+      )
+      .map((r: any) => ({
+        ...r,
+        // Negative profit per piece × stock_qty = total exposure for
+        // below-cost items; for below-min-margin we surface the gap
+        // between the current margin and the floor as Δ pct.
+        loss_exposure:
+          r.status === 'below_cost'
+            ? +(r.stock_qty * Math.min(0, r.profit)).toFixed(2)
+            : 0,
+        margin_gap_pct:
+          r.status === 'below_min_margin' && r.margin_pct != null
+            ? +(r.min_margin_pct - r.margin_pct).toFixed(2)
+            : null,
+      }))
+      .sort((a: any, b: any) => {
+        const lossA = a.loss_exposure || 0;
+        const lossB = b.loss_exposure || 0;
+        if (lossA !== lossB) return lossA - lossB; // most negative first
+        const gapA = a.margin_gap_pct ?? 0;
+        const gapB = b.margin_gap_pct ?? 0;
+        if (gapA !== gapB) return gapB - gapA; // biggest gap first
+        return b.stock_qty - a.stock_qty;
+      });
+    return {
+      summary: {
+        below_cost: items.filter((r: any) => r.status === 'below_cost').length,
+        below_min_margin: items.filter(
+          (r: any) => r.status === 'below_min_margin',
+        ).length,
+        total_loss_exposure: +items
+          .reduce(
+            (s: number, r: any) => s + (r.loss_exposure || 0),
+            0,
+          )
+          .toFixed(2),
+      },
+      items,
+    };
+  }
+
+  /**
+   * Report C — Variant price change history (from variant_price_history,
+   * introduced in P3.2). Joined with product/variant name + the user
+   * who applied the change + the source purchase number when present.
+   */
+  async pricingHistory(filters: {
+    variant_id?: string;
+    from?: string;
+    to?: string;
+    limit?: number;
+  } = {}) {
+    const params: any[] = [];
+    const conds: string[] = ['1=1'];
+    if (filters.variant_id) {
+      params.push(filters.variant_id);
+      conds.push(`vph.variant_id = $${params.length}`);
+    }
+    if (filters.from) {
+      params.push(filters.from);
+      conds.push(`vph.changed_at >= $${params.length}::timestamptz`);
+    }
+    if (filters.to) {
+      params.push(filters.to);
+      conds.push(
+        `vph.changed_at < ($${params.length}::timestamptz + interval '1 day')`,
+      );
+    }
+    const where = `WHERE ${conds.join(' AND ')}`;
+    const limit = Math.min(Math.max(1, Number(filters.limit) || 500), 5000);
+
+    const rows = await this.ds.query(
+      `
+      SELECT
+        vph.id,
+        vph.variant_id,
+        vph.old_selling_price,
+        vph.new_selling_price,
+        (vph.new_selling_price - vph.old_selling_price)::numeric(14,2)
+          AS delta_amount,
+        CASE
+          WHEN vph.old_selling_price > 0
+          THEN ROUND(
+            (vph.new_selling_price - vph.old_selling_price)
+              / vph.old_selling_price * 100, 2)
+          ELSE NULL
+        END                                       AS delta_pct,
+        vph.source_purchase_id,
+        vph.source_purchase_no,
+        vph.reason,
+        vph.changed_by,
+        u.full_name                               AS changed_by_name,
+        vph.changed_at,
+        pv.sku,
+        pv.barcode,
+        p.id                                      AS product_id,
+        p.name_ar                                 AS product_name
+      FROM variant_price_history vph
+      JOIN product_variants pv ON pv.id = vph.variant_id
+      JOIN products p           ON p.id = pv.product_id
+      LEFT JOIN users u         ON u.id = vph.changed_by
+      ${where}
+      ORDER BY vph.changed_at DESC
+      LIMIT ${limit}
+      `,
+      params,
+    );
+    return {
+      summary: {
+        total: rows.length,
+        last_change: rows[0]?.changed_at ?? null,
+      },
+      items: rows,
+    };
+  }
+
+  /**
+   * Report D — Last-purchase landed cost impact per variant.
+   *
+   * For each variant that has at least one received-purchase line,
+   * surfaces the most recent purchase + landed breakdown + the
+   * current selling price + the implied margin, so the operator can
+   * see "is my current price still healthy after this last cost?".
+   */
+  async pricingLandedImpact(filters: {
+    supplier_id?: string;
+    needs_review_only?: boolean;
+    limit?: number;
+  } = {}) {
+    const params: any[] = [];
+    const conds: string[] = ['1=1'];
+    if (filters.supplier_id) {
+      params.push(filters.supplier_id);
+      conds.push(`p_last.supplier_id = $${params.length}`);
+    }
+    const where = `WHERE ${conds.join(' AND ')}`;
+    const limit = Math.min(Math.max(1, Number(filters.limit) || 500), 5000);
+
+    const rows = await this.ds.query(
+      `
+      WITH
+      min_margin_default AS (
+        SELECT COALESCE(
+          (SELECT (value)::text::numeric
+             FROM settings
+            WHERE key = 'smart_pricing.min_margin_pct_default'
+            LIMIT 1),
+          15
+        ) AS pct
+      ),
+      last_purchases AS (
+        SELECT DISTINCT ON (pi.variant_id)
+          pi.variant_id,
+          pi.purchase_id,
+          pi.quantity,
+          pi.base_unit_cost,
+          pi.allocated_cost_total,
+          pi.allocated_cost_per_unit,
+          pi.unit_cost                AS landed_unit_cost,
+          pi.manual_allocation
+        FROM purchase_items pi
+        JOIN purchases pu ON pu.id = pi.purchase_id
+        WHERE pu.status IN ('received', 'partial', 'paid')
+        ORDER BY pi.variant_id, pu.received_at DESC NULLS LAST,
+                 pu.invoice_date DESC, pu.created_at DESC
+      )
+      SELECT
+        pv.id                              AS variant_id,
+        pv.sku,
+        pv.barcode,
+        p.id                               AS product_id,
+        p.name_ar                          AS product_name,
+        COALESCE(NULLIF(pv.selling_price, 0), p.base_price)
+                                           AS selling_price,
+        pv.cost_price                      AS current_cost_price,
+        lp.base_unit_cost,
+        lp.allocated_cost_per_unit,
+        lp.landed_unit_cost,
+        lp.manual_allocation,
+        p_last.id                          AS purchase_id,
+        p_last.purchase_no,
+        p_last.supplier_id,
+        s.name                             AS supplier_name,
+        p_last.received_at,
+        p_last.invoice_date,
+        COALESCE(prod.min_margin_pct, (SELECT pct FROM min_margin_default))::numeric(6,2)
+                                           AS min_margin_pct
+      FROM last_purchases lp
+      JOIN product_variants pv ON pv.id = lp.variant_id
+      JOIN products prod        ON prod.id = pv.product_id
+      JOIN products p           ON p.id = pv.product_id
+      JOIN purchases p_last     ON p_last.id = lp.purchase_id
+      LEFT JOIN suppliers s     ON s.id = p_last.supplier_id
+      ${where}
+      ORDER BY p_last.received_at DESC NULLS LAST, p_last.invoice_date DESC
+      LIMIT ${limit}
+      `,
+      params,
+    );
+
+    const items = rows.map((r: any) => {
+      const cost = Number(r.landed_unit_cost ?? r.current_cost_price ?? 0);
+      const sell = Number(r.selling_price || 0);
+      const profit = +(sell - cost).toFixed(2);
+      const markup_pct =
+        cost > 0 ? +((profit / cost) * 100).toFixed(2) : null;
+      const margin_pct =
+        sell > 0 ? +((profit / sell) * 100).toFixed(2) : null;
+      const min_pct = Number(r.min_margin_pct || 0);
+      let needs_review = false;
+      let needs_review_reason: string | null = null;
+      if (!(sell > 0)) {
+        needs_review = true;
+        needs_review_reason = 'no_price';
+      } else if (sell < cost) {
+        needs_review = true;
+        needs_review_reason = 'below_cost';
+      } else if (margin_pct !== null && margin_pct < min_pct) {
+        needs_review = true;
+        needs_review_reason = 'below_min_margin';
+      }
+      return {
+        variant_id: r.variant_id,
+        product_id: r.product_id,
+        product_name: r.product_name,
+        sku: r.sku,
+        barcode: r.barcode,
+        last_purchase: {
+          purchase_id: r.purchase_id,
+          purchase_no: r.purchase_no,
+          supplier_id: r.supplier_id,
+          supplier_name: r.supplier_name,
+          received_at: r.received_at,
+          invoice_date: r.invoice_date,
+          manual_allocation: r.manual_allocation,
+        },
+        base_unit_cost: Number(r.base_unit_cost || 0),
+        allocated_cost_per_unit: Number(r.allocated_cost_per_unit || 0),
+        landed_unit_cost: cost,
+        current_selling_price: sell,
+        profit,
+        markup_pct,
+        margin_pct,
+        min_margin_pct: min_pct,
+        needs_review,
+        needs_review_reason,
+      };
+    });
+
+    const filtered = filters.needs_review_only
+      ? items.filter((r: any) => r.needs_review)
+      : items;
+    return {
+      summary: {
+        total: filtered.length,
+        needs_review: filtered.filter((r: any) => r.needs_review).length,
+      },
+      items: filtered,
+    };
+  }
 }
