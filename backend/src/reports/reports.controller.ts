@@ -136,6 +136,49 @@ function MAP_SOLD_PROFIT_INVOICE(r: any) {
   };
 }
 
+// ── P3.4D — Net-of-returns mappers ─────────────────────────────────
+function MAP_NET_SUMMARY(r: any) {
+  return {
+    'من': r.from ?? '',
+    'إلى': r.to ?? '',
+    'إجمالي المبيعات': fmtNumber(r.gross_revenue),
+    'إجمالي المرتجعات': fmtNumber(r.returns_revenue),
+    'صافي المبيعات': fmtNumber(r.net_revenue),
+    'تكلفة المبيعات': fmtNumber(r.gross_cogs),
+    'تكلفة المرتجعات': fmtNumber(r.returns_cogs),
+    'صافي تكلفة البضاعة': fmtNumber(r.net_cogs),
+    'صافي الربح': fmtNumber(r.net_profit),
+    'هامش صافي الربح %': fmtNumber(r.net_margin_pct),
+    'الزيادة على التكلفة %': fmtNumber(r.net_markup_pct),
+    'عدد الفواتير': fmtNumber(r.invoice_count),
+    'عدد المرتجعات': fmtNumber(r.return_count),
+    'كمية مباعة': fmtNumber(r.qty_sold),
+    'كمية مرتجعة': fmtNumber(r.qty_returned),
+    'ملاحظة':
+      'يتم نسب المرتجعات إلى تاريخ ردّ المبلغ (refunded_at) وليس تاريخ البيع الأصلي.',
+  };
+}
+
+function MAP_NET_PRODUCT(r: any) {
+  return {
+    'المنتج': r.product_name ?? '',
+    'SKU': r.sku ?? '',
+    'كمية مباعة': fmtNumber(r.qty_sold),
+    'كمية مرتجعة': fmtNumber(r.qty_returned),
+    'صافي الكمية': fmtNumber(r.qty_net),
+    'مبيعات': fmtNumber(r.sales_revenue),
+    'مرتجعات': fmtNumber(r.returns_revenue),
+    'صافي المبيعات': fmtNumber(r.net_revenue),
+    'تكلفة مبيعات': fmtNumber(r.sales_cogs),
+    'تكلفة مرتجعات': fmtNumber(r.returns_cogs),
+    'صافي التكلفة': fmtNumber(r.net_cogs),
+    'صافي الربح': fmtNumber(r.net_profit),
+    'هامش صافي الربح %': fmtNumber(r.net_margin_pct),
+    'الزيادة على التكلفة %': fmtNumber(r.net_markup_pct),
+    'الحالة': r.status ?? '',
+  };
+}
+
 @ApiBearerAuth()
 @ApiTags('reports')
 // Gated on reports.view — grantable per-user via extra_permissions.
@@ -554,6 +597,70 @@ export class ReportsController {
         format,
         'sold-profit-invoices',
         'الربح الفعلي حسب الفاتورة',
+        { from, to },
+      );
+    }
+    return result;
+  }
+
+  // ── P3.4D — Net-of-returns reports (READ-ONLY) ─────────────────────
+  // Returns are attributed to `returns.refunded_at`, not the original
+  // sale date. A November sale + December return shows up in
+  // December's net profit. The gross endpoints above stay unchanged.
+
+  @Get('pricing/sold-profit/net-summary')
+  @ApiOperation({
+    summary: 'Net-of-returns sold-profit aggregate over a date range',
+  })
+  async soldProfitNetSummary(
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('format') format?: 'json' | 'xlsx' | 'pdf',
+    @Res({ passthrough: true }) res?: Response,
+  ) {
+    const result = await this.svc.soldProfitNetSummary({ from, to });
+    if (format && format !== 'json' && res) {
+      const rows = [MAP_NET_SUMMARY(result)];
+      return this.respond(
+        res,
+        rows,
+        format,
+        'sold-profit-net-summary',
+        'الربح الفعلي بعد المرتجعات — ملخص',
+        { from, to },
+      );
+    }
+    return result;
+  }
+
+  @Get('pricing/sold-profit/net-products')
+  @ApiOperation({
+    summary: 'Per-variant net-of-returns sold-profit over a date range',
+  })
+  async soldProfitNetProducts(
+    @Query('q') q?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('status') status?: string,
+    @Query('limit') limit?: string,
+    @Query('format') format?: 'json' | 'xlsx' | 'pdf',
+    @Res({ passthrough: true }) res?: Response,
+  ) {
+    const result = await this.svc.soldProfitNetProducts({
+      q,
+      from,
+      to,
+      status: status as any,
+      limit: limit ? Number(limit) : undefined,
+    });
+    if (format && format !== 'json' && res) {
+      const rows = (result.items || []).map(MAP_NET_PRODUCT);
+      return this.respond(
+        res,
+        rows,
+        format,
+        'sold-profit-net-products',
+        'الربح الفعلي بعد المرتجعات حسب المنتج',
         { from, to },
       );
     }

@@ -40,6 +40,8 @@ import {
   type SoldProfitProductRow,
   type SoldProfitSort,
   type SoldProfitStatus,
+  type SoldProfitNetProductRow,
+  type SoldProfitNetStatus,
 } from '@/api/reports.api';
 import type {
   SmartPricingScope,
@@ -1159,9 +1161,37 @@ function SoldProfitTab() {
   const [status, setStatus] = useState<SoldProfitStatus | ''>('');
   const [sort, setSort] = useState<SoldProfitSort>('gross_profit_desc');
   const [view, setView] = useState<'products' | 'invoices'>('products');
+  // P3.4D — Gross / Net mode toggle. Net deducts returns attributed
+  // to their `refunded_at` date (NOT the original sale date) so a
+  // November sale + December return lands in December's net profit.
+  // Gross keeps the existing report shape untouched.
+  const [mode, setMode] = useState<'gross' | 'net'>('gross');
+  const [netStatus, setNetStatus] = useState<SoldProfitNetStatus | ''>('');
   // Sold-profit selections only make sense for the products view —
   // the invoices view doesn't expose variant_ids one-per-row.
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+
+  const netSummaryQ = useQuery({
+    queryKey: ['sold-profit-net-summary', from, to],
+    queryFn: () =>
+      reportsApi.soldProfitNetSummary({
+        from: from || undefined,
+        to: to || undefined,
+      }),
+    enabled: mode === 'net',
+  });
+  const netProductsQ = useQuery({
+    queryKey: ['sold-profit-net-products', from, to, q, netStatus],
+    queryFn: () =>
+      reportsApi.soldProfitNetProducts({
+        from: from || undefined,
+        to: to || undefined,
+        q: q.trim() || undefined,
+        status: netStatus || undefined,
+        limit: 1000,
+      }),
+    enabled: mode === 'net',
+  });
 
   // Sold-profit's status enum (low_margin / loss / …) doesn't map to
   // SmartPricingStatusFilter, and its date filters don't apply to the
@@ -1285,16 +1315,80 @@ function SoldProfitTab() {
         </div>
       </div>
 
-      {/* Net-of-returns notice (P3.4D pending) */}
+      {/* P3.4D — Gross / Net mode toggle. Gross UI below stays as
+          P3.4B/C; Net mounts a parallel block driven by net-summary +
+          net-products endpoints. */}
       <div
-        className="text-[11px] text-slate-600 bg-amber-50 border border-amber-200 rounded p-2"
-        data-testid="sold-profit-returns-notice"
+        className="inline-flex rounded-lg border border-slate-200 overflow-hidden text-sm"
+        role="tablist"
+        data-testid="sold-profit-mode-toggle"
       >
-        ملاحظة: هذه الأرقام هي إجمالي المبيعات (Gross) — فواتير المرتجعات
-        مستبعدة من الحساب لكنها لا تُخصم تلقائيًا. صافي الربح بعد المرتجعات
-        مؤجّل لمرحلة لاحقة.
+        <button
+          type="button"
+          role="tab"
+          aria-selected={mode === 'gross'}
+          onClick={() => setMode('gross')}
+          className={`px-4 py-2 font-bold ${
+            mode === 'gross'
+              ? 'bg-amber-500 text-white'
+              : 'bg-white text-slate-700 hover:bg-slate-50'
+          }`}
+          data-testid="sold-profit-mode-gross"
+        >
+          إجمالي Gross
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={mode === 'net'}
+          onClick={() => setMode('net')}
+          className={`px-4 py-2 font-bold ${
+            mode === 'net'
+              ? 'bg-amber-500 text-white'
+              : 'bg-white text-slate-700 hover:bg-slate-50'
+          }`}
+          data-testid="sold-profit-mode-net"
+        >
+          صافي بعد المرتجعات Net
+        </button>
       </div>
 
+      {mode === 'gross' && (
+        <div
+          className="text-[11px] text-slate-600 bg-amber-50 border border-amber-200 rounded p-2"
+          data-testid="sold-profit-returns-notice"
+        >
+          ملاحظة: هذه الأرقام هي إجمالي المبيعات (Gross) — فواتير المرتجعات
+          مستبعدة من الحساب لكنها لا تُخصم تلقائيًا. للحصول على صافي الربح
+          بعد المرتجعات، فعّل وضع &quot;صافي بعد المرتجعات Net&quot; أعلاه.
+        </div>
+      )}
+      {mode === 'net' && (
+        <div
+          className="text-[11px] text-slate-600 bg-sky-50 border border-sky-200 rounded p-2"
+          data-testid="sold-profit-net-notice"
+        >
+          يتم نسب المرتجعات إلى تاريخ ردّ المبلغ (refunded_at) وليس تاريخ
+          البيع الأصلي. مرتجع نوفمبر لفاتورة أكتوبر يُخصم من صافي ربح
+          نوفمبر.
+        </div>
+      )}
+
+      {mode === 'net' && (
+        <NetSoldProfitBlock
+          summary={netSummaryQ.data}
+          isSummaryLoading={netSummaryQ.isLoading}
+          products={netProductsQ.data?.items ?? []}
+          isProductsLoading={netProductsQ.isLoading}
+          netStatus={netStatus}
+          onNetStatusChange={setNetStatus}
+          from={from}
+          to={to}
+          q={q}
+        />
+      )}
+
+      {mode === 'gross' && (<>
       {/* Summary export — one-row sheet pinned to the active date range. */}
       <div className="flex justify-end">
         <ExportButtons
@@ -1463,6 +1557,230 @@ function SoldProfitTab() {
       ) : (
         <SoldInvoicesTable rows={invoicesQ.data?.items ?? []} />
       )}
+      </>)}
+    </div>
+  );
+}
+
+/* ────────────────── P3.4D — Net-of-returns block ────────────────── */
+
+const NET_STATUS_LABEL_AR: Record<SoldProfitNetStatus, string> = {
+  ok: 'ربح صحي',
+  low_margin: 'هامش منخفض',
+  loss: 'خسارة',
+  unknown: 'غير محدد',
+};
+
+const NET_STATUS_COLOR: Record<SoldProfitNetStatus, string> = {
+  ok: 'bg-emerald-100 text-emerald-700',
+  low_margin: 'bg-amber-100 text-amber-700',
+  loss: 'bg-rose-100 text-rose-700',
+  unknown: 'bg-slate-100 text-slate-700',
+};
+
+interface NetSoldProfitBlockProps {
+  summary: import('@/api/reports.api').SoldProfitNetSummary | undefined;
+  isSummaryLoading: boolean;
+  products: SoldProfitNetProductRow[];
+  isProductsLoading: boolean;
+  netStatus: SoldProfitNetStatus | '';
+  onNetStatusChange: (s: SoldProfitNetStatus | '') => void;
+  from: string;
+  to: string;
+  q: string;
+}
+
+function NetSoldProfitBlock({
+  summary,
+  isSummaryLoading,
+  products,
+  isProductsLoading,
+  netStatus,
+  onNetStatusChange,
+  from,
+  to,
+  q,
+}: NetSoldProfitBlockProps) {
+  return (
+    <div className="space-y-3" data-testid="sold-profit-net-block">
+      {/* Net summary export */}
+      <div className="flex justify-end">
+        <ExportButtons
+          slug="pricing/sold-profit/net-summary"
+          params={{
+            from: from || undefined,
+            to: to || undefined,
+          }}
+          testIdSuffix="sold-profit-net-summary"
+        />
+      </div>
+
+      {/* Net summary cards — 8 tiles per spec. */}
+      <div
+        className="grid grid-cols-2 md:grid-cols-4 gap-2"
+        data-testid="sold-profit-net-summary"
+      >
+        <Tile
+          label="إجمالي المبيعات"
+          value={EGP(summary?.gross_revenue ?? 0)}
+        />
+        <Tile
+          label="إجمالي المرتجعات"
+          value={EGP(summary?.returns_revenue ?? 0)}
+          accent="rose"
+        />
+        <Tile
+          label="صافي المبيعات"
+          value={EGP(summary?.net_revenue ?? 0)}
+          accent="emerald"
+        />
+        <Tile
+          label="تكلفة المبيعات"
+          value={EGP(summary?.gross_cogs ?? 0)}
+        />
+        <Tile
+          label="تكلفة المرتجعات"
+          value={EGP(summary?.returns_cogs ?? 0)}
+          accent="rose"
+        />
+        <Tile
+          label="صافي تكلفة البضاعة"
+          value={EGP(summary?.net_cogs ?? 0)}
+        />
+        <Tile
+          label="صافي الربح"
+          value={EGP(summary?.net_profit ?? 0)}
+          accent={(summary?.net_profit ?? 0) >= 0 ? 'emerald' : 'rose'}
+        />
+        <Tile
+          label="هامش صافي الربح"
+          value={PCT(summary?.net_margin_pct ?? null)}
+        />
+      </div>
+
+      {isSummaryLoading && (
+        <div className="text-xs text-slate-400">جاري تحميل الملخص...</div>
+      )}
+
+      {/* Status filter + products export */}
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div className="flex items-center gap-2 flex-wrap">
+          <label className="text-xs font-bold text-slate-700">
+            حالة صافي الربح:
+          </label>
+          <select
+            value={netStatus}
+            onChange={(e) =>
+              onNetStatusChange(e.target.value as SoldProfitNetStatus | '')
+            }
+            data-testid="sold-profit-net-status-filter"
+            className="border border-slate-200 rounded-lg px-3 py-2 text-sm"
+          >
+            <option value="">كل الحالات</option>
+            <option value="ok">ربح صحي</option>
+            <option value="low_margin">هامش منخفض</option>
+            <option value="loss">خسارة</option>
+            <option value="unknown">غير محدد</option>
+          </select>
+        </div>
+        <ExportButtons
+          slug="pricing/sold-profit/net-products"
+          params={{
+            q: q.trim() || undefined,
+            from: from || undefined,
+            to: to || undefined,
+            status: netStatus || undefined,
+            limit: 1000,
+          }}
+          testIdSuffix="sold-profit-net-products"
+        />
+      </div>
+
+      {/* Net products table */}
+      {isProductsLoading ? (
+        <div className="p-6 text-center text-slate-400">جاري التحميل...</div>
+      ) : (
+        <NetProductsTable rows={products} />
+      )}
+    </div>
+  );
+}
+
+function NetProductsTable({ rows }: { rows: SoldProfitNetProductRow[] }) {
+  return (
+    <div className="overflow-x-auto border border-slate-200 rounded-lg">
+      <table className="w-full text-sm">
+        <thead className="bg-slate-50 text-slate-600 text-xs">
+          <tr>
+            <th className="p-2 text-right">المنتج</th>
+            <th className="p-2 text-right">SKU</th>
+            <th className="p-2 text-right">كمية مباعة</th>
+            <th className="p-2 text-right">كمية مرتجعة</th>
+            <th className="p-2 text-right">صافي الكمية</th>
+            <th className="p-2 text-right">مبيعات</th>
+            <th className="p-2 text-right">مرتجعات</th>
+            <th className="p-2 text-right">صافي المبيعات</th>
+            <th className="p-2 text-right">تكلفة مبيعات</th>
+            <th className="p-2 text-right">تكلفة مرتجعات</th>
+            <th className="p-2 text-right">صافي التكلفة</th>
+            <th className="p-2 text-right">صافي الربح</th>
+            <th className="p-2 text-right">هامش صافي الربح</th>
+            <th className="p-2 text-right">الزيادة على التكلفة</th>
+            <th className="p-2 text-right">الحالة</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-slate-100">
+          {rows.length === 0 ? (
+            <tr>
+              <td colSpan={15} className="p-6 text-center text-slate-400">
+                لا توجد بيانات صافية للفترة المحددة
+              </td>
+            </tr>
+          ) : (
+            rows.map((r) => (
+              <tr
+                key={r.variant_id}
+                data-testid={`sold-profit-net-row-${r.variant_id}`}
+              >
+                <td className="p-2">
+                  <div className="font-medium">{r.product_name}</div>
+                  <div className="text-[10px] text-slate-400 font-mono">
+                    {[r.color, r.size].filter(Boolean).join(' / ')}
+                  </div>
+                </td>
+                <td className="p-2 font-mono text-xs">{r.sku}</td>
+                <td className="p-2">{r.qty_sold}</td>
+                <td className="p-2 text-rose-700">{r.qty_returned}</td>
+                <td className="p-2 font-bold">{r.qty_net}</td>
+                <td className="p-2">{EGP(r.sales_revenue)}</td>
+                <td className="p-2 text-rose-700">
+                  {EGP(r.returns_revenue)}
+                </td>
+                <td className="p-2 font-bold">{EGP(r.net_revenue)}</td>
+                <td className="p-2">{EGP(r.sales_cogs)}</td>
+                <td className="p-2 text-rose-700">{EGP(r.returns_cogs)}</td>
+                <td className="p-2 font-bold">{EGP(r.net_cogs)}</td>
+                <td
+                  className={`p-2 font-bold ${
+                    r.net_profit >= 0 ? 'text-emerald-700' : 'text-rose-700'
+                  }`}
+                >
+                  {EGP(r.net_profit)}
+                </td>
+                <td className="p-2">{PCT(r.net_margin_pct)}</td>
+                <td className="p-2">{PCT(r.net_markup_pct)}</td>
+                <td className="p-2">
+                  <span
+                    className={`text-[10px] font-bold px-2 py-1 rounded ${NET_STATUS_COLOR[r.status]}`}
+                  >
+                    {NET_STATUS_LABEL_AR[r.status]}
+                  </span>
+                </td>
+              </tr>
+            ))
+          )}
+        </tbody>
+      </table>
     </div>
   );
 }

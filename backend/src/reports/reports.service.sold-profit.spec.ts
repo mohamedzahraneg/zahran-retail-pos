@@ -323,12 +323,19 @@ describe('STATIC GUARDRAIL — P3.4B reports never write', () => {
   });
 
   it('zero references to write-side service helpers', () => {
-    expect(slice).not.toMatch(/applyVariantPrices\b/);
-    expect(slice).not.toMatch(/reverseByReference\b/);
-    expect(slice).not.toMatch(/recordTransaction\b/);
-    expect(slice).not.toMatch(/postPurchase\b/);
-    expect(slice).not.toMatch(/financialEngine/i);
-    expect(slice).not.toMatch(/\.transaction\(/);
+    // Strip comment lines so doc strings that LIST the forbidden
+    // tokens (for human readers) don't false-positive. The OTHER
+    // tests in this block already use this pattern; aligning here.
+    const stripped = slice
+      .split('\n')
+      .filter((l) => !/^\s*(\/\/|\*)/.test(l))
+      .join('\n');
+    expect(stripped).not.toMatch(/applyVariantPrices\b/);
+    expect(stripped).not.toMatch(/reverseByReference\b/);
+    expect(stripped).not.toMatch(/recordTransaction\b/);
+    expect(stripped).not.toMatch(/postPurchase\b/);
+    expect(stripped).not.toMatch(/financialEngine/i);
+    expect(stripped).not.toMatch(/\.transaction\(/);
   });
 
   it('zero references to forbidden tables in executable lines', () => {

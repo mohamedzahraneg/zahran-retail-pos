@@ -257,6 +257,26 @@ export const reportsApi = {
       api.get('/reports/pricing/sold-profit/invoices', { params }),
     ),
 
+  // P3.4D — net-of-returns sold-profit reports (read-only).
+  // Returns are attributed to `refunded_at`, not the original sale date.
+  // Gross helpers above remain unchanged.
+  soldProfitNetSummary: (params: { from?: string; to?: string } = {}) =>
+    unwrap<SoldProfitNetSummary>(
+      api.get('/reports/pricing/sold-profit/net-summary', { params }),
+    ),
+  soldProfitNetProducts: (
+    params: {
+      q?: string;
+      from?: string;
+      to?: string;
+      status?: SoldProfitNetStatus;
+      limit?: number;
+    } = {},
+  ) =>
+    unwrap<SoldProfitNetProductsResponse>(
+      api.get('/reports/pricing/sold-profit/net-products', { params }),
+    ),
+
   export: (
     slug: string,
     format: 'xlsx' | 'pdf',
@@ -484,4 +504,71 @@ export interface SoldProfitInvoicesResponse {
     low_margin: number;
   };
   items: SoldProfitInvoiceRow[];
+}
+
+// ─── P3.4D — Net-of-returns response types ────────────────────────
+export type SoldProfitNetStatus = 'ok' | 'loss' | 'low_margin' | 'unknown';
+
+export interface SoldProfitNetSummary {
+  from: string | null;
+  to: string | null;
+  gross_revenue: number;
+  gross_cogs: number;
+  gross_profit: number;
+  qty_sold: number;
+  invoice_count: number;
+  returns_revenue: number;
+  returns_cogs: number;
+  returns_profit_reversal: number;
+  qty_returned: number;
+  return_count: number;
+  net_revenue: number;
+  net_cogs: number;
+  net_profit: number;
+  net_margin_pct: number | null;
+  net_markup_pct: number | null;
+}
+
+export interface SoldProfitNetProductRow {
+  variant_id: string;
+  product_id: string;
+  product_name: string;
+  sku: string;
+  barcode: string | null;
+  color: string | null;
+  size: string | null;
+  qty_sold: number;
+  qty_returned: number;
+  qty_net: number;
+  sales_revenue: number;
+  returns_revenue: number;
+  net_revenue: number;
+  sales_cogs: number;
+  returns_cogs: number;
+  net_cogs: number;
+  invoice_count: number;
+  return_count: number;
+  last_sold_at: string | null;
+  last_returned_at: string | null;
+  net_profit: number;
+  net_margin_pct: number | null;
+  net_markup_pct: number | null;
+  min_margin_pct: number;
+  status: SoldProfitNetStatus;
+}
+
+export interface SoldProfitNetProductsResponse {
+  from: string | null;
+  to: string | null;
+  summary: {
+    total: number;
+    net_revenue: number;
+    net_cogs: number;
+    net_profit: number;
+    loss: number;
+    low_margin: number;
+    unknown: number;
+    ok: number;
+  };
+  items: SoldProfitNetProductRow[];
 }

@@ -1639,4 +1639,365 @@ export class ReportsService {
       items: filtered,
     };
   }
+
+  // ──────────────────────────────────────────────────────────────────────
+  //  P3.4D — Net-of-returns sold-profit reports (READ-ONLY)
+  //
+  //  Returns are NOT stored as `is_return=TRUE` invoices in this
+  //  codebase. They live in the `returns` + `return_items` tables with
+  //  `original_invoice_id` linking back to the sale. Attribution date
+  //  for a return is `returns.refunded_at` (when the refund actually
+  //  closed) — NOT the original sale date. This matches the operator's
+  //  policy: a December return of a November sale is deducted from
+  //  December net profit.
+  //
+  //  Sign convention: `return_items.quantity` is stored POSITIVE
+  //  (CHECK quantity > 0). We negate at compute time.
+  //
+  //  Returned revenue uses `return_items.refund_amount` — the
+  //  authoritative per-line refund the system actually issued (already
+  //  accounts for partial refunds / restocking handled at the header
+  //  level). Returned COGS pulls `unit_cost` from the ORIGINAL
+  //  invoice_item via `original_invoice_item_id` so the cost basis
+  //  matches what we recognised at the time of sale.
+  //
+  //  Cancelled / not-yet-refunded returns are excluded:
+  //    r.status = 'refunded' AND r.cancelled_at IS NULL
+  //
+  //  STRICTLY SELECT-only. The static guardrail spec asserts the new
+  //  block contains no INSERT/UPDATE/DELETE/ALTER/DROP/CREATE and
+  //  zero references to applyVariantPrices, cashbox, journal_entries,
+  //  journal_lines, stock_movements, supplier_payments, purchase_items.
+  // ──────────────────────────────────────────────────────────────────────
+
+  /** P3.4D — Net-of-returns aggregate summary across the date range. */
+  async soldProfitNetSummary(filters: { from?: string; to?: string } = {}) {
+    const params: any[] = [];
+    const where = this.soldProfitWhere(params, filters.from, filters.to);
+    const [sales] = await this.ds.query(
+      `
+      SELECT
+        COALESCE(SUM(ii.quantity * ii.unit_price - ii.discount_amount), 0)::numeric(14,2)
+                                                                          AS revenue,
+        COALESCE(SUM(ii.quantity * ii.unit_cost), 0)::numeric(14,2)        AS cogs,
+        COALESCE(SUM(ii.quantity), 0)::int                                 AS qty_sold,
+        COUNT(DISTINCT ii.invoice_id)::int                                 AS invoice_count
+      FROM invoice_items ii
+      JOIN invoices i ON i.id = ii.invoice_id
+      ${where}
+      `,
+      params,
+    );
+    // Returns side: separate query against returns + return_items joined
+    // back to invoice_items for the cost basis.
+    const retParams: any[] = [];
+    const retConds: string[] = [
+      `r.status = 'refunded'`,
+      `r.cancelled_at IS NULL`,
+    ];
+    if (filters.from) {
+      retParams.push(filters.from);
+      retConds.push(`r.refunded_at >= $${retParams.length}::timestamptz`);
+    }
+    if (filters.to) {
+      retParams.push(filters.to);
+      retConds.push(
+        `r.refunded_at < ($${retParams.length}::timestamptz + interval '1 day')`,
+      );
+    }
+    const [returns] = await this.ds.query(
+      `
+      SELECT
+        COALESCE(SUM(ri.refund_amount), 0)::numeric(14,2)                  AS revenue,
+        COALESCE(SUM(ri.quantity * COALESCE(ii.unit_cost, 0)), 0)::numeric(14,2)
+                                                                          AS cogs,
+        COALESCE(SUM(ri.quantity), 0)::int                                 AS qty_returned,
+        COUNT(DISTINCT r.id)::int                                          AS return_count
+      FROM return_items ri
+      JOIN returns r ON r.id = ri.return_id
+      LEFT JOIN invoice_items ii ON ii.id = ri.original_invoice_item_id
+      WHERE ${retConds.join(' AND ')}
+      `,
+      retParams,
+    );
+
+    const grossRevenue = Number(sales.revenue);
+    const grossCogs = Number(sales.cogs);
+    const grossProfit = grossRevenue - grossCogs;
+    const returnsRevenue = Number(returns.revenue);
+    const returnsCogs = Number(returns.cogs);
+    const returnsProfit = returnsRevenue - returnsCogs;
+    const netRevenue = grossRevenue - returnsRevenue;
+    const netCogs = grossCogs - returnsCogs;
+    const netProfit = grossProfit - returnsProfit;
+    const netMarginPct =
+      netRevenue > 0 ? +((netProfit / netRevenue) * 100).toFixed(2) : null;
+    const netMarkupPct =
+      netCogs > 0 ? +((netProfit / netCogs) * 100).toFixed(2) : null;
+
+    return {
+      from: filters.from ?? null,
+      to: filters.to ?? null,
+      // Gross half (matches existing soldProfitSummary).
+      gross_revenue: +grossRevenue.toFixed(2),
+      gross_cogs: +grossCogs.toFixed(2),
+      gross_profit: +grossProfit.toFixed(2),
+      qty_sold: Number(sales.qty_sold),
+      invoice_count: Number(sales.invoice_count),
+      // Returns half (NEW).
+      returns_revenue: +returnsRevenue.toFixed(2),
+      returns_cogs: +returnsCogs.toFixed(2),
+      returns_profit_reversal: +returnsProfit.toFixed(2),
+      qty_returned: Number(returns.qty_returned),
+      return_count: Number(returns.return_count),
+      // Net (NEW).
+      net_revenue: +netRevenue.toFixed(2),
+      net_cogs: +netCogs.toFixed(2),
+      net_profit: +netProfit.toFixed(2),
+      net_margin_pct: netMarginPct,
+      net_markup_pct: netMarkupPct,
+    };
+  }
+
+  /** P3.4D — Per-variant net-of-returns rows. */
+  async soldProfitNetProducts(filters: {
+    q?: string;
+    from?: string;
+    to?: string;
+    status?: 'loss' | 'low_margin' | 'ok' | 'unknown';
+    limit?: number;
+  } = {}) {
+    const limit = Math.min(Math.max(1, Number(filters.limit) || 500), 5000);
+    const minMarginParam = `(SELECT COALESCE(
+        (SELECT (value)::text::numeric
+           FROM settings
+          WHERE key = 'smart_pricing.min_margin_pct_default'
+          LIMIT 1),
+        15
+      ))`;
+
+    // ── Sales aggregate per variant, period-filtered on sale date.
+    const salesConds: string[] = [
+      `i.status IN ('completed','paid','partially_paid')`,
+      `NOT i.is_return`,
+    ];
+    const salesParams: any[] = [];
+    if (filters.from) {
+      salesParams.push(filters.from);
+      salesConds.push(
+        `COALESCE(i.completed_at, i.created_at) >= $${salesParams.length}::timestamptz`,
+      );
+    }
+    if (filters.to) {
+      salesParams.push(filters.to);
+      salesConds.push(
+        `COALESCE(i.completed_at, i.created_at) < ($${salesParams.length}::timestamptz + interval '1 day')`,
+      );
+    }
+    if (filters.q) {
+      salesParams.push(`%${filters.q.trim()}%`);
+      const idx = salesParams.length;
+      salesConds.push(
+        `(p.name_ar ILIKE $${idx} OR pv.sku ILIKE $${idx} OR pv.barcode ILIKE $${idx})`,
+      );
+    }
+
+    // ── Returns aggregate per variant, period-filtered on refunded_at.
+    // We deliberately use the SAME param array as sales so the SQL is
+    // a single statement with one set of bindings. Returns conds get
+    // their own indices.
+    const retConds: string[] = [
+      `r.status = 'refunded'`,
+      `r.cancelled_at IS NULL`,
+    ];
+    const retParams: any[] = [];
+    if (filters.from) {
+      retParams.push(filters.from);
+      retConds.push(`r.refunded_at >= $${retParams.length}::timestamptz`);
+    }
+    if (filters.to) {
+      retParams.push(filters.to);
+      retConds.push(
+        `r.refunded_at < ($${retParams.length}::timestamptz + interval '1 day')`,
+      );
+    }
+    if (filters.q) {
+      retParams.push(`%${filters.q.trim()}%`);
+      const idx = retParams.length;
+      retConds.push(
+        `(p2.name_ar ILIKE $${idx} OR pv2.sku ILIKE $${idx} OR pv2.barcode ILIKE $${idx})`,
+      );
+    }
+
+    // Build one combined statement using two CTEs + FULL OUTER JOIN so
+    // return-only rows surface even when the original sale fell outside
+    // the period.
+    const allParams = [...salesParams, ...retParams];
+    const retParamOffset = salesParams.length;
+    const offsetRetConds = retConds.map((c) =>
+      c.replace(/\$(\d+)/g, (_m, n) => `$${Number(n) + retParamOffset}`),
+    );
+
+    const rows = await this.ds.query(
+      `
+      WITH sales AS (
+        SELECT
+          pv.id                                                      AS variant_id,
+          pv.product_id,
+          p.name_ar                                                  AS product_name,
+          pv.sku,
+          pv.barcode,
+          c.name_ar                                                  AS color,
+          s.size_label                                               AS size,
+          SUM(ii.quantity)::int                                      AS qty_sold,
+          SUM(ii.quantity * ii.unit_price - ii.discount_amount)::numeric(14,2)
+                                                                     AS revenue,
+          SUM(ii.quantity * ii.unit_cost)::numeric(14,2)             AS cogs,
+          COUNT(DISTINCT ii.invoice_id)::int                         AS invoice_count,
+          MAX(COALESCE(i.completed_at, i.created_at))                AS last_sold_at
+        FROM invoice_items ii
+        JOIN product_variants pv ON pv.id = ii.variant_id
+        JOIN products p          ON p.id  = pv.product_id
+        LEFT JOIN colors c       ON c.id  = pv.color_id
+        LEFT JOIN sizes  s       ON s.id  = pv.size_id
+        JOIN invoices i          ON i.id  = ii.invoice_id
+        WHERE ${salesConds.join(' AND ')}
+        GROUP BY pv.id, pv.product_id, p.name_ar, pv.sku, pv.barcode,
+                 c.name_ar, s.size_label
+      ),
+      returns AS (
+        SELECT
+          pv2.id                                                     AS variant_id,
+          pv2.product_id,
+          p2.name_ar                                                 AS product_name,
+          pv2.sku,
+          pv2.barcode,
+          c2.name_ar                                                 AS color,
+          s2.size_label                                              AS size,
+          SUM(ri.quantity)::int                                      AS qty_returned,
+          SUM(ri.refund_amount)::numeric(14,2)                       AS revenue,
+          SUM(ri.quantity * COALESCE(ii_orig.unit_cost, 0))::numeric(14,2)
+                                                                     AS cogs,
+          COUNT(DISTINCT r.id)::int                                  AS return_count,
+          MAX(r.refunded_at)                                         AS last_returned_at
+        FROM return_items ri
+        JOIN returns r            ON r.id  = ri.return_id
+        JOIN product_variants pv2 ON pv2.id = ri.variant_id
+        JOIN products p2          ON p2.id = pv2.product_id
+        LEFT JOIN colors c2       ON c2.id = pv2.color_id
+        LEFT JOIN sizes  s2       ON s2.id = pv2.size_id
+        LEFT JOIN invoice_items ii_orig ON ii_orig.id = ri.original_invoice_item_id
+        WHERE ${offsetRetConds.join(' AND ')}
+        GROUP BY pv2.id, pv2.product_id, p2.name_ar, pv2.sku, pv2.barcode,
+                 c2.name_ar, s2.size_label
+      )
+      SELECT
+        COALESCE(sales.variant_id, returns.variant_id)               AS variant_id,
+        COALESCE(sales.product_id, returns.product_id)               AS product_id,
+        COALESCE(sales.product_name, returns.product_name)           AS product_name,
+        COALESCE(sales.sku, returns.sku)                             AS sku,
+        COALESCE(sales.barcode, returns.barcode)                     AS barcode,
+        COALESCE(sales.color, returns.color)                         AS color,
+        COALESCE(sales.size, returns.size)                           AS size,
+        COALESCE(sales.qty_sold, 0)::int                             AS qty_sold,
+        COALESCE(returns.qty_returned, 0)::int                       AS qty_returned,
+        (COALESCE(sales.qty_sold, 0) - COALESCE(returns.qty_returned, 0))::int
+                                                                     AS qty_net,
+        COALESCE(sales.revenue, 0)::numeric(14,2)                    AS sales_revenue,
+        COALESCE(returns.revenue, 0)::numeric(14,2)                  AS returns_revenue,
+        (COALESCE(sales.revenue, 0) - COALESCE(returns.revenue, 0))::numeric(14,2)
+                                                                     AS net_revenue,
+        COALESCE(sales.cogs, 0)::numeric(14,2)                       AS sales_cogs,
+        COALESCE(returns.cogs, 0)::numeric(14,2)                     AS returns_cogs,
+        (COALESCE(sales.cogs, 0) - COALESCE(returns.cogs, 0))::numeric(14,2)
+                                                                     AS net_cogs,
+        COALESCE(sales.invoice_count, 0)::int                        AS invoice_count,
+        COALESCE(returns.return_count, 0)::int                       AS return_count,
+        sales.last_sold_at,
+        returns.last_returned_at,
+        ${minMarginParam}::numeric(6,2)                              AS min_margin_pct
+      FROM sales
+      FULL OUTER JOIN returns ON returns.variant_id = sales.variant_id
+      ORDER BY (COALESCE(sales.revenue, 0) - COALESCE(returns.revenue, 0)) DESC
+      LIMIT ${limit}
+      `,
+      allParams,
+    );
+
+    // Compute net_profit + status client-side so the formulas stay
+    // visible in code review.
+    const enriched = (rows as any[]).map((r) => {
+      const netRevenue = Number(r.net_revenue || 0);
+      const netCogs = Number(r.net_cogs || 0);
+      const netProfit = +(netRevenue - netCogs).toFixed(2);
+      const netMarginPct =
+        netRevenue > 0 ? +((netProfit / netRevenue) * 100).toFixed(2) : null;
+      const netMarkupPct =
+        netCogs > 0 ? +((netProfit / netCogs) * 100).toFixed(2) : null;
+      const minMarginPct = Number(r.min_margin_pct || 0);
+      let status: 'loss' | 'low_margin' | 'ok' | 'unknown';
+      // Status precedence per P3.4D spec:
+      //   1. net_profit < 0           → loss
+      //   2. margin known and < min   → low_margin
+      //   3. net_revenue ≤ 0 or net_cogs ≤ 0
+      //                              → unknown (no basis to evaluate)
+      //   4. otherwise                → ok
+      if (netProfit < 0) {
+        status = 'loss';
+      } else if (
+        netMarginPct !== null
+        && minMarginPct > 0
+        && netMarginPct < minMarginPct
+      ) {
+        status = 'low_margin';
+      } else if (netRevenue <= 0 || netCogs <= 0) {
+        status = 'unknown';
+      } else {
+        status = 'ok';
+      }
+      return {
+        ...r,
+        qty_sold: Number(r.qty_sold),
+        qty_returned: Number(r.qty_returned),
+        qty_net: Number(r.qty_net),
+        sales_revenue: +Number(r.sales_revenue).toFixed(2),
+        returns_revenue: +Number(r.returns_revenue).toFixed(2),
+        net_revenue: +netRevenue.toFixed(2),
+        sales_cogs: +Number(r.sales_cogs).toFixed(2),
+        returns_cogs: +Number(r.returns_cogs).toFixed(2),
+        net_cogs: +netCogs.toFixed(2),
+        net_profit: netProfit,
+        net_margin_pct: netMarginPct,
+        net_markup_pct: netMarkupPct,
+        min_margin_pct: minMarginPct,
+        status,
+      };
+    });
+
+    const filtered = filters.status
+      ? enriched.filter((r) => r.status === filters.status)
+      : enriched;
+
+    return {
+      from: filters.from ?? null,
+      to: filters.to ?? null,
+      summary: {
+        total: filtered.length,
+        net_revenue: +filtered
+          .reduce((s, r) => s + Number(r.net_revenue), 0)
+          .toFixed(2),
+        net_cogs: +filtered
+          .reduce((s, r) => s + Number(r.net_cogs), 0)
+          .toFixed(2),
+        net_profit: +filtered
+          .reduce((s, r) => s + Number(r.net_profit), 0)
+          .toFixed(2),
+        loss: filtered.filter((r) => r.status === 'loss').length,
+        low_margin: filtered.filter((r) => r.status === 'low_margin').length,
+        unknown: filtered.filter((r) => r.status === 'unknown').length,
+        ok: filtered.filter((r) => r.status === 'ok').length,
+      },
+      items: filtered,
+    };
+  }
 }
