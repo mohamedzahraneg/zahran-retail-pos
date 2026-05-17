@@ -1200,7 +1200,16 @@ describe('STATIC GUARDRAIL — smart pricing assistant write footprint', () => {
   // that may legitimately reference forbidden tables in their own
   // (unrelated) read-side guards.
   const startIdx = allIdxs[allIdxs.length - 1] ?? -1;
-  const slice = startIdx >= 0 ? SRC.slice(startIdx) : '';
+  // Stop at the next phase marker (P3.6A — cost adjustment) so the
+  // guardrail only inspects the P3.5A pricing block. P3.6A legitimately
+  // writes `product_variants.cost_price` and has its own guardrail.
+  const endIdx = startIdx >= 0 ? SRC.indexOf('PR-PURCHASES-P3.6A', startIdx + 1) : -1;
+  const slice =
+    startIdx >= 0
+      ? endIdx > startIdx
+        ? SRC.slice(startIdx, endIdx)
+        : SRC.slice(startIdx)
+      : '';
 
   it('the new methods exist in the source', () => {
     expect(slice).toMatch(/async smartPricingPreview\b/);

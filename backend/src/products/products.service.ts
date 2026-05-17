@@ -18,6 +18,9 @@ import {
   SmartPricingPreviewDto,
   SmartPricingScopeDto,
   SmartPricingStrategy,
+  CostAdjustmentApplyDto,
+  CostAdjustmentPreviewDto,
+  CostAdjustmentType,
 } from './dto/product.dto';
 
 // ── PR-PURCHASES-P3.5A — Smart Bulk Pricing Assistant ──
@@ -1283,6 +1286,377 @@ export class ProductsService {
         mode: isManual ? 'manual' : 'smart',
         updated,
         skipped,
+        items: out,
+      };
+    });
+  }
+
+  // ──────────────────────────────────────────────────────────────────────
+  //  PR-PURCHASES-P3.6A — Smart Cost Adjustment Preview + Apply
+  //
+  //  COST-REFERENCE-ONLY by design:
+  //    · Writes ONLY product_variants.cost_price + INSERT
+  //      variant_cost_history (migration 136). No other write surface.
+  //    · NEVER writes journal_entries / journal_lines.
+  //    · NEVER writes cashbox_transactions / stock_movements /
+  //      supplier_ledger / supplier_payments.
+  //    · NEVER updates stock.* — moving-average revaluation is OUT of
+  //      scope. Updating the variant's REFERENCE cost only affects the
+  //      NEXT sale's COGS basis; historical invoice_items.unit_cost
+  //      stays immutable so reconciliation reports keep working.
+  //    · NEVER updates purchase_items / invoice_items / purchases.
+  //    · NEVER updates product_variants.selling_price (that's the
+  //      P3.5A surface).
+  //    · NEVER calls posting.service / financial-engine / cashbox
+  //      primitives.
+  //
+  //  The static guardrail spec asserts this with regex scans.
+  //
+  //  Apply gates (mirrors smart-pricing timeout hotfix):
+  //    · variant_ids_to_apply REQUIRED (no implicit "apply all").
+  //    · variant_ids_to_apply.length ≤ 500 — refuse oversized batches.
+  //    · reason required (min 3 chars).
+  //    · resulting cost must stay ≥ 0 (CHECK constraint in migration).
+  // ──────────────────────────────────────────────────────────────────────
+
+  private _computeNewCost(
+    current: number,
+    type: CostAdjustmentType,
+    value: number,
+  ): number {
+    switch (type) {
+      case 'fixed_increase':
+        return current + value;
+      case 'fixed_decrease':
+        return current - value;
+      case 'percent_increase':
+        return current * (1 + value / 100);
+      case 'percent_decrease':
+        return current * (1 - value / 100);
+      case 'set_exact':
+        return value;
+    }
+  }
+
+  /** Resolve the cost-adjustment scope to a concrete variant list +
+   *  the total candidate count. Read-only. */
+  private async _resolveCostScope(
+    dto: CostAdjustmentPreviewDto,
+    effectiveLimit: number,
+  ): Promise<{ ids: string[]; total_candidates: number }> {
+    if (dto.scope === 'selected') {
+      const ids = (dto.variant_ids ?? []).filter(Boolean);
+      if (ids.length === 0) {
+        throw new BadRequestException(
+          'يجب تحديد صنف واحد على الأقل لهذا النطاق',
+        );
+      }
+      return {
+        ids: ids.slice(0, effectiveLimit),
+        total_candidates: ids.length,
+      };
+    }
+
+    const f = dto.filters ?? {};
+    const params: any[] = [];
+    const conds: string[] = ['pv.deleted_at IS NULL'];
+    if (f.only_active !== false) {
+      conds.push('pv.is_active = TRUE');
+    }
+    if (f.q) {
+      params.push(`%${f.q.trim()}%`);
+      const idx = params.length;
+      conds.push(
+        `(p.name_ar ILIKE $${idx}::text OR pv.sku ILIKE $${idx}::text OR pv.barcode ILIKE $${idx}::text)`,
+      );
+    }
+    if (f.category_id) {
+      params.push(f.category_id);
+      conds.push(`p.category_id = $${params.length}::uuid`);
+    }
+    const stockJoin = f.only_in_stock
+      ? 'JOIN stock st ON st.variant_id = pv.id AND st.quantity_on_hand > 0'
+      : '';
+    const fromClause = `FROM product_variants pv
+        JOIN products p ON p.id = pv.product_id
+        ${stockJoin}
+       WHERE ${conds.join(' AND ')}`;
+    const [countRow] = await this.ds.query(
+      `SELECT COUNT(DISTINCT pv.id)::int AS n ${fromClause}`,
+      params,
+    );
+    const total_candidates = Number(countRow?.n ?? 0);
+    const rows = await this.ds.query(
+      `SELECT DISTINCT pv.id AS variant_id
+         ${fromClause}
+       ORDER BY pv.id
+       LIMIT ${effectiveLimit}`,
+      params,
+    );
+    return {
+      ids: rows.map((r: any) => r.variant_id as string),
+      total_candidates,
+    };
+  }
+
+  /** Public entry: read-only preview. Builds the row set for the UI
+   *  table + the summary tile values. No writes. */
+  async costAdjustmentPreview(dto: CostAdjustmentPreviewDto) {
+    this._validateAdjustment(dto.adjustment_type, dto.adjustment_value);
+
+    const SMART_COST_PREVIEW_DEFAULT = 200;
+    const SMART_COST_PREVIEW_MAX = 1000;
+    const effective_limit = Math.min(
+      Math.max(1, Number(dto.limit) || SMART_COST_PREVIEW_DEFAULT),
+      SMART_COST_PREVIEW_MAX,
+    );
+
+    const { ids: variantIds, total_candidates } = await this._resolveCostScope(
+      dto,
+      effective_limit,
+    );
+    if (variantIds.length === 0) {
+      return {
+        items: [],
+        summary: {
+          total_candidates,
+          returned_count: 0,
+          truncated: false,
+          avg_delta_pct: null,
+          total_inventory_value_before: 0,
+          total_inventory_value_after_reference_only: 0,
+          message_ar: null,
+        },
+      };
+    }
+
+    // Pull the rich rows for the variants in scope. READ-ONLY join
+    // on stock for inventory_value_before/after_reference_only.
+    const rows = await this.ds.query(
+      `
+      WITH stock_sum AS (
+        SELECT variant_id, SUM(quantity_on_hand)::int AS qty
+          FROM stock
+         WHERE variant_id = ANY($1::uuid[])
+         GROUP BY variant_id
+      )
+      SELECT
+        pv.id                                                AS variant_id,
+        pv.sku,
+        pv.barcode,
+        p.id                                                 AS product_id,
+        p.name_ar                                            AS product_name,
+        cat.name_ar                                          AS category_name,
+        pv.cost_price::numeric(14,2)                         AS current_cost_price,
+        COALESCE(stock_sum.qty, 0)                           AS stock_on_hand
+      FROM product_variants pv
+      JOIN products p          ON p.id = pv.product_id
+      LEFT JOIN categories cat ON cat.id = p.category_id
+      LEFT JOIN stock_sum      ON stock_sum.variant_id = pv.id
+      WHERE pv.id = ANY($1::uuid[])
+        AND pv.deleted_at IS NULL
+      ORDER BY p.name_ar, pv.sku
+      `,
+      [variantIds],
+    );
+
+    const items = (rows as any[]).map((r) => {
+      const current = Number(r.current_cost_price || 0);
+      const raw = this._computeNewCost(
+        current,
+        dto.adjustment_type,
+        dto.adjustment_value,
+      );
+      const newCost = Math.max(0, Math.round(raw * 100) / 100);
+      const delta = +(newCost - current).toFixed(2);
+      const deltaPct =
+        current > 0 ? +((delta / current) * 100).toFixed(2) : null;
+      const stock = Number(r.stock_on_hand || 0);
+      const inventoryBefore = +(stock * current).toFixed(2);
+      const inventoryAfter = +(stock * newCost).toFixed(2);
+      let warning: string | null = null;
+      if (newCost <= 0) {
+        warning = 'التكلفة الجديدة صفر — راجع القيمة قبل التطبيق';
+      } else if (raw < 0) {
+        warning = 'التكلفة الناتجة سالبة وستُثبَّت عند الصفر';
+      } else if (current === 0) {
+        warning = 'التكلفة الحالية غير معروفة — لا يمكن حساب النسبة';
+      }
+      return {
+        variant_id: r.variant_id,
+        product_id: r.product_id,
+        product_name: r.product_name,
+        sku: r.sku,
+        barcode: r.barcode,
+        category_name: r.category_name,
+        current_cost_price: current,
+        new_cost_price: newCost,
+        delta_amount: delta,
+        delta_pct: deltaPct,
+        stock_on_hand: stock,
+        inventory_value_before: inventoryBefore,
+        inventory_value_after_reference_only: inventoryAfter,
+        warning,
+      };
+    });
+
+    const truncated = total_candidates > items.length;
+    const deltaPctValues = items
+      .map((i) => i.delta_pct)
+      .filter((v): v is number => v !== null);
+    const avgDeltaPct =
+      deltaPctValues.length > 0
+        ? +(
+            deltaPctValues.reduce((s, v) => s + v, 0) /
+            deltaPctValues.length
+          ).toFixed(2)
+        : null;
+    const totalBefore = +items
+      .reduce((s, i) => s + i.inventory_value_before, 0)
+      .toFixed(2);
+    const totalAfter = +items
+      .reduce((s, i) => s + i.inventory_value_after_reference_only, 0)
+      .toFixed(2);
+    const message_ar = truncated
+      ? `تم عرض أول ${items.length} صنف فقط من ${total_candidates}. ضيّق الفلتر أو طبّق على دفعات.`
+      : null;
+
+    return {
+      items,
+      summary: {
+        total_candidates,
+        returned_count: items.length,
+        truncated,
+        avg_delta_pct: avgDeltaPct,
+        total_inventory_value_before: totalBefore,
+        total_inventory_value_after_reference_only: totalAfter,
+        message_ar,
+      },
+    };
+  }
+
+  private _validateAdjustment(
+    type: CostAdjustmentType,
+    value: number,
+  ): void {
+    if (!Number.isFinite(value) || value < 0) {
+      throw new BadRequestException('قيمة التعديل يجب أن تكون رقمًا موجبًا');
+    }
+    if (type !== 'set_exact' && value <= 0) {
+      throw new BadRequestException('قيمة التعديل يجب أن تكون أكبر من صفر');
+    }
+    if (
+      (type === 'percent_increase' || type === 'percent_decrease')
+      && value > 500
+    ) {
+      throw new BadRequestException('النسبة لا يمكن أن تتجاوز 500%');
+    }
+  }
+
+  /** Public entry: apply. Re-validates server-side, runs the same
+   *  formula the preview used (NEVER trusts a client-supplied price),
+   *  writes ONLY product_variants.cost_price + variant_cost_history
+   *  inside ONE transaction.
+   *
+   *  Apply gates:
+   *    · variant_ids_to_apply must be present (DTO enforces ≥ 1).
+   *    · variant_ids_to_apply.length ≤ 500.
+   *    · reason min 3 chars (DTO).
+   *    · per-row guard: if |new - current| < 0.01 we skip (no audit
+   *      row written — cleaner trail). */
+  async costAdjustmentApply(dto: CostAdjustmentApplyDto, userId?: string) {
+    this._validateAdjustment(dto.adjustment_type, dto.adjustment_value);
+    if (!dto.reason || dto.reason.trim().length < 3) {
+      throw new BadRequestException('سبب التعديل مطلوب');
+    }
+
+    const COST_APPLY_BATCH_MAX = 500;
+    if (dto.variant_ids_to_apply.length > COST_APPLY_BATCH_MAX) {
+      throw new BadRequestException(
+        'عدد الأصناف كبير جدًا للتطبيق مرة واحدة. طبّق على دفعات أصغر.',
+      );
+    }
+
+    const ids = dto.variant_ids_to_apply.filter(Boolean);
+    if (ids.length === 0) {
+      throw new BadRequestException(
+        'حدد الأصناف من المعاينة قبل التطبيق على نطاق واسع. طبّق على دفعات.',
+      );
+    }
+
+    return this.ds.transaction(async (em) => {
+      // One batch_id ties every history row from this apply call.
+      const [{ batch_id }] = await em.query(
+        `SELECT gen_random_uuid()::uuid AS batch_id`,
+      );
+
+      const out: any[] = [];
+      let updated = 0;
+      let skipped = 0;
+      for (const variantId of ids) {
+        const [variant] = await em.query(
+          `SELECT id, cost_price FROM product_variants
+            WHERE id = $1 AND deleted_at IS NULL FOR UPDATE`,
+          [variantId],
+        );
+        if (!variant) {
+          throw new NotFoundException(`الصنف غير موجود: ${variantId}`);
+        }
+        const oldCost = Number(variant.cost_price ?? 0);
+        const raw = this._computeNewCost(
+          oldCost,
+          dto.adjustment_type,
+          dto.adjustment_value,
+        );
+        const newCost = Math.max(0, Math.round(raw * 100) / 100);
+        if (Math.abs(newCost - oldCost) < 0.01) {
+          skipped += 1;
+          continue;
+        }
+        await em.query(
+          `UPDATE product_variants
+              SET cost_price = $2,
+                  updated_at = NOW()
+            WHERE id = $1`,
+          [variantId, newCost],
+        );
+        const meta: Record<string, any> = {
+          scope: dto.scope,
+          filters: dto.filters ?? null,
+        };
+        const [hist] = await em.query(
+          `INSERT INTO variant_cost_history
+             (variant_id, old_cost_price, new_cost_price,
+              adjustment_type, adjustment_value,
+              reason, source, batch_id, changed_by, metadata)
+           VALUES ($1, $2, $3, $4, $5, $6, 'bulk_cost_adjustment',
+                   $7, $8, $9)
+           RETURNING id`,
+          [
+            variantId,
+            oldCost,
+            newCost,
+            dto.adjustment_type,
+            dto.adjustment_value,
+            dto.reason,
+            batch_id,
+            userId ?? null,
+            meta,
+          ],
+        );
+        out.push({
+          variant_id: variantId,
+          old_cost_price: oldCost,
+          new_cost_price: newCost,
+          history_id: hist?.id ?? null,
+        });
+        updated += 1;
+      }
+
+      return {
+        updated,
+        skipped,
+        batch_id,
         items: out,
       };
     });

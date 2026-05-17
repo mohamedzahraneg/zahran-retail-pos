@@ -151,6 +151,26 @@ export const productsApi = {
         timeout: 60_000,
       }),
     ),
+
+  // ─── PR-PURCHASES-P3.6A — Smart Cost Adjustment Assistant ───────────
+  // Preview is read-only. Apply writes ONLY product_variants.cost_price +
+  // variant_cost_history audit rows. Cost adjustment is reference-only —
+  // it does NOT revalue inventory, does NOT post a journal entry, and
+  // does NOT touch historical invoice_items.unit_cost. 60s timeout
+  // mirrors the smart-pricing pattern because preview joins stock for
+  // inventory-value rollups and may walk thousands of rows.
+  costAdjustmentPreview: (body: CostAdjustmentPreviewPayload) =>
+    unwrap<CostAdjustmentPreviewResponse>(
+      api.post('/products/variants/cost-adjustments/preview', body, {
+        timeout: 60_000,
+      }),
+    ),
+  costAdjustmentApply: (body: CostAdjustmentApplyPayload) =>
+    unwrap<CostAdjustmentApplyResponse>(
+      api.post('/products/variants/cost-adjustments/apply', body, {
+        timeout: 60_000,
+      }),
+    ),
 };
 
 // PR-PURCHASES-P3.2 — wire types for the apply-prices payload + response.
@@ -339,4 +359,87 @@ export interface SmartPricingApplyResponse {
   updated: number;
   skipped: number;
   items: SmartPricingApplyResultItem[];
+}
+
+// ─── PR-PURCHASES-P3.6A — Smart Cost Adjustment Assistant types ──────
+export type CostAdjustmentScopeType = 'all' | 'filtered' | 'selected';
+
+export type CostAdjustmentType =
+  | 'fixed_increase'
+  | 'fixed_decrease'
+  | 'percent_increase'
+  | 'percent_decrease'
+  | 'set_exact';
+
+export interface CostAdjustmentFilters {
+  q?: string;
+  category_id?: string;
+  only_in_stock?: boolean;
+  only_active?: boolean;
+}
+
+export interface CostAdjustmentPreviewPayload {
+  scope: CostAdjustmentScopeType;
+  variant_ids?: string[];
+  filters?: CostAdjustmentFilters;
+  adjustment_type: CostAdjustmentType;
+  adjustment_value: number;
+  reason?: string;
+  limit?: number;
+}
+
+export interface CostAdjustmentApplyPayload {
+  scope: CostAdjustmentScopeType;
+  variant_ids?: string[];
+  filters?: CostAdjustmentFilters;
+  adjustment_type: CostAdjustmentType;
+  adjustment_value: number;
+  variant_ids_to_apply: string[];
+  reason: string;
+}
+
+export interface CostAdjustmentPreviewItem {
+  variant_id: string;
+  product_id: string;
+  product_name: string;
+  sku: string;
+  barcode: string | null;
+  category_name: string | null;
+  current_cost_price: number;
+  new_cost_price: number;
+  delta_amount: number;
+  delta_pct: number | null;
+  stock_on_hand: number;
+  inventory_value_before: number;
+  /** Reference-only — we do NOT revalue the inventory ledger. */
+  inventory_value_after_reference_only: number;
+  warning: string | null;
+}
+
+export interface CostAdjustmentPreviewResponse {
+  items: CostAdjustmentPreviewItem[];
+  summary: {
+    total_candidates: number;
+    returned_count: number;
+    truncated: boolean;
+    avg_delta_pct: number | null;
+    total_inventory_value_before: number;
+    /** Reference-only — informational, never written to ledgers. */
+    total_inventory_value_after_reference_only: number;
+    message_ar: string | null;
+  };
+}
+
+export interface CostAdjustmentApplyResultItem {
+  variant_id: string;
+  old_cost_price: number;
+  new_cost_price: number;
+  history_id: string | null;
+}
+
+export interface CostAdjustmentApplyResponse {
+  updated: number;
+  skipped: number;
+  batch_id: string;
+  items: CostAdjustmentApplyResultItem[];
 }

@@ -44,10 +44,12 @@ import {
   type SoldProfitNetStatus,
 } from '@/api/reports.api';
 import type {
+  CostAdjustmentFilters,
   SmartPricingScope,
   SmartPricingStatusFilter,
 } from '@/api/products.api';
 import { SmartPricingAssistantModal } from '@/components/pricing/SmartPricingAssistantModal';
+import { CostAdjustmentAssistantModal } from '@/components/pricing/CostAdjustmentAssistantModal';
 
 // Map the frontend's wider PricingStatus to the smart-pricing-allowed subset.
 const SMART_PRICING_STATUS_FILTER = new Set<SmartPricingStatusFilter>([
@@ -150,6 +152,56 @@ function SmartPricingTrigger({
         onApplied={() => {
           onApplied();
         }}
+      />
+    </>
+  );
+}
+
+/**
+ * PR-PURCHASES-P3.6A — Local toolbar trigger that opens the
+ * CostAdjustmentAssistantModal.
+ *
+ * Cost-reference-only by design: the modal ONLY mutates
+ * product_variants.cost_price + inserts variant_cost_history rows. It
+ * never touches accounting, cashbox, stock ledgers, supplier ledgers,
+ * historical invoices/returns, or selling_price.
+ */
+interface CostAdjustmentTriggerProps {
+  selectedVariantIds: Set<string>;
+  filters?: CostAdjustmentFilters;
+  onApplied: () => void;
+  testIdSuffix: string;
+}
+
+function CostAdjustmentTrigger({
+  selectedVariantIds,
+  filters,
+  onApplied,
+  testIdSuffix,
+}: CostAdjustmentTriggerProps) {
+  const [open, setOpen] = useState(false);
+  const ids = useMemo(
+    () => Array.from(selectedVariantIds),
+    [selectedVariantIds],
+  );
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        data-testid={`open-cost-adjust-${testIdSuffix}`}
+        className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-bold bg-emerald-600 text-white hover:bg-emerald-700 shadow-sm"
+      >
+        مساعد تعديل التكلفة
+        {ids.length > 0 && (
+          <span className="bg-white/20 rounded px-1 text-xs">{ids.length}</span>
+        )}
+      </button>
+      <CostAdjustmentAssistantModal
+        open={open}
+        context={{ selectedVariantIds: ids, filters }}
+        onClose={() => setOpen(false)}
+        onApplied={() => onApplied()}
       />
     </>
   );
@@ -401,6 +453,17 @@ function HealthTab() {
     return f;
   }, [q, status, onlyInStock]);
 
+  // PR-PURCHASES-P3.6A — Cost-adjustment filters only support a subset
+  // of pricing-health filters (q / only_in_stock). Status is a pricing
+  // concept and is intentionally not forwarded — cost adjustment is
+  // about cost, not about sale-price health.
+  const costFilters = useMemo<CostAdjustmentFilters>(() => {
+    const f: CostAdjustmentFilters = {};
+    if (q.trim()) f.q = q.trim();
+    if (onlyInStock) f.only_in_stock = true;
+    return f;
+  }, [q, onlyInStock]);
+
   return (
     <div className="space-y-3">
       <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
@@ -457,6 +520,12 @@ function HealthTab() {
           <SmartPricingTrigger
             selectedVariantIds={selectedIds}
             filters={smartFilters}
+            onApplied={() => setSelectedIds(new Set())}
+            testIdSuffix="health"
+          />
+          <CostAdjustmentTrigger
+            selectedVariantIds={selectedIds}
+            filters={costFilters}
             onApplied={() => setSelectedIds(new Set())}
             testIdSuffix="health"
           />

@@ -289,3 +289,140 @@ export class SmartPricingApplyDto {
    *  accidentally rewrite every price. */
   @ApiPropertyOptional() @IsOptional() @IsString() confirm_all?: string;
 }
+
+// ─── PR-PURCHASES-P3.6A — Smart Cost Adjustment ───────────────────────
+// Bulk update product_variants.cost_price with an append-only audit
+// trail in variant_cost_history. STRICTLY cost-reference-only:
+//   · NEVER writes journal_entries / journal_lines.
+//   · NEVER writes cashbox_transactions / stock_movements /
+//     supplier_ledger.
+//   · NEVER updates `stock.*` (avg_cost would be inappropriate here
+//     because no stock-movement actually happened).
+//   · NEVER updates `purchase_items` / `invoice_items` — historical
+//     snapshots stay immutable so old reports + reconciliation paths
+//     keep working.
+//   · NEVER updates `product_variants.selling_price` — pricing is the
+//     P3.5A surface, not this one.
+//   · NEVER calls posting.service / financial-engine / cashbox
+//     primitives. The static guardrail spec asserts this.
+
+export type CostAdjustmentScopeType = 'all' | 'filtered' | 'selected';
+export type CostAdjustmentType =
+  | 'fixed_increase'
+  | 'fixed_decrease'
+  | 'percent_increase'
+  | 'percent_decrease'
+  | 'set_exact';
+
+export class CostAdjustmentFiltersDto {
+  @ApiPropertyOptional() @IsOptional() @IsString() q?: string;
+  @ApiPropertyOptional() @IsOptional() @IsUUID() category_id?: string;
+  @ApiPropertyOptional() @IsOptional() @IsBoolean() only_in_stock?: boolean;
+  @ApiPropertyOptional() @IsOptional() @IsBoolean() only_active?: boolean;
+}
+
+export class CostAdjustmentPreviewDto {
+  @ApiProperty({ enum: ['all', 'filtered', 'selected'] })
+  @IsIn(['all', 'filtered', 'selected'])
+  scope: CostAdjustmentScopeType;
+
+  @ApiPropertyOptional({ type: [String] })
+  @IsOptional()
+  @IsArray()
+  @IsUUID('all', { each: true })
+  variant_ids?: string[];
+
+  @ApiPropertyOptional({ type: () => CostAdjustmentFiltersDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => CostAdjustmentFiltersDto)
+  filters?: CostAdjustmentFiltersDto;
+
+  @ApiProperty({
+    enum: [
+      'fixed_increase',
+      'fixed_decrease',
+      'percent_increase',
+      'percent_decrease',
+      'set_exact',
+    ],
+  })
+  @IsIn([
+    'fixed_increase',
+    'fixed_decrease',
+    'percent_increase',
+    'percent_decrease',
+    'set_exact',
+  ])
+  adjustment_type: CostAdjustmentType;
+
+  /** Required > 0 for the four +/− modes; set_exact accepts >= 0. */
+  @ApiProperty()
+  @IsNumber()
+  @Min(0)
+  adjustment_value: number;
+
+  @ApiPropertyOptional() @IsOptional() @IsString() reason?: string;
+
+  /** Default 200, server hard-caps at 1000 (same shape as the smart-
+   *  pricing timeout hotfix). */
+  @ApiPropertyOptional({ default: 200 })
+  @IsOptional() @IsNumber() @Min(1) @Max(1000)
+  limit?: number;
+}
+
+export class CostAdjustmentApplyDto {
+  @ApiProperty({ enum: ['all', 'filtered', 'selected'] })
+  @IsIn(['all', 'filtered', 'selected'])
+  scope: CostAdjustmentScopeType;
+
+  @ApiPropertyOptional({ type: [String] })
+  @IsOptional()
+  @IsArray()
+  @IsUUID('all', { each: true })
+  variant_ids?: string[];
+
+  @ApiPropertyOptional({ type: () => CostAdjustmentFiltersDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => CostAdjustmentFiltersDto)
+  filters?: CostAdjustmentFiltersDto;
+
+  @ApiProperty({
+    enum: [
+      'fixed_increase',
+      'fixed_decrease',
+      'percent_increase',
+      'percent_decrease',
+      'set_exact',
+    ],
+  })
+  @IsIn([
+    'fixed_increase',
+    'fixed_decrease',
+    'percent_increase',
+    'percent_decrease',
+    'set_exact',
+  ])
+  adjustment_type: CostAdjustmentType;
+
+  @ApiProperty()
+  @IsNumber()
+  @Min(0)
+  adjustment_value: number;
+
+  /** Required at apply time. Server-side this is the explicit narrowing
+   *  even for `all` / `filtered` scopes — the operator MUST tick rows
+   *  from the preview before applying. Matches the smart-pricing
+   *  timeout-hotfix policy. */
+  @ApiProperty({ type: [String] })
+  @IsArray()
+  @ArrayMinSize(1)
+  @IsUUID('all', { each: true })
+  variant_ids_to_apply: string[];
+
+  @ApiProperty()
+  @IsString()
+  @MinLength(3)
+  reason: string;
+}

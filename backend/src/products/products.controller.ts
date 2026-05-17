@@ -14,6 +14,8 @@ import { ApiBearerAuth, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { ProductsService } from './products.service';
 import {
   ApplyVariantPricesDto,
+  CostAdjustmentApplyDto,
+  CostAdjustmentPreviewDto,
   CreateProductDto,
   CreateVariantDto,
   SmartPricingApplyDto,
@@ -156,6 +158,30 @@ export class ProductsController {
     @Req() req: any,
   ) {
     return this.products.smartPricingApply(dto, req.user?.userId);
+  }
+
+  // ─── PR-PURCHASES-P3.6A — Smart Cost Adjustment Assistant ──────────
+  // Cost-only by design. Mirrors the P3.5A pricing pattern:
+  //   · Preview is read-only — open to authenticated callers under the
+  //     existing class-level @Permissions('products.view').
+  //   · Apply mutates only product_variants.cost_price + inserts
+  //     variant_cost_history audit rows — gated by
+  //     @Permissions('products.cost_change') (cashiers cannot apply
+  //     cost adjustments).
+  // Never touches accounting / cashbox / stock / supplier ledger / POS
+  // / purchases / invoices / selling_price. No inventory revaluation.
+  @Post('variants/cost-adjustments/preview')
+  costAdjustmentPreview(@Body() dto: CostAdjustmentPreviewDto) {
+    return this.products.costAdjustmentPreview(dto);
+  }
+
+  @Post('variants/cost-adjustments/apply')
+  @Permissions('products.cost_change')
+  costAdjustmentApply(
+    @Body() dto: CostAdjustmentApplyDto,
+    @Req() req: any,
+  ) {
+    return this.products.costAdjustmentApply(dto, req.user?.userId);
   }
 
   @Patch('variants/:id')
