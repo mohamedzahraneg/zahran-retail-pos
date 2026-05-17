@@ -24,7 +24,11 @@ import {
   type PurchaseProductSearchRow,
 } from '@/api/purchases.api';
 import { suppliersApi } from '@/api/suppliers.api';
-import { settingsApi } from '@/api/settings.api';
+import {
+  settingsApi,
+  SMART_PRICING_DEFAULTS,
+  type SmartPricingSettings,
+} from '@/api/settings.api';
 // PR-PURCHASES-P1 — new purchase-invoice helpers.
 import { SupplierContextCard } from '@/components/purchases/SupplierContextCard';
 import { PurchaseProductSearch } from '@/components/purchases/PurchaseProductSearch';
@@ -421,6 +425,16 @@ function CreatePurchaseModal({ onClose }: { onClose: () => void }) {
     queryKey: ['suppliers-all'],
     queryFn: () => suppliersApi.list(),
   });
+  // PR-PURCHASES-P3.3 — load smart_pricing settings once per modal
+  // mount. Falls back to built-in defaults on failure so suggestion
+  // cards always render — pricing config is non-blocking by design.
+  const { data: pricingSettings = SMART_PRICING_DEFAULTS as SmartPricingSettings } =
+    useQuery({
+      queryKey: ['settings', 'smart_pricing'],
+      queryFn: () => settingsApi.getSmartPricing(),
+      staleTime: 60_000,
+      retry: false,
+    });
   const { data: warehouses = [] } = useQuery({
     queryKey: ['warehouses'],
     queryFn: () => settingsApi.listWarehouses(),
@@ -900,7 +914,23 @@ function CreatePurchaseModal({ onClose }: { onClose: () => void }) {
                                     pv?.final_unit_cost ??
                                     Number(it.unit_cost || 0),
                                   currentSellingPrice: it._ui?.selling_price,
-                                  minMarginPct: 15,
+                                  // PR-PURCHASES-P3.3 — settings drive both
+                                  // the strategy formulas and the
+                                  // min-margin warning threshold.
+                                  minMarginPct:
+                                    pricingSettings.min_margin_pct_default,
+                                  settings: {
+                                    competitiveMarkupPct:
+                                      pricingSettings.competitive_markup_pct,
+                                    recommendedMarginPct:
+                                      pricingSettings.recommended_margin_pct,
+                                    highMarginPct:
+                                      pricingSettings.high_margin_pct,
+                                    wholesaleMarkupPct:
+                                      pricingSettings.wholesale_markup_pct,
+                                    roundingStep: pricingSettings.rounding_step,
+                                    roundingMode: pricingSettings.rounding_mode,
+                                  },
                                 })}
                                 appliedStrategy={
                                   pendingPrices[idx]?.strategy ?? null
@@ -1604,6 +1634,14 @@ export function EditPurchaseModal({
     queryKey: ['purchase-detail', id],
     queryFn: () => purchasesApi.get(id),
   });
+  // PR-PURCHASES-P3.3 — smart_pricing settings, mirrors CreatePurchaseModal.
+  const { data: pricingSettings = SMART_PRICING_DEFAULTS as SmartPricingSettings } =
+    useQuery({
+      queryKey: ['settings', 'smart_pricing'],
+      queryFn: () => settingsApi.getSmartPricing(),
+      staleTime: 60_000,
+      retry: false,
+    });
 
   const [items, setItems] = useState<EditItem[]>([]);
   const [notes, setNotes] = useState('');
@@ -2002,7 +2040,22 @@ export function EditPurchaseModal({
                                   // backend join). Suggestions still
                                   // render; vs-current just goes blank.
                                   currentSellingPrice: undefined,
-                                  minMarginPct: 15,
+                                  // PR-PURCHASES-P3.3 — settings drive
+                                  // formulas + min-margin threshold.
+                                  minMarginPct:
+                                    pricingSettings.min_margin_pct_default,
+                                  settings: {
+                                    competitiveMarkupPct:
+                                      pricingSettings.competitive_markup_pct,
+                                    recommendedMarginPct:
+                                      pricingSettings.recommended_margin_pct,
+                                    highMarginPct:
+                                      pricingSettings.high_margin_pct,
+                                    wholesaleMarkupPct:
+                                      pricingSettings.wholesale_markup_pct,
+                                    roundingStep: pricingSettings.rounding_step,
+                                    roundingMode: pricingSettings.rounding_mode,
+                                  },
                                 })}
                                 appliedStrategy={
                                   pendingPrices[idx]?.strategy ?? null

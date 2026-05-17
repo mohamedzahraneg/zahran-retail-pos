@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import {
+  SmartPricingSettingsDto,
   UpdateCompanyProfileDto,
   UpsertCashboxDto,
   UpsertSettingDto,
@@ -628,5 +629,81 @@ export class SettingsService {
     );
     if (!row) throw new NotFoundException('طريقة الدفع غير موجودة');
     return row;
+  }
+
+  // ─── PR-PURCHASES-P3.3 — smart_pricing settings ────────────────────
+  // Strict, typed read/write of the 9 keys that drive the purchase-
+  // modal sale-price suggestion cards. Stored as ordinary rows in the
+  // existing `settings` key/value table (group_name='smart_pricing'),
+  // so no schema changes. Pricing-only — never touches accounting,
+  // cashbox, stock, purchases, or product_variants.
+  private static readonly SMART_PRICING_DEFAULTS = {
+    competitive_markup_pct: 15,
+    recommended_margin_pct: 30,
+    high_margin_pct: 40,
+    wholesale_markup_pct: 10,
+    min_margin_pct_default: 15,
+    rounding_step: 5 as 1 | 5 | 10 | 25 | 50,
+    rounding_mode: 'nearest' as 'nearest' | 'floor' | 'ceil',
+    show_wholesale_card: true,
+    show_high_margin_card: true,
+  };
+
+  async getSmartPricing() {
+    const rows = await this.ds.query(
+      `SELECT key, value FROM settings WHERE group_name = $1`,
+      ['smart_pricing'],
+    );
+    const out: Record<string, any> = {
+      ...SettingsService.SMART_PRICING_DEFAULTS,
+    };
+    for (const row of rows) {
+      const tail = String(row.key || '').replace(/^smart_pricing\./, '');
+      if (!(tail in SettingsService.SMART_PRICING_DEFAULTS)) continue;
+      // Postgres returns jsonb pre-parsed.
+      out[tail] = row.value;
+    }
+    return out;
+  }
+
+  async updateSmartPricing(dto: SmartPricingSettingsDto, userId: string) {
+    // Class-validator already enforced the per-field ranges/enums.
+    // We additionally validate the cross-field invariant that the
+    // recommended/high margins remain orderable when both are set.
+    if (
+      dto.recommended_margin_pct != null
+      && dto.high_margin_pct != null
+      && dto.recommended_margin_pct >= dto.high_margin_pct
+    ) {
+      throw new BadRequestException(
+        'هامش السعر العالي يجب أن يكون أكبر من هامش السعر الموصى به',
+      );
+    }
+    const entries = Object.entries(dto).filter(
+      ([k, v]) =>
+        v !== undefined
+        && k in SettingsService.SMART_PRICING_DEFAULTS,
+    );
+    if (entries.length === 0) {
+      // Nothing to write; just echo the current state.
+      return this.getSmartPricing();
+    }
+    await this.ds.transaction(async (em) => {
+      for (const [tail, value] of entries) {
+        const key = `smart_pricing.${tail}`;
+        await em.query(
+          `INSERT INTO settings
+             (key, value, group_name, is_public, description, updated_by)
+           VALUES ($1, $2::jsonb, 'smart_pricing', FALSE, NULL, $3)
+           ON CONFLICT (key) DO UPDATE SET
+             value = EXCLUDED.value,
+             group_name = 'smart_pricing',
+             updated_by = EXCLUDED.updated_by,
+             updated_at = NOW()`,
+          [key, JSON.stringify(value), userId ?? null],
+        );
+      }
+    });
+    return this.getSmartPricing();
   }
 }

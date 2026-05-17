@@ -1,4 +1,15 @@
-import { IsBoolean, IsDefined, IsOptional, IsString, IsUUID, Length } from 'class-validator';
+import {
+  IsBoolean,
+  IsDefined,
+  IsIn,
+  IsNumber,
+  IsOptional,
+  IsString,
+  IsUUID,
+  Length,
+  Max,
+  Min,
+} from 'class-validator';
 
 export class UpsertSettingDto {
   @IsString()
@@ -75,4 +86,36 @@ export class UpsertCashboxDto {
    */
   @IsOptional() @IsUUID() warehouse_id?: string;
   @IsOptional() @IsBoolean() is_active?: boolean;
+}
+
+// ─── PR-PURCHASES-P3.3 — smart_pricing settings (typed) ─────────────
+// Drives the per-line sale-price suggestion cards in CreatePurchaseModal
+// + EditPurchaseModal. Percent values are 0-500 (very generous upper
+// bound — wholesale markups can go high), margin values are capped at
+// < 95 to avoid divide-by-zero / absurd prices, rounding_step is from
+// a fixed set, rounding_mode is a 3-value enum.
+export class SmartPricingSettingsDto {
+  @IsOptional() @IsNumber() @Min(0) @Max(500)
+  competitive_markup_pct?: number;
+
+  @IsOptional() @IsNumber() @Min(0) @Max(94.99)
+  recommended_margin_pct?: number;
+
+  @IsOptional() @IsNumber() @Min(0) @Max(94.99)
+  high_margin_pct?: number;
+
+  @IsOptional() @IsNumber() @Min(0) @Max(500)
+  wholesale_markup_pct?: number;
+
+  @IsOptional() @IsNumber() @Min(0) @Max(94.99)
+  min_margin_pct_default?: number;
+
+  @IsOptional() @IsIn([1, 5, 10, 25, 50])
+  rounding_step?: number;
+
+  @IsOptional() @IsIn(['nearest', 'floor', 'ceil'])
+  rounding_mode?: 'nearest' | 'floor' | 'ceil';
+
+  @IsOptional() @IsBoolean() show_wholesale_card?: boolean;
+  @IsOptional() @IsBoolean() show_high_margin_card?: boolean;
 }

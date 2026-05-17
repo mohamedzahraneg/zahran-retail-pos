@@ -14,6 +14,7 @@ import {
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { SettingsService } from './settings.service';
 import {
+  SmartPricingSettingsDto,
   UpdateCompanyProfileDto,
   UpsertCashboxDto,
   UpsertSettingDto,
@@ -150,5 +151,30 @@ export class SettingsController {
     @Body('is_active') is_active: boolean,
   ) {
     return this.service.togglePaymentMethod(code, is_active);
+  }
+
+  // ─── PR-PURCHASES-P3.3 — smart_pricing settings (typed) ──────────
+  // GET is open to authenticated callers — the suggestion cards need
+  // to read these values to compute prices, and the values themselves
+  // aren't sensitive. PUT is gated to `admin` (same as the existing
+  // settings upsert route). Pricing-only: never touches accounting,
+  // cashbox, stock, or product price write paths.
+  @Get('groups/smart_pricing')
+  @ApiOperation({ summary: 'Read smart-pricing suggestion settings' })
+  getSmartPricing() {
+    return this.service.getSmartPricing();
+  }
+
+  @Patch('groups/smart_pricing')
+  @Roles('admin')
+  @ApiOperation({ summary: 'Update smart-pricing suggestion settings' })
+  updateSmartPricing(
+    @Body() dto: SmartPricingSettingsDto,
+    @Req() req: any,
+  ) {
+    return this.service.updateSmartPricing(
+      dto,
+      req.user?.sub ?? req.user?.id,
+    );
   }
 }

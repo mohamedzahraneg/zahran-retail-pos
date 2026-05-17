@@ -53,6 +53,21 @@ vi.mock('@/api/purchases.api', async () => {
   };
 });
 
+// PR-PURCHASES-P3.3 — settings API is now consumed by the edit modal
+// to drive the pricing-suggestion cards. Stub returns a deterministic
+// payload so the suggestion tests in this file stay stable.
+vi.mock('@/api/settings.api', async () => {
+  const actual = await vi.importActual<any>('@/api/settings.api');
+  return {
+    ...actual,
+    settingsApi: {
+      ...((actual as any).settingsApi ?? {}),
+      getSmartPricing: () =>
+        Promise.resolve((actual as any).SMART_PRICING_DEFAULTS),
+    },
+  };
+});
+
 // PR-PURCHASES-P3.2 — mock the apply-prices endpoint at the products
 // API layer. P3.2 introduces an independent endpoint; the purchase
 // edit payload must remain pure regardless of pricing apply state.

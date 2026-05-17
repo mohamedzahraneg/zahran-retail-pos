@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
@@ -15,6 +15,8 @@ import {
   Printer,
   Banknote,
   ArrowLeft,
+  TrendingUp,
+  RotateCcw,
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import {
@@ -24,7 +26,14 @@ import {
   Cashbox,
   PaymentMethod,
   Role,
+  SMART_PRICING_DEFAULTS,
+  type RoundingMode,
+  type RoundingStep,
+  type SmartPricingSettings,
 } from '@/api/settings.api';
+// PR-PURCHASES-P3.3 — preview the pricing-suggestion cards live as
+// the operator tweaks the settings.
+import { suggestPrices } from '@/components/purchases/pricingMath';
 import { useAuthStore } from '@/stores/auth.store';
 import { ReceiptTemplatesTab } from './ReceiptTemplatesTab';
 import { PrintersTab } from './PrintersTab';
@@ -40,6 +49,7 @@ type TabKey =
   | 'cashboxes'
   | 'payments'
   | 'payment-accounts'
+  | 'pricing'
   | 'roles';
 
 const TABS: { key: TabKey; label: string; icon: any }[] = [
@@ -51,6 +61,7 @@ const TABS: { key: TabKey; label: string; icon: any }[] = [
   { key: 'cashboxes', label: 'الخزائن', icon: Wallet },
   { key: 'payments', label: 'طرق الدفع', icon: CreditCard },
   { key: 'payment-accounts', label: 'حسابات التحصيل', icon: Banknote },
+  { key: 'pricing', label: 'اقتراحات أسعار البيع', icon: TrendingUp },
   { key: 'roles', label: 'الأدوار', icon: UsersIcon },
 ];
 
@@ -89,6 +100,7 @@ export default function Settings() {
           {tab === 'cashboxes' && <CashboxesTab />}
           {tab === 'payments' && <PaymentsTab />}
           {tab === 'payment-accounts' && <PaymentAccountsTab />}
+          {tab === 'pricing' && <PricingSettingsTab />}
           {tab === 'roles' && <RolesTab />}
         </div>
       </div>
@@ -1360,6 +1372,337 @@ export function PaymentAccountsTab() {
 
       {/* PR-FIN-PAYACCT-4D-UX-FIX-5 — restored per-account logo manager. */}
       <PaymentAccountLogoManager />
+    </div>
+  );
+}
+
+/* ────────────────────────────────────────────────────────────────── */
+/*  PR-PURCHASES-P3.3 — smart_pricing settings tab.                    */
+/*                                                                     */
+/*  Admin-only PATCH /settings/groups/smart_pricing — GET is open so   */
+/*  every authenticated user can read the cards, but only an admin    */
+/*  can change them. The tab renders a live preview of the four      */
+/*  suggestion cards as the operator tweaks values so they can see    */
+/*  the effect of margin-vs-markup before saving.                    */
+/* ────────────────────────────────────────────────────────────────── */
+
+const EGP_FMT = (n: number) =>
+  `${Number(n || 0).toLocaleString('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })} ج.م`;
+
+const ROUNDING_STEPS: RoundingStep[] = [1, 5, 10, 25, 50];
+const ROUNDING_MODE_LABELS: Record<RoundingMode, string> = {
+  nearest: 'أقرب قيمة',
+  floor: 'للأسفل',
+  ceil: 'للأعلى',
+};
+
+function PricingSettingsTab() {
+  const qc = useQueryClient();
+  const user = useAuthStore((s) => s.user);
+  const canEdit = !!user && user.role === 'admin';
+
+  const { data: server, isLoading } = useQuery({
+    queryKey: ['settings', 'smart_pricing'],
+    queryFn: () => settingsApi.getSmartPricing(),
+  });
+
+  // Local form mirrors server until the operator clicks save.
+  const [form, setForm] = useState<SmartPricingSettings>(SMART_PRICING_DEFAULTS);
+  useEffect(() => {
+    if (server) setForm(server);
+  }, [server]);
+
+  const save = useMutation({
+    mutationFn: (next: SmartPricingSettings) =>
+      settingsApi.updateSmartPricing(next),
+    onSuccess: (next) => {
+      toast.success('تم حفظ إعدادات اقتراحات السعر');
+      qc.setQueryData(['settings', 'smart_pricing'], next);
+      setForm(next);
+    },
+    onError: (e: any) => {
+      const status = e?.response?.status;
+      if (status === 403) {
+        toast.error('ليس لديك صلاحية تعديل هذه الإعدادات.');
+      } else {
+        toast.error(
+          e?.response?.data?.message || e?.message || 'فشل حفظ الإعدادات.',
+        );
+      }
+    },
+  });
+
+  // Inline validation — mirrors the backend class-validator ranges.
+  const errors: Record<string, string> = {};
+  if (form.competitive_markup_pct < 0 || form.competitive_markup_pct > 500)
+    errors.competitive_markup_pct = 'القيمة يجب أن تكون بين 0 و 500%';
+  if (form.recommended_margin_pct < 0 || form.recommended_margin_pct >= 95)
+    errors.recommended_margin_pct = 'الهامش يجب أن يكون بين 0% و 95% (غير شامل)';
+  if (form.high_margin_pct < 0 || form.high_margin_pct >= 95)
+    errors.high_margin_pct = 'الهامش يجب أن يكون بين 0% و 95% (غير شامل)';
+  if (form.wholesale_markup_pct < 0 || form.wholesale_markup_pct > 500)
+    errors.wholesale_markup_pct = 'القيمة يجب أن تكون بين 0 و 500%';
+  if (form.min_margin_pct_default < 0 || form.min_margin_pct_default >= 95)
+    errors.min_margin_pct_default = 'الحد الأدنى يجب أن يكون بين 0% و 95%';
+  if (
+    form.recommended_margin_pct >= form.high_margin_pct
+  ) {
+    errors.high_margin_pct =
+      'هامش السعر العالي يجب أن يكون أكبر من هامش السعر الموصى به';
+  }
+  const hasErrors = Object.keys(errors).length > 0;
+
+  // Live preview at a fixed cost (100 EGP) so the operator can see
+  // exactly how their settings translate to suggestion cards.
+  const previewResult = useMemo(
+    () =>
+      suggestPrices({
+        cost: 100,
+        minMarginPct: form.min_margin_pct_default,
+        settings: {
+          competitiveMarkupPct: form.competitive_markup_pct,
+          recommendedMarginPct: form.recommended_margin_pct,
+          highMarginPct: form.high_margin_pct,
+          wholesaleMarkupPct: form.wholesale_markup_pct,
+          roundingStep: form.rounding_step,
+          roundingMode: form.rounding_mode,
+        },
+      }),
+    [form],
+  );
+
+  if (isLoading) {
+    return <div className="p-6 text-slate-400">جاري التحميل...</div>;
+  }
+
+  return (
+    <div className="space-y-5" dir="rtl" data-testid="pricing-settings-tab">
+      <header>
+        <h2 className="text-lg font-black text-slate-800 flex items-center gap-2">
+          <TrendingUp className="w-5 h-5 text-amber-500" />
+          إعدادات اقتراح أسعار البيع
+        </h2>
+        <p className="text-xs text-slate-600 mt-2 leading-relaxed">
+          تتحكم هذه القيم في اقتراحات أسعار البيع داخل فواتير المشتريات. لا
+          يتم تحديث أسعار البيع تلقائيًا إلا عند الضغط على «تطبيق الأسعار
+          المحددة».
+        </p>
+      </header>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <PctInput
+          label="السعر الاقتصادي / المنافس — زيادة على التكلفة %"
+          value={form.competitive_markup_pct}
+          onChange={(v) => setForm({ ...form, competitive_markup_pct: v })}
+          error={errors.competitive_markup_pct}
+          testId="pricing-setting-competitive_markup_pct"
+          disabled={!canEdit}
+        />
+        <PctInput
+          label="السعر الموصى به — هامش ربح %"
+          value={form.recommended_margin_pct}
+          onChange={(v) => setForm({ ...form, recommended_margin_pct: v })}
+          error={errors.recommended_margin_pct}
+          testId="pricing-setting-recommended_margin_pct"
+          disabled={!canEdit}
+        />
+        <PctInput
+          label="السعر العالي — هامش ربح %"
+          value={form.high_margin_pct}
+          onChange={(v) => setForm({ ...form, high_margin_pct: v })}
+          error={errors.high_margin_pct}
+          testId="pricing-setting-high_margin_pct"
+          disabled={!canEdit}
+        />
+        <PctInput
+          label="سعر الجملة — زيادة على التكلفة %"
+          value={form.wholesale_markup_pct}
+          onChange={(v) => setForm({ ...form, wholesale_markup_pct: v })}
+          error={errors.wholesale_markup_pct}
+          testId="pricing-setting-wholesale_markup_pct"
+          disabled={!canEdit}
+        />
+        <PctInput
+          label="الحد الأدنى لهامش الربح %"
+          value={form.min_margin_pct_default}
+          onChange={(v) => setForm({ ...form, min_margin_pct_default: v })}
+          error={errors.min_margin_pct_default}
+          testId="pricing-setting-min_margin_pct_default"
+          disabled={!canEdit}
+        />
+        <div>
+          <label className="block text-xs font-bold text-slate-700 mb-1">
+            تقريب السعر لأقرب
+          </label>
+          <select
+            className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm"
+            value={form.rounding_step}
+            onChange={(e) =>
+              setForm({
+                ...form,
+                rounding_step: Number(e.target.value) as RoundingStep,
+              })
+            }
+            disabled={!canEdit}
+            data-testid="pricing-setting-rounding_step"
+          >
+            {ROUNDING_STEPS.map((s) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label className="block text-xs font-bold text-slate-700 mb-1">
+            طريقة التقريب
+          </label>
+          <select
+            className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm"
+            value={form.rounding_mode}
+            onChange={(e) =>
+              setForm({
+                ...form,
+                rounding_mode: e.target.value as RoundingMode,
+              })
+            }
+            disabled={!canEdit}
+            data-testid="pricing-setting-rounding_mode"
+          >
+            {(Object.keys(ROUNDING_MODE_LABELS) as RoundingMode[]).map((m) => (
+              <option key={m} value={m}>
+                {ROUNDING_MODE_LABELS[m]}
+              </option>
+            ))}
+          </select>
+        </div>
+        <label className="flex items-center gap-2 text-sm text-slate-700">
+          <input
+            type="checkbox"
+            checked={form.show_wholesale_card}
+            onChange={(e) =>
+              setForm({ ...form, show_wholesale_card: e.target.checked })
+            }
+            disabled={!canEdit}
+            data-testid="pricing-setting-show_wholesale_card"
+          />
+          إظهار بطاقة سعر الجملة في اقتراحات الفاتورة
+        </label>
+        <label className="flex items-center gap-2 text-sm text-slate-700">
+          <input
+            type="checkbox"
+            checked={form.show_high_margin_card}
+            onChange={(e) =>
+              setForm({ ...form, show_high_margin_card: e.target.checked })
+            }
+            disabled={!canEdit}
+            data-testid="pricing-setting-show_high_margin_card"
+          />
+          إظهار بطاقة الهامش العالي في اقتراحات الفاتورة
+        </label>
+      </div>
+
+      {/* Live preview at cost = 100 EGP */}
+      <section
+        className="rounded-xl border border-amber-200 bg-amber-50/40 p-3 space-y-2"
+        data-testid="pricing-settings-preview"
+      >
+        <h3 className="font-bold text-slate-800 text-sm">
+          مثال مباشر — تكلفة 100 ج.م
+        </h3>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-2">
+          {previewResult.suggestions.map((s) => (
+            <div
+              key={s.strategy}
+              className="rounded-md border border-slate-200 bg-white p-2 text-xs space-y-1"
+              data-testid={`pricing-settings-preview-${s.strategy}`}
+            >
+              <div className="font-bold text-slate-800">{s.label_ar}</div>
+              <div className="text-base font-black text-slate-900">
+                {EGP_FMT(s.price)}
+              </div>
+              <div className="text-[11px] text-slate-600">
+                هامش الربح: <span className="font-bold">{s.margin_pct}%</span>
+              </div>
+              <div className="text-[11px] text-slate-600">
+                الزيادة على التكلفة:{' '}
+                <span className="font-bold">{s.markup_pct}%</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+        <button
+          type="button"
+          onClick={() => setForm(SMART_PRICING_DEFAULTS)}
+          disabled={!canEdit || save.isPending}
+          className="px-4 py-2 rounded-lg bg-slate-100 text-slate-700 hover:bg-slate-200 text-sm font-bold flex items-center gap-2 disabled:opacity-50"
+          data-testid="pricing-settings-reset"
+        >
+          <RotateCcw className="w-4 h-4" /> استعادة القيم الافتراضية
+        </button>
+        <button
+          type="button"
+          onClick={() => save.mutate(form)}
+          disabled={!canEdit || save.isPending || hasErrors}
+          className="px-4 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 text-sm font-bold flex items-center gap-2 disabled:opacity-50"
+          data-testid="pricing-settings-save"
+          title={
+            !canEdit
+              ? 'يتطلب صلاحية مدير'
+              : hasErrors
+                ? 'صحّح القيم قبل الحفظ'
+                : undefined
+          }
+        >
+          <Save className="w-4 h-4" />
+          {save.isPending ? 'جاري الحفظ...' : 'حفظ الإعدادات'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+interface PctInputProps {
+  label: string;
+  value: number;
+  onChange: (v: number) => void;
+  error?: string;
+  testId: string;
+  disabled?: boolean;
+}
+
+function PctInput({ label, value, onChange, error, testId, disabled }: PctInputProps) {
+  return (
+    <div>
+      <label className="block text-xs font-bold text-slate-700 mb-1">
+        {label}
+      </label>
+      <input
+        type="number"
+        step="0.01"
+        min={0}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value) || 0)}
+        disabled={disabled}
+        data-testid={testId}
+        className={`w-full border rounded-lg px-3 py-2 text-sm ${
+          error ? 'border-rose-300 bg-rose-50' : 'border-slate-200'
+        }`}
+      />
+      {error ? (
+        <p
+          className="text-[11px] text-rose-700 mt-1"
+          data-testid={`${testId}-error`}
+        >
+          {error}
+        </p>
+      ) : null}
     </div>
   );
 }
