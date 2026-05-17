@@ -16,6 +16,7 @@
  */
 import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import toast from 'react-hot-toast';
 import {
   TrendingDown,
   TrendingUp,
@@ -25,6 +26,8 @@ import {
   History as HistoryIcon,
   DollarSign,
   Sparkles,
+  FileSpreadsheet,
+  FileText,
 } from 'lucide-react';
 import {
   reportsApi,
@@ -262,6 +265,67 @@ function SelectAllHeader({
  * Renders inline next to the smart-pricing trigger; always rendered so
  * the count area has stable layout.
  */
+/**
+ * P3.4C — Export buttons for pricing reports. Wraps the existing
+ * read-only `reportsApi.export(slug, format, params)` helper which
+ * funnels every download through the shared backend xlsx/pdf pipeline.
+ *
+ * The component is intentionally tiny: each tab passes its own
+ * slug + the current filter object. No formula lives here; the
+ * backend re-runs the same SELECT it serves to the JSON callers and
+ * relabels the columns to Arabic via the controller-side mapper.
+ */
+interface ExportButtonsProps {
+  /** Report slug under `/api/v1/reports/<slug>`. Examples:
+   *  `pricing/health`, `pricing/sold-profit/products`. */
+  slug: string;
+  /** Filters mirroring what the JSON fetch already uses. */
+  params: Record<string, any>;
+  /** Per-tab test-id suffix for vitest selection. */
+  testIdSuffix: string;
+}
+
+function ExportButtons({ slug, params, testIdSuffix }: ExportButtonsProps) {
+  const [busy, setBusy] = useState<null | 'xlsx' | 'pdf'>(null);
+  const run = async (format: 'xlsx' | 'pdf') => {
+    if (busy) return;
+    setBusy(format);
+    try {
+      await reportsApi.export(slug, format, params);
+    } catch {
+      toast.error('تعذر تصدير التقرير. حاول مرة أخرى.');
+    } finally {
+      setBusy(null);
+    }
+  };
+  const label = (base: string) =>
+    busy ? 'جاري تجهيز الملف...' : base;
+  return (
+    <div className="flex items-center gap-2 flex-wrap">
+      <button
+        type="button"
+        onClick={() => run('xlsx')}
+        disabled={busy !== null}
+        data-testid={`pricing-export-xlsx-${testIdSuffix}`}
+        className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-bold bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200 disabled:opacity-60"
+      >
+        <FileSpreadsheet className="w-4 h-4" />
+        {label('تصدير Excel')}
+      </button>
+      <button
+        type="button"
+        onClick={() => run('pdf')}
+        disabled={busy !== null}
+        data-testid={`pricing-export-pdf-${testIdSuffix}`}
+        className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-bold bg-rose-50 text-rose-700 hover:bg-rose-100 border border-rose-200 disabled:opacity-60"
+      >
+        <FileText className="w-4 h-4" />
+        {label('تصدير PDF')}
+      </button>
+    </div>
+  );
+}
+
 interface SelectionToolbarProps {
   selectedIds: Set<string>;
   onClear: () => void;
@@ -372,17 +436,29 @@ function HealthTab() {
         </label>
       </div>
 
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
         <SelectionToolbar
           selectedIds={selectedIds}
           onClear={() => setSelectedIds(new Set())}
         />
-        <SmartPricingTrigger
-          selectedVariantIds={selectedIds}
-          filters={smartFilters}
-          onApplied={() => setSelectedIds(new Set())}
-          testIdSuffix="health"
-        />
+        <div className="flex items-center gap-2 flex-wrap">
+          <ExportButtons
+            slug="pricing/health"
+            params={{
+              q: q.trim() || undefined,
+              status: status || undefined,
+              only_in_stock: onlyInStock || undefined,
+              limit: 1000,
+            }}
+            testIdSuffix="health"
+          />
+          <SmartPricingTrigger
+            selectedVariantIds={selectedIds}
+            filters={smartFilters}
+            onApplied={() => setSelectedIds(new Set())}
+            testIdSuffix="health"
+          />
+        </div>
       </div>
 
       <SummaryStrip>
@@ -558,12 +634,22 @@ function LossesTab() {
             onClear={() => setSelectedIds(new Set())}
           />
         </div>
-        <SmartPricingTrigger
-          selectedVariantIds={selectedIds}
-          filters={smartFilters}
-          onApplied={() => setSelectedIds(new Set())}
-          testIdSuffix="losses"
-        />
+        <div className="flex items-center gap-2 flex-wrap">
+          <ExportButtons
+            slug="pricing/losses"
+            params={{
+              only_in_stock: onlyInStock || undefined,
+              limit: 1000,
+            }}
+            testIdSuffix="losses"
+          />
+          <SmartPricingTrigger
+            selectedVariantIds={selectedIds}
+            filters={smartFilters}
+            onApplied={() => setSelectedIds(new Set())}
+            testIdSuffix="losses"
+          />
+        </div>
       </div>
 
       <SummaryStrip>
@@ -734,6 +820,18 @@ function HistoryTab() {
         </div>
       </div>
 
+      <div className="flex justify-end">
+        <ExportButtons
+          slug="pricing/history"
+          params={{
+            from: from || undefined,
+            to: to || undefined,
+            limit: 500,
+          }}
+          testIdSuffix="history"
+        />
+      </div>
+
       <SummaryStrip>
         <Tile label="عدد التغييرات" value={String(data?.summary.total ?? 0)} />
         <Tile
@@ -861,12 +959,22 @@ function LandedImpactTab() {
             onClear={() => setSelectedIds(new Set())}
           />
         </div>
-        <SmartPricingTrigger
-          selectedVariantIds={selectedIds}
-          filters={smartFilters}
-          onApplied={() => setSelectedIds(new Set())}
-          testIdSuffix="landed"
-        />
+        <div className="flex items-center gap-2 flex-wrap">
+          <ExportButtons
+            slug="pricing/landed-impact"
+            params={{
+              needs_review_only: needsReviewOnly || undefined,
+              limit: 1000,
+            }}
+            testIdSuffix="landed"
+          />
+          <SmartPricingTrigger
+            selectedVariantIds={selectedIds}
+            filters={smartFilters}
+            onApplied={() => setSelectedIds(new Set())}
+            testIdSuffix="landed"
+          />
+        </div>
       </div>
 
       <SummaryStrip>
@@ -1187,6 +1295,18 @@ function SoldProfitTab() {
         مؤجّل لمرحلة لاحقة.
       </div>
 
+      {/* Summary export — one-row sheet pinned to the active date range. */}
+      <div className="flex justify-end">
+        <ExportButtons
+          slug="pricing/sold-profit/summary"
+          params={{
+            from: from || undefined,
+            to: to || undefined,
+          }}
+          testIdSuffix="sold-profit-summary"
+        />
+      </div>
+
       {/* Summary cards */}
       <SummaryStrip>
         <Tile
@@ -1279,11 +1399,40 @@ function SoldProfitTab() {
               onClear={() => setSelectedIds(new Set())}
             />
           </div>
-          <SmartPricingTrigger
-            selectedVariantIds={selectedIds}
-            filters={smartFilters}
-            onApplied={() => setSelectedIds(new Set())}
-            testIdSuffix="sold-profit"
+          <div className="flex items-center gap-2 flex-wrap">
+            <ExportButtons
+              slug="pricing/sold-profit/products"
+              params={{
+                q: q.trim() || undefined,
+                from: from || undefined,
+                to: to || undefined,
+                status: status || undefined,
+                sort,
+                limit: 1000,
+              }}
+              testIdSuffix="sold-profit-products"
+            />
+            <SmartPricingTrigger
+              selectedVariantIds={selectedIds}
+              filters={smartFilters}
+              onApplied={() => setSelectedIds(new Set())}
+              testIdSuffix="sold-profit"
+            />
+          </div>
+        </div>
+      )}
+      {view === 'invoices' && (
+        <div className="flex justify-end">
+          <ExportButtons
+            slug="pricing/sold-profit/invoices"
+            params={{
+              q: q.trim() || undefined,
+              from: from || undefined,
+              to: to || undefined,
+              status: status || undefined,
+              limit: 1000,
+            }}
+            testIdSuffix="sold-profit-invoices"
           />
         </div>
       )}

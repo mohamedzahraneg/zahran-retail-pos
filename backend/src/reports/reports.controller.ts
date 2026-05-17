@@ -15,6 +15,127 @@ import {
   Permissions,
 } from '../common/decorators/roles.decorator';
 
+// ── P3.4C — Arabic row mappers for pricing-reports export ─────────────
+// Each MAP_* function takes one raw row from the existing read-side
+// service method and returns a flat Arabic-keyed object. The keys
+// become the xlsx column headers (toXlsx in reports.service.ts uses
+// Object.keys(rows[0]) verbatim). Formulas are unchanged from the
+// underlying SELECT — these helpers only relabel + project; no
+// computation. Pure functions, zero side-effects.
+const fmtBool = (v: any) => (v ? 'نعم' : 'لا');
+const fmtNumber = (v: any) =>
+  v === null || v === undefined ? '' : Number(v);
+
+function MAP_PRICING_HEALTH(r: any) {
+  return {
+    'المنتج': r.product_name ?? '',
+    'SKU': r.sku ?? '',
+    'الباركود': r.barcode ?? '',
+    'سعر البيع': fmtNumber(r.selling_price),
+    'التكلفة': fmtNumber(r.cost_price),
+    'الربح المتوقع': fmtNumber(r.profit),
+    'هامش الربح %': fmtNumber(r.margin_pct),
+    'الزيادة على التكلفة %': fmtNumber(r.markup_pct),
+    'الحد الأدنى للهامش %': fmtNumber(r.min_margin_pct),
+    'الحالة': r.status ?? '',
+    'المخزون': fmtNumber(r.stock_qty),
+  };
+}
+
+function MAP_PRICING_LOSSES(r: any) {
+  return {
+    'المنتج': r.product_name ?? '',
+    'SKU': r.sku ?? '',
+    'سعر البيع': fmtNumber(r.selling_price),
+    'التكلفة': fmtNumber(r.cost_price),
+    'الحالة': r.status ?? '',
+    'الخسارة المحتملة': fmtNumber(r.loss_exposure),
+    'فجوة الهامش %': fmtNumber(r.margin_gap_pct),
+    'المخزون': fmtNumber(r.stock_qty),
+  };
+}
+
+function MAP_PRICING_HISTORY(r: any) {
+  return {
+    'المنتج': r.product_name ?? '',
+    'SKU': r.sku ?? '',
+    'السعر القديم': fmtNumber(r.old_selling_price),
+    'السعر الجديد': fmtNumber(r.new_selling_price),
+    'الفرق': fmtNumber(r.delta_amount),
+    'نسبة التغيير %': fmtNumber(r.delta_pct),
+    'مصدر التغيير / فاتورة الشراء': r.source_purchase_no ?? '',
+    'السبب': r.reason ?? '',
+    'المستخدم': r.changed_by_name ?? '',
+    'تاريخ التغيير': r.changed_at ?? '',
+  };
+}
+
+function MAP_PRICING_LANDED(r: any) {
+  const last = r.last_purchase ?? {};
+  return {
+    'المنتج': r.product_name ?? '',
+    'SKU': r.sku ?? '',
+    'المورد': last.supplier_name ?? '',
+    'آخر فاتورة شراء': last.purchase_no ?? '',
+    'تكلفة الشراء الأساسية': fmtNumber(r.base_unit_cost),
+    'المصاريف المحملة': fmtNumber(r.allocated_cost_per_unit),
+    'التكلفة النهائية': fmtNumber(r.landed_unit_cost),
+    'سعر البيع الحالي': fmtNumber(r.current_selling_price),
+    'هامش الربح %': fmtNumber(r.margin_pct),
+    'الزيادة على التكلفة %': fmtNumber(r.markup_pct),
+    'يحتاج مراجعة؟': fmtBool(r.needs_review),
+    'سبب المراجعة': r.needs_review_reason ?? '',
+  };
+}
+
+function MAP_SOLD_PROFIT_SUMMARY(r: any) {
+  return {
+    'من': r.from ?? '',
+    'إلى': r.to ?? '',
+    'إجمالي المبيعات': fmtNumber(r.total_revenue),
+    'تكلفة البضاعة المباعة': fmtNumber(r.total_cogs),
+    'مجمل الربح': fmtNumber(r.gross_profit),
+    'هامش الربح %': fmtNumber(r.gross_margin_pct),
+    'عدد الفواتير': fmtNumber(r.invoice_count),
+    'عدد القطع المباعة': fmtNumber(r.total_qty_sold),
+    // Net-of-returns is deferred — keep the disclaimer in the export.
+    'ملاحظة': 'هذه الأرقام هي إجمالي المبيعات Gross — فواتير المرتجعات مستبعدة لكنها لا تُخصم تلقائيًا.',
+  };
+}
+
+function MAP_SOLD_PROFIT_PRODUCT(r: any) {
+  return {
+    'المنتج': r.product_name ?? '',
+    'SKU': r.sku ?? '',
+    'الكمية المباعة': fmtNumber(r.qty_sold),
+    'عدد الفواتير': fmtNumber(r.invoice_count),
+    'إجمالي المبيعات': fmtNumber(r.revenue),
+    'تكلفة البضاعة المباعة': fmtNumber(r.cogs),
+    'مجمل الربح': fmtNumber(r.gross_profit),
+    'هامش الربح %': fmtNumber(r.gross_margin_pct),
+    'الزيادة على التكلفة %': fmtNumber(r.markup_pct),
+    'متوسط سعر البيع': fmtNumber(r.avg_selling_price),
+    'متوسط التكلفة': fmtNumber(r.avg_unit_cost),
+    'الحالة': r.status ?? '',
+    'آخر بيع': r.last_sold_at ?? '',
+  };
+}
+
+function MAP_SOLD_PROFIT_INVOICE(r: any) {
+  return {
+    'رقم الفاتورة': r.invoice_no ?? '',
+    'العميل': r.customer_name ?? '',
+    'التاريخ': r.sold_at ?? '',
+    'عدد الأصناف': fmtNumber(r.item_count),
+    'عدد القطع': fmtNumber(r.qty_sold),
+    'إجمالي المبيعات': fmtNumber(r.revenue),
+    'تكلفة البضاعة المباعة': fmtNumber(r.cogs),
+    'مجمل الربح': fmtNumber(r.gross_profit),
+    'هامش الربح %': fmtNumber(r.gross_margin_pct),
+    'الحالة': r.status ?? '',
+  };
+}
+
 @ApiBearerAuth()
 @ApiTags('reports')
 // Gated on reports.view — grantable per-user via extra_permissions.
@@ -246,61 +367,102 @@ export class ReportsController {
 
   @Get('pricing/health')
   @ApiOperation({ summary: 'Per-variant current pricing health' })
-  pricingHealth(
+  async pricingHealth(
     @Query('q') q?: string,
     @Query('status') status?: string,
     @Query('only_in_stock') onlyInStock?: string,
     @Query('limit') limit?: string,
+    @Query('format') format?: 'json' | 'xlsx' | 'pdf',
+    @Res({ passthrough: true }) res?: Response,
   ) {
-    return this.svc.pricingHealth({
+    const result = await this.svc.pricingHealth({
       q,
       status: status as any,
       only_in_stock: onlyInStock === 'true' || onlyInStock === '1',
       limit: limit ? Number(limit) : undefined,
     });
+    if (format && format !== 'json' && res) {
+      const rows = (result.items || []).map(MAP_PRICING_HEALTH);
+      return this.respond(res, rows, format, 'pricing-health', 'صحة الأسعار');
+    }
+    return result;
   }
 
   @Get('pricing/losses')
   @ApiOperation({ summary: 'Below-cost / below-min-margin products' })
-  pricingLosses(
+  async pricingLosses(
     @Query('only_in_stock') onlyInStock?: string,
     @Query('limit') limit?: string,
+    @Query('format') format?: 'json' | 'xlsx' | 'pdf',
+    @Res({ passthrough: true }) res?: Response,
   ) {
-    return this.svc.pricingLosses({
+    const result = await this.svc.pricingLosses({
       only_in_stock: onlyInStock === 'true' || onlyInStock === '1',
       limit: limit ? Number(limit) : undefined,
     });
+    if (format && format !== 'json' && res) {
+      const rows = (result.items || []).map(MAP_PRICING_LOSSES);
+      return this.respond(res, rows, format, 'pricing-losses', 'منتجات تحت الحد');
+    }
+    return result;
   }
 
   @Get('pricing/history')
   @ApiOperation({ summary: 'Variant selling-price change history' })
-  pricingHistory(
+  async pricingHistory(
     @Query('variant_id') variant_id?: string,
     @Query('from') from?: string,
     @Query('to') to?: string,
     @Query('limit') limit?: string,
+    @Query('format') format?: 'json' | 'xlsx' | 'pdf',
+    @Res({ passthrough: true }) res?: Response,
   ) {
-    return this.svc.pricingHistory({
+    const result = await this.svc.pricingHistory({
       variant_id,
       from,
       to,
       limit: limit ? Number(limit) : undefined,
     });
+    if (format && format !== 'json' && res) {
+      const rows = (result.items || []).map(MAP_PRICING_HISTORY);
+      return this.respond(
+        res,
+        rows,
+        format,
+        'pricing-history',
+        'تاريخ تغيير الأسعار',
+        { from, to },
+      );
+    }
+    return result;
   }
 
   @Get('pricing/landed-impact')
   @ApiOperation({ summary: 'Last-purchase landed cost vs current price' })
-  pricingLandedImpact(
+  async pricingLandedImpact(
     @Query('supplier_id') supplier_id?: string,
     @Query('needs_review_only') needsReviewOnly?: string,
     @Query('limit') limit?: string,
+    @Query('format') format?: 'json' | 'xlsx' | 'pdf',
+    @Res({ passthrough: true }) res?: Response,
   ) {
-    return this.svc.pricingLandedImpact({
+    const result = await this.svc.pricingLandedImpact({
       supplier_id,
       needs_review_only:
         needsReviewOnly === 'true' || needsReviewOnly === '1',
       limit: limit ? Number(limit) : undefined,
     });
+    if (format && format !== 'json' && res) {
+      const rows = (result.items || []).map(MAP_PRICING_LANDED);
+      return this.respond(
+        res,
+        rows,
+        format,
+        'pricing-landed-impact',
+        'أثر آخر مشتريات',
+      );
+    }
+    return result;
   }
 
   // ── PR-PURCHASES-P3.4B — Actual sold profit reports (read-only) ──────
@@ -309,24 +471,42 @@ export class ReportsController {
 
   @Get('pricing/sold-profit/summary')
   @ApiOperation({ summary: 'Aggregate sold-profit over a date range' })
-  soldProfitSummary(
+  async soldProfitSummary(
     @Query('from') from?: string,
     @Query('to') to?: string,
+    @Query('format') format?: 'json' | 'xlsx' | 'pdf',
+    @Res({ passthrough: true }) res?: Response,
   ) {
-    return this.svc.soldProfitSummary({ from, to });
+    const result = await this.svc.soldProfitSummary({ from, to });
+    if (format && format !== 'json' && res) {
+      // Summary is a single object — wrap in [row] so toXlsx/toPdf
+      // get a one-row sheet with Arabic headers.
+      const rows = [MAP_SOLD_PROFIT_SUMMARY(result)];
+      return this.respond(
+        res,
+        rows,
+        format,
+        'sold-profit-summary',
+        'الربح الفعلي — ملخص',
+        { from, to },
+      );
+    }
+    return result;
   }
 
   @Get('pricing/sold-profit/products')
   @ApiOperation({ summary: 'Per-variant sold-profit over a date range' })
-  soldProfitProducts(
+  async soldProfitProducts(
     @Query('q') q?: string,
     @Query('from') from?: string,
     @Query('to') to?: string,
     @Query('status') status?: string,
     @Query('limit') limit?: string,
     @Query('sort') sort?: string,
+    @Query('format') format?: 'json' | 'xlsx' | 'pdf',
+    @Res({ passthrough: true }) res?: Response,
   ) {
-    return this.svc.soldProfitProducts({
+    const result = await this.svc.soldProfitProducts({
       q,
       from,
       to,
@@ -334,24 +514,50 @@ export class ReportsController {
       limit: limit ? Number(limit) : undefined,
       sort: sort as any,
     });
+    if (format && format !== 'json' && res) {
+      const rows = (result.items || []).map(MAP_SOLD_PROFIT_PRODUCT);
+      return this.respond(
+        res,
+        rows,
+        format,
+        'sold-profit-products',
+        'الربح الفعلي حسب المنتج',
+        { from, to },
+      );
+    }
+    return result;
   }
 
   @Get('pricing/sold-profit/invoices')
   @ApiOperation({ summary: 'Per-invoice sold-profit over a date range' })
-  soldProfitInvoices(
+  async soldProfitInvoices(
     @Query('q') q?: string,
     @Query('from') from?: string,
     @Query('to') to?: string,
     @Query('status') status?: string,
     @Query('limit') limit?: string,
+    @Query('format') format?: 'json' | 'xlsx' | 'pdf',
+    @Res({ passthrough: true }) res?: Response,
   ) {
-    return this.svc.soldProfitInvoices({
+    const result = await this.svc.soldProfitInvoices({
       q,
       from,
       to,
       status: status as any,
       limit: limit ? Number(limit) : undefined,
     });
+    if (format && format !== 'json' && res) {
+      const rows = (result.items || []).map(MAP_SOLD_PROFIT_INVOICE);
+      return this.respond(
+        res,
+        rows,
+        format,
+        'sold-profit-invoices',
+        'الربح الفعلي حسب الفاتورة',
+        { from, to },
+      );
+    }
+    return result;
   }
 
   // ── Helper ───────────────────────────────────────────────────────────
