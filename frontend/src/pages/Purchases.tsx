@@ -1443,7 +1443,7 @@ interface EditItem {
   tax: number;
 }
 
-function EditPurchaseModal({
+export function EditPurchaseModal({
   id,
   onClose,
 }: {
@@ -1462,6 +1462,10 @@ function EditPurchaseModal({
   const [discountAmount, setDiscountAmount] = useState(0);
   const [taxAmount, setTaxAmount] = useState(0);
   const [reason, setReason] = useState('');
+  // PR-PURCHASES-P2.3A — landed-cost extras state. Preloaded from
+  // detail.extra_costs on first render. Only sent back to the API for
+  // DRAFT purchases (non-draft surfaces a blocking banner instead).
+  const [extraCosts, setExtraCosts] = useState<ExtraCostRow[]>([]);
 
   useEffect(() => {
     if (!detail) return;
@@ -1471,7 +1475,12 @@ function EditPurchaseModal({
         product_name: it.product_name || '',
         sku: it.sku || '',
         quantity: Number(it.quantity || 0),
-        unit_cost: Number(it.unit_cost || 0),
+        // Preload the operator-facing BASE price (P2.1's base_unit_cost
+        // column). Falls back to unit_cost for legacy purchases that
+        // pre-date migration 133. Sending base lets the allocator
+        // rebuild the landed cost from scratch — otherwise re-saving a
+        // draft would double-bake the allocation into unit_cost.
+        unit_cost: Number(it.base_unit_cost ?? it.unit_cost ?? 0),
         discount: Number(it.discount || 0),
         tax: Number(it.tax || 0),
       })),
@@ -1480,17 +1489,80 @@ function EditPurchaseModal({
     setShippingCost(Number((detail as any).shipping_cost || 0));
     setDiscountAmount(Number((detail as any).discount_amount || 0));
     setTaxAmount(Number((detail as any).tax_amount || 0));
+    setExtraCosts(
+      ((detail as any).extra_costs ?? []).map(
+        (e: any, idx: number): ExtraCostRow => ({
+          _key: `ec-load-${e.id ?? idx}`,
+          cost_type: e.cost_type,
+          label: e.label ?? '',
+          amount: Number(e.amount ?? 0),
+          capitalize_to_inventory: e.capitalize_to_inventory !== false,
+          allocation_method: e.allocation_method ?? 'by_value',
+          notes: e.notes ?? '',
+          sort_order: Number(e.sort_order ?? idx),
+          // Manual sub-allocations aren't persisted on the read model
+          // yet — operators reapply them when switching to manual.
+          manual_allocations: [],
+        }),
+      ),
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [detail?.id]);
 
-  const subtotal = items.reduce(
-    (s, it) => s + it.quantity * it.unit_cost - (it.discount || 0) + (it.tax || 0),
-    0,
+  const isDraft = detail?.status === 'draft';
+
+  // PR-PURCHASES-P2.3A — preview the same allocation the backend will
+  // run on save (draft only). Non-draft renders extras read-only and
+  // does not need the live preview.
+  const preview = useMemo(
+    () =>
+      computeLandedPreview({
+        lines: items.map((it) => ({
+          variant_id: it.variant_id,
+          quantity: it.quantity,
+          base_unit_cost: it.unit_cost,
+          discount: it.discount,
+          tax: it.tax,
+        })),
+        extras: extraCosts.map((e) => ({
+          cost_type: e.cost_type,
+          amount: Number(e.amount || 0),
+          capitalize_to_inventory: e.capitalize_to_inventory !== false,
+          allocation_method: e.allocation_method ?? 'by_value',
+          manual_allocations: e.manual_allocations,
+        })),
+        shipping_cost: Number(shippingCost || 0),
+        discount_amount: Number(discountAmount || 0),
+        tax_amount: Number(taxAmount || 0),
+      }),
+    [items, extraCosts, shippingCost, discountAmount, taxAmount],
   );
-  const grand = Math.max(
-    0,
-    subtotal + Number(shippingCost || 0) + Number(taxAmount || 0) -
-      Number(discountAmount || 0),
+  const previewByVariant = useMemo(() => {
+    const m = new Map<string, (typeof preview)['lines'][number]>();
+    for (const l of preview.lines) m.set(l.variant_id, l);
+    return m;
+  }, [preview]);
+
+  const subtotal = preview.products_base_subtotal;
+  const grand = preview.grand_total_preview;
+  const hasCapitalizedExtras = preview.extra_costs_capitalized > 0;
+  const extraCostErrors = preview.errors;
+  const hasExtraErrors = Object.keys(extraCostErrors).length > 0;
+
+  // PR-PURCHASES-P2.3A — non-draft purchases with extras are blocked
+  // from any landed-cost mutation. The flag covers both pre-existing
+  // extras on the loaded purchase and any extras the operator
+  // attempted to add through the modal.
+  const detailHasExtras = ((detail as any)?.extra_costs ?? []).length > 0;
+  const nonDraftLandedBlocked =
+    !!detail && !isDraft && (detailHasExtras || extraCosts.length > 0);
+
+  const cleanExtraCosts = useMemo(
+    () =>
+      extraCosts
+        .map(({ _key: _k, ...rest }) => rest)
+        .filter((r) => Number(r.amount || 0) > 0),
+    [extraCosts],
   );
 
   const update = (idx: number, patch: Partial<EditItem>) =>
@@ -1504,6 +1576,18 @@ function EditPurchaseModal({
         return Promise.reject(new Error('يجب وجود صنف واحد على الأقل'));
       if (detail?.status !== 'draft' && !reason.trim())
         return Promise.reject(new Error('يجب كتابة سبب التعديل'));
+      if (hasExtraErrors)
+        return Promise.reject(
+          new Error(
+            'يوجد خطأ في توزيع المصاريف الإضافية — راجع التوزيع اليدوي.',
+          ),
+        );
+      if (nonDraftLandedBlocked)
+        return Promise.reject(
+          new Error(
+            'لا يمكن تعديل مصاريف فاتورة مشتريات مستلمة أو مدفوعة حاليًا. أنشئ تسوية مخصصة أو تواصل مع المدير.',
+          ),
+        );
       const body: CreatePurchasePayload & { edit_reason?: string } = {
         supplier_id: detail!.supplier_id,
         warehouse_id: detail!.warehouse_id,
@@ -1515,10 +1599,18 @@ function EditPurchaseModal({
         items: items.map((it) => ({
           variant_id: it.variant_id,
           quantity: it.quantity,
+          // Always BASE — backend re-runs the allocator. Sending the
+          // landed value here would double-bake on save.
           unit_cost: it.unit_cost,
           discount: it.discount || 0,
           tax: it.tax || 0,
         })),
+        // Extras only for drafts — non-draft never reaches this branch
+        // because the guard above blocks it.
+        extra_costs:
+          isDraft && cleanExtraCosts.length > 0
+            ? cleanExtraCosts
+            : undefined,
       };
       return purchasesApi.edit(id, body);
     },
@@ -1531,8 +1623,6 @@ function EditPurchaseModal({
     onError: (e: any) =>
       toast.error(e?.response?.data?.message || e?.message || 'فشل التعديل'),
   });
-
-  const isDraft = detail?.status === 'draft';
 
   return (
     <div className="fixed inset-0 bg-slate-900/50 z-50 flex items-center justify-center p-4">
@@ -1549,7 +1639,9 @@ function EditPurchaseModal({
             <p className="text-xs text-slate-500 mt-1">
               {isDraft
                 ? 'الفاتورة مسودة — سيتم التعديل في نفس السجل.'
-                : 'الفاتورة مستلمة — سيُصدر فاتورة جديدة بديلة وتُلغى الحالية مع عكس المخزون والدفعات.'}
+                : detailHasExtras
+                  ? 'الفاتورة مستلمة وتحتوي مصاريف محملة — تعديل المصاريف غير متاح في هذه الواجهة.'
+                  : 'الفاتورة مستلمة — سيُصدر فاتورة جديدة بديلة وتُلغى الحالية مع عكس المخزون والدفعات.'}
             </p>
           </div>
           <button className="icon-btn" onClick={onClose} title="إغلاق">
@@ -1568,19 +1660,35 @@ function EditPurchaseModal({
                     <tr>
                       <th className="p-2 text-right">الصنف</th>
                       <th className="p-2 text-right">الكمية</th>
-                      <th className="p-2 text-right">تكلفة الوحدة</th>
+                      <th className="p-2 text-right">
+                        {hasCapitalizedExtras
+                          ? 'سعر القطعة الأساسي'
+                          : 'تكلفة الوحدة'}
+                      </th>
                       <th className="p-2 text-right">خصم</th>
                       <th className="p-2 text-right">ضريبة</th>
+                      {hasCapitalizedExtras ? (
+                        <>
+                          <th className="p-2 text-right">نصيب المصاريف</th>
+                          <th className="p-2 text-right">
+                            تكلفة القطعة النهائية
+                          </th>
+                        </>
+                      ) : null}
                       <th className="p-2 text-right">الإجمالي</th>
                       <th className="p-2"></th>
                     </tr>
                   </thead>
                   <tbody className="divide-y">
                     {items.map((it, idx) => {
-                      const total =
+                      const baseTotal =
                         it.quantity * it.unit_cost -
                         (it.discount || 0) +
                         (it.tax || 0);
+                      const pv = previewByVariant.get(it.variant_id);
+                      const total = hasCapitalizedExtras
+                        ? (pv?.final_line_total ?? baseTotal)
+                        : baseTotal;
                       return (
                         <tr key={`${it.variant_id}-${idx}`}>
                           <td className="p-2">
@@ -1666,6 +1774,22 @@ function EditPurchaseModal({
                               }
                             />
                           </td>
+                          {hasCapitalizedExtras ? (
+                            <>
+                              <td
+                                className="p-2 text-emerald-700 text-xs"
+                                data-testid={`edit-line-allocated-${idx}`}
+                              >
+                                +{EGP(pv?.allocated_cost_per_unit ?? 0)}
+                              </td>
+                              <td
+                                className="p-2 font-bold"
+                                data-testid={`edit-line-final-unit-${idx}`}
+                              >
+                                {EGP(pv?.final_unit_cost ?? it.unit_cost)}
+                              </td>
+                            </>
+                          ) : null}
                           <td className="p-2 font-mono font-bold">
                             {EGP(total)}
                           </td>
@@ -1684,7 +1808,7 @@ function EditPurchaseModal({
                     {items.length === 0 && (
                       <tr>
                         <td
-                          colSpan={7}
+                          colSpan={hasCapitalizedExtras ? 9 : 7}
                           className="p-6 text-center text-slate-400"
                         >
                           لا توجد أصناف
@@ -1745,6 +1869,72 @@ function EditPurchaseModal({
                 </div>
               </div>
 
+              {/* PR-PURCHASES-P2.3A — landed-cost UI. DRAFT gets the
+                  full editor; non-draft renders extras as read-only
+                  rows with a blocking Arabic banner. */}
+              {isDraft ? (
+                <LandedCostsSection
+                  rows={extraCosts}
+                  lines={items.map((it) => ({
+                    variant_id: it.variant_id,
+                    display: it.product_name || it.sku || it.variant_id,
+                    quantity: it.quantity,
+                    base_unit_cost: it.unit_cost,
+                  }))}
+                  capitalizedTotal={preview.extra_costs_capitalized}
+                  nonCapitalizedTotal={preview.extra_costs_non_capitalized}
+                  errors={extraCostErrors}
+                  onChange={setExtraCosts}
+                />
+              ) : detailHasExtras ? (
+                <section
+                  data-testid="edit-landed-readonly"
+                  className="rounded-xl border border-rose-200 bg-rose-50/40 p-3 space-y-2"
+                >
+                  <div
+                    data-testid="edit-landed-block-banner"
+                    className="text-xs font-bold text-rose-700"
+                  >
+                    لا يمكن تعديل مصاريف فاتورة مشتريات مستلمة أو مدفوعة حاليًا.
+                    أنشئ تسوية مخصصة أو تواصل مع المدير.
+                  </div>
+                  <div className="overflow-x-auto border border-rose-100 rounded-lg bg-white">
+                    <table className="w-full text-xs">
+                      <thead className="bg-slate-50 text-slate-600">
+                        <tr>
+                          <th className="p-2 text-right">النوع</th>
+                          <th className="p-2 text-right">الوصف</th>
+                          <th className="p-2 text-right">المبلغ</th>
+                          <th className="p-2 text-right">يدخل في التكلفة؟</th>
+                          <th className="p-2 text-right">طريقة التوزيع</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {((detail as any).extra_costs ?? []).map((ec: any) => (
+                          <tr key={ec.id}>
+                            <td className="p-2">
+                              {COST_TYPE_LABEL_AR[
+                                ec.cost_type as keyof typeof COST_TYPE_LABEL_AR
+                              ] ?? ec.cost_type}
+                            </td>
+                            <td className="p-2">{ec.label || '—'}</td>
+                            <td className="p-2 font-bold">{EGP(ec.amount)}</td>
+                            <td className="p-2">
+                              {ec.capitalize_to_inventory ? 'نعم' : 'لا'}
+                            </td>
+                            <td className="p-2">
+                              {ALLOC_METHOD_LABEL_AR[
+                                ec.allocation_method as keyof typeof ALLOC_METHOD_LABEL_AR
+                              ] ?? ec.allocation_method}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              ) : null}
+
               <div className="flex items-center justify-between bg-slate-50 rounded-lg px-4 py-3">
                 <div className="text-sm text-slate-600">
                   المجموع الفرعي:{' '}
@@ -1778,14 +1968,24 @@ function EditPurchaseModal({
             إلغاء
           </button>
           <button
+            data-testid="edit-purchase-submit"
             onClick={() => save.mutate()}
             disabled={
               save.isPending ||
               items.length === 0 ||
               isLoading ||
-              (!isDraft && !reason.trim())
+              (!isDraft && !reason.trim()) ||
+              hasExtraErrors ||
+              nonDraftLandedBlocked
             }
             className="btn-primary"
+            title={
+              nonDraftLandedBlocked
+                ? 'لا يمكن تعديل مصاريف فاتورة مشتريات مستلمة أو مدفوعة حاليًا.'
+                : hasExtraErrors
+                  ? 'يوجد خطأ في توزيع المصاريف الإضافية'
+                  : undefined
+            }
           >
             {save.isPending
               ? 'جاري الحفظ...'

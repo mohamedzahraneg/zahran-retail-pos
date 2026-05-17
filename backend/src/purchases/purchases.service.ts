@@ -123,19 +123,19 @@ export class PurchasesService {
   }
 
   // --------------------------------------------------------------------------
-  //  Create
+  //  Allocator helper — shared by create() and draft edit()
   // --------------------------------------------------------------------------
-  async create(dto: CreatePurchaseDto, userId: string) {
-    if (!dto.items?.length) {
-      throw new BadRequestException('يجب إضافة صنف واحد على الأقل');
-    }
-
-    // PR-PURCHASES-P2.1 — run the landed-cost allocator BEFORE the
-    // transaction opens. The DTO's `unit_cost` is treated as the BASE
-    // (raw) price; the allocator turns it into the landed `unit_cost`
-    // that gets written to `purchase_items` and (via receive()) into
-    // `product_variants.cost_price`.
-    const allocatorLines: AllocatorLineInput[] = dto.items.map((i) => ({
+  /**
+   * Run the landed-cost allocator on a Create/Edit DTO and map any
+   * `ManualAllocationError` to the canonical Arabic
+   * `BadRequestException`. Pure helper — no transaction, no I/O.
+   *
+   * Shared by `create()` (initial PO insert) and `edit()`'s draft
+   * branch (PR-PURCHASES-P2.3A) so the allocation rules can't drift
+   * between the two paths.
+   */
+  private runAllocatorOrThrow(dto: CreatePurchaseDto) {
+    const allocatorLines: AllocatorLineInput[] = (dto.items ?? []).map((i) => ({
       variant_id: i.variant_id,
       quantity: i.quantity,
       base_unit_cost: i.unit_cost,
@@ -153,10 +153,8 @@ export class PurchasesService {
         manual_allocations: e.manual_allocations,
       }),
     );
-
-    let allocation;
     try {
-      allocation = allocateLandedCosts(allocatorLines, allocatorExtras);
+      return allocateLandedCosts(allocatorLines, allocatorExtras);
     } catch (err) {
       if (err instanceof ManualAllocationError) {
         // Canonical Arabic operator-facing message — the precise reason
@@ -167,6 +165,22 @@ export class PurchasesService {
       }
       throw err;
     }
+  }
+
+  // --------------------------------------------------------------------------
+  //  Create
+  // --------------------------------------------------------------------------
+  async create(dto: CreatePurchaseDto, userId: string) {
+    if (!dto.items?.length) {
+      throw new BadRequestException('يجب إضافة صنف واحد على الأقل');
+    }
+
+    // PR-PURCHASES-P2.1 — run the landed-cost allocator BEFORE the
+    // transaction opens. The DTO's `unit_cost` is treated as the BASE
+    // (raw) price; the allocator turns it into the landed `unit_cost`
+    // that gets written to `purchase_items` and (via receive()) into
+    // `product_variants.cost_price`.
+    const allocation = this.runAllocatorOrThrow(dto);
 
     return this.ds.transaction(async (m) => {
       // subtotal stays as the BASE products subtotal (unchanged
@@ -504,10 +518,24 @@ export class PurchasesService {
   }
 
   /**
-   * Edit a purchase invoice. For draft purchases we update items in place.
-   * For received/paid purchases we cancel-and-recreate via fn_void_purchase
-   * then insert a fresh row, mirroring the sales invoice edit flow. The new
-   * purchase carries a `replaces_purchase_id` trail in its `notes` field.
+   * Edit a purchase invoice.
+   *
+   * DRAFT (PR-PURCHASES-P2.3A): full in-place edit that re-runs the
+   * landed-cost allocator and rewrites items + extras. Replaces the
+   * pre-P2.3 path which silently dropped `extra_costs` and inserted
+   * `purchase_items` without the `base_unit_cost NOT NULL` column
+   * (P2.1 migration 133).
+   *
+   * RECEIVED / PARTIAL / PAID: legacy void-and-recreate flow, kept
+   * for purchases that don't carry landed-cost extras. When either
+   * the existing purchase OR the incoming DTO references extras, the
+   * call is blocked with the canonical Arabic message — operators
+   * must create a manual adjustment instead.
+   *
+   * NOTE: the existing GL-reversal leak on the void path (cancel()
+   * calls reverseByReference, edit() does not) is INTENTIONALLY left
+   * untouched in P2.3A. It will be fixed alongside the proper delta
+   * engine in P2.3B.
    */
   async edit(
     id: string,
@@ -524,42 +552,108 @@ export class PurchasesService {
       throw new BadRequestException('الفاتورة ملغاة — لا يمكن تعديلها');
     }
 
-    // Draft → in-place edit
+    // ── DRAFT → in-place full edit with allocator ──────────────────
     if (existing.status === 'draft') {
+      if (!dto.items?.length) {
+        throw new BadRequestException('يجب إضافة صنف واحد على الأقل');
+      }
+      // Allocator runs OUTSIDE the transaction (same shape as create())
+      // so manual-allocation mismatches surface before we touch the
+      // DB. Throws BadRequestException with the canonical Arabic
+      // message on mismatch.
+      const allocation = this.runAllocatorOrThrow(dto);
+
+      const base_subtotal = allocation.base_subtotal;
+      const extra_costs_capitalized = allocation.capitalized_total;
+      const extra_costs_non_capitalized = allocation.non_capitalized_total;
+      const grand_total = +(
+        base_subtotal
+        - (dto.discount_amount || 0)
+        + (dto.tax_amount || 0)
+        + (dto.shipping_cost || 0)
+        + extra_costs_capitalized
+        + extra_costs_non_capitalized
+      ).toFixed(2);
+
       return this.ds.transaction(async (em) => {
         await em.query(
           `UPDATE purchases
-              SET supplier_id  = $2,
-                  warehouse_id = $3,
-                  notes        = $4,
-                  updated_at   = NOW()
+              SET supplier_id              = $2,
+                  warehouse_id             = $3,
+                  notes                    = $4,
+                  subtotal                 = $5,
+                  shipping_cost            = $6,
+                  discount_amount          = $7,
+                  tax_amount               = $8,
+                  grand_total              = $9,
+                  extra_costs_capitalized  = $10,
+                  extra_costs_non_capitalized = $11,
+                  updated_at               = NOW()
             WHERE id = $1`,
           [
             id,
             dto.supplier_id ?? existing.supplier_id,
             dto.warehouse_id ?? existing.warehouse_id,
             dto.notes ?? existing.notes,
+            base_subtotal,
+            dto.shipping_cost || 0,
+            dto.discount_amount || 0,
+            dto.tax_amount || 0,
+            grand_total,
+            extra_costs_capitalized,
+            extra_costs_non_capitalized,
           ],
         );
-        await em.query(`DELETE FROM purchase_items WHERE purchase_id = $1`, [id]);
-        for (const line of dto.items || []) {
-          const line_total =
-            line.quantity * line.unit_cost -
-            (line.discount || 0) +
-            (line.tax || 0);
+        await em.query(
+          `DELETE FROM purchase_items WHERE purchase_id = $1`,
+          [id],
+        );
+        for (const line of allocation.lines) {
           await em.query(
             `INSERT INTO purchase_items
-               (purchase_id, variant_id, quantity, unit_cost,
-                discount, tax, line_total)
-             VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+               (purchase_id, variant_id, quantity,
+                base_unit_cost, allocated_cost_total, allocated_cost_per_unit,
+                unit_cost, discount, tax, line_total,
+                manual_allocation)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
             [
               id,
               line.variant_id,
               line.quantity,
+              line.base_unit_cost,
+              line.allocated_cost_total,
+              line.allocated_cost_per_unit,
               line.unit_cost,
-              line.discount || 0,
-              line.tax || 0,
-              line_total,
+              line.discount,
+              line.tax,
+              line.line_total,
+              line.manual_allocation,
+            ],
+          );
+        }
+        await em.query(
+          `DELETE FROM purchase_extra_costs WHERE purchase_id = $1`,
+          [id],
+        );
+        const extras = dto.extra_costs ?? [];
+        for (let i = 0; i < extras.length; i++) {
+          const e = extras[i];
+          await em.query(
+            `INSERT INTO purchase_extra_costs
+               (purchase_id, cost_type, label, amount,
+                capitalize_to_inventory, allocation_method,
+                notes, sort_order, created_by)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+            [
+              id,
+              e.cost_type,
+              e.label ?? null,
+              e.amount,
+              e.capitalize_to_inventory !== false,
+              e.allocation_method ?? 'by_value',
+              e.notes ?? null,
+              e.sort_order ?? i,
+              userId,
             ],
           );
         }
@@ -571,7 +665,21 @@ export class PurchasesService {
       });
     }
 
-    // Received / paid → void via SP, then create a new purchase
+    // ── RECEIVED / PARTIAL / PAID — block when extras are involved
+    // before touching fn_void_purchase. P2.3A defers received/paid
+    // landed-cost edits to a future delta engine (P2.3B).
+    const [hasExisting] = await this.ds.query(
+      `SELECT 1 AS has FROM purchase_extra_costs WHERE purchase_id = $1 LIMIT 1`,
+      [id],
+    );
+    const dtoHasExtras = (dto.extra_costs ?? []).length > 0;
+    if (hasExisting || dtoHasExtras) {
+      throw new BadRequestException(
+        'لا يمكن تعديل مصاريف فاتورة مشتريات مستلمة أو مدفوعة حاليًا. أنشئ تسوية مخصصة أو تواصل مع المدير.',
+      );
+    }
+
+    // Legacy non-extras path: void via SP, then create a new purchase.
     await this.ds.query(`SELECT fn_void_purchase($1, $2, $3)`, [
       id,
       userId,
