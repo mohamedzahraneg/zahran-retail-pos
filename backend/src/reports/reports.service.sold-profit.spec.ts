@@ -360,4 +360,168 @@ describe('STATIC GUARDRAIL — P3.4B reports never write', () => {
     // settings is read for the min_margin default
     expect(stripped).toMatch(/FROM settings\b/);
   });
+
+  // ────────────────────────────────────────────────────────────────
+  //  HOTFIX guardrail: Postgres has no max(uuid) aggregate. Catch
+  //  any future regression that wraps a UUID-shaped column in MAX().
+  //  These are the columns we KNOW are UUID in our schema and
+  //  appear inside the P3.4B SQL (id, product_id, variant_id,
+  //  customer_id, invoice_id).
+  // ────────────────────────────────────────────────────────────────
+  it('HOTFIX: never wraps a UUID column in MAX(...)', () => {
+    const stripped = slice
+      .split('\n')
+      .filter((l) => !/^\s*(\/\/|\*)/.test(l))
+      .join('\n');
+    const forbidden = [
+      /MAX\(\s*id\s*\)/i,
+      /MAX\(\s*product_id\s*\)/i,
+      /MAX\(\s*variant_id\s*\)/i,
+      /MAX\(\s*customer_id\s*\)/i,
+      /MAX\(\s*invoice_id\s*\)/i,
+      /MAX\(\s*user_id\s*\)/i,
+      /MAX\(\s*supplier_id\s*\)/i,
+    ];
+    for (const re of forbidden) {
+      expect(stripped).not.toMatch(re);
+    }
+  });
+});
+
+// ─── HOTFIX functional tests for top/worst product UUID handoff ───
+// The summary endpoint's `top_profit_product` / `worst_margin_product`
+// MUST surface a real `product_id` UUID. Previously the per-row
+// aggregation in the products endpoint also fetched a UUID via
+// MAX(product_id) which crashed at runtime. These tests fail if
+// either endpoint stops returning the UUID, and stand as canaries
+// for any future regression.
+import { Test as Test2 } from '@nestjs/testing';
+import { DataSource as DS2 } from 'typeorm';
+import { ReportsService as RS2 } from './reports.service';
+
+async function makeServ(responses: Array<any[]> = []) {
+  const queue = [...responses];
+  const calls: any[] = [];
+  const ds: any = {
+    query: jest.fn(async (sql: string, params: any[] = []) => {
+      calls.push({ sql, params });
+      return queue.length ? queue.shift() : [];
+    }),
+  };
+  const m = await Test2.createTestingModule({
+    providers: [RS2, { provide: DS2, useValue: ds }],
+  }).compile();
+  return { service: m.get(RS2), calls };
+}
+
+describe('HOTFIX — UUID handoff in summary top/worst and products endpoint', () => {
+  it('summary top_profit_product carries product_id (UUID) untouched by MAX', async () => {
+    const PROD_ID = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+    const { service } = await makeServ([
+      // totals
+      [
+        {
+          total_revenue: '100',
+          total_cogs: '60',
+          gross_profit: '40',
+          total_qty_sold: 1,
+          invoice_count: 1,
+          product_count: 1,
+          variant_count: 1,
+        },
+      ],
+      // top
+      [
+        {
+          product_id: PROD_ID,
+          product_name: 'منتج',
+          gross_profit: '40.00',
+        },
+      ],
+      // worst
+      [
+        {
+          product_id: PROD_ID,
+          product_name: 'منتج',
+          revenue: '100',
+          cogs: '60',
+          gross_profit: '40',
+          gross_margin_pct: '40',
+        },
+      ],
+    ]);
+    const res = await service.soldProfitSummary();
+    expect(res.top_profit_product?.product_id).toBe(PROD_ID);
+    expect(res.worst_margin_product?.product_id).toBe(PROD_ID);
+  });
+
+  it('products endpoint carries UUID product_id + variant_id through GROUP BY (no MAX)', async () => {
+    const VID = '11111111-1111-1111-1111-111111111111';
+    const PID = '22222222-2222-2222-2222-222222222222';
+    const { service, calls } = await makeServ([
+      [
+        {
+          variant_id: VID,
+          product_id: PID,
+          product_name: 'منتج',
+          sku: 'A',
+          barcode: null,
+          color: null,
+          size: null,
+          qty_sold: 5,
+          revenue: '500',
+          cogs: '300',
+          gross_profit: '200',
+          avg_selling_price: '100',
+          avg_unit_cost: '60',
+          invoice_count: 2,
+          last_sold_at: '2026-05-17T10:00:00Z',
+          min_margin_pct: '15',
+        },
+      ],
+    ]);
+    const res = await service.soldProfitProducts();
+    expect(res.items[0].variant_id).toBe(VID);
+    expect(res.items[0].product_id).toBe(PID);
+    // SQL must group by both UUIDs and the metadata columns; never
+    // wrap them in MAX(...)
+    const sql = calls[0].sql;
+    expect(sql).toMatch(
+      /GROUP BY\s+variant_id,\s*product_id,\s*product_name,\s*sku,\s*barcode,\s*color,\s*size/i,
+    );
+    expect(sql).not.toMatch(/MAX\(\s*product_id\s*\)/i);
+    expect(sql).not.toMatch(/MAX\(\s*variant_id\s*\)/i);
+  });
+
+  it('invoices endpoint carries UUID invoice_id + customer_id through GROUP BY (no MAX)', async () => {
+    const INV = '33333333-3333-3333-3333-333333333333';
+    const CID = '44444444-4444-4444-4444-444444444444';
+    const { service, calls } = await makeServ([
+      [
+        {
+          invoice_id: INV,
+          invoice_no: 'INV-2026-0000001',
+          sold_at: '2026-05-17T10:00:00Z',
+          customer_id: CID,
+          customer_name: 'عميل',
+          status: 'completed',
+          qty_sold: 3,
+          item_count: 2,
+          revenue: '500',
+          cogs: '300',
+          gross_profit: '200',
+          min_margin_pct: '15',
+        },
+      ],
+    ]);
+    const res = await service.soldProfitInvoices();
+    expect(res.items[0].invoice_id).toBe(INV);
+    expect(res.items[0].customer_id).toBe(CID);
+    const sql = calls[0].sql;
+    expect(sql).toMatch(
+      /GROUP BY\s+invoice_id,\s*invoice_no,\s*sold_at,\s*customer_id,\s*customer_name,\s*status/i,
+    );
+    expect(sql).not.toMatch(/MAX\(\s*customer_id\s*\)/i);
+    expect(sql).not.toMatch(/MAX\(\s*invoice_id\s*\)/i);
+  });
 });

@@ -1365,14 +1365,23 @@ export class ReportsService {
         ${whereWithQ}
       ),
       agg AS (
+        -- HOTFIX: previously aggregated the per-variant metadata via
+        -- MAX(...). That fails with the Postgres error
+        --   function max(uuid) does not exist
+        -- for product_id (and defensively for any other id columns).
+        -- These fields are functionally dependent on variant_id, so
+        -- the correct approach is to include them in GROUP BY —
+        -- same result row, no aggregate needed.
+        -- sold_at stays as MAX(...) because the per-variant LATEST
+        -- sale across multiple invoices IS semantic (last_sold_at).
         SELECT
           variant_id,
-          MAX(product_id)                          AS product_id,
-          MAX(product_name)                        AS product_name,
-          MAX(sku)                                 AS sku,
-          MAX(barcode)                             AS barcode,
-          MAX(color)                               AS color,
-          MAX(size)                                AS size,
+          product_id,
+          product_name,
+          sku,
+          barcode,
+          color,
+          size,
           SUM(qty)::int                            AS qty_sold,
           SUM(revenue)::numeric                    AS revenue,
           SUM(cogs)::numeric                       AS cogs,
@@ -1386,7 +1395,7 @@ export class ReportsService {
           COUNT(DISTINCT invoice_id)::int          AS invoice_count,
           MAX(sold_at)                             AS last_sold_at
         FROM lines
-        GROUP BY variant_id
+        GROUP BY variant_id, product_id, product_name, sku, barcode, color, size
       )
       SELECT
         agg.*,
@@ -1541,20 +1550,27 @@ export class ReportsService {
         ${where}
       ),
       agg AS (
+        -- HOTFIX: previously aggregated invoice metadata via
+        -- MAX(...). That fails with the Postgres error
+        --   function max(uuid) does not exist
+        -- for customer_id, and is anyway redundant since each
+        -- invoice_id maps to exactly one (invoice_no, sold_at,
+        -- customer_id, customer_name, status) tuple. Include those
+        -- columns in GROUP BY instead — same result, no aggregate.
         SELECT
           invoice_id,
-          MAX(invoice_no)                          AS invoice_no,
-          MAX(sold_at)                             AS sold_at,
-          MAX(customer_id)                         AS customer_id,
-          MAX(customer_name)                       AS customer_name,
-          MAX(status::text)                        AS status,
+          invoice_no,
+          sold_at,
+          customer_id,
+          customer_name,
+          status::text                             AS status,
           SUM(qty)::int                            AS qty_sold,
           COUNT(*)::int                            AS item_count,
           SUM(revenue)::numeric                    AS revenue,
           SUM(cogs)::numeric                       AS cogs,
           (SUM(revenue) - SUM(cogs))::numeric      AS gross_profit
         FROM lines
-        GROUP BY invoice_id
+        GROUP BY invoice_id, invoice_no, sold_at, customer_id, customer_name, status
       )
       SELECT agg.*, ${minMarginParam} AS min_margin_pct
       FROM agg
