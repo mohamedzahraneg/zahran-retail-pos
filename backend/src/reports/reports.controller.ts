@@ -303,6 +303,57 @@ export class ReportsController {
     });
   }
 
+  // ── PR-PURCHASES-P3.4B — Actual sold profit reports (read-only) ──────
+  // Gross sold-profit from posted invoice_items joined with invoices,
+  // returns excluded. Pure SELECT; static guardrail spec enforces.
+
+  @Get('pricing/sold-profit/summary')
+  @ApiOperation({ summary: 'Aggregate sold-profit over a date range' })
+  soldProfitSummary(
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    return this.svc.soldProfitSummary({ from, to });
+  }
+
+  @Get('pricing/sold-profit/products')
+  @ApiOperation({ summary: 'Per-variant sold-profit over a date range' })
+  soldProfitProducts(
+    @Query('q') q?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('status') status?: string,
+    @Query('limit') limit?: string,
+    @Query('sort') sort?: string,
+  ) {
+    return this.svc.soldProfitProducts({
+      q,
+      from,
+      to,
+      status: status as any,
+      limit: limit ? Number(limit) : undefined,
+      sort: sort as any,
+    });
+  }
+
+  @Get('pricing/sold-profit/invoices')
+  @ApiOperation({ summary: 'Per-invoice sold-profit over a date range' })
+  soldProfitInvoices(
+    @Query('q') q?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('status') status?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.svc.soldProfitInvoices({
+      q,
+      from,
+      to,
+      status: status as any,
+      limit: limit ? Number(limit) : undefined,
+    });
+  }
+
   // ── Helper ───────────────────────────────────────────────────────────
   private async respond(
     res: Response,

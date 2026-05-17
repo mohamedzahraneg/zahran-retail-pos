@@ -25,6 +25,10 @@ const lossesMock = vi.fn();
 const historyMock = vi.fn();
 const landedMock = vi.fn();
 const applyPricesMock = vi.fn();
+// PR-PURCHASES-P3.4B — sold-profit endpoint spies.
+const soldSummaryMock = vi.fn();
+const soldProductsMock = vi.fn();
+const soldInvoicesMock = vi.fn();
 
 vi.mock('@/api/reports.api', async () => {
   const actual = await vi.importActual<any>('@/api/reports.api');
@@ -35,6 +39,9 @@ vi.mock('@/api/reports.api', async () => {
       pricingLosses: (params: any) => lossesMock(params),
       pricingHistory: (params: any) => historyMock(params),
       pricingLandedImpact: (params: any) => landedMock(params),
+      soldProfitSummary: (params: any) => soldSummaryMock(params),
+      soldProfitProducts: (params: any) => soldProductsMock(params),
+      soldProfitInvoices: (params: any) => soldInvoicesMock(params),
     },
   };
 });
@@ -147,6 +154,111 @@ beforeEach(() => {
   historyMock.mockReset();
   landedMock.mockReset();
   applyPricesMock.mockReset();
+  soldSummaryMock.mockReset();
+  soldProductsMock.mockReset();
+  soldInvoicesMock.mockReset();
+  // PR-PURCHASES-P3.4B — default fixtures for the sold-profit tab.
+  soldSummaryMock.mockResolvedValue({
+    from: '2026-05-01',
+    to: '2026-05-17',
+    total_revenue: 1000,
+    total_cogs: 600,
+    gross_profit: 400,
+    gross_margin_pct: 40,
+    markup_pct: 66.67,
+    total_qty_sold: 20,
+    invoice_count: 5,
+    product_count: 3,
+    variant_count: 4,
+    avg_profit_per_unit: 20,
+    top_profit_product: {
+      product_id: 'p-top',
+      product_name: 'منتج رابح',
+      gross_profit: 400,
+    },
+    worst_margin_product: {
+      product_id: 'p-worst',
+      product_name: 'منتج خاسر',
+      gross_profit: -20,
+      gross_margin_pct: -20,
+    },
+  });
+  soldProductsMock.mockResolvedValue({
+    summary: { total: 2, loss: 1, low_margin: 0, unknown_cost: 0, ok: 1 },
+    items: [
+      {
+        variant_id: 'v-ok',
+        product_id: 'p1',
+        product_name: 'صنف رابح',
+        sku: 'OK',
+        barcode: null,
+        color: null,
+        size: null,
+        qty_sold: 10,
+        revenue: 1000,
+        cogs: 600,
+        gross_profit: 400,
+        gross_margin_pct: 40,
+        markup_pct: 66.67,
+        avg_selling_price: 100,
+        avg_unit_cost: 60,
+        invoice_count: 3,
+        last_sold_at: '2026-05-15T10:00:00Z',
+        status: 'ok',
+        min_margin_pct: 15,
+      },
+      {
+        variant_id: 'v-loss',
+        product_id: 'p2',
+        product_name: 'صنف خاسر',
+        sku: 'LOSS',
+        barcode: null,
+        color: null,
+        size: null,
+        qty_sold: 5,
+        revenue: 200,
+        cogs: 300,
+        gross_profit: -100,
+        gross_margin_pct: -50,
+        markup_pct: -33.33,
+        avg_selling_price: 40,
+        avg_unit_cost: 60,
+        invoice_count: 2,
+        last_sold_at: '2026-05-14T10:00:00Z',
+        status: 'loss',
+        min_margin_pct: 15,
+      },
+    ],
+  });
+  soldInvoicesMock.mockResolvedValue({
+    summary: {
+      total: 1,
+      revenue: 500,
+      cogs: 300,
+      gross_profit: 200,
+      loss: 0,
+      low_margin: 0,
+    },
+    items: [
+      {
+        invoice_id: 'inv1',
+        invoice_no: 'INV-2026-0000001',
+        sold_at: '2026-05-15T10:00:00Z',
+        customer_id: 'c1',
+        customer_name: 'عميل أ',
+        invoice_status: 'completed',
+        item_count: 2,
+        qty_sold: 3,
+        revenue: 500,
+        cogs: 300,
+        gross_profit: 200,
+        gross_margin_pct: 40,
+        markup_pct: 66.67,
+        status: 'ok',
+        min_margin_pct: 15,
+      },
+    ],
+  });
   healthMock.mockResolvedValue(HEALTH_RESPONSE);
   lossesMock.mockResolvedValue({
     summary: { below_cost: 1, below_min_margin: 1, total_loss_exposure: -60 },
@@ -294,5 +406,122 @@ describe('PricingReports — P3.4A tabs', () => {
     expect(lossesMock).toHaveBeenCalled();
     expect(historyMock).toHaveBeenCalled();
     expect(landedMock).toHaveBeenCalled();
+  });
+});
+
+describe('PricingReports — P3.4B sold-profit tab', () => {
+  it('8. tab renders summary tiles + top/worst + returns disclaimer', async () => {
+    renderPage();
+    fireEvent.click(screen.getByTestId('pricing-reports-tab-sold-profit'));
+    await screen.findByTestId('sold-profit-returns-notice');
+    await waitFor(() => expect(soldSummaryMock).toHaveBeenCalled());
+    expect(screen.getByTestId('sold-profit-top')).toHaveTextContent(
+      'منتج رابح',
+    );
+    expect(screen.getByTestId('sold-profit-worst')).toHaveTextContent(
+      'منتج خاسر',
+    );
+    // Disclaimer is the "gross sales" notice
+    expect(
+      screen.getByTestId('sold-profit-returns-notice'),
+    ).toHaveTextContent('فواتير المرتجعات مستبعدة من الحساب');
+    // BOTH margin AND markup headers are present in the products
+    // table header (label-distinction guard). They each appear twice
+    // — once as a summary tile label, once as a table header.
+    await screen.findByTestId('sold-profit-product-row-v-ok');
+    expect(screen.getAllByText('هامش الربح').length).toBeGreaterThan(0);
+    expect(
+      screen.getAllByText('الزيادة على التكلفة').length,
+    ).toBeGreaterThan(0);
+  });
+
+  it('9. products view renders rows with status badges', async () => {
+    renderPage();
+    fireEvent.click(screen.getByTestId('pricing-reports-tab-sold-profit'));
+    await screen.findByTestId('sold-profit-product-row-v-ok');
+    expect(
+      screen.getByTestId('sold-profit-product-row-v-loss'),
+    ).toBeInTheDocument();
+    // Loss badge text
+    expect(
+      screen.getByTestId('sold-profit-product-row-v-loss'),
+    ).toHaveTextContent('خسارة');
+  });
+
+  it('10. invoices view toggle hides products table and fetches invoices', async () => {
+    renderPage();
+    fireEvent.click(screen.getByTestId('pricing-reports-tab-sold-profit'));
+    await screen.findByTestId('sold-profit-product-row-v-ok');
+    fireEvent.change(screen.getByTestId('sold-profit-view-toggle'), {
+      target: { value: 'invoices' },
+    });
+    await screen.findByTestId('sold-profit-invoice-row-inv1');
+    expect(soldInvoicesMock).toHaveBeenCalled();
+    expect(
+      screen.queryByTestId('sold-profit-product-row-v-ok'),
+    ).toBeNull();
+  });
+
+  it('11. date filters propagate as params to the endpoints', async () => {
+    renderPage();
+    fireEvent.click(screen.getByTestId('pricing-reports-tab-sold-profit'));
+    await screen.findByTestId('sold-profit-product-row-v-ok');
+    fireEvent.change(screen.getByTestId('sold-profit-from'), {
+      target: { value: '2026-05-01' },
+    });
+    fireEvent.change(screen.getByTestId('sold-profit-to'), {
+      target: { value: '2026-05-31' },
+    });
+    await waitFor(() =>
+      expect(soldSummaryMock).toHaveBeenLastCalledWith(
+        expect.objectContaining({ from: '2026-05-01', to: '2026-05-31' }),
+      ),
+    );
+    expect(soldProductsMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({ from: '2026-05-01', to: '2026-05-31' }),
+    );
+  });
+
+  it('12. status filter narrows the products query', async () => {
+    renderPage();
+    fireEvent.click(screen.getByTestId('pricing-reports-tab-sold-profit'));
+    await screen.findByTestId('sold-profit-product-row-v-ok');
+    fireEvent.change(screen.getByTestId('sold-profit-status-filter'), {
+      target: { value: 'loss' },
+    });
+    await waitFor(() =>
+      expect(soldProductsMock).toHaveBeenLastCalledWith(
+        expect.objectContaining({ status: 'loss' }),
+      ),
+    );
+  });
+
+  it('13. sort override propagates to the products query', async () => {
+    renderPage();
+    fireEvent.click(screen.getByTestId('pricing-reports-tab-sold-profit'));
+    await screen.findByTestId('sold-profit-product-row-v-ok');
+    fireEvent.change(screen.getByTestId('sold-profit-sort'), {
+      target: { value: 'margin_asc' },
+    });
+    await waitFor(() =>
+      expect(soldProductsMock).toHaveBeenLastCalledWith(
+        expect.objectContaining({ sort: 'margin_asc' }),
+      ),
+    );
+  });
+
+  it('14. NEVER calls apply-prices or any mutation endpoint', async () => {
+    renderPage();
+    fireEvent.click(screen.getByTestId('pricing-reports-tab-sold-profit'));
+    await screen.findByTestId('sold-profit-product-row-v-ok');
+    fireEvent.change(screen.getByTestId('sold-profit-view-toggle'), {
+      target: { value: 'invoices' },
+    });
+    await screen.findByTestId('sold-profit-invoice-row-inv1');
+    expect(applyPricesMock).not.toHaveBeenCalled();
+    // Only the three read-only sold-profit endpoints were touched.
+    expect(soldSummaryMock).toHaveBeenCalled();
+    expect(soldProductsMock).toHaveBeenCalled();
+    expect(soldInvoicesMock).toHaveBeenCalled();
   });
 });

@@ -226,6 +226,37 @@ export const reportsApi = {
       api.get('/reports/pricing/landed-impact', { params }),
     ),
 
+  // PR-PURCHASES-P3.4B — sold-profit reports (read-only, gross sales).
+  soldProfitSummary: (params: { from?: string; to?: string } = {}) =>
+    unwrap<SoldProfitSummary>(
+      api.get('/reports/pricing/sold-profit/summary', { params }),
+    ),
+  soldProfitProducts: (
+    params: {
+      q?: string;
+      from?: string;
+      to?: string;
+      status?: SoldProfitStatus;
+      limit?: number;
+      sort?: SoldProfitSort;
+    } = {},
+  ) =>
+    unwrap<SoldProfitProductsResponse>(
+      api.get('/reports/pricing/sold-profit/products', { params }),
+    ),
+  soldProfitInvoices: (
+    params: {
+      q?: string;
+      from?: string;
+      to?: string;
+      status?: SoldProfitStatus;
+      limit?: number;
+    } = {},
+  ) =>
+    unwrap<SoldProfitInvoicesResponse>(
+      api.get('/reports/pricing/sold-profit/invoices', { params }),
+    ),
+
   export: (
     slug: string,
     format: 'xlsx' | 'pdf',
@@ -355,4 +386,102 @@ export interface PricingLandedImpactRow {
 export interface PricingLandedImpactResponse {
   summary: { total: number; needs_review: number };
   items: PricingLandedImpactRow[];
+}
+
+// ─── PR-PURCHASES-P3.4B — sold-profit response types ──────────────
+export type SoldProfitStatus = 'ok' | 'loss' | 'low_margin' | 'unknown_cost';
+export type SoldProfitSort =
+  | 'gross_profit_desc'
+  | 'gross_profit_asc'
+  | 'margin_desc'
+  | 'margin_asc'
+  | 'qty_desc';
+
+export interface SoldProfitSummary {
+  from: string | null;
+  to: string | null;
+  total_revenue: number;
+  total_cogs: number;
+  gross_profit: number;
+  gross_margin_pct: number | null;
+  markup_pct: number | null;
+  total_qty_sold: number;
+  invoice_count: number;
+  product_count: number;
+  variant_count: number;
+  avg_profit_per_unit: number | null;
+  top_profit_product: {
+    product_id: string;
+    product_name: string;
+    gross_profit: number;
+  } | null;
+  worst_margin_product: {
+    product_id: string;
+    product_name: string;
+    gross_profit: number;
+    gross_margin_pct: number | null;
+  } | null;
+}
+
+export interface SoldProfitProductRow {
+  variant_id: string;
+  product_id: string;
+  product_name: string;
+  sku: string;
+  barcode: string | null;
+  color: string | null;
+  size: string | null;
+  qty_sold: number;
+  revenue: number;
+  cogs: number;
+  gross_profit: number;
+  gross_margin_pct: number | null;
+  markup_pct: number | null;
+  avg_selling_price: number | null;
+  avg_unit_cost: number | null;
+  invoice_count: number;
+  last_sold_at: string | null;
+  status: SoldProfitStatus;
+  min_margin_pct: number;
+}
+
+export interface SoldProfitProductsResponse {
+  summary: {
+    total: number;
+    loss: number;
+    low_margin: number;
+    unknown_cost: number;
+    ok: number;
+  };
+  items: SoldProfitProductRow[];
+}
+
+export interface SoldProfitInvoiceRow {
+  invoice_id: string;
+  invoice_no: string;
+  sold_at: string;
+  customer_id: string | null;
+  customer_name: string | null;
+  invoice_status: string;
+  item_count: number;
+  qty_sold: number;
+  revenue: number;
+  cogs: number;
+  gross_profit: number;
+  gross_margin_pct: number | null;
+  markup_pct: number | null;
+  status: SoldProfitStatus;
+  min_margin_pct: number;
+}
+
+export interface SoldProfitInvoicesResponse {
+  summary: {
+    total: number;
+    revenue: number;
+    cogs: number;
+    gross_profit: number;
+    loss: number;
+    low_margin: number;
+  };
+  items: SoldProfitInvoiceRow[];
 }

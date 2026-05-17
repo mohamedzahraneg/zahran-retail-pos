@@ -23,6 +23,7 @@ import {
   Clock,
   Package,
   History as HistoryIcon,
+  DollarSign,
 } from 'lucide-react';
 import {
   reportsApi,
@@ -31,6 +32,10 @@ import {
   type PricingLandedImpactRow,
   type PricingLossRow,
   type PricingStatus,
+  type SoldProfitInvoiceRow,
+  type SoldProfitProductRow,
+  type SoldProfitSort,
+  type SoldProfitStatus,
 } from '@/api/reports.api';
 
 const EGP = (n: number | string | null | undefined) =>
@@ -63,13 +68,14 @@ const STATUS_COLOR: Record<PricingStatus, string> = {
   unknown_cost: 'bg-slate-100 text-slate-700',
 };
 
-type Tab = 'health' | 'losses' | 'history' | 'landed';
+type Tab = 'health' | 'losses' | 'history' | 'landed' | 'sold-profit';
 
 const TABS: { key: Tab; label: string; icon: any }[] = [
   { key: 'health', label: 'صحة الأسعار', icon: TrendingUp },
   { key: 'losses', label: 'منتجات تحت الحد / خاسرة', icon: TrendingDown },
   { key: 'history', label: 'تاريخ تغيير الأسعار', icon: HistoryIcon },
   { key: 'landed', label: 'أثر آخر مشتريات', icon: Package },
+  { key: 'sold-profit', label: 'الربح الفعلي', icon: DollarSign },
 ];
 
 export default function PricingReports() {
@@ -115,6 +121,7 @@ export default function PricingReports() {
           {tab === 'losses' && <LossesTab />}
           {tab === 'history' && <HistoryTab />}
           {tab === 'landed' && <LandedImpactTab />}
+          {tab === 'sold-profit' && <SoldProfitTab />}
         </div>
       </div>
     </div>
@@ -665,6 +672,391 @@ function SummaryStrip({ children }: { children: React.ReactNode }) {
       data-testid="pricing-reports-summary"
     >
       {children}
+    </div>
+  );
+}
+
+/* ────────────────── Sold-profit tab (P3.4B) ────────────────── */
+
+const SOLD_STATUS_LABEL_AR: Record<SoldProfitStatus, string> = {
+  ok: 'ربح صحي',
+  low_margin: 'هامش منخفض',
+  loss: 'خسارة',
+  unknown_cost: 'تكلفة غير معروفة',
+};
+
+const SOLD_STATUS_COLOR: Record<SoldProfitStatus, string> = {
+  ok: 'bg-emerald-100 text-emerald-700',
+  low_margin: 'bg-amber-100 text-amber-700',
+  loss: 'bg-rose-100 text-rose-700',
+  unknown_cost: 'bg-slate-100 text-slate-700',
+};
+
+function SoldProfitTab() {
+  const [from, setFrom] = useState('');
+  const [to, setTo] = useState('');
+  const [q, setQ] = useState('');
+  const [status, setStatus] = useState<SoldProfitStatus | ''>('');
+  const [sort, setSort] = useState<SoldProfitSort>('gross_profit_desc');
+  const [view, setView] = useState<'products' | 'invoices'>('products');
+
+  const summaryQ = useQuery({
+    queryKey: ['sold-profit-summary', from, to],
+    queryFn: () =>
+      reportsApi.soldProfitSummary({
+        from: from || undefined,
+        to: to || undefined,
+      }),
+  });
+  const productsQ = useQuery({
+    queryKey: ['sold-profit-products', from, to, q, status, sort],
+    queryFn: () =>
+      reportsApi.soldProfitProducts({
+        from: from || undefined,
+        to: to || undefined,
+        q: q.trim() || undefined,
+        status: status || undefined,
+        sort,
+        limit: 1000,
+      }),
+    enabled: view === 'products',
+  });
+  const invoicesQ = useQuery({
+    queryKey: ['sold-profit-invoices', from, to, q, status],
+    queryFn: () =>
+      reportsApi.soldProfitInvoices({
+        from: from || undefined,
+        to: to || undefined,
+        q: q.trim() || undefined,
+        status: status || undefined,
+        limit: 1000,
+      }),
+    enabled: view === 'invoices',
+  });
+
+  return (
+    <div className="space-y-3">
+      {/* Filter strip */}
+      <div className="grid grid-cols-1 md:grid-cols-5 gap-2">
+        <div>
+          <label className="block text-xs font-bold text-slate-700 mb-1">
+            من تاريخ
+          </label>
+          <input
+            type="date"
+            value={from}
+            onChange={(e) => setFrom(e.target.value)}
+            data-testid="sold-profit-from"
+            className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm"
+          />
+        </div>
+        <div>
+          <label className="block text-xs font-bold text-slate-700 mb-1">
+            إلى تاريخ
+          </label>
+          <input
+            type="date"
+            value={to}
+            onChange={(e) => setTo(e.target.value)}
+            data-testid="sold-profit-to"
+            className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm"
+          />
+        </div>
+        <div>
+          <label className="block text-xs font-bold text-slate-700 mb-1">
+            بحث
+          </label>
+          <input
+            type="search"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder={
+              view === 'products' ? 'بحث صنف / SKU' : 'بحث رقم فاتورة / عميل'
+            }
+            data-testid="sold-profit-search"
+            className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm"
+          />
+        </div>
+        <div>
+          <label className="block text-xs font-bold text-slate-700 mb-1">
+            الحالة
+          </label>
+          <select
+            value={status}
+            onChange={(e) => setStatus(e.target.value as SoldProfitStatus | '')}
+            data-testid="sold-profit-status-filter"
+            className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm"
+          >
+            <option value="">كل الحالات</option>
+            <option value="ok">ربح صحي</option>
+            <option value="low_margin">هامش منخفض</option>
+            <option value="loss">خسارة</option>
+            <option value="unknown_cost">تكلفة غير معروفة</option>
+          </select>
+        </div>
+        <div>
+          <label className="block text-xs font-bold text-slate-700 mb-1">
+            العرض
+          </label>
+          <select
+            value={view}
+            onChange={(e) =>
+              setView(e.target.value as 'products' | 'invoices')
+            }
+            data-testid="sold-profit-view-toggle"
+            className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm"
+          >
+            <option value="products">حسب المنتج</option>
+            <option value="invoices">حسب الفاتورة</option>
+          </select>
+        </div>
+      </div>
+
+      {/* Net-of-returns notice (P3.4D pending) */}
+      <div
+        className="text-[11px] text-slate-600 bg-amber-50 border border-amber-200 rounded p-2"
+        data-testid="sold-profit-returns-notice"
+      >
+        ملاحظة: هذه الأرقام هي إجمالي المبيعات (Gross) — فواتير المرتجعات
+        مستبعدة من الحساب لكنها لا تُخصم تلقائيًا. صافي الربح بعد المرتجعات
+        مؤجّل لمرحلة لاحقة.
+      </div>
+
+      {/* Summary cards */}
+      <SummaryStrip>
+        <Tile
+          label="إجمالي المبيعات"
+          value={EGP(summaryQ.data?.total_revenue ?? 0)}
+          accent="emerald"
+        />
+        <Tile
+          label="تكلفة البضاعة المباعة"
+          value={EGP(summaryQ.data?.total_cogs ?? 0)}
+        />
+        <Tile
+          label="مجمل الربح"
+          value={EGP(summaryQ.data?.gross_profit ?? 0)}
+          accent={
+            (summaryQ.data?.gross_profit ?? 0) >= 0 ? 'emerald' : 'rose'
+          }
+        />
+        <Tile
+          label="هامش الربح"
+          value={PCT(summaryQ.data?.gross_margin_pct ?? null)}
+        />
+        <Tile
+          label="عدد الفواتير"
+          value={String(summaryQ.data?.invoice_count ?? 0)}
+        />
+        <Tile
+          label="عدد القطع المباعة"
+          value={String(summaryQ.data?.total_qty_sold ?? 0)}
+        />
+      </SummaryStrip>
+
+      {(summaryQ.data?.top_profit_product || summaryQ.data?.worst_margin_product) && (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs">
+          {summaryQ.data?.top_profit_product && (
+            <div
+              className="rounded-md border border-emerald-200 bg-emerald-50/40 p-2"
+              data-testid="sold-profit-top"
+            >
+              <div className="text-[10px] text-slate-500 mb-0.5">
+                أعلى ربح
+              </div>
+              <div className="font-bold">
+                {summaryQ.data.top_profit_product.product_name}{' '}
+                <span className="text-emerald-700">
+                  ({EGP(summaryQ.data.top_profit_product.gross_profit)})
+                </span>
+              </div>
+            </div>
+          )}
+          {summaryQ.data?.worst_margin_product && (
+            <div
+              className="rounded-md border border-rose-200 bg-rose-50/40 p-2"
+              data-testid="sold-profit-worst"
+            >
+              <div className="text-[10px] text-slate-500 mb-0.5">
+                أسوأ هامش ربح
+              </div>
+              <div className="font-bold">
+                {summaryQ.data.worst_margin_product.product_name}{' '}
+                <span className="text-rose-700">
+                  ({PCT(summaryQ.data.worst_margin_product.gross_margin_pct)})
+                </span>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Sort selector — only meaningful for products view */}
+      {view === 'products' && (
+        <div className="flex items-center gap-2">
+          <label className="text-xs font-bold text-slate-700">ترتيب:</label>
+          <select
+            value={sort}
+            onChange={(e) => setSort(e.target.value as SoldProfitSort)}
+            data-testid="sold-profit-sort"
+            className="border border-slate-200 rounded-lg px-3 py-2 text-sm"
+          >
+            <option value="gross_profit_desc">الربح من الأعلى للأقل</option>
+            <option value="gross_profit_asc">الربح من الأقل للأعلى</option>
+            <option value="margin_desc">الهامش من الأعلى للأقل</option>
+            <option value="margin_asc">الهامش من الأقل للأعلى</option>
+            <option value="qty_desc">الكمية المباعة</option>
+          </select>
+        </div>
+      )}
+
+      {/* Table */}
+      {view === 'products' ? (
+        productsQ.isLoading ? (
+          <div className="p-6 text-center text-slate-400">جاري التحميل...</div>
+        ) : (
+          <SoldProductsTable rows={productsQ.data?.items ?? []} />
+        )
+      ) : invoicesQ.isLoading ? (
+        <div className="p-6 text-center text-slate-400">جاري التحميل...</div>
+      ) : (
+        <SoldInvoicesTable rows={invoicesQ.data?.items ?? []} />
+      )}
+    </div>
+  );
+}
+
+function SoldProductsTable({ rows }: { rows: SoldProfitProductRow[] }) {
+  return (
+    <div className="overflow-x-auto border border-slate-200 rounded-lg">
+      <table className="w-full text-sm">
+        <thead className="bg-slate-50 text-slate-600 text-xs">
+          <tr>
+            <th className="p-2 text-right">الصنف</th>
+            <th className="p-2 text-right">SKU</th>
+            <th className="p-2 text-right">كمية مباعة</th>
+            <th className="p-2 text-right">المبيعات</th>
+            <th className="p-2 text-right">تكلفة البضاعة</th>
+            <th className="p-2 text-right">مجمل الربح</th>
+            <th className="p-2 text-right">هامش الربح</th>
+            <th className="p-2 text-right">الزيادة على التكلفة</th>
+            <th className="p-2 text-right">آخر بيع</th>
+            <th className="p-2 text-right">الحالة</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-slate-100">
+          {rows.length === 0 ? (
+            <tr>
+              <td colSpan={10} className="p-6 text-center text-slate-400">
+                لا توجد مبيعات في النطاق المختار
+              </td>
+            </tr>
+          ) : (
+            rows.map((r) => (
+              <tr
+                key={r.variant_id}
+                data-testid={`sold-profit-product-row-${r.variant_id}`}
+              >
+                <td className="p-2">
+                  <div className="font-medium">{r.product_name}</div>
+                  <div className="text-[10px] text-slate-400 font-mono">
+                    {[r.color, r.size].filter(Boolean).join(' / ')}
+                  </div>
+                </td>
+                <td className="p-2 font-mono text-xs">{r.sku}</td>
+                <td className="p-2">{r.qty_sold}</td>
+                <td className="p-2">{EGP(r.revenue)}</td>
+                <td className="p-2">{EGP(r.cogs)}</td>
+                <td
+                  className={`p-2 font-bold ${
+                    r.gross_profit >= 0 ? 'text-emerald-700' : 'text-rose-700'
+                  }`}
+                >
+                  {EGP(r.gross_profit)}
+                </td>
+                <td className="p-2">{PCT(r.gross_margin_pct)}</td>
+                <td className="p-2">{PCT(r.markup_pct)}</td>
+                <td className="p-2 text-[10px] text-slate-500">
+                  {r.last_sold_at
+                    ? new Date(r.last_sold_at).toLocaleDateString('en-US')
+                    : '—'}
+                </td>
+                <td className="p-2">
+                  <span
+                    className={`text-[10px] font-bold px-2 py-1 rounded ${SOLD_STATUS_COLOR[r.status]}`}
+                  >
+                    {SOLD_STATUS_LABEL_AR[r.status]}
+                  </span>
+                </td>
+              </tr>
+            ))
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function SoldInvoicesTable({ rows }: { rows: SoldProfitInvoiceRow[] }) {
+  return (
+    <div className="overflow-x-auto border border-slate-200 rounded-lg">
+      <table className="w-full text-sm">
+        <thead className="bg-slate-50 text-slate-600 text-xs">
+          <tr>
+            <th className="p-2 text-right">رقم الفاتورة</th>
+            <th className="p-2 text-right">التاريخ</th>
+            <th className="p-2 text-right">العميل</th>
+            <th className="p-2 text-right">عدد الأصناف</th>
+            <th className="p-2 text-right">عدد القطع</th>
+            <th className="p-2 text-right">المبيعات</th>
+            <th className="p-2 text-right">تكلفة البضاعة</th>
+            <th className="p-2 text-right">مجمل الربح</th>
+            <th className="p-2 text-right">هامش الربح</th>
+            <th className="p-2 text-right">الحالة</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-slate-100">
+          {rows.length === 0 ? (
+            <tr>
+              <td colSpan={10} className="p-6 text-center text-slate-400">
+                لا توجد فواتير في النطاق المختار
+              </td>
+            </tr>
+          ) : (
+            rows.map((r) => (
+              <tr
+                key={r.invoice_id}
+                data-testid={`sold-profit-invoice-row-${r.invoice_id}`}
+              >
+                <td className="p-2 font-mono text-xs">{r.invoice_no}</td>
+                <td className="p-2 text-xs">
+                  {new Date(r.sold_at).toLocaleString('en-US')}
+                </td>
+                <td className="p-2 text-xs">{r.customer_name || '—'}</td>
+                <td className="p-2">{r.item_count}</td>
+                <td className="p-2">{r.qty_sold}</td>
+                <td className="p-2">{EGP(r.revenue)}</td>
+                <td className="p-2">{EGP(r.cogs)}</td>
+                <td
+                  className={`p-2 font-bold ${
+                    r.gross_profit >= 0 ? 'text-emerald-700' : 'text-rose-700'
+                  }`}
+                >
+                  {EGP(r.gross_profit)}
+                </td>
+                <td className="p-2">{PCT(r.gross_margin_pct)}</td>
+                <td className="p-2">
+                  <span
+                    className={`text-[10px] font-bold px-2 py-1 rounded ${SOLD_STATUS_COLOR[r.status]}`}
+                  >
+                    {SOLD_STATUS_LABEL_AR[r.status]}
+                  </span>
+                </td>
+              </tr>
+            ))
+          )}
+        </tbody>
+      </table>
     </div>
   );
 }

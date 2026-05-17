@@ -1095,4 +1095,532 @@ export class ReportsService {
       items: filtered,
     };
   }
+
+  // ──────────────────────────────────────────────────────────────────────
+  //  PR-PURCHASES-P3.4B — Actual sold profit reports (read-only)
+  //
+  //  Computes gross sold-profit from posted invoice_items joined to
+  //  invoices, using:
+  //    line_revenue = quantity × unit_price - discount_amount
+  //    line_cogs    = quantity × unit_cost       (cost frozen at sale)
+  //    gross_profit = line_revenue - line_cogs
+  //
+  //  Status filter: invoices.status IN ('completed','paid','partially_paid')
+  //                 AND NOT invoices.is_return
+  //  Returns are SEPARATE invoices with is_return=TRUE — they are
+  //  EXCLUDED from the aggregates (gross sales view, matching the
+  //  legacy v_product_profit semantics). Net-of-returns is deferred
+  //  to P3.4D.
+  //
+  //  STRICTLY SELECT-only — no writes to product_variants /
+  //  variant_price_history / journal_entries / journal_lines /
+  //  cashbox_transactions / stock_movements / supplier_ledger /
+  //  purchase_items / purchases / settings. The static guardrail
+  //  spec asserts this with regex scans.
+  // ──────────────────────────────────────────────────────────────────────
+
+  private soldProfitWhere(
+    params: any[],
+    from?: string,
+    to?: string,
+  ): string {
+    const conds: string[] = [
+      `i.status IN ('completed','paid','partially_paid')`,
+      `NOT i.is_return`,
+    ];
+    if (from) {
+      params.push(from);
+      conds.push(
+        `COALESCE(i.completed_at, i.created_at) >= $${params.length}::timestamptz`,
+      );
+    }
+    if (to) {
+      params.push(to);
+      conds.push(
+        `COALESCE(i.completed_at, i.created_at) < ($${params.length}::timestamptz + interval '1 day')`,
+      );
+    }
+    return `WHERE ${conds.join(' AND ')}`;
+  }
+
+  /** Report S — sold-profit summary across the date range. */
+  async soldProfitSummary(filters: { from?: string; to?: string } = {}) {
+    const params: any[] = [];
+    const where = this.soldProfitWhere(params, filters.from, filters.to);
+    // One round-trip: aggregate totals + counts in a CTE, then
+    // pluck the top / worst per-product in two small follow-ups.
+    const [agg] = await this.ds.query(
+      `
+      WITH lines AS (
+        SELECT
+          ii.invoice_id,
+          ii.variant_id,
+          pv.product_id,
+          ii.quantity::int                                          AS qty,
+          (ii.quantity * ii.unit_price - ii.discount_amount)::numeric AS revenue,
+          (ii.quantity * ii.unit_cost)::numeric                       AS cogs
+        FROM invoice_items ii
+        JOIN product_variants pv ON pv.id = ii.variant_id
+        JOIN invoices i           ON i.id = ii.invoice_id
+        ${where}
+      )
+      SELECT
+        COALESCE(SUM(revenue), 0)::numeric        AS total_revenue,
+        COALESCE(SUM(cogs), 0)::numeric           AS total_cogs,
+        COALESCE(SUM(revenue) - SUM(cogs), 0)::numeric AS gross_profit,
+        COALESCE(SUM(qty), 0)::int                AS total_qty_sold,
+        COUNT(DISTINCT invoice_id)::int           AS invoice_count,
+        COUNT(DISTINCT product_id)::int           AS product_count,
+        COUNT(DISTINCT variant_id)::int           AS variant_count
+      FROM lines
+      `,
+      params,
+    );
+
+    const revenue = Number(agg?.total_revenue || 0);
+    const cogs = Number(agg?.total_cogs || 0);
+    const gross_profit = +(revenue - cogs).toFixed(2);
+    const gross_margin_pct =
+      revenue > 0 ? +((gross_profit / revenue) * 100).toFixed(2) : null;
+    const markup_pct =
+      cogs > 0 ? +((gross_profit / cogs) * 100).toFixed(2) : null;
+    const qty = Number(agg?.total_qty_sold || 0);
+    const avg_profit_per_unit =
+      qty > 0 ? +(gross_profit / qty).toFixed(2) : null;
+
+    // Top profit product + worst margin product — two small SELECTs
+    // sharing the same WHERE.
+    const [top] = await this.ds.query(
+      `
+      WITH lines AS (
+        SELECT
+          pv.product_id,
+          p.name_ar                                                 AS product_name,
+          (ii.quantity * ii.unit_price - ii.discount_amount)::numeric AS revenue,
+          (ii.quantity * ii.unit_cost)::numeric                       AS cogs
+        FROM invoice_items ii
+        JOIN product_variants pv ON pv.id = ii.variant_id
+        JOIN products p           ON p.id = pv.product_id
+        JOIN invoices i           ON i.id = ii.invoice_id
+        ${where}
+      )
+      SELECT
+        product_id,
+        product_name,
+        SUM(revenue) - SUM(cogs)                  AS gross_profit
+      FROM lines
+      GROUP BY product_id, product_name
+      ORDER BY gross_profit DESC
+      LIMIT 1
+      `,
+      params,
+    );
+    const [worst] = await this.ds.query(
+      `
+      WITH lines AS (
+        SELECT
+          pv.product_id,
+          p.name_ar                                                 AS product_name,
+          (ii.quantity * ii.unit_price - ii.discount_amount)::numeric AS revenue,
+          (ii.quantity * ii.unit_cost)::numeric                       AS cogs
+        FROM invoice_items ii
+        JOIN product_variants pv ON pv.id = ii.variant_id
+        JOIN products p           ON p.id = pv.product_id
+        JOIN invoices i           ON i.id = ii.invoice_id
+        ${where}
+      ),
+      agg AS (
+        SELECT
+          product_id, product_name,
+          SUM(revenue) AS revenue,
+          SUM(cogs)    AS cogs,
+          SUM(revenue) - SUM(cogs) AS gross_profit
+        FROM lines
+        GROUP BY product_id, product_name
+      )
+      SELECT
+        product_id, product_name, revenue, cogs, gross_profit,
+        CASE WHEN revenue > 0
+             THEN ROUND(gross_profit / revenue * 100, 2)
+             ELSE NULL
+        END AS gross_margin_pct
+      FROM agg
+      WHERE revenue > 0
+      ORDER BY (gross_profit / revenue) ASC
+      LIMIT 1
+      `,
+      params,
+    );
+
+    return {
+      from: filters.from ?? null,
+      to: filters.to ?? null,
+      total_revenue: +revenue.toFixed(2),
+      total_cogs: +cogs.toFixed(2),
+      gross_profit,
+      gross_margin_pct,
+      markup_pct,
+      total_qty_sold: qty,
+      invoice_count: Number(agg?.invoice_count || 0),
+      product_count: Number(agg?.product_count || 0),
+      variant_count: Number(agg?.variant_count || 0),
+      avg_profit_per_unit,
+      top_profit_product: top
+        ? {
+            product_id: top.product_id,
+            product_name: top.product_name,
+            gross_profit: +Number(top.gross_profit || 0).toFixed(2),
+          }
+        : null,
+      worst_margin_product: worst
+        ? {
+            product_id: worst.product_id,
+            product_name: worst.product_name,
+            gross_profit: +Number(worst.gross_profit || 0).toFixed(2),
+            gross_margin_pct:
+              worst.gross_margin_pct == null
+                ? null
+                : Number(worst.gross_margin_pct),
+          }
+        : null,
+    };
+  }
+
+  /** Report P — per-variant sold-profit. */
+  async soldProfitProducts(filters: {
+    q?: string;
+    from?: string;
+    to?: string;
+    status?: 'loss' | 'low_margin' | 'ok' | 'unknown_cost';
+    limit?: number;
+    sort?:
+      | 'gross_profit_desc'
+      | 'gross_profit_asc'
+      | 'margin_desc'
+      | 'margin_asc'
+      | 'qty_desc';
+  } = {}) {
+    const limit = Math.min(Math.max(1, Number(filters.limit) || 500), 5000);
+    const minMarginParam = `(SELECT COALESCE(
+        (SELECT (value)::text::numeric
+           FROM settings
+          WHERE key = 'smart_pricing.min_margin_pct_default'
+          LIMIT 1),
+        15
+      ))`;
+
+    // Build the WHERE inline so the optional `q` filter shares the
+    // same params array. We can't index ii.* directly,
+    // but for catalog-size N the per-row filter is cheap.
+    const conds: string[] = [
+      `i.status IN ('completed','paid','partially_paid')`,
+      `NOT i.is_return`,
+    ];
+    const params2: any[] = [];
+    if (filters.from) {
+      params2.push(filters.from);
+      conds.push(
+        `COALESCE(i.completed_at, i.created_at) >= $${params2.length}::timestamptz`,
+      );
+    }
+    if (filters.to) {
+      params2.push(filters.to);
+      conds.push(
+        `COALESCE(i.completed_at, i.created_at) < ($${params2.length}::timestamptz + interval '1 day')`,
+      );
+    }
+    if (filters.q) {
+      params2.push(`%${filters.q.trim()}%`);
+      const idx = params2.length;
+      conds.push(
+        `(p.name_ar ILIKE $${idx} OR pv.sku ILIKE $${idx} OR pv.barcode ILIKE $${idx})`,
+      );
+    }
+    const whereWithQ = `WHERE ${conds.join(' AND ')}`;
+
+    const rows = await this.ds.query(
+      `
+      WITH lines AS (
+        SELECT
+          pv.id                                                       AS variant_id,
+          pv.product_id,
+          p.name_ar                                                   AS product_name,
+          pv.sku,
+          pv.barcode,
+          c.name_ar                                                   AS color,
+          s.size_label                                                AS size,
+          ii.invoice_id,
+          ii.quantity::int                                            AS qty,
+          (ii.quantity * ii.unit_price - ii.discount_amount)::numeric AS revenue,
+          (ii.quantity * ii.unit_cost)::numeric                       AS cogs,
+          ii.unit_price,
+          ii.unit_cost,
+          COALESCE(i.completed_at, i.created_at)                      AS sold_at
+        FROM invoice_items ii
+        JOIN product_variants pv ON pv.id = ii.variant_id
+        JOIN products p           ON p.id = pv.product_id
+        LEFT JOIN colors c        ON c.id = pv.color_id
+        LEFT JOIN sizes  s        ON s.id = pv.size_id
+        JOIN invoices i           ON i.id = ii.invoice_id
+        ${whereWithQ}
+      ),
+      agg AS (
+        SELECT
+          variant_id,
+          MAX(product_id)                          AS product_id,
+          MAX(product_name)                        AS product_name,
+          MAX(sku)                                 AS sku,
+          MAX(barcode)                             AS barcode,
+          MAX(color)                               AS color,
+          MAX(size)                                AS size,
+          SUM(qty)::int                            AS qty_sold,
+          SUM(revenue)::numeric                    AS revenue,
+          SUM(cogs)::numeric                       AS cogs,
+          (SUM(revenue) - SUM(cogs))::numeric      AS gross_profit,
+          CASE WHEN SUM(qty) > 0
+               THEN ROUND(SUM(revenue) / SUM(qty), 2)
+               ELSE NULL END                       AS avg_selling_price,
+          CASE WHEN SUM(qty) > 0
+               THEN ROUND(SUM(cogs) / SUM(qty), 2)
+               ELSE NULL END                       AS avg_unit_cost,
+          COUNT(DISTINCT invoice_id)::int          AS invoice_count,
+          MAX(sold_at)                             AS last_sold_at
+        FROM lines
+        GROUP BY variant_id
+      )
+      SELECT
+        agg.*,
+        ${minMarginParam} AS min_margin_pct
+      FROM agg
+      ORDER BY gross_profit DESC NULLS LAST
+      LIMIT ${limit}
+      `,
+      params2,
+    );
+
+    const items = rows.map((r: any) => {
+      const revenue = Number(r.revenue || 0);
+      const cogs = Number(r.cogs || 0);
+      const gross_profit = +(revenue - cogs).toFixed(2);
+      const gross_margin_pct =
+        revenue > 0 ? +((gross_profit / revenue) * 100).toFixed(2) : null;
+      const markup_pct =
+        cogs > 0 ? +((gross_profit / cogs) * 100).toFixed(2) : null;
+      const min_pct = Number(r.min_margin_pct || 15);
+      let status: 'loss' | 'low_margin' | 'ok' | 'unknown_cost';
+      if (Number(r.avg_unit_cost || 0) === 0 || cogs === 0) {
+        status = 'unknown_cost';
+      } else if (gross_profit < 0) {
+        status = 'loss';
+      } else if (
+        gross_margin_pct !== null
+        && gross_margin_pct < min_pct
+      ) {
+        status = 'low_margin';
+      } else {
+        status = 'ok';
+      }
+      return {
+        variant_id: r.variant_id,
+        product_id: r.product_id,
+        product_name: r.product_name,
+        sku: r.sku,
+        barcode: r.barcode,
+        color: r.color,
+        size: r.size,
+        qty_sold: Number(r.qty_sold || 0),
+        revenue: +revenue.toFixed(2),
+        cogs: +cogs.toFixed(2),
+        gross_profit,
+        gross_margin_pct,
+        markup_pct,
+        avg_selling_price:
+          r.avg_selling_price == null
+            ? null
+            : Number(r.avg_selling_price),
+        avg_unit_cost:
+          r.avg_unit_cost == null ? null : Number(r.avg_unit_cost),
+        invoice_count: Number(r.invoice_count || 0),
+        last_sold_at: r.last_sold_at,
+        status,
+        min_margin_pct: min_pct,
+      };
+    });
+
+    const filtered = filters.status
+      ? items.filter((r: any) => r.status === filters.status)
+      : items;
+
+    // Server-side sort fallback when the caller wants something other
+    // than the default gross_profit DESC.
+    if (filters.sort) {
+      const cmp: Record<string, (a: any, b: any) => number> = {
+        gross_profit_desc: (a, b) => b.gross_profit - a.gross_profit,
+        gross_profit_asc: (a, b) => a.gross_profit - b.gross_profit,
+        margin_desc: (a, b) =>
+          (b.gross_margin_pct ?? -Infinity) - (a.gross_margin_pct ?? -Infinity),
+        margin_asc: (a, b) =>
+          (a.gross_margin_pct ?? Infinity) - (b.gross_margin_pct ?? Infinity),
+        qty_desc: (a, b) => b.qty_sold - a.qty_sold,
+      };
+      if (cmp[filters.sort]) filtered.sort(cmp[filters.sort]);
+    }
+
+    return {
+      summary: {
+        total: filtered.length,
+        loss: filtered.filter((r: any) => r.status === 'loss').length,
+        low_margin: filtered.filter((r: any) => r.status === 'low_margin')
+          .length,
+        unknown_cost: filtered.filter(
+          (r: any) => r.status === 'unknown_cost',
+        ).length,
+        ok: filtered.filter((r: any) => r.status === 'ok').length,
+      },
+      items: filtered,
+    };
+  }
+
+  /** Report I — per-invoice sold-profit. */
+  async soldProfitInvoices(filters: {
+    q?: string;
+    from?: string;
+    to?: string;
+    status?: 'loss' | 'low_margin' | 'ok' | 'unknown_cost';
+    limit?: number;
+  } = {}) {
+    const params: any[] = [];
+    const conds: string[] = [
+      `i.status IN ('completed','paid','partially_paid')`,
+      `NOT i.is_return`,
+    ];
+    if (filters.from) {
+      params.push(filters.from);
+      conds.push(
+        `COALESCE(i.completed_at, i.created_at) >= $${params.length}::timestamptz`,
+      );
+    }
+    if (filters.to) {
+      params.push(filters.to);
+      conds.push(
+        `COALESCE(i.completed_at, i.created_at) < ($${params.length}::timestamptz + interval '1 day')`,
+      );
+    }
+    if (filters.q) {
+      params.push(`%${filters.q.trim()}%`);
+      conds.push(
+        `(i.invoice_no ILIKE $${params.length} OR c.full_name ILIKE $${params.length})`,
+      );
+    }
+    const where = `WHERE ${conds.join(' AND ')}`;
+    const limit = Math.min(Math.max(1, Number(filters.limit) || 500), 5000);
+    const minMarginParam = `(SELECT COALESCE(
+        (SELECT (value)::text::numeric
+           FROM settings
+          WHERE key = 'smart_pricing.min_margin_pct_default'
+          LIMIT 1),
+        15
+      ))`;
+
+    const rows = await this.ds.query(
+      `
+      WITH lines AS (
+        SELECT
+          i.id                                                        AS invoice_id,
+          i.invoice_no,
+          COALESCE(i.completed_at, i.created_at)                      AS sold_at,
+          i.customer_id,
+          c.full_name                                                 AS customer_name,
+          i.status,
+          ii.quantity::int                                            AS qty,
+          (ii.quantity * ii.unit_price - ii.discount_amount)::numeric AS revenue,
+          (ii.quantity * ii.unit_cost)::numeric                       AS cogs
+        FROM invoice_items ii
+        JOIN invoices i  ON i.id = ii.invoice_id
+        LEFT JOIN customers c ON c.id = i.customer_id
+        ${where}
+      ),
+      agg AS (
+        SELECT
+          invoice_id,
+          MAX(invoice_no)                          AS invoice_no,
+          MAX(sold_at)                             AS sold_at,
+          MAX(customer_id)                         AS customer_id,
+          MAX(customer_name)                       AS customer_name,
+          MAX(status::text)                        AS status,
+          SUM(qty)::int                            AS qty_sold,
+          COUNT(*)::int                            AS item_count,
+          SUM(revenue)::numeric                    AS revenue,
+          SUM(cogs)::numeric                       AS cogs,
+          (SUM(revenue) - SUM(cogs))::numeric      AS gross_profit
+        FROM lines
+        GROUP BY invoice_id
+      )
+      SELECT agg.*, ${minMarginParam} AS min_margin_pct
+      FROM agg
+      ORDER BY sold_at DESC NULLS LAST
+      LIMIT ${limit}
+      `,
+      params,
+    );
+
+    const items = rows.map((r: any) => {
+      const revenue = Number(r.revenue || 0);
+      const cogs = Number(r.cogs || 0);
+      const gross_profit = +(revenue - cogs).toFixed(2);
+      const gross_margin_pct =
+        revenue > 0 ? +((gross_profit / revenue) * 100).toFixed(2) : null;
+      const markup_pct =
+        cogs > 0 ? +((gross_profit / cogs) * 100).toFixed(2) : null;
+      const min_pct = Number(r.min_margin_pct || 15);
+      let status: 'loss' | 'low_margin' | 'ok' | 'unknown_cost';
+      if (cogs === 0) status = 'unknown_cost';
+      else if (gross_profit < 0) status = 'loss';
+      else if (
+        gross_margin_pct !== null
+        && gross_margin_pct < min_pct
+      )
+        status = 'low_margin';
+      else status = 'ok';
+      return {
+        invoice_id: r.invoice_id,
+        invoice_no: r.invoice_no,
+        sold_at: r.sold_at,
+        customer_id: r.customer_id,
+        customer_name: r.customer_name,
+        invoice_status: r.status,
+        item_count: Number(r.item_count || 0),
+        qty_sold: Number(r.qty_sold || 0),
+        revenue: +revenue.toFixed(2),
+        cogs: +cogs.toFixed(2),
+        gross_profit,
+        gross_margin_pct,
+        markup_pct,
+        status,
+        min_margin_pct: min_pct,
+      };
+    });
+
+    const filtered = filters.status
+      ? items.filter((r: any) => r.status === filters.status)
+      : items;
+    return {
+      summary: {
+        total: filtered.length,
+        revenue: +filtered
+          .reduce((s: number, r: any) => s + r.revenue, 0)
+          .toFixed(2),
+        cogs: +filtered
+          .reduce((s: number, r: any) => s + r.cogs, 0)
+          .toFixed(2),
+        gross_profit: +filtered
+          .reduce((s: number, r: any) => s + r.gross_profit, 0)
+          .toFixed(2),
+        loss: filtered.filter((r: any) => r.status === 'loss').length,
+        low_margin: filtered.filter((r: any) => r.status === 'low_margin')
+          .length,
+      },
+      items: filtered,
+    };
+  }
 }
