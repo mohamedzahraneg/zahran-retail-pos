@@ -102,6 +102,16 @@ export default function PurchasesPage() {
   const [detailId, setDetailId] = useState<string | null>(null);
   const [payId, setPayId] = useState<string | null>(null);
   const [editId, setEditId] = useState<string | null>(null);
+  // Cash-flow UX bridge — remember which freshly-created purchases
+  // were marked as "كاش" in the create modal. After receive succeeds
+  // on one of these, we auto-open PayPurchaseModal with the existing
+  // official path (no new endpoint, no direct cashbox call). The set
+  // is local-only — refreshing the page clears it.
+  const [cashIntentIds, setCashIntentIds] = useState<Set<string>>(new Set());
+  // When the pay modal is auto-opened from a cash intent we want the
+  // amount field to default to the remaining instead of zero. This
+  // flag rides along with `payId` for that one modal session.
+  const [payAutoFillRemaining, setPayAutoFillRemaining] = useState(false);
 
   const user = useAuthStore((s) => s.user);
   const hasPermission = useAuthStore((s) => s.hasPermission);
@@ -158,9 +168,21 @@ export default function PurchasesPage() {
 
   const receiveMut = useMutation({
     mutationFn: (id: string) => purchasesApi.receive(id),
-    onSuccess: () => {
+    onSuccess: (_data, id) => {
       toast.success('تم استلام الفاتورة وتحديث المخزون');
       qc.invalidateQueries({ queryKey: ['purchases'] });
+      // Cash-flow UX bridge — if this purchase was created with the
+      // "كاش" intent, auto-open the existing PayPurchaseModal so the
+      // operator records the payment via the OFFICIAL pay endpoint.
+      if (cashIntentIds.has(id)) {
+        setCashIntentIds((prev) => {
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
+        setPayAutoFillRemaining(true);
+        setPayId(id);
+      }
     },
     onError: (e: any) =>
       toast.error(e?.response?.data?.message || 'فشل الاستلام'),
@@ -389,7 +411,21 @@ export default function PurchasesPage() {
       </div>
 
       {showCreate && (
-        <CreatePurchaseModal onClose={() => setShowCreate(false)} />
+        <CreatePurchaseModal
+          onClose={() => setShowCreate(false)}
+          onCreated={(newId, paymentType) => {
+            // Cash-flow UX bridge — remember the cash-intent ids so
+            // we can auto-open PayPurchaseModal after receive. Credit
+            // invoices are silent.
+            if (paymentType === 'cash' && newId) {
+              setCashIntentIds((prev) => {
+                const next = new Set(prev);
+                next.add(newId);
+                return next;
+              });
+            }
+          }}
+        />
       )}
 
       {detailId && (
@@ -397,7 +433,14 @@ export default function PurchasesPage() {
       )}
 
       {payId && (
-        <PayPurchaseModal id={payId} onClose={() => setPayId(null)} />
+        <PayPurchaseModal
+          id={payId}
+          autoFillRemaining={payAutoFillRemaining}
+          onClose={() => {
+            setPayId(null);
+            setPayAutoFillRemaining(false);
+          }}
+        />
       )}
 
       {editId && (
@@ -434,7 +477,17 @@ function StatCard({
 
 /* -------------------------------------------------------------------------- */
 
-function CreatePurchaseModal({ onClose }: { onClose: () => void }) {
+function CreatePurchaseModal({
+  onClose,
+  onCreated,
+}: {
+  onClose: () => void;
+  /** Cash-flow UX bridge — fired with the new purchase id + the
+   *  selected payment type so the parent can remember "كاش" intent
+   *  and auto-open PayPurchaseModal after receive. Optional so the
+   *  modal stays usable from any future caller. */
+  onCreated?: (newId: string | null, paymentType: 'cash' | 'credit') => void;
+}) {
   const qc = useQueryClient();
   // Purchases UX fixes — supplier is now picked via the SupplierSearch
   // typeahead. We keep a Supplier object alongside the id so the
@@ -623,9 +676,14 @@ function CreatePurchaseModal({ onClose }: { onClose: () => void }) {
         items: items.map(({ display: _d, _ui: _u, ...rest }) => rest),
         extra_costs: cleanExtraCosts.length > 0 ? cleanExtraCosts : undefined,
       }),
-    onSuccess: () => {
+    onSuccess: (created: any) => {
       toast.success('تم إنشاء فاتورة المشتريات');
       qc.invalidateQueries({ queryKey: ['purchases'] });
+      // Notify the page so it can remember cash intent for the
+      // auto-open-PayPurchaseModal bridge after receive succeeds.
+      // The pay endpoint stays the OFFICIAL one — this is purely a
+      // page-level memory hint.
+      if (onCreated) onCreated(created?.id ?? null, paymentType);
       onClose();
     },
     onError: (e: any) =>
@@ -1526,9 +1584,15 @@ function InfoBlock({
 function PayPurchaseModal({
   id,
   onClose,
+  autoFillRemaining = false,
 }: {
   id: string;
   onClose: () => void;
+  /** Cash-flow UX bridge — when true and the purchase data arrives,
+   *  default `amount` to the remaining balance so the operator can
+   *  hit save without retyping. Only set by the auto-open path; the
+   *  manual pay-button flow leaves the form's existing 0 default. */
+  autoFillRemaining?: boolean;
 }) {
   const qc = useQueryClient();
   const { data: purchase } = useQuery({
@@ -1558,6 +1622,18 @@ function PayPurchaseModal({
   const remaining = purchase
     ? Number(purchase.grand_total) - Number(purchase.paid_amount)
     : 0;
+
+  // Cash-flow UX bridge — when the modal is auto-opened from the
+  // cash-intent flow, default the amount to `remaining` once the
+  // purchase data is available. We only apply this once (when the
+  // form is still at its initial zero) so the operator can adjust
+  // afterwards without us overwriting their input on the next render.
+  useEffect(() => {
+    if (autoFillRemaining && remaining > 0 && form.amount === 0) {
+      setForm((f) => ({ ...f, amount: remaining }));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoFillRemaining, remaining]);
 
   const mut = useMutation({
     mutationFn: () =>

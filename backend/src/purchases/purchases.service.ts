@@ -397,9 +397,14 @@ export class PurchasesService {
    *      (migration 014) atomically moves cash + updates supplier
    *      balance + writes supplier_ledger
    *   2. INSERT `supplier_payment_allocations` against this purchase —
-   *      trigger `trg_supplier_alloc_recompute` updates
-   *      purchases.paid_amount/status
-   *   3. Await `postSupplierPayment` → GL: DR 211 · CR Cash
+   *      the trigger `trg_supplier_alloc_recompute` recomputes
+   *      `supplier_payments.allocated_amount` but does NOT touch the
+   *      purchases row.
+   *   3. Inline UPDATE on `purchases` to recompute `paid_amount` and
+   *      advance `status` (paid / partial / received) — fills the
+   *      gap that the trigger leaves. Kept on the OFFICIAL path: no
+   *      new endpoint, no new cashbox / GL primitive, no migration.
+   *   4. Await `postSupplierPayment` → GL: DR 211 · CR Cash
    *
    * cashbox_id is resolved from the caller's open shift so the
    * existing public DTO (no cashbox_id field) keeps working.
@@ -458,13 +463,45 @@ export class PurchasesService {
         ],
       );
 
-      // Allocate this payment against the specific purchase so the
-      // purchases row reflects it via trg_supplier_alloc_recompute.
+      // Allocate this payment against the specific purchase.
       await m.query(
         `INSERT INTO supplier_payment_allocations
            (payment_id, purchase_id, amount)
          VALUES ($1, $2, $3)`,
         [sp.id, id, dto.amount],
+      );
+
+      // Cash-flow bug fix — recompute purchases.paid_amount and
+      // purchases.status from the live allocations. The
+      // `trg_supplier_alloc_recompute` trigger (migration 014) only
+      // updates `supplier_payments.allocated_amount` — it has never
+      // touched the purchases row. Before this fix every successful
+      // pay() left `purchases.paid_amount = 0` and the status pinned
+      // at 'received' even though the supplier balance + cashbox + GL
+      // had all moved correctly. We stay on the OFFICIAL path: no
+      // new endpoint, no new cashbox / supplier-ledger / GL writer,
+      // no new migration. The recompute is read-only against
+      // supplier_payment_allocations + supplier_payments (skipping
+      // voided parents) and writes only the purchases row.
+      await m.query(
+        `WITH new_total AS (
+           SELECT COALESCE(SUM(spa.amount), 0)::numeric(14,2) AS paid
+             FROM supplier_payment_allocations spa
+             JOIN supplier_payments sp ON sp.id = spa.payment_id
+            WHERE spa.purchase_id = $1
+              AND COALESCE(sp.is_void, FALSE) = FALSE
+         )
+         UPDATE purchases p
+            SET paid_amount = new_total.paid,
+                status = CASE
+                  WHEN new_total.paid >= p.grand_total THEN 'paid'
+                  WHEN new_total.paid > 0              THEN 'partial'
+                  ELSE 'received'
+                END,
+                updated_at = NOW()
+           FROM new_total
+          WHERE p.id = $1`,
+        [id],
       );
 
       // Post GL — awaited so a failure rolls back the whole payment.
