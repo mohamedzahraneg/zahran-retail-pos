@@ -859,8 +859,20 @@ export class PurchasesService {
     );
   }
 
-  async getReturn(id: string) {
-    const [header] = await this.ds.query(
+  async getReturn(id: string, em?: EntityManager) {
+    // PR-PURCHASES-P2.4A-FIX-TXN-READ: when called from inside
+    // createReturn's transaction, use the transaction manager's
+    // connection so we can read rows the same transaction just
+    // inserted. Without this, the default DataSource sees an
+    // uncommitted sibling transaction's writes as invisible (READ
+    // COMMITTED isolation) and the SELECT returns 0 rows → throws
+    // NotFoundException → rolls back the whole create. Public
+    // callers (GET /api/v1/purchases/returns/:id) pass nothing and
+    // continue to read via this.ds.
+    const q: (sql: string, params?: any[]) => Promise<any[]> = em
+      ? em.query.bind(em)
+      : this.ds.query.bind(this.ds);
+    const [header] = await q(
       `SELECT pr.*, s.name AS supplier_name, w.name_ar AS warehouse_name,
               cb.name_ar AS cashbox_name, cb.kind AS cashbox_kind,
               u_created.full_name    AS created_by_name,
@@ -877,7 +889,7 @@ export class PurchasesService {
       [id],
     );
     if (!header) throw new NotFoundException(`Purchase return ${id} not found`);
-    const items = await this.ds.query(
+    const items = await q(
       `SELECT pri.*, pv.sku, pv.barcode,
               p.id AS product_id, p.name_ar AS product_name,
               c.name_ar AS color_name, s.size_label AS size_label
@@ -1231,7 +1243,9 @@ export class PurchasesService {
         }
       }
 
-      return this.getReturn(returnId);
+      // PR-PURCHASES-P2.4A-FIX-TXN-READ: pass the transaction manager
+      // `m` so the closing SELECT can see the rows we just inserted.
+      return this.getReturn(returnId, m);
     });
   }
 

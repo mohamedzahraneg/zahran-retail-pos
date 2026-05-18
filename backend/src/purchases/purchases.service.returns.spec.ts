@@ -749,6 +749,36 @@ describe('PurchasesService — purchase-return source guardrails (PR-P2.4A block
     );
   });
 
+  it('PR-PURCHASES-P2.4A-FIX-TXN-READ: getReturn accepts an optional EntityManager + uses it for both header + items queries', () => {
+    // Signature must be `getReturn(id: string, em?: EntityManager)`
+    // so transaction-bound callers can read rows their own
+    // transaction has inserted but not yet committed.
+    expect(RAW).toMatch(
+      /async\s+getReturn\s*\(\s*id\s*:\s*string\s*,\s*em\?\s*:\s*EntityManager\s*\)/,
+    );
+    // Both SELECTs must go through the picked `q` function — never
+    // back to `this.ds.query` inside getReturn, which would re-
+    // introduce the cross-connection visibility bug.
+    const getReturnStart = RAW.indexOf('async getReturn(');
+    const getReturnEnd = RAW.indexOf('async ', getReturnStart + 10);
+    const getReturnBlock = RAW.slice(getReturnStart, getReturnEnd);
+    expect(getReturnBlock).toMatch(/const\s+q\s*:/);
+    expect(getReturnBlock).toMatch(/em\s*\?\s*em\.query\.bind\(em\)/);
+    expect(getReturnBlock).toMatch(/:\s*this\.ds\.query\.bind\(this\.ds\)/);
+    // After the `q` is defined, getReturn must NOT call this.ds.query
+    // for either the header or the items.
+    expect(getReturnBlock).not.toMatch(/this\.ds\.query\(/);
+  });
+
+  it('PR-PURCHASES-P2.4A-FIX-TXN-READ: createReturn passes the transaction manager into getReturn', () => {
+    // The closing read inside createReturn's transaction must use
+    // `m` (the transaction manager) — without it the SELECT runs on
+    // the default connection and cannot see the just-INSERTed row,
+    // triggering NotFoundException → rollback → 404 on every create.
+    expect(RETURN_BLOCK).toMatch(/return\s+this\.getReturn\(\s*returnId\s*,\s*m\s*\)/);
+    expect(RETURN_BLOCK).not.toMatch(/return\s+this\.getReturn\(\s*returnId\s*\)\s*;/);
+  });
+
   it('PR-PURCHASES-P2.4A-FIX-ENUM-2: depends on migration 141 (entity_type += purchase_return)', () => {
     // The purchase-return block writes reference_type='purchase_return'
     // to columns typed `entity_type`. Migration 141 makes that value
