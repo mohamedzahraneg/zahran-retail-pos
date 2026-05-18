@@ -324,6 +324,15 @@ describe('Phase 2F · Layer 2 — reverseByReference call sites are whitelisted'
         'receiving the replacement.',
     },
     {
+      file: 'src/purchases/purchases.service.ts',
+      enclosingFn: 'cancelReturn',
+      role: 'explicit_cancel_void_refund_return',
+      note:
+        'PATCH /purchases/returns/:id/cancel — perm purchases.return. ' +
+        'P2.4A atomic cancel reverses stock + (supplier_ledger | cashbox) ' +
+        'and calls reverseByReference on the purchase_return JE.',
+    },
+    {
       file: 'src/returns/returns.service.ts',
       enclosingFn: 'cancel',
       role: 'explicit_cancel_void_refund_return',
