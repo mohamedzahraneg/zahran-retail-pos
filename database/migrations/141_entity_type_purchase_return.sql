@@ -1,0 +1,38 @@
+-- ============================================================================
+--  ZAHRAN RETAIL SYSTEM  |  Migration 141 : entity_type += 'purchase_return'
+--                          (PR-PURCHASES-P2.4A-FIX-ENUM-2)
+--
+--  WHAT THIS DOES
+--    Adds the single new enum value 'purchase_return' to the existing
+--    `entity_type` enum (defined in migration 001, previously extended
+--    by migration 107 for 'employee_settlement').
+--
+--    The new P2.4A purchase-returns flow writes `reference_type =
+--    'purchase_return'` to FIVE different columns that are all typed
+--    `entity_type`:
+--      · stock_movements.reference_type        (migration 004)
+--      · supplier_ledger.reference_type        (migration 005)
+--      · journal_entries.reference_type        (migration 009)
+--      · cashbox_transactions.reference_type   (migration 014, via
+--                                                fn_record_cashbox_txn)
+--      · (customer_ledger.reference_type — not used by P2.4A)
+--
+--    Without this migration every authenticated purchase-return create
+--    or cancel crashed with:
+--      ERROR: invalid input value for enum entity_type: "purchase_return"
+--
+--    Same additive `ADD VALUE IF NOT EXISTS` pattern as migration 107
+--    (which added 'employee_settlement' to this exact enum).
+--
+--  WHAT THIS DOES NOT DO
+--    * Does NOT touch any table, column, constraint, index, trigger, or
+--      function.
+--    * Does NOT touch other enums (stock_movement_type, txn_direction,
+--      payment_method_code, party_payment_kind, …).
+--    * Does NOT mutate any existing row. Pre-141 rows keep their
+--      current reference_type. The only effect is that future INSERTs
+--      with reference_type='purchase_return' now succeed.
+--    * Does NOT touch backend/src/provisioning/ or any application code.
+-- ============================================================================
+
+ALTER TYPE entity_type ADD VALUE IF NOT EXISTS 'purchase_return';

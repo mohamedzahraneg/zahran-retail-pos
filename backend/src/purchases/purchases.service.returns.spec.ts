@@ -700,8 +700,14 @@ describe('PurchasesService — purchase-return source guardrails (PR-P2.4A block
     // codebase are 'adjustment' / 'adjustment_in' / 'adjustment_out'.
     // This regression scans the purchase-return block for any
     // INSERT … stock_movements … 'purchase_return' value-position
-    // shape and fails if reintroduced. `reference_type='purchase_return'`
-    // is still allowed (it lives on a free-text column).
+    // shape and fails if reintroduced.
+    //
+    // NOTE: `reference_type='purchase_return'` IS still emitted by
+    // this code — it writes to a column typed as the `entity_type`
+    // enum (stock_movements / supplier_ledger / journal_entries /
+    // cashbox_transactions all share that type). Migration 141 adds
+    // 'purchase_return' to that enum so these writes succeed. The
+    // migration-141 spec pins the schema side.
     expect(RETURN_BLOCK).not.toMatch(/'purchase_return'\s*,\s*'out'/);
     expect(RETURN_BLOCK).not.toMatch(/'purchase_return'\s*,\s*'in'/);
   });
@@ -724,5 +730,25 @@ describe('PurchasesService — purchase-return source guardrails (PR-P2.4A block
   it('purchase-return block uses reference_type=purchase_return on stock_movements + supplier_ledger + cashbox + posting', () => {
     const occurrences = RETURN_BLOCK.match(/'purchase_return'/g) ?? [];
     expect(occurrences.length).toBeGreaterThanOrEqual(6);
+  });
+
+  it('PR-PURCHASES-P2.4A-FIX-ENUM-2: depends on migration 141 (entity_type += purchase_return)', () => {
+    // The purchase-return block writes reference_type='purchase_return'
+    // to columns typed `entity_type`. Migration 141 makes that value
+    // valid in the enum. This test fails loudly if the migration is
+    // missing or renamed, so the dependency cannot silently regress.
+    const migrationPath = resolve(
+      __dirname,
+      '..',
+      '..',
+      '..',
+      'database',
+      'migrations',
+      '141_entity_type_purchase_return.sql',
+    );
+    const migrationSql = readFileSync(migrationPath, 'utf8');
+    expect(migrationSql).toMatch(
+      /ALTER\s+TYPE\s+entity_type\s+ADD\s+VALUE\s+IF\s+NOT\s+EXISTS\s+'purchase_return'/i,
+    );
   });
 });
