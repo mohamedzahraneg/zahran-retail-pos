@@ -315,6 +315,15 @@ describe('Phase 2F · Layer 2 — reverseByReference call sites are whitelisted'
       note: 'PATCH /purchases/:id/cancel — perm purchases.cancel',
     },
     {
+      file: 'src/purchases/purchases.service.ts',
+      enclosingFn: 'edit',
+      role: 'explicit_cancel_void_refund_return',
+      note:
+        'P2.3B safe replacement: received + unpaid purchase edit voids ' +
+        'the old purchase and reverses its purchase JE before creating/' +
+        'receiving the replacement.',
+    },
+    {
       file: 'src/returns/returns.service.ts',
       enclosingFn: 'cancel',
       role: 'explicit_cancel_void_refund_return',
