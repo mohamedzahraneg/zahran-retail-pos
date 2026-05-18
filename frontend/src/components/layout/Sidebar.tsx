@@ -31,6 +31,7 @@ import {
   BookOpen,
   Scale,
   Sparkles,
+  Tags,
   Target,
   ShieldCheck,
   Shield,
@@ -229,6 +230,7 @@ const groups: NavGroup[] = [
     title: 'المخزون',
     items: [
       { to: '/products', label: 'المنتجات', icon: Package, roles: ['admin', 'manager', 'inventory'], permission: 'products.view' },
+      { to: '/product-groups', label: 'مجموعات المنتجات', icon: Tags, roles: ['admin', 'manager', 'inventory'], permission: 'products.groups_manage' },
       { to: '/stock-adjustments', label: 'تعديلات المخزون', icon: PackagePlus, roles: ['admin', 'manager', 'inventory'], permission: 'stock.adjust' },
       { to: '/stock-transfers', label: 'تحويلات المخازن', icon: Shuffle, roles: ['admin', 'manager', 'inventory'], permission: 'stock.transfer' },
       { to: '/stock-count', label: 'الجرد الفعلي', icon: ClipboardCheck, roles: ['admin', 'manager', 'inventory'], permission: 'stock.count' },

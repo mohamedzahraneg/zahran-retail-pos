@@ -43,6 +43,7 @@ import { RecurringExpensesModule } from './recurring-expenses/recurring-expenses
 import { ExpenseAllocationsModule } from './expense-allocations/expense-allocations.module';
 import { CustomerGroupsModule } from './customer-groups/customer-groups.module';
 import { CategoriesModule } from './categories/categories.module';
+import { ProductGroupsModule } from './product-groups/product-groups.module';
 import { AttendanceModule } from './attendance/attendance.module';
 import { EmployeesModule } from './employees/employees.module';
 import { ChartOfAccountsModule } from './chart-of-accounts/chart-of-accounts.module';
@@ -115,6 +116,7 @@ class HealthController {
     ExpenseAllocationsModule,
     CustomerGroupsModule,
     CategoriesModule,
+    ProductGroupsModule,
     ChartOfAccountsModule,
     PaymentsModule,
     FinanceModule,

@@ -443,6 +443,7 @@ export class SettingsService {
         { code: 'products.value_view',      label: 'عرض إجمالي قيمة المخزون' },
         { code: 'products.price_change',    label: 'تعديل سعر البيع من شاشة المنتجات' },
         { code: 'products.cost_change',     label: 'تعديل سعر التكلفة بشكل جماعي' },
+        { code: 'products.groups_manage',   label: 'إدارة مجموعات المنتجات' },
         { code: 'categories.view',          label: 'عرض الفئات' },
         { code: 'categories.manage',        label: 'إدارة المجموعات والفئات' },
       ],
