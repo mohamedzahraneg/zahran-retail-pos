@@ -193,13 +193,18 @@ export const reportsApi = {
     q?: string;
     status?: PricingStatus;
     only_in_stock?: boolean;
+    group_id?: string;
     limit?: number;
   } = {}) =>
     unwrap<PricingHealthResponse>(
       api.get('/reports/pricing/health', { params }),
     ),
   pricingLosses: (
-    params: { only_in_stock?: boolean; limit?: number } = {},
+    params: {
+      only_in_stock?: boolean;
+      group_id?: string;
+      limit?: number;
+    } = {},
   ) =>
     unwrap<PricingLossesResponse>(
       api.get('/reports/pricing/losses', { params }),
@@ -219,6 +224,7 @@ export const reportsApi = {
     params: {
       supplier_id?: string;
       needs_review_only?: boolean;
+      group_id?: string;
       limit?: number;
     } = {},
   ) =>
@@ -245,6 +251,7 @@ export const reportsApi = {
       from?: string;
       to?: string;
       status?: SoldProfitStatus;
+      group_id?: string;
       limit?: number;
       sort?: SoldProfitSort;
     } = {},
@@ -606,6 +613,8 @@ export interface PricingFairPriceParams {
   q?: string;
   only_in_stock?: boolean;
   only_active?: boolean;
+  // PR-P9.1b — filter to a manual product group.
+  group_id?: string;
   limit?: number;
 }
 

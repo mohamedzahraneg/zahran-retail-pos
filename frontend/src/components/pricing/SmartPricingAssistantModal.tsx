@@ -10,7 +10,8 @@
  * Cost changes are deferred to P3.5B.
  */
 import { useEffect, useMemo, useState } from 'react';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { productGroupsApi } from '@/api/productGroups.api';
 import toast from 'react-hot-toast';
 import {
   CheckCircle2,
@@ -145,6 +146,12 @@ export function SmartPricingAssistantModal({
   const [confirmAll, setConfirmAll] = useState('');
   const [preview, setPreview] = useState<SmartPricingPreviewResponse | null>(null);
   const [excludedIds, setExcludedIds] = useState<Set<string>>(new Set());
+  // PR-P9.1b — manual product-group override. Seeded from the tab's
+  // forwarded filter so the modal opens already scoped; the operator
+  // can override inside the modal without leaving the assistant.
+  const [groupOverride, setGroupOverride] = useState<string>(
+    context.filters?.group_id ?? '',
+  );
 
   // Reset every time the modal opens so we don't carry stale state.
   useEffect(() => {
@@ -164,7 +171,17 @@ export function SmartPricingAssistantModal({
     setMode('smart');
     setManualOperation('increase_percent');
     setManualValue('');
+    setGroupOverride(context.filters?.group_id ?? '');
   }, [open, context]);
+
+  // PR-P9.1b — list of active manual groups, fetched only when the
+  // modal is open. Used by the in-modal "المجموعة" select.
+  const { data: groups = [] } = useQuery({
+    queryKey: ['product-groups', { is_active: true }],
+    queryFn: () => productGroupsApi.list({ is_active: true }),
+    enabled: open,
+    staleTime: 60_000,
+  });
 
   // Whether the manual adjustment value parses to a valid number > 0.
   // Used to gate the "توليد المعاينة" button when in manual mode.
@@ -183,10 +200,20 @@ export function SmartPricingAssistantModal({
       return { type: 'selected', variant_ids: context.selectedVariantIds };
     }
     if (scopeKey === 'filtered') {
-      return { type: 'filtered', filters: context.filters ?? {} };
+      // PR-P9.1b — merge the in-modal group override on top of the
+      // tab's forwarded filters. Empty string clears the override.
+      const baseFilters: SmartPricingScope['filters'] = {
+        ...(context.filters ?? {}),
+      };
+      if (groupOverride) {
+        baseFilters.group_id = groupOverride;
+      } else {
+        delete baseFilters.group_id;
+      }
+      return { type: 'filtered', filters: baseFilters };
     }
     return { type: 'all' };
-  }, [scopeKey, context]);
+  }, [scopeKey, context, groupOverride]);
 
   // HOTFIX P3.5A.1 timeout — friendly Arabic message when axios aborts
   // a slow preview/apply request. Recognises both the explicit axios
@@ -406,6 +433,29 @@ export function SmartPricingAssistantModal({
                   </label>
                 ))}
               </div>
+              {/* PR-P9.1b — in-modal group select. Only meaningful for
+                  the filtered scope; for selected/single/all the
+                  preview ignores filters.group_id. */}
+              {scopeKey === 'filtered' && (
+                <div className="border border-slate-200 rounded-lg p-3 bg-slate-50/40">
+                  <label className="block text-[11px] text-slate-600 mb-1">
+                    مجموعة المنتجات (اختياري)
+                  </label>
+                  <select
+                    value={groupOverride}
+                    onChange={(e) => setGroupOverride(e.target.value)}
+                    data-testid="smart-pricing-group-filter"
+                    className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white"
+                  >
+                    <option value="">كل المجموعات</option>
+                    {groups.map((g) => (
+                      <option key={g.id} value={g.id}>
+                        {g.name_ar}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
             </div>
           )}
 

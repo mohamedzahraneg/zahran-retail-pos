@@ -259,6 +259,8 @@ export interface SmartPricingScope {
     only_in_stock?: boolean;
     supplier_id?: string;
     needs_review_only?: boolean;
+    /** PR-P9.1b — restrict the scope to variants in a manual product group. */
+    group_id?: string;
   };
 }
 
@@ -376,6 +378,8 @@ export interface CostAdjustmentFilters {
   category_id?: string;
   only_in_stock?: boolean;
   only_active?: boolean;
+  /** PR-P9.1b — restrict the scope to variants in a manual product group. */
+  group_id?: string;
 }
 
 export interface CostAdjustmentPreviewPayload {

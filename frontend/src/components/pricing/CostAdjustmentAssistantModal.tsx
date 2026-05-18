@@ -15,9 +15,10 @@
  * the NEXT sale's COGS basis.
  */
 import { useEffect, useMemo, useState } from 'react';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import { AlertTriangle, ShieldAlert, Coins, X } from 'lucide-react';
+import { productGroupsApi } from '@/api/productGroups.api';
 import {
   productsApi,
   type CostAdjustmentApplyPayload,
@@ -91,6 +92,10 @@ export function CostAdjustmentAssistantModal({
     null,
   );
   const [excludedIds, setExcludedIds] = useState<Set<string>>(new Set());
+  // PR-P9.1b — in-modal group override (seeded from forwarded filters).
+  const [groupOverride, setGroupOverride] = useState<string>(
+    context.filters?.group_id ?? '',
+  );
 
   useEffect(() => {
     if (!open) return;
@@ -105,7 +110,16 @@ export function CostAdjustmentAssistantModal({
     else if (context.filters && Object.keys(context.filters).length > 0)
       setScopeKey('filtered');
     else setScopeKey('all');
+    setGroupOverride(context.filters?.group_id ?? '');
   }, [open, context]);
+
+  // PR-P9.1b — active manual groups for the in-modal select.
+  const { data: groups = [] } = useQuery({
+    queryKey: ['product-groups', { is_active: true }],
+    queryFn: () => productGroupsApi.list({ is_active: true }),
+    enabled: open,
+    staleTime: 60_000,
+  });
 
   const valueNum = Number(adjustmentValue);
   const valueValid =
@@ -125,6 +139,18 @@ export function CostAdjustmentAssistantModal({
     return e?.response?.data?.message ?? msg ?? fallback;
   };
 
+  // PR-P9.1b — merge in-modal group override on top of the forwarded
+  // filters. Empty `groupOverride` clears it; otherwise it replaces.
+  const mergedFilters = useMemo<CostAdjustmentFilters>(() => {
+    const base: CostAdjustmentFilters = { ...(context.filters ?? {}) };
+    if (groupOverride) {
+      base.group_id = groupOverride;
+    } else {
+      delete base.group_id;
+    }
+    return base;
+  }, [context.filters, groupOverride]);
+
   const buildPreviewPayload = (): CostAdjustmentPreviewPayload => {
     const payload: CostAdjustmentPreviewPayload = {
       scope: scopeKey,
@@ -135,7 +161,7 @@ export function CostAdjustmentAssistantModal({
     if (scopeKey === 'selected') {
       payload.variant_ids = context.selectedVariantIds;
     } else if (scopeKey === 'filtered') {
-      payload.filters = context.filters ?? {};
+      payload.filters = mergedFilters;
     }
     return payload;
   };
@@ -258,7 +284,7 @@ export function CostAdjustmentAssistantModal({
     if (scopeKey === 'selected') {
       payload.variant_ids = context.selectedVariantIds;
     } else if (scopeKey === 'filtered') {
-      payload.filters = context.filters ?? {};
+      payload.filters = mergedFilters;
     }
     applyMut.mutate(payload);
   };
@@ -344,6 +370,29 @@ export function CostAdjustmentAssistantModal({
                     </label>
                   ))}
                 </div>
+                {/* PR-P9.1b — in-modal group select. Only changes the
+                    SELECT-side scope when scope='filtered'; selected/
+                    all ignore filters.group_id. */}
+                {scopeKey === 'filtered' && (
+                  <div className="mt-3">
+                    <label className="block text-xs font-bold text-slate-700 mb-1">
+                      مجموعة المنتجات (اختياري)
+                    </label>
+                    <select
+                      value={groupOverride}
+                      onChange={(e) => setGroupOverride(e.target.value)}
+                      data-testid="cost-adjust-group-filter"
+                      className="w-full rounded-md border-slate-200 text-sm"
+                    >
+                      <option value="">كل المجموعات</option>
+                      {groups.map((g) => (
+                        <option key={g.id} value={g.id}>
+                          {g.name_ar}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
               </section>
 
               <section className="space-y-3">

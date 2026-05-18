@@ -186,6 +186,11 @@ export class SmartPricingFiltersDto {
   @ApiPropertyOptional() @IsOptional() @IsBoolean() only_in_stock?: boolean;
   @ApiPropertyOptional() @IsOptional() @IsUUID() supplier_id?: string;
   @ApiPropertyOptional() @IsOptional() @IsBoolean() needs_review_only?: boolean;
+  // PR-P9.1b — manual product-group filter. When present the scope
+  // resolver JOINs product_group_variants so only variants belonging
+  // to the chosen group are returned. Pure SELECT filter — does not
+  // change pricing math or apply permissions.
+  @ApiPropertyOptional() @IsOptional() @IsUUID() group_id?: string;
 }
 
 export class SmartPricingScopeDto {
@@ -319,6 +324,9 @@ export class CostAdjustmentFiltersDto {
   @ApiPropertyOptional() @IsOptional() @IsUUID() category_id?: string;
   @ApiPropertyOptional() @IsOptional() @IsBoolean() only_in_stock?: boolean;
   @ApiPropertyOptional() @IsOptional() @IsBoolean() only_active?: boolean;
+  // PR-P9.1b — manual product-group filter (mirrors SmartPricingFiltersDto).
+  // SELECT-only join into product_group_variants. Apply permissions unchanged.
+  @ApiPropertyOptional() @IsOptional() @IsUUID() group_id?: string;
 }
 
 export class CostAdjustmentPreviewDto {

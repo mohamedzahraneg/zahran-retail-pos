@@ -667,10 +667,19 @@ export class ProductsService {
       if (f.only_in_stock) {
         conds.push(`st.quantity_on_hand > 0`);
       }
+      // PR-P9.1b — manual product-group filter. SELECT-only inner
+      // join into product_group_variants; restricts the scope without
+      // changing pricing math or bypassing any apply permission.
+      let groupJoin = '';
+      if (f.group_id) {
+        params.push(f.group_id);
+        groupJoin = `JOIN product_group_variants pgv ON pgv.variant_id = pv.id AND pgv.group_id = $${params.length}::uuid`;
+      }
       const fromClause = `FROM product_variants pv
           JOIN products p ON p.id = pv.product_id
           ${supplierJoin}
           ${stockJoin}
+          ${groupJoin}
          WHERE ${conds.join(' AND ')}`;
       // HOTFIX timeout — cheap COUNT(*) so the UI can warn when the
       // preview is truncated. Read-only.
@@ -1377,9 +1386,17 @@ export class ProductsService {
     const stockJoin = f.only_in_stock
       ? 'JOIN stock st ON st.variant_id = pv.id AND st.quantity_on_hand > 0'
       : '';
+    // PR-P9.1b — manual product-group filter for cost-adjustment scope.
+    // Same SELECT-only inner join pattern as the smart-pricing resolver.
+    let groupJoin = '';
+    if (f.group_id) {
+      params.push(f.group_id);
+      groupJoin = `JOIN product_group_variants pgv ON pgv.variant_id = pv.id AND pgv.group_id = $${params.length}::uuid`;
+    }
     const fromClause = `FROM product_variants pv
         JOIN products p ON p.id = pv.product_id
         ${stockJoin}
+        ${groupJoin}
        WHERE ${conds.join(' AND ')}`;
     const [countRow] = await this.ds.query(
       `SELECT COUNT(DISTINCT pv.id)::int AS n ${fromClause}`,

@@ -445,11 +445,15 @@ export class ReportsController {
     @Query('limit') limit?: string,
     @Query('format') format?: 'json' | 'xlsx' | 'pdf',
     @Res({ passthrough: true }) res?: Response,
+    // PR-P9.1b — kept LAST to preserve the existing positional shape
+    // used by reports.controller.pricing-export.spec.ts.
+    @Query('group_id') groupId?: string,
   ) {
     const result = await this.svc.pricingHealth({
       q,
       status: status as any,
       only_in_stock: onlyInStock === 'true' || onlyInStock === '1',
+      group_id: groupId,
       limit: limit ? Number(limit) : undefined,
     });
     if (format && format !== 'json' && res) {
@@ -466,9 +470,11 @@ export class ReportsController {
     @Query('limit') limit?: string,
     @Query('format') format?: 'json' | 'xlsx' | 'pdf',
     @Res({ passthrough: true }) res?: Response,
+    @Query('group_id') groupId?: string,
   ) {
     const result = await this.svc.pricingLosses({
       only_in_stock: onlyInStock === 'true' || onlyInStock === '1',
+      group_id: groupId,
       limit: limit ? Number(limit) : undefined,
     });
     if (format && format !== 'json' && res) {
@@ -516,11 +522,13 @@ export class ReportsController {
     @Query('limit') limit?: string,
     @Query('format') format?: 'json' | 'xlsx' | 'pdf',
     @Res({ passthrough: true }) res?: Response,
+    @Query('group_id') groupId?: string,
   ) {
     const result = await this.svc.pricingLandedImpact({
       supplier_id,
       needs_review_only:
         needsReviewOnly === 'true' || needsReviewOnly === '1',
+      group_id: groupId,
       limit: limit ? Number(limit) : undefined,
     });
     if (format && format !== 'json' && res) {
@@ -556,6 +564,7 @@ export class ReportsController {
     @Query('limit') limit?: string,
     @Query('format') format?: 'json' | 'xlsx' | 'pdf',
     @Res({ passthrough: true }) res?: Response,
+    @Query('group_id') groupId?: string,
   ) {
     const result = await this.svc.fairPrice({
       from,
@@ -572,6 +581,7 @@ export class ReportsController {
         onlyActive === undefined
           ? undefined
           : !(onlyActive === 'false' || onlyActive === '0'),
+      group_id: groupId,
       limit: limit ? Number(limit) : undefined,
     });
     if (format && format !== 'json' && res) {
@@ -631,12 +641,14 @@ export class ReportsController {
     @Query('sort') sort?: string,
     @Query('format') format?: 'json' | 'xlsx' | 'pdf',
     @Res({ passthrough: true }) res?: Response,
+    @Query('group_id') groupId?: string,
   ) {
     const result = await this.svc.soldProfitProducts({
       q,
       from,
       to,
       status: status as any,
+      group_id: groupId,
       limit: limit ? Number(limit) : undefined,
       sort: sort as any,
     });

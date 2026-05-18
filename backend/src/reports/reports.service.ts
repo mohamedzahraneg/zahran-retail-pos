@@ -689,6 +689,7 @@ export class ReportsService {
     q?: string;
     status?: 'ok' | 'below_min_margin' | 'below_cost' | 'no_price' | 'unknown_cost';
     only_in_stock?: boolean;
+    group_id?: string;
     limit?: number;
   } = {}) {
     const params: any[] = [];
@@ -701,6 +702,13 @@ export class ReportsService {
     }
     if (filters.only_in_stock) {
       conds.push(`COALESCE(stock_sum.qty, 0) > 0`);
+    }
+    // PR-P9.1b — manual product-group filter. SELECT-only inner join;
+    // formulas unchanged, no apply-side effect.
+    let groupJoin = '';
+    if (filters.group_id) {
+      params.push(filters.group_id);
+      groupJoin = `JOIN product_group_variants pgv ON pgv.variant_id = pv.id AND pgv.group_id = $${params.length}::uuid`;
     }
     const where = `WHERE ${conds.join(' AND ')}`;
     const limit = Math.min(Math.max(1, Number(filters.limit) || 500), 5000);
@@ -743,6 +751,7 @@ export class ReportsService {
       LEFT JOIN colors c ON c.id = pv.color_id
       LEFT JOIN sizes  s ON s.id = pv.size_id
       LEFT JOIN stock_sum ON stock_sum.variant_id = pv.id
+      ${groupJoin}
       ${where}
       ORDER BY p.name_ar, pv.sku
       LIMIT ${limit}
@@ -827,9 +836,14 @@ export class ReportsService {
    * Convenience filter on top of pricingHealth(), pre-sorted by the
    * largest potential loss.
    */
-  async pricingLosses(filters: { only_in_stock?: boolean; limit?: number } = {}) {
+  async pricingLosses(filters: {
+    only_in_stock?: boolean;
+    group_id?: string;
+    limit?: number;
+  } = {}) {
     const base = await this.pricingHealth({
       only_in_stock: filters.only_in_stock,
+      group_id: filters.group_id,
       limit: filters.limit,
     });
     const items = base.items
@@ -962,6 +976,7 @@ export class ReportsService {
   async pricingLandedImpact(filters: {
     supplier_id?: string;
     needs_review_only?: boolean;
+    group_id?: string;
     limit?: number;
   } = {}) {
     const params: any[] = [];
@@ -969,6 +984,12 @@ export class ReportsService {
     if (filters.supplier_id) {
       params.push(filters.supplier_id);
       conds.push(`p_last.supplier_id = $${params.length}`);
+    }
+    // PR-P9.1b — manual product-group filter. SELECT-only inner join.
+    let groupJoin = '';
+    if (filters.group_id) {
+      params.push(filters.group_id);
+      groupJoin = `JOIN product_group_variants pgv ON pgv.variant_id = pv.id AND pgv.group_id = $${params.length}::uuid`;
     }
     const where = `WHERE ${conds.join(' AND ')}`;
     const limit = Math.min(Math.max(1, Number(filters.limit) || 500), 5000);
@@ -1028,6 +1049,7 @@ export class ReportsService {
       JOIN products p           ON p.id = pv.product_id
       JOIN purchases p_last     ON p_last.id = lp.purchase_id
       LEFT JOIN suppliers s     ON s.id = p_last.supplier_id
+      ${groupJoin}
       ${where}
       ORDER BY p_last.received_at DESC NULLS LAST, p_last.invoice_date DESC
       LIMIT ${limit}
@@ -1292,6 +1314,7 @@ export class ReportsService {
     from?: string;
     to?: string;
     status?: 'loss' | 'low_margin' | 'ok' | 'unknown_cost';
+    group_id?: string;
     limit?: number;
     sort?:
       | 'gross_profit_desc'
@@ -1336,6 +1359,12 @@ export class ReportsService {
         `(p.name_ar ILIKE $${idx} OR pv.sku ILIKE $${idx} OR pv.barcode ILIKE $${idx})`,
       );
     }
+    // PR-P9.1b — manual product-group filter. SELECT-only inner join.
+    let groupJoin = '';
+    if (filters.group_id) {
+      params2.push(filters.group_id);
+      groupJoin = `JOIN product_group_variants pgv ON pgv.variant_id = pv.id AND pgv.group_id = $${params2.length}::uuid`;
+    }
     const whereWithQ = `WHERE ${conds.join(' AND ')}`;
 
     const rows = await this.ds.query(
@@ -1362,6 +1391,7 @@ export class ReportsService {
         LEFT JOIN colors c        ON c.id = pv.color_id
         LEFT JOIN sizes  s        ON s.id = pv.size_id
         JOIN invoices i           ON i.id = ii.invoice_id
+        ${groupJoin}
         ${whereWithQ}
       ),
       agg AS (
@@ -2039,6 +2069,7 @@ export class ReportsService {
     q?: string;
     only_in_stock?: boolean;
     only_active?: boolean;
+    group_id?: string;
     limit?: number;
   } = {}) {
     const ALLOC_BASES = [
@@ -2188,6 +2219,14 @@ export class ReportsService {
     const stockFilter = filters.only_in_stock
       ? 'AND COALESCE(stock_sum.qty, 0) > 0'
       : '';
+    // PR-P9.1b — manual product-group filter for the fair-price rows
+    // query. SELECT-only inner join into product_group_variants;
+    // formulas + summary math untouched.
+    let groupJoin = '';
+    if (filters.group_id) {
+      params.push(filters.group_id);
+      groupJoin = `JOIN product_group_variants pgv ON pgv.variant_id = pv.id AND pgv.group_id = $${params.length}::uuid`;
+    }
 
     const rows = await this.ds.query(
       `
@@ -2224,6 +2263,7 @@ export class ReportsService {
         LEFT JOIN categories cat ON cat.id = p.category_id
         LEFT JOIN sales          ON sales.variant_id = pv.id
         LEFT JOIN stock_sum      ON stock_sum.variant_id = pv.id
+        ${groupJoin}
        WHERE ${conds.join(' AND ')}
        ${stockFilter}
        ORDER BY revenue_in_period DESC NULLS LAST, p.name_ar

@@ -54,6 +54,7 @@ import type {
 } from '@/api/products.api';
 import { SmartPricingAssistantModal } from '@/components/pricing/SmartPricingAssistantModal';
 import { CostAdjustmentAssistantModal } from '@/components/pricing/CostAdjustmentAssistantModal';
+import { productGroupsApi } from '@/api/productGroups.api';
 
 // Map the frontend's wider PricingStatus to the smart-pricing-allowed subset.
 const SMART_PRICING_STATUS_FILTER = new Set<SmartPricingStatusFilter>([
@@ -351,6 +352,49 @@ interface ExportButtonsProps {
   testIdSuffix: string;
 }
 
+/**
+ * PR-P9.1b — Reusable "المجموعة" dropdown.
+ *
+ * Fed by `productGroupsApi.list({ is_active: true })`. The value
+ * is the group_id (uuid) or empty string (no filter). The parent
+ * passes the current value + an onChange handler; this component
+ * stays presentational so each tab can drop it into its own
+ * toolbar without re-fetching.
+ */
+interface GroupFilterSelectProps {
+  value: string;
+  onChange: (groupId: string) => void;
+  testIdSuffix: string;
+}
+
+function GroupFilterSelect({
+  value,
+  onChange,
+  testIdSuffix,
+}: GroupFilterSelectProps) {
+  const { data: groups = [] } = useQuery({
+    queryKey: ['product-groups', { is_active: true }],
+    queryFn: () => productGroupsApi.list({ is_active: true }),
+    staleTime: 60_000,
+  });
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      data-testid={`pricing-group-filter-${testIdSuffix}`}
+      className="border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white"
+      aria-label="مجموعة المنتجات"
+    >
+      <option value="">كل المجموعات</option>
+      {groups.map((g) => (
+        <option key={g.id} value={g.id}>
+          {g.name_ar}
+        </option>
+      ))}
+    </select>
+  );
+}
+
 function ExportButtons({ slug, params, testIdSuffix }: ExportButtonsProps) {
   const [busy, setBusy] = useState<null | 'xlsx' | 'pdf'>(null);
   const run = async (format: 'xlsx' | 'pdf') => {
@@ -443,15 +487,18 @@ function HealthTab() {
   const [q, setQ] = useState('');
   const [status, setStatus] = useState<PricingStatus | ''>('');
   const [onlyInStock, setOnlyInStock] = useState(false);
+  // PR-P9.1b — manual product-group filter. Empty string = no filter.
+  const [groupId, setGroupId] = useState<string>('');
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
   const { data, isLoading } = useQuery({
-    queryKey: ['pricing-health', q, status, onlyInStock],
+    queryKey: ['pricing-health', q, status, onlyInStock, groupId],
     queryFn: () =>
       reportsApi.pricingHealth({
         q: q.trim() || undefined,
         status: status || undefined,
         only_in_stock: onlyInStock,
+        group_id: groupId || undefined,
         limit: 1000,
       }),
   });
@@ -462,19 +509,21 @@ function HealthTab() {
     const mappedStatus = toSmartPricingStatus(status);
     if (mappedStatus) f.status = mappedStatus;
     if (onlyInStock) f.only_in_stock = true;
+    if (groupId) f.group_id = groupId;
     return f;
-  }, [q, status, onlyInStock]);
+  }, [q, status, onlyInStock, groupId]);
 
   // PR-PURCHASES-P3.6A — Cost-adjustment filters only support a subset
   // of pricing-health filters (q / only_in_stock). Status is a pricing
   // concept and is intentionally not forwarded — cost adjustment is
-  // about cost, not about sale-price health.
+  // about cost, not about sale-price health. PR-P9.1b adds group_id.
   const costFilters = useMemo<CostAdjustmentFilters>(() => {
     const f: CostAdjustmentFilters = {};
     if (q.trim()) f.q = q.trim();
     if (onlyInStock) f.only_in_stock = true;
+    if (groupId) f.group_id = groupId;
     return f;
-  }, [q, onlyInStock]);
+  }, [q, onlyInStock, groupId]);
 
   return (
     <div className="space-y-3">
@@ -519,12 +568,18 @@ function HealthTab() {
           onClear={() => setSelectedIds(new Set())}
         />
         <div className="flex items-center gap-2 flex-wrap">
+          <GroupFilterSelect
+            value={groupId}
+            onChange={setGroupId}
+            testIdSuffix="health"
+          />
           <ExportButtons
             slug="pricing/health"
             params={{
               q: q.trim() || undefined,
               status: status || undefined,
               only_in_stock: onlyInStock || undefined,
+              group_id: groupId || undefined,
               limit: 1000,
             }}
             testIdSuffix="health"
@@ -684,20 +739,29 @@ function HealthTable({ rows, selectedIds, onToggle, onToggleAll }: HealthTablePr
 
 function LossesTab() {
   const [onlyInStock, setOnlyInStock] = useState(true);
+  const [groupId, setGroupId] = useState<string>('');
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const { data, isLoading } = useQuery({
-    queryKey: ['pricing-losses', onlyInStock],
+    queryKey: ['pricing-losses', onlyInStock, groupId],
     queryFn: () =>
-      reportsApi.pricingLosses({ only_in_stock: onlyInStock, limit: 1000 }),
+      reportsApi.pricingLosses({
+        only_in_stock: onlyInStock,
+        group_id: groupId || undefined,
+        limit: 1000,
+      }),
   });
 
   // Losses report is implicitly below_cost + below_min_margin only,
   // so we don't bind a single status filter through to smart pricing —
   // we just pass only_in_stock so "filtered" scope mirrors the UI.
-  const smartFilters = useMemo<SmartPricingScope['filters']>(
-    () => (onlyInStock ? { only_in_stock: true } : {}),
-    [onlyInStock],
-  );
+  // PR-P9.1b — group_id propagates so the assistants honour the same
+  // visible scope.
+  const smartFilters = useMemo<SmartPricingScope['filters']>(() => {
+    const f: SmartPricingScope['filters'] = {};
+    if (onlyInStock) f.only_in_stock = true;
+    if (groupId) f.group_id = groupId;
+    return f;
+  }, [onlyInStock, groupId]);
 
   return (
     <div className="space-y-3">
@@ -718,10 +782,16 @@ function LossesTab() {
           />
         </div>
         <div className="flex items-center gap-2 flex-wrap">
+          <GroupFilterSelect
+            value={groupId}
+            onChange={setGroupId}
+            testIdSuffix="losses"
+          />
           <ExportButtons
             slug="pricing/losses"
             params={{
               only_in_stock: onlyInStock || undefined,
+              group_id: groupId || undefined,
               limit: 1000,
             }}
             testIdSuffix="losses"
@@ -1009,20 +1079,24 @@ function HistoryTable({ rows }: { rows: PricingHistoryRow[] }) {
 
 function LandedImpactTab() {
   const [needsReviewOnly, setNeedsReviewOnly] = useState(false);
+  const [groupId, setGroupId] = useState<string>('');
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const { data, isLoading } = useQuery({
-    queryKey: ['pricing-landed-impact', needsReviewOnly],
+    queryKey: ['pricing-landed-impact', needsReviewOnly, groupId],
     queryFn: () =>
       reportsApi.pricingLandedImpact({
         needs_review_only: needsReviewOnly,
+        group_id: groupId || undefined,
         limit: 1000,
       }),
   });
 
-  const smartFilters = useMemo<SmartPricingScope['filters']>(
-    () => (needsReviewOnly ? { needs_review_only: true } : {}),
-    [needsReviewOnly],
-  );
+  const smartFilters = useMemo<SmartPricingScope['filters']>(() => {
+    const f: SmartPricingScope['filters'] = {};
+    if (needsReviewOnly) f.needs_review_only = true;
+    if (groupId) f.group_id = groupId;
+    return f;
+  }, [needsReviewOnly, groupId]);
 
   return (
     <div className="space-y-3">
@@ -1043,10 +1117,16 @@ function LandedImpactTab() {
           />
         </div>
         <div className="flex items-center gap-2 flex-wrap">
+          <GroupFilterSelect
+            value={groupId}
+            onChange={setGroupId}
+            testIdSuffix="landed"
+          />
           <ExportButtons
             slug="pricing/landed-impact"
             params={{
               needs_review_only: needsReviewOnly || undefined,
+              group_id: groupId || undefined,
               limit: 1000,
             }}
             testIdSuffix="landed"
@@ -1242,6 +1322,8 @@ function SoldProfitTab() {
   const [status, setStatus] = useState<SoldProfitStatus | ''>('');
   const [sort, setSort] = useState<SoldProfitSort>('gross_profit_desc');
   const [view, setView] = useState<'products' | 'invoices'>('products');
+  // PR-P9.1b — manual product-group filter (products view only).
+  const [groupId, setGroupId] = useState<string>('');
   // P3.4D — Gross / Net mode toggle. Net deducts returns attributed
   // to their `refunded_at` date (NOT the original sale date) so a
   // November sale + December return lands in December's net profit.
@@ -1281,8 +1363,9 @@ function SoldProfitTab() {
   const smartFilters = useMemo<SmartPricingScope['filters']>(() => {
     const f: SmartPricingScope['filters'] = {};
     if (q.trim()) f.q = q.trim();
+    if (groupId) f.group_id = groupId;
     return f;
-  }, [q]);
+  }, [q, groupId]);
 
   const summaryQ = useQuery({
     queryKey: ['sold-profit-summary', from, to],
@@ -1293,13 +1376,14 @@ function SoldProfitTab() {
       }),
   });
   const productsQ = useQuery({
-    queryKey: ['sold-profit-products', from, to, q, status, sort],
+    queryKey: ['sold-profit-products', from, to, q, status, sort, groupId],
     queryFn: () =>
       reportsApi.soldProfitProducts({
         from: from || undefined,
         to: to || undefined,
         q: q.trim() || undefined,
         status: status || undefined,
+        group_id: groupId || undefined,
         sort,
         limit: 1000,
       }),
@@ -1575,6 +1659,11 @@ function SoldProfitTab() {
             />
           </div>
           <div className="flex items-center gap-2 flex-wrap">
+            <GroupFilterSelect
+              value={groupId}
+              onChange={setGroupId}
+              testIdSuffix="sold-profit"
+            />
             <ExportButtons
               slug="pricing/sold-profit/products"
               params={{
@@ -1582,6 +1671,7 @@ function SoldProfitTab() {
                 from: from || undefined,
                 to: to || undefined,
                 status: status || undefined,
+                group_id: groupId || undefined,
                 sort,
                 limit: 1000,
               }}
@@ -2092,6 +2182,8 @@ function FairPriceTab() {
   const [q, setQ] = useState<string>('');
   const [onlyInStock, setOnlyInStock] = useState<boolean>(false);
   const [onlyActive, setOnlyActive] = useState<boolean>(true);
+  // PR-P9.1b — manual product-group filter.
+  const [groupId, setGroupId] = useState<string>('');
 
   const params = useMemo<PricingFairPriceParams>(() => {
     const p: PricingFairPriceParams = {
@@ -2108,8 +2200,9 @@ function FairPriceTab() {
       p.target_margin_pct = tm;
     }
     if (q.trim()) p.q = q.trim();
+    if (groupId) p.group_id = groupId;
     return p;
-  }, [from, to, basis, source, targetMarginText, q, onlyInStock, onlyActive]);
+  }, [from, to, basis, source, targetMarginText, q, onlyInStock, onlyActive, groupId]);
 
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ['pricing-fair-price', params],
@@ -2264,6 +2357,11 @@ function FairPriceTab() {
       </div>
 
       <div className="flex items-center justify-end gap-2 flex-wrap">
+        <GroupFilterSelect
+          value={groupId}
+          onChange={setGroupId}
+          testIdSuffix="fair-price"
+        />
         <ExportButtons
           slug="pricing/fair-price"
           params={exportParams}
