@@ -862,7 +862,7 @@ export class PurchasesService {
   async getReturn(id: string) {
     const [header] = await this.ds.query(
       `SELECT pr.*, s.name AS supplier_name, w.name_ar AS warehouse_name,
-              cb.name AS cashbox_name, cb.kind AS cashbox_kind,
+              cb.name_ar AS cashbox_name, cb.kind AS cashbox_kind,
               u_created.full_name    AS created_by_name,
               u_posted.full_name     AS posted_by_name,
               u_cancelled.full_name  AS cancelled_by_name

@@ -732,6 +732,23 @@ describe('PurchasesService — purchase-return source guardrails (PR-P2.4A block
     expect(occurrences.length).toBeGreaterThanOrEqual(6);
   });
 
+  it('PR-PURCHASES-P2.4A-FIX-CB-NAME: getReturn detail query uses cb.name_ar (not cb.name)', () => {
+    // `cashboxes` has no `name` column — its display columns are
+    // `name_ar` (NOT NULL VARCHAR(120)) and `name_en` (nullable).
+    // The detail SELECT in getReturn() must alias name_ar AS
+    // cashbox_name to match the convention used by the sibling
+    // warehouses join (w.name_ar AS warehouse_name) and the FE
+    // type (PurchaseReturnDetails.cashbox_name).
+    expect(RETURN_BLOCK).not.toMatch(/\bcb\.name\b(?!_)/);
+    expect(RETURN_BLOCK).toMatch(/cb\.name_ar\s+AS\s+cashbox_name/);
+  });
+
+  it('PR-PURCHASES-P2.4A-FIX-CB-NAME: getReturn still LEFT JOINs cashboxes cb ON cb.id = pr.cashbox_id', () => {
+    expect(RETURN_BLOCK).toMatch(
+      /LEFT\s+JOIN\s+cashboxes\s+cb\s+ON\s+cb\.id\s*=\s*pr\.cashbox_id/i,
+    );
+  });
+
   it('PR-PURCHASES-P2.4A-FIX-ENUM-2: depends on migration 141 (entity_type += purchase_return)', () => {
     // The purchase-return block writes reference_type='purchase_return'
     // to columns typed `entity_type`. Migration 141 makes that value
