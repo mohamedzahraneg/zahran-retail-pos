@@ -4,7 +4,7 @@ import {
   NotFoundException,
   Optional,
 } from '@nestjs/common';
-import { DataSource } from 'typeorm';
+import { DataSource, EntityManager } from 'typeorm';
 import {
   AddPurchasePaymentDto,
   CreatePurchaseDto,
@@ -177,7 +177,19 @@ export class PurchasesService {
   // --------------------------------------------------------------------------
   //  Create
   // --------------------------------------------------------------------------
-  async create(dto: CreatePurchaseDto, userId: string) {
+  /**
+   * PR-PURCHASES-P2.3B — accepts an optional `em: EntityManager` so the
+   * new safe-edit replacement flow can run create()+receive() inside
+   * the same transaction as fn_void_purchase + reverseByReference.
+   * When `em` is omitted (the common public path), behavior is
+   * unchanged: opens its own transaction.
+   *
+   * Allocator runs OUTSIDE the transaction (callers that pass `em`
+   * must call `runAllocatorOrThrow(dto)` beforehand themselves so a
+   * manual-allocation mismatch surfaces BEFORE the txn starts and we
+   * don't half-void the old purchase).
+   */
+  async create(dto: CreatePurchaseDto, userId: string, em?: EntityManager) {
     if (!dto.items?.length) {
       throw new BadRequestException('يجب إضافة صنف واحد على الأقل');
     }
@@ -189,7 +201,7 @@ export class PurchasesService {
     // `product_variants.cost_price`.
     const allocation = this.runAllocatorOrThrow(dto);
 
-    return this.ds.transaction(async (m) => {
+    const body = async (m: EntityManager) => {
       // subtotal stays as the BASE products subtotal (unchanged
       // semantics; reports keep using it as "products total before
       // landed cost"). grand_total now adds the capitalized AND
@@ -287,14 +299,23 @@ export class PurchasesService {
       }
 
       return purchase;
-    });
+    };
+    return em ? body(em) : this.ds.transaction(body);
   }
 
   // --------------------------------------------------------------------------
   //  Receive — increment stock, ledger
   // --------------------------------------------------------------------------
-  async receive(id: string, userId: string) {
-    return this.ds.transaction(async (m) => {
+  /**
+   * PR-PURCHASES-P2.3B — accepts an optional `em: EntityManager` so the
+   * safe-edit replacement flow can call receive() inside the same
+   * transaction. When `em` is provided the trailing `getOne(id)`
+   * read is skipped (the caller already has the new purchase row from
+   * create()'s return value). Public callers (no `em`) keep the
+   * existing rich getOne return shape.
+   */
+  async receive(id: string, userId: string, em?: EntityManager) {
+    const body = async (m: EntityManager) => {
       const [p] = await m.query(
         `SELECT * FROM purchases WHERE id = $1 FOR UPDATE`,
         [id],
@@ -375,7 +396,13 @@ export class PurchasesService {
 
       // Auto-post inventory capitalization to the GL.
       await this.posting?.postPurchase(id, userId, m).catch(() => undefined);
-
+    };
+    if (em) {
+      await body(em);
+      return;
+    }
+    return this.ds.transaction(async (m) => {
+      await body(m);
       return this.getOne(id);
     });
   }
@@ -568,24 +595,56 @@ export class PurchasesService {
    * landed-cost allocator and rewrites items + extras. Replaces the
    * pre-P2.3 path which silently dropped `extra_costs` and inserted
    * `purchase_items` without the `base_unit_cost NOT NULL` column
-   * (P2.1 migration 133).
+   * (P2.1 migration 133). UNCHANGED in P2.3B.
    *
-   * RECEIVED / PARTIAL / PAID: legacy void-and-recreate flow, kept
-   * for purchases that don't carry landed-cost extras. When either
-   * the existing purchase OR the incoming DTO references extras, the
-   * call is blocked with the canonical Arabic message — operators
-   * must create a manual adjustment instead.
+   * CANCELLED: blocked. UNCHANGED in P2.3B.
    *
-   * NOTE: the existing GL-reversal leak on the void path (cancel()
-   * calls reverseByReference, edit() does not) is INTENTIONALLY left
-   * untouched in P2.3A. It will be fixed alongside the proper delta
-   * engine in P2.3B.
+   * RECEIVED + UNPAID (PR-PURCHASES-P2.3B): safe replacement flow.
+   * Mandates an `edit_reason` ≥ 3 chars, runs the allocator OUTSIDE
+   * the transaction so a manual-allocation mismatch fails before any
+   * writes, then in ONE transaction:
+   *   1. SELECT … FOR UPDATE  — lock the row.
+   *   2. Re-check status='received' AND paid_amount = 0
+   *      AND replaced_by_purchase_id IS NULL (defensive race guard).
+   *   3. SELECT fn_void_purchase(old_id, userId, edit_reason)
+   *      — reverses stock + sets old status='cancelled'.
+   *      No cash payments exist (paid_amount=0), so the cashbox
+   *      reversal section of the SP is a no-op — no double-reverse
+   *      risk against step 4.
+   *   4. posting.reverseByReference('purchase', old_id, …)
+   *      — inverts the receive-side journal_entries (DR Inventory /
+   *      CR AP). NO `.catch()` here: the user's directive is "do not
+   *      swallow failures silently in the edit replacement flow;
+   *      rollback is preferred".
+   *   5. this.create(dto, userId, em)  — official create path.
+   *   6. this.receive(new_id, userId, em) — official receive path
+   *      (writes stock_movements, supplier_ledger, supplier balance,
+   *      and posts the NEW journal_entry via postPurchase).
+   *   7. UPDATE links on both rows (replaces_purchase_id +
+   *      replaced_by_purchase_id + edit_reason) — migration 137
+   *      audit metadata.
+   *
+   * PARTIAL / PAID / paid_amount > 0:
+   *   blocked with the P2.3B Arabic message. The refund + top-up
+   *   flow is the P2.3C deliverable.
+   *
+   * Hard guarantees (asserted by the static guardrail in
+   * purchases.service.p2.3b.spec.ts):
+   *   · No direct `cashbox_transactions` / `cashbox_balances` writes
+   *     from edit(). All cashbox movement happens through
+   *     fn_void_purchase and (later) the new receive()'s GL post.
+   *   · No direct `journal_entries` / `journal_lines` writes from
+   *     edit(). All GL movement happens through reverseByReference
+   *     and postPurchase (the official posting service).
+   *   · No supplier_ledger / supplier_payments writes — those flow
+   *     through the official receive() + (later) pay().
+   *   · No `backend/src/provisioning/` touch.
    */
   async edit(
     id: string,
     dto: CreatePurchaseDto & { edit_reason?: string },
     userId: string,
-    reason: string,
+    _reason: string,
   ) {
     const [existing] = await this.ds.query(
       `SELECT * FROM purchases WHERE id = $1`,
@@ -709,34 +768,143 @@ export class PurchasesService {
       });
     }
 
-    // ── RECEIVED / PARTIAL / PAID — block when extras are involved
-    // before touching fn_void_purchase. P2.3A defers received/paid
-    // landed-cost edits to a future delta engine (P2.3B).
-    const [hasExisting] = await this.ds.query(
-      `SELECT 1 AS has FROM purchase_extra_costs WHERE purchase_id = $1 LIMIT 1`,
-      [id],
-    );
-    const dtoHasExtras = (dto.extra_costs ?? []).length > 0;
-    if (hasExisting || dtoHasExtras) {
+    // ── PR-PURCHASES-P2.3B — paid / partial / paid_amount > 0 stay
+    // BLOCKED until the P2.3C refund + top-up flow ships. Defensive
+    // `paid_amount > 0` check covers the edge case where status is
+    // somehow still 'received' but a payment has landed.
+    const paidAmount = Number(existing.paid_amount ?? 0);
+    if (
+      existing.status === 'partial'
+      || existing.status === 'paid'
+      || paidAmount > 0
+    ) {
       throw new BadRequestException(
-        'لا يمكن تعديل مصاريف فاتورة مشتريات مستلمة أو مدفوعة حاليًا. أنشئ تسوية مخصصة أو تواصل مع المدير.',
+        'الفاتورة مسددة جزئيًا أو كليًا. التعديل بعد بدء السداد يحتاج خطوة استرداد أو دفعة إضافية، وسيتم تنفيذه في المرحلة القادمة.',
       );
     }
 
-    // Legacy non-extras path: void via SP, then create a new purchase.
-    await this.ds.query(`SELECT fn_void_purchase($1, $2, $3)`, [
-      id,
-      userId,
-      reason,
-    ]);
-    const tagged = {
-      ...dto,
-      notes: [dto.notes, `تعديل لفاتورة المشتريات رقم ${id}`]
-        .filter(Boolean)
-        .join(' — '),
-    };
-    const created = await this.create(tagged, userId);
-    return { replaced: id, purchase: created };
+    // PR-PURCHASES-P2.3B — already-replaced guard. A purchase that
+    // was itself replaced by an earlier safe-edit cannot be edited
+    // again; the operator must work on the latest link in the chain.
+    if (existing.replaced_by_purchase_id) {
+      throw new BadRequestException(
+        'هذه الفاتورة تم تبديلها بفاتورة مصححة بالفعل. عدّل الفاتورة الأحدث في السلسلة.',
+      );
+    }
+
+    // PR-PURCHASES-P2.3B — require an operator reason. The
+    // `reason` controller default ('تعديل فاتورة مشتريات' from the
+    // controller) is too generic to be useful in audit; on the new
+    // path the operator must supply something specific via
+    // `dto.edit_reason`.
+    const editReason = (dto.edit_reason ?? '').trim();
+    if (editReason.length < 3) {
+      throw new BadRequestException(
+        'سبب التعديل مطلوب (3 أحرف على الأقل).',
+      );
+    }
+
+    // PR-PURCHASES-P2.3B — received + unpaid safe replacement flow.
+    // Allocator runs BEFORE the transaction so a manual-allocation
+    // mismatch surfaces before we touch any row.
+    this.runAllocatorOrThrow(dto);
+
+    return this.ds.transaction(async (em) => {
+      // 1. Lock the row. Re-read everything we depend on so a race
+      //    against pay() / cancel() can't slip through.
+      const [locked] = await em.query(
+        `SELECT id, status, paid_amount, replaced_by_purchase_id
+           FROM purchases WHERE id = $1 FOR UPDATE`,
+        [id],
+      );
+      if (!locked) throw new NotFoundException(`Purchase ${id} not found`);
+      const lockedPaid = Number(locked.paid_amount ?? 0);
+      if (locked.status !== 'received' || lockedPaid > 0) {
+        throw new BadRequestException(
+          'الفاتورة مسددة جزئيًا أو كليًا. التعديل بعد بدء السداد يحتاج خطوة استرداد أو دفعة إضافية، وسيتم تنفيذه في المرحلة القادمة.',
+        );
+      }
+      if (locked.replaced_by_purchase_id) {
+        throw new BadRequestException(
+          'هذه الفاتورة تم تبديلها بفاتورة مصححة بالفعل. عدّل الفاتورة الأحدث في السلسلة.',
+        );
+      }
+
+      // 2. Reverse stock + sets old status='cancelled'. fn_void_purchase
+      //    has a no-op cashbox section when there are no cash payments
+      //    (we just locked paid_amount=0 above).
+      await em.query(`SELECT fn_void_purchase($1, $2, $3)`, [
+        id,
+        userId,
+        editReason,
+      ]);
+
+      // 3. Reverse the receive-side journal_entry. NO `.catch()` —
+      //    a reversal failure must roll back the whole flow per the
+      //    user's directive. When `posting` isn't wired (DI optional
+      //    in tests) we skip; the transactional contract is still
+      //    correct because no JE existed in that scenario either.
+      if (this.posting) {
+        const res = (await this.posting.reverseByReference(
+          'purchase',
+          id,
+          editReason,
+          userId,
+          em,
+        )) as any;
+        if (res && res.error) {
+          throw new BadRequestException(
+            `فشل عكس قيد المشتريات: ${res.error}`,
+          );
+        }
+      }
+
+      // 4. Create the replacement purchase through the OFFICIAL
+      //    create() path (inside our transaction).
+      const tagged = {
+        ...dto,
+        notes: [dto.notes, `تعديل لفاتورة المشتريات رقم ${id}`]
+          .filter(Boolean)
+          .join(' — '),
+      };
+      const created = await this.create(tagged, userId, em);
+      const newId = (created as any).id as string;
+
+      // 5. Receive the replacement through the OFFICIAL receive()
+      //    path. This writes the new stock_movements, supplier_ledger,
+      //    supplier balance, and posts the new journal_entry via
+      //    postPurchase. No direct ledger writes from edit().
+      await this.receive(newId, userId, em);
+
+      // 6. Wire the audit-trail links (migration 137 columns).
+      //    fn_void_purchase already set status='cancelled' on the
+      //    old row; we layer the reason + forward link.
+      await em.query(
+        `UPDATE purchases
+            SET edit_reason             = $2,
+                replaced_by_purchase_id = $3,
+                updated_at              = NOW()
+          WHERE id = $1`,
+        [id, editReason, newId],
+      );
+      await em.query(
+        `UPDATE purchases
+            SET replaces_purchase_id = $2,
+                updated_at           = NOW()
+          WHERE id = $1`,
+        [newId, id],
+      );
+
+      return {
+        replaced: id,
+        purchase: created,
+        replacement: {
+          new_purchase_id: newId,
+          replaces_purchase_id: id,
+          edit_reason: editReason,
+        },
+      };
+    });
   }
 
   // --------------------------------------------------------------------------

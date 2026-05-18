@@ -21,7 +21,6 @@ import {
   screen,
   fireEvent,
   waitFor,
-  within,
 } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { EditPurchaseModal } from '../Purchases';
@@ -150,11 +149,10 @@ const DRAFT_DETAIL = {
   ],
 };
 
-const RECEIVED_DETAIL = {
-  ...DRAFT_DETAIL,
-  id: 'pur-recv',
-  status: 'received' as const,
-};
+// RECEIVED_DETAIL was used by the removed tests 5/6 which P2.3B has
+// superseded; its coverage now lives in
+// EditPurchaseModal.p2.3b.test.tsx. Kept removed to silence the
+// unused-var lint warning.
 
 function renderModal() {
   const qc = new QueryClient({
@@ -237,34 +235,12 @@ describe('EditPurchaseModal P2.3A — draft', () => {
   });
 });
 
-describe('EditPurchaseModal P2.3A — received with extras', () => {
-  it('5. shows the blocking Arabic banner instead of LandedCostsSection', async () => {
-    getMock.mockResolvedValue(RECEIVED_DETAIL);
-    renderModal();
-    const banner = await screen.findByTestId('edit-landed-block-banner');
-    expect(banner).toHaveTextContent(
-      'لا يمكن تعديل مصاريف فاتورة مشتريات مستلمة أو مدفوعة حاليًا.',
-    );
-    expect(banner).toHaveTextContent(
-      'أنشئ تسوية مخصصة أو تواصل مع المدير.',
-    );
-  });
-
-  it('6. does NOT mount LandedCostsSection and disables save', async () => {
-    getMock.mockResolvedValue(RECEIVED_DETAIL);
-    renderModal();
-    await screen.findByTestId('edit-landed-readonly');
-    expect(screen.queryByTestId('landed-costs-section')).toBeNull();
-    expect(screen.queryByTestId('landed-costs-add-row')).toBeNull();
-    // Read-only table renders the existing extra row.
-    const ro = screen.getByTestId('edit-landed-readonly');
-    expect(within(ro).getByText('نقل من القاهرة')).toBeInTheDocument();
-    // Save is blocked even before reason is filled — defensive: the
-    // non-draft + landed-blocked path keeps it disabled regardless.
-    const submit = screen.getByTestId('edit-purchase-submit') as HTMLButtonElement;
-    expect(submit).toBeDisabled();
-  });
-});
+// NOTE: P2.3A tests 5 + 6 (received-with-extras blocking banner)
+// have been SUPERSEDED by P2.3B's safe-replacement frontend flow.
+// The new coverage lives in `EditPurchaseModal.p2.3b.test.tsx`:
+// received+unpaid renders the replacement warning + lets the
+// operator edit extras; only paid/partial/cancelled/already-replaced
+// surface the blocking banner.
 
 describe('EditPurchaseModal P3.1 — pricing suggestions', () => {
   it('7. toggling the pricing-tag button surfaces the suggestion panel', async () => {

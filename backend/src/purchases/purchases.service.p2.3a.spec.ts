@@ -73,9 +73,9 @@ function draftRow(overrides: Record<string, any> = {}) {
   };
 }
 
-function receivedRow(overrides: Record<string, any> = {}) {
-  return draftRow({ status: 'received', ...overrides });
-}
+// receivedRow was used by tests 6/7/8 which P2.3B has superseded; its
+// coverage now lives in purchases.service.p2.3b.spec.ts. Kept removed
+// to silence the unused-var lint warning.
 
 describe('PurchasesService.edit — P2.3A draft landed-cost path', () => {
   it('1. adds a capitalized extra cost and recalculates landed unit_cost', async () => {
@@ -307,101 +307,11 @@ describe('PurchasesService.edit — P2.3A draft landed-cost path', () => {
     }
   });
 
-  it('6. received purchase with existing extras blocks BEFORE fn_void_purchase', async () => {
-    const { service, calls } = await makeService({
-      responses: [
-        [receivedRow()],            // SELECT * FROM purchases
-        [{ has: 1 }],               // SELECT 1 FROM purchase_extra_costs
-      ],
-    });
-
-    await expect(
-      service.edit(
-        PURCHASE,
-        {
-          supplier_id: SUPPLIER,
-          warehouse_id: WAREHOUSE,
-          items: [{ variant_id: V1, quantity: 1, unit_cost: 100 }],
-        } as any,
-        USER,
-        'reason',
-      ),
-    ).rejects.toMatchObject({
-      message:
-        'لا يمكن تعديل مصاريف فاتورة مشتريات مستلمة أو مدفوعة حاليًا. أنشئ تسوية مخصصة أو تواصل مع المدير.',
-    });
-
-    // fn_void_purchase must NOT have run.
-    expect(
-      findAll(calls, /fn_void_purchase/),
-    ).toHaveLength(0);
-  });
-
-  it('7. paid purchase with dto.extra_costs blocks BEFORE fn_void_purchase', async () => {
-    const { service, calls } = await makeService({
-      responses: [
-        [receivedRow({ status: 'paid' })], // SELECT * FROM purchases
-        [],                                // SELECT 1 FROM purchase_extra_costs (none)
-      ],
-    });
-
-    await expect(
-      service.edit(
-        PURCHASE,
-        {
-          supplier_id: SUPPLIER,
-          warehouse_id: WAREHOUSE,
-          items: [{ variant_id: V1, quantity: 1, unit_cost: 100 }],
-          extra_costs: [
-            {
-              cost_type: 'transport',
-              amount: 50,
-              capitalize_to_inventory: true,
-              allocation_method: 'by_value',
-            },
-          ],
-        } as any,
-        USER,
-        'reason',
-      ),
-    ).rejects.toMatchObject({
-      message:
-        'لا يمكن تعديل مصاريف فاتورة مشتريات مستلمة أو مدفوعة حاليًا. أنشئ تسوية مخصصة أو تواصل مع المدير.',
-    });
-
-    expect(findAll(calls, /fn_void_purchase/)).toHaveLength(0);
-  });
-
-  it('8. received purchase WITHOUT extras still uses legacy void+create path', async () => {
-    const { service, calls } = await makeService({
-      responses: [
-        [receivedRow()],                     // SELECT * FROM purchases
-        [],                                  // SELECT 1 FROM purchase_extra_costs (none)
-        [],                                  // SELECT fn_void_purchase
-        // create() path inside the same call:
-        [{ id: 'new-pur', purchase_no: 'PO-2026-000099' }], // INSERT purchases
-        [],                                  // INSERT purchase_items
-      ],
-    });
-
-    await service.edit(
-      PURCHASE,
-      {
-        supplier_id: SUPPLIER,
-        warehouse_id: WAREHOUSE,
-        items: [{ variant_id: V1, quantity: 1, unit_cost: 100 }],
-      } as any,
-      USER,
-      'legacy non-extras edit',
-    );
-
-    // fn_void_purchase MUST have run (legacy path preserved).
-    expect(findAll(calls, /SELECT fn_void_purchase/)).toHaveLength(1);
-    // And create() inserted the replacement.
-    expect(
-      findAll(calls, /INSERT INTO purchases\b/),
-    ).toHaveLength(1);
-  });
+  // NOTE: P2.3A tests 6, 7, 8 (received/paid extras-block and legacy
+  // non-extras void+create) have been SUPERSEDED by P2.3B's safe
+  // replacement flow. They live in `purchases.service.p2.3b.spec.ts`
+  // under the new shape: received+unpaid is ALLOWED (no extras block),
+  // partial/paid stay BLOCKED with the new Arabic message.
 
   it('9. draft landed-cost edit does NOT call fn_void_purchase', async () => {
     const { service, calls } = await makeService({

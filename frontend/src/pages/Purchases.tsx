@@ -1877,6 +1877,34 @@ export function EditPurchaseModal({
 
   const isDraft = detail?.status === 'draft';
 
+  // PR-PURCHASES-P2.3B — derive the edit path. Only ONE of these is
+  // true at a time. The save mutation + footer button + body banner
+  // each read this flag instead of recomputing.
+  const detailPaid = Number((detail as any)?.paid_amount ?? 0);
+  const isPaidOrPartial =
+    detail?.status === 'paid'
+    || detail?.status === 'partial'
+    || detailPaid > 0;
+  const isCancelled = detail?.status === 'cancelled';
+  const isAlreadyReplaced = !!(detail as any)?.replaced_by_purchase_id;
+  const isReplacementSafe =
+    !!detail
+    && detail.status === 'received'
+    && !isPaidOrPartial
+    && !isAlreadyReplaced;
+  const isBlocked = !!detail && !isDraft && !isReplacementSafe;
+  // Precedence: already-replaced gives the operator the most
+  // actionable hint ("go edit the newer row"), so it wins over the
+  // generic "cancelled" message even when both apply (a replaced row
+  // is always cancelled).
+  const blockedMessage = isAlreadyReplaced
+    ? 'هذه الفاتورة تم تبديلها بفاتورة مصححة بالفعل. عدّل الفاتورة الأحدث في السلسلة.'
+    : isCancelled
+      ? 'الفاتورة ملغاة — لا يمكن تعديلها.'
+      : isPaidOrPartial
+        ? 'الفاتورة مسددة جزئيًا أو كليًا. التعديل بعد بدء السداد يحتاج خطوة استرداد أو دفعة إضافية، وسيتم تنفيذه في المرحلة القادمة.'
+        : '';
+
   // PR-PURCHASES-P2.3A — preview the same allocation the backend will
   // run on save (draft only). Non-draft renders extras read-only and
   // does not need the live preview.
@@ -1915,13 +1943,12 @@ export function EditPurchaseModal({
   const extraCostErrors = preview.errors;
   const hasExtraErrors = Object.keys(extraCostErrors).length > 0;
 
-  // PR-PURCHASES-P2.3A — non-draft purchases with extras are blocked
-  // from any landed-cost mutation. The flag covers both pre-existing
-  // extras on the loaded purchase and any extras the operator
-  // attempted to add through the modal.
+  // PR-PURCHASES-P2.3B — extras can now be edited on the
+  // received+unpaid safe-replacement path. We only keep the read-only
+  // extras view when the purchase is `isBlocked` (paid/partial/
+  // cancelled/already-replaced) — those paths can't save anything
+  // anyway.
   const detailHasExtras = ((detail as any)?.extra_costs ?? []).length > 0;
-  const nonDraftLandedBlocked =
-    !!detail && !isDraft && (detailHasExtras || extraCosts.length > 0);
 
   const cleanExtraCosts = useMemo(
     () =>
@@ -1940,20 +1967,18 @@ export function EditPurchaseModal({
     mutationFn: () => {
       if (items.length === 0)
         return Promise.reject(new Error('يجب وجود صنف واحد على الأقل'));
-      if (detail?.status !== 'draft' && !reason.trim())
-        return Promise.reject(new Error('يجب كتابة سبب التعديل'));
+      if (!isDraft && reason.trim().length < 3)
+        return Promise.reject(
+          new Error('سبب التعديل مطلوب (3 أحرف على الأقل).'),
+        );
       if (hasExtraErrors)
         return Promise.reject(
           new Error(
             'يوجد خطأ في توزيع المصاريف الإضافية — راجع التوزيع اليدوي.',
           ),
         );
-      if (nonDraftLandedBlocked)
-        return Promise.reject(
-          new Error(
-            'لا يمكن تعديل مصاريف فاتورة مشتريات مستلمة أو مدفوعة حاليًا. أنشئ تسوية مخصصة أو تواصل مع المدير.',
-          ),
-        );
+      if (isBlocked)
+        return Promise.reject(new Error(blockedMessage));
       const body: CreatePurchasePayload & { edit_reason?: string } = {
         supplier_id: detail!.supplier_id,
         warehouse_id: detail!.warehouse_id,
@@ -1961,7 +1986,12 @@ export function EditPurchaseModal({
         shipping_cost: shippingCost || undefined,
         discount_amount: discountAmount || undefined,
         tax_amount: taxAmount || undefined,
-        edit_reason: reason || 'تعديل فاتورة مشتريات',
+        // PR-PURCHASES-P2.3B — edit_reason is mandatory for non-draft
+        // (required >= 3 chars by both sides). For drafts the field is
+        // optional and a generic fallback is fine.
+        edit_reason: !isDraft
+          ? reason.trim()
+          : reason.trim() || 'تعديل فاتورة مشتريات',
         items: items.map((it) => ({
           variant_id: it.variant_id,
           quantity: it.quantity,
@@ -1971,19 +2001,36 @@ export function EditPurchaseModal({
           discount: it.discount || 0,
           tax: it.tax || 0,
         })),
-        // Extras only for drafts — non-draft never reaches this branch
-        // because the guard above blocks it.
+        // PR-PURCHASES-P2.3B — extras are allowed on draft AND on the
+        // received+unpaid safe-replacement path (the backend re-runs
+        // the allocator inside the replacement transaction). Only the
+        // blocked paths skip extras.
         extra_costs:
-          isDraft && cleanExtraCosts.length > 0
+          (isDraft || isReplacementSafe) && cleanExtraCosts.length > 0
             ? cleanExtraCosts
             : undefined,
       };
       return purchasesApi.edit(id, body);
     },
-    onSuccess: () => {
-      toast.success('تم حفظ التعديل');
+    onSuccess: (res: any) => {
+      // PR-PURCHASES-P2.3B — surface the replacement explicitly when
+      // it happened so the operator sees that the OLD invoice was
+      // cancelled and a NEW one was issued.
+      if (res?.replacement?.new_purchase_id) {
+        const newNo = res?.purchase?.purchase_no ?? '';
+        toast.success(
+          newNo
+            ? `تم إلغاء الفاتورة وإصدار فاتورة بديلة ${newNo}.`
+            : 'تم إلغاء الفاتورة وإصدار فاتورة بديلة.',
+        );
+      } else {
+        toast.success('تم حفظ التعديل');
+      }
       qc.invalidateQueries({ queryKey: ['purchases'] });
       qc.invalidateQueries({ queryKey: ['purchase-detail', id] });
+      qc.invalidateQueries({ queryKey: ['pricing-history'] });
+      qc.invalidateQueries({ queryKey: ['pricing-landed-impact'] });
+      qc.invalidateQueries({ queryKey: ['sold-profit-products'] });
       onClose();
     },
     onError: (e: any) =>
@@ -2002,12 +2049,15 @@ export function EditPurchaseModal({
               <Pencil className="w-5 h-5 text-amber-500" />
               تعديل فاتورة {detail?.purchase_no || ''}
             </h3>
-            <p className="text-xs text-slate-500 mt-1">
+            <p
+              className="text-xs text-slate-500 mt-1"
+              data-testid="edit-purchase-subtitle"
+            >
               {isDraft
                 ? 'الفاتورة مسودة — سيتم التعديل في نفس السجل.'
-                : detailHasExtras
-                  ? 'الفاتورة مستلمة وتحتوي مصاريف محملة — تعديل المصاريف غير متاح في هذه الواجهة.'
-                  : 'الفاتورة مستلمة — سيُصدر فاتورة جديدة بديلة وتُلغى الحالية مع عكس المخزون والدفعات.'}
+                : isReplacementSafe
+                  ? 'سيتم إلغاء الفاتورة المستلمة الحالية وعكس أثرها ثم إنشاء فاتورة مصححة واستلامها من جديد.'
+                  : blockedMessage}
             </p>
           </div>
           <button className="icon-btn" onClick={onClose} title="إغلاق">
@@ -2309,10 +2359,14 @@ export function EditPurchaseModal({
                 </div>
               </div>
 
-              {/* PR-PURCHASES-P2.3A — landed-cost UI. DRAFT gets the
-                  full editor; non-draft renders extras as read-only
-                  rows with a blocking Arabic banner. */}
-              {isDraft ? (
+              {/* PR-PURCHASES-P2.3B — landed-cost UI:
+                    · DRAFT and RECEIVED+UNPAID get the full editor
+                      (the backend replacement flow re-runs the
+                      allocator inside the same transaction).
+                    · BLOCKED paths (paid / partial / cancelled /
+                      already-replaced) render the existing extras
+                      as read-only with the blocking Arabic banner. */}
+              {isDraft || isReplacementSafe ? (
                 <LandedCostsSection
                   rows={extraCosts}
                   lines={items.map((it) => ({
@@ -2335,8 +2389,7 @@ export function EditPurchaseModal({
                     data-testid="edit-landed-block-banner"
                     className="text-xs font-bold text-rose-700"
                   >
-                    لا يمكن تعديل مصاريف فاتورة مشتريات مستلمة أو مدفوعة حاليًا.
-                    أنشئ تسوية مخصصة أو تواصل مع المدير.
+                    {blockedMessage}
                   </div>
                   <div className="overflow-x-auto border border-rose-100 rounded-lg bg-white">
                     <table className="w-full text-xs">
@@ -2385,10 +2438,35 @@ export function EditPurchaseModal({
                 </div>
               </div>
 
-              {!isDraft && (
+              {/* PR-PURCHASES-P2.3B — operator banner for the
+                  blocked paths. The save button stays disabled
+                  but we surface the exact reason explicitly. */}
+              {isBlocked ? (
+                <div
+                  data-testid="edit-purchase-blocked-banner"
+                  className="rounded-xl border border-rose-200 bg-rose-50/40 p-3 text-xs font-bold text-rose-700"
+                >
+                  {blockedMessage}
+                </div>
+              ) : null}
+
+              {/* PR-PURCHASES-P2.3B — replacement warning + reason
+                  input for the received+unpaid safe path. */}
+              {isReplacementSafe && (
+                <div
+                  data-testid="edit-purchase-replacement-warning"
+                  className="rounded-xl border border-amber-300 bg-amber-50/60 p-3 text-xs text-amber-900 leading-relaxed"
+                >
+                  سيتم إلغاء الفاتورة المستلمة الحالية وعكس أثرها على المخزون
+                  وقيود المشتريات ثم إنشاء فاتورة مصححة واستلامها من جديد.
+                  الفاتورة الحالية لم تُسدَّد جزئيًا أو كليًا، لذلك العملية آمنة
+                  ولن تُنشئ أي حركة خزنة. أدخل سبب التعديل أدناه.
+                </div>
+              )}
+              {!isDraft && !isBlocked && (
                 <div>
                   <label className="text-xs text-slate-600 block mb-1">
-                    سبب التعديل *
+                    سبب التعديل * (3 أحرف على الأقل)
                   </label>
                   <textarea
                     rows={2}
@@ -2396,6 +2474,7 @@ export function EditPurchaseModal({
                     placeholder="مثال: تصحيح كمية / تعديل تكلفة"
                     value={reason}
                     onChange={(e) => setReason(e.target.value)}
+                    data-testid="edit-purchase-reason"
                   />
                 </div>
               )}
@@ -2430,14 +2509,14 @@ export function EditPurchaseModal({
                 save.isPending ||
                 items.length === 0 ||
                 isLoading ||
-                (!isDraft && !reason.trim()) ||
+                (!isDraft && reason.trim().length < 3) ||
                 hasExtraErrors ||
-                nonDraftLandedBlocked
+                isBlocked
               }
               className="btn-primary"
               title={
-                nonDraftLandedBlocked
-                  ? 'لا يمكن تعديل مصاريف فاتورة مشتريات مستلمة أو مدفوعة حاليًا.'
+                isBlocked
+                  ? blockedMessage
                   : hasExtraErrors
                     ? 'يوجد خطأ في توزيع المصاريف الإضافية'
                     : undefined

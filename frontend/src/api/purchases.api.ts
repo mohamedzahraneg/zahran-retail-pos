@@ -28,6 +28,11 @@ export interface Purchase {
   // PR-PURCHASES-P2.1 — landed-cost aggregates (NUMERIC NOT NULL DEFAULT 0).
   extra_costs_capitalized?: string | number;
   extra_costs_non_capitalized?: string | number;
+  // PR-PURCHASES-P2.3B — purchase edit audit metadata (migration 137).
+  // Only set on rows in the edit chain; NULL for pre-P2.3B purchases.
+  replaces_purchase_id?: string | null;
+  replaced_by_purchase_id?: string | null;
+  edit_reason?: string | null;
 }
 
 export interface PurchaseItem {
