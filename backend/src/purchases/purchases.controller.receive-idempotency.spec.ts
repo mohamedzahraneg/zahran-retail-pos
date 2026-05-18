@@ -271,6 +271,7 @@ describe('PurchasesController route-level wiring — PR-FIX-IDEMPOTENCY-STOCK-IN
             cancelReturn: jest.fn(),
             listReturns: jest.fn(),
             getReturn: jest.fn(),
+            getReturnableItems: jest.fn(),
           },
         },
         { provide: IdempotencyCacheService, useValue: {} },
@@ -304,6 +305,13 @@ describe('PurchasesController route-level wiring — PR-FIX-IDEMPOTENCY-STOCK-IN
     //    positive assertion; regression-guarded here.
     expect(hasInterceptor((controller as any).pay)).toBe(true);
 
+    // ── createReturn — PR-P2.4A added the interceptor here so that
+    //    a duplicate POST during a network retry can't double-write
+    //    the multi-stage return (stock + supplier_ledger | cashbox +
+    //    GL). Without an Idempotency-Key header the behavior is
+    //    unchanged.
+    expect(hasInterceptor((controller as any).createReturn)).toBe(true);
+
     // All other PurchasesController POST handlers MUST be undecorated
     // in this PR.
     const undecoratedSiblings: Array<keyof PurchasesController> = [
@@ -311,7 +319,6 @@ describe('PurchasesController route-level wiring — PR-FIX-IDEMPOTENCY-STOCK-IN
       'getOne',
       'create',
       'edit',
-      'createReturn',
       'listReturns',
       'getReturn',
     ];

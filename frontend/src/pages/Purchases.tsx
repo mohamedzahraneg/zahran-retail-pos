@@ -14,6 +14,7 @@ import {
   Pencil,
   Minus,
   Tag,
+  Undo2,
 } from 'lucide-react';
 import {
   purchasesApi,
@@ -35,6 +36,8 @@ import { SupplierSearch } from '@/components/purchases/SupplierSearch';
 import { PurchaseProductSearch } from '@/components/purchases/PurchaseProductSearch';
 import { PurchaseLineEntry } from '@/components/purchases/PurchaseLineEntry';
 import { QuickAddProductModal } from '@/components/purchases/QuickAddProductModal';
+// PR-P2.4A — create-purchase-return modal launched from the row action.
+import { CreatePurchaseReturnModal } from '@/components/purchases/CreatePurchaseReturnModal';
 // PR-PURCHASES-P2.2 — landed-cost UI + preview math.
 import { LandedCostsSection } from '@/components/purchases/LandedCostsSection';
 import type { ExtraCostRow } from '@/components/purchases/landedCostState';
@@ -102,6 +105,8 @@ export default function PurchasesPage() {
   const [detailId, setDetailId] = useState<string | null>(null);
   const [payId, setPayId] = useState<string | null>(null);
   const [editId, setEditId] = useState<string | null>(null);
+  // PR-P2.4A — purchase-return modal launched from the row action below.
+  const [returnPurchaseId, setReturnPurchaseId] = useState<string | null>(null);
   // Cash-flow UX bridge — remember which freshly-created purchases
   // were marked as "كاش" in the create modal. After receive succeeds
   // on one of these, we auto-open PayPurchaseModal with the existing
@@ -366,6 +371,18 @@ export default function PurchasesPage() {
                               <CreditCard className="w-4 h-4" />
                             </button>
                           )}
+                          {(p.status === 'received'
+                            || p.status === 'partial'
+                            || p.status === 'paid') && (
+                            <button
+                              title="إنشاء مرتجع"
+                              data-testid={`return-btn-${p.id}`}
+                              onClick={() => setReturnPurchaseId(p.id)}
+                              className="icon-btn text-orange-600"
+                            >
+                              <Undo2 className="w-4 h-4" />
+                            </button>
+                          )}
                           {canEdit && p.status !== 'cancelled' && (
                             <button
                               title="تعديل"
@@ -445,6 +462,13 @@ export default function PurchasesPage() {
 
       {editId && (
         <EditPurchaseModal id={editId} onClose={() => setEditId(null)} />
+      )}
+
+      {returnPurchaseId && (
+        <CreatePurchaseReturnModal
+          purchaseId={returnPurchaseId}
+          onClose={() => setReturnPurchaseId(null)}
+        />
       )}
     </div>
   );

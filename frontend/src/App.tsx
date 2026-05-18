@@ -15,6 +15,7 @@ import CashDesk from '@/pages/CashDesk';
 import Suppliers from '@/pages/Suppliers';
 import SupplierDetail from '@/pages/SupplierDetail';
 import Purchases from '@/pages/Purchases';
+import PurchaseReturns from '@/pages/PurchaseReturns';
 import StockAdjustments from '@/pages/StockAdjustments';
 import BarcodeLabels from '@/pages/BarcodeLabels';
 import Invoices from '@/pages/Invoices';
@@ -94,6 +95,14 @@ export default function App() {
         <Route path="suppliers" element={<Suppliers />} />
         <Route path="suppliers/:id" element={<SupplierDetail />} />
         <Route path="purchases" element={<Purchases />} />
+        <Route
+          path="purchases/returns"
+          element={
+            <ProtectedRoute permissions={['purchases.view']}>
+              <PurchaseReturns />
+            </ProtectedRoute>
+          }
+        />
         <Route path="stock-adjustments" element={<StockAdjustments />} />
         <Route path="barcode-labels" element={<BarcodeLabels />} />
         <Route path="invoices" element={<Invoices />} />

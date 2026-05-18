@@ -17,6 +17,7 @@ import {
   CreatePurchaseDto,
   ListPurchasesDto,
 } from './dto/purchase.dto';
+import { CreatePurchaseReturnDto } from './dto/purchase-return.dto';
 import { Permissions, Roles } from '../common/decorators/roles.decorator';
 // PR-FIX-IDEMPOTENCY-STOCK-INVENTORY-PATHS (Sprint 4 / PR-11B) —
 // opt-in Idempotency-Key support on POST /purchases/:id/receive.
@@ -35,24 +36,49 @@ export class PurchasesController {
   }
 
   // ---- Returns (declared BEFORE ':id' to win route priority) ----
+  // PR-P2.4A upgraded these in place. Single official namespace:
+  //   GET    /purchases/returns                 (filters: q, supplier_id,
+  //                                               status, from, to)
+  //   GET    /purchases/returns/:id             (enriched detail)
+  //   POST   /purchases/returns                 (4 settlement modes)
+  //   PATCH  /purchases/returns/:id/cancel      (atomic reversal)
+  //   GET    /purchases/:id/returnable-items    (per-item remaining qty)
   @Get('returns')
-  listReturns(@Query('supplier_id') supplierId?: string) {
-    return this.purchases.listReturns(supplierId);
+  @Permissions('purchases.view')
+  listReturns(
+    @Query('q') q?: string,
+    @Query('supplier_id') supplierId?: string,
+    @Query('status') status?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    return this.purchases.listReturns({
+      q,
+      supplier_id: supplierId,
+      status,
+      from,
+      to,
+    });
   }
 
   @Get('returns/:id')
+  @Permissions('purchases.view')
   getReturn(@Param('id', ParseUUIDPipe) id: string) {
     return this.purchases.getReturn(id);
   }
 
   @Post('returns')
-  @Roles('admin', 'manager', 'stock_keeper', 'accountant')
-  createReturn(@Body() dto: any, @Req() req: any) {
-    return this.purchases.createReturn(dto, req.user?.id);
+  @Permissions('purchases.return')
+  @UseInterceptors(IdempotencyInterceptor)
+  createReturn(
+    @Body() dto: CreatePurchaseReturnDto,
+    @Req() req: any,
+  ) {
+    return this.purchases.createReturn(dto, req.user?.id ?? req.user?.userId);
   }
 
   @Patch('returns/:id/cancel')
-  @Roles('admin', 'manager')
+  @Permissions('purchases.return')
   // PR-FIX-IDEMPOTENCY-VOID-CANCEL-REFUND-FAMILY (Sprint 4 / PR-11E) —
   // P0 in this PR. Multi-stage reversal: rebuilds stock + INSERTs
   // reversing stock_movements + UPDATE purchase_returns is_void +
@@ -61,7 +87,16 @@ export class PurchasesController {
   // Without an Idempotency-Key header, behavior is exactly unchanged.
   @UseInterceptors(IdempotencyInterceptor)
   cancelReturn(@Param('id', ParseUUIDPipe) id: string, @Req() req: any) {
-    return this.purchases.cancelReturn(id, req.user?.id);
+    return this.purchases.cancelReturn(id, req.user?.id ?? req.user?.userId);
+  }
+
+  // GET /purchases/:id/returnable-items — used by the
+  // "create purchase return" modal to show per-item remaining qty
+  // (received − sum(posted returns)).
+  @Get(':id/returnable-items')
+  @Permissions('purchases.view')
+  returnableItems(@Param('id', ParseUUIDPipe) id: string) {
+    return this.purchases.getReturnableItems(id);
   }
 
   // ── Purchases P1 (PR-PURCHASES-P1) — read-only helpers used by the

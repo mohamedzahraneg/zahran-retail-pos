@@ -10,6 +10,7 @@ import {
   CreatePurchaseDto,
   ListPurchasesDto,
 } from './dto/purchase.dto';
+import { CreatePurchaseReturnDto } from './dto/purchase-return.dto';
 import { AccountingPostingService } from '../chart-of-accounts/posting.service';
 import {
   allocateLandedCosts,
@@ -908,17 +909,70 @@ export class PurchasesService {
   }
 
   // --------------------------------------------------------------------------
-  //  Purchase Returns (إرجاع للمورد)
+  //  Purchase Returns (إرجاع للمورد) — PR-P2.4A
+  //
+  //  Upgraded the existing /purchases/returns* methods in place (no
+  //  second namespace, no second module). Adds four settlement modes,
+  //  per-item returnable-qty enforcement (received − sum(posted)),
+  //  cashbox refund-in via fn_record_cashbox_txn, and GL via
+  //  PostingService.postPurchaseReturn.
+  //
+  //  Write footprint (pinned by spec):
+  //   · INSERT INTO purchase_returns / purchase_return_items
+  //   · UPDATE stock + INSERT INTO stock_movements
+  //   · UPDATE suppliers + INSERT INTO supplier_ledger  (supplier_credit)
+  //   · SELECT fn_record_cashbox_txn(...)                (cash/bank_refund)
+  //   · GL only via posting.postPurchaseReturn / reverseByReference
+  //   · NO direct journal_entries/journal_lines/cashbox_transactions writes.
   // --------------------------------------------------------------------------
-  listReturns(supplierId?: string) {
+  listReturns(filters?: {
+    q?: string;
+    supplier_id?: string;
+    status?: string;
+    from?: string;
+    to?: string;
+  }) {
     const params: any[] = [];
-    let where = '';
-    if (supplierId) {
-      params.push(supplierId);
-      where = `WHERE supplier_id = $1`;
+    const conds: string[] = [];
+    if (filters?.q && filters.q.trim()) {
+      params.push(`%${filters.q.trim()}%`);
+      const i = params.length;
+      conds.push(
+        `(pr.return_no ILIKE $${i}::text OR s.name ILIKE $${i}::text)`,
+      );
     }
+    if (filters?.supplier_id) {
+      params.push(filters.supplier_id);
+      conds.push(`pr.supplier_id = $${params.length}::uuid`);
+    }
+    if (filters?.status) {
+      params.push(filters.status);
+      conds.push(`pr.status = $${params.length}`);
+    }
+    if (filters?.from) {
+      params.push(filters.from);
+      conds.push(`pr.return_date >= $${params.length}::date`);
+    }
+    if (filters?.to) {
+      params.push(filters.to);
+      conds.push(`pr.return_date <= $${params.length}::date`);
+    }
+    const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
     return this.ds.query(
-      `SELECT * FROM v_purchase_returns_summary ${where} LIMIT 200`,
+      `SELECT pr.id, pr.return_no, pr.return_date, pr.supplier_id,
+              s.name AS supplier_name,
+              pr.warehouse_id, w.name_ar AS warehouse_name,
+              pr.total_amount, pr.status, pr.reason,
+              pr.settlement_type, pr.refund_amount, pr.cashbox_id,
+              pr.posted_at, pr.cancelled_at,
+              (SELECT COUNT(*) FROM purchase_return_items pri
+                WHERE pri.purchase_return_id = pr.id)::int AS items_count
+         FROM purchase_returns pr
+         LEFT JOIN suppliers s  ON s.id = pr.supplier_id
+         LEFT JOIN warehouses w ON w.id = pr.warehouse_id
+         ${where}
+         ORDER BY pr.return_date DESC, pr.created_at DESC
+         LIMIT 500`,
       params,
     );
   }
@@ -926,144 +980,372 @@ export class PurchasesService {
   async getReturn(id: string) {
     const [header] = await this.ds.query(
       `SELECT pr.*, s.name AS supplier_name, w.name_ar AS warehouse_name,
-              u.full_name AS created_by_name
+              cb.name AS cashbox_name, cb.kind AS cashbox_kind,
+              u_created.full_name    AS created_by_name,
+              u_posted.full_name     AS posted_by_name,
+              u_cancelled.full_name  AS cancelled_by_name
          FROM purchase_returns pr
-         LEFT JOIN suppliers s ON s.id = pr.supplier_id
-         LEFT JOIN warehouses w ON w.id = pr.warehouse_id
-         LEFT JOIN users u ON u.id = pr.created_by
+         LEFT JOIN suppliers s            ON s.id = pr.supplier_id
+         LEFT JOIN warehouses w           ON w.id = pr.warehouse_id
+         LEFT JOIN cashboxes cb           ON cb.id = pr.cashbox_id
+         LEFT JOIN users u_created        ON u_created.id = pr.created_by
+         LEFT JOIN users u_posted         ON u_posted.id = pr.posted_by
+         LEFT JOIN users u_cancelled      ON u_cancelled.id = pr.cancelled_by
         WHERE pr.id = $1`,
       [id],
     );
-    if (!header) throw new NotFoundException('Return not found');
+    if (!header) throw new NotFoundException(`Purchase return ${id} not found`);
     const items = await this.ds.query(
-      `SELECT pri.*, pv.sku, p.name_ar AS product_name
+      `SELECT pri.*, pv.sku, pv.barcode,
+              p.id AS product_id, p.name_ar AS product_name,
+              c.name_ar AS color_name, s.size_label AS size_label
          FROM purchase_return_items pri
          JOIN product_variants pv ON pv.id = pri.variant_id
-         JOIN products p ON p.id = pv.product_id
+         JOIN products p          ON p.id = pv.product_id
+         LEFT JOIN colors c       ON c.id = pv.color_id
+         LEFT JOIN sizes s        ON s.id = pv.size_id
         WHERE pri.purchase_return_id = $1
-        ORDER BY p.name_ar`,
+        ORDER BY p.name_ar, pv.sku`,
       [id],
     );
     return { ...header, items };
   }
 
   /**
-   * Create a supplier return. Decrements stock, writes stock_movements,
-   * reduces supplier balance (we owe them less), writes a supplier_ledger
-   * row (direction = 'out') and posts the return.
+   * Per-item returnable qty for a parent purchase:
+   *   received − sum(posted purchase_return_items.quantity for same purchase_item_id)
    */
-  async createReturn(
-    dto: {
-      supplier_id: string;
-      warehouse_id: string;
-      purchase_id?: string;
-      return_date?: string;
-      reason?: string;
-      notes?: string;
-      items: Array<{
-        variant_id: string;
-        quantity: number;
-        unit_cost: number;
-      }>;
-    },
-    userId: string,
-  ) {
+  async getReturnableItems(purchaseId: string) {
+    const [purchase] = await this.ds.query(
+      `SELECT id, purchase_no, supplier_id, warehouse_id, status
+         FROM purchases WHERE id = $1`,
+      [purchaseId],
+    );
+    if (!purchase) {
+      throw new NotFoundException(`Purchase ${purchaseId} not found`);
+    }
+    if (purchase.status === 'draft' || purchase.status === 'cancelled') {
+      throw new BadRequestException(
+        'لا يمكن إنشاء مرتجع لفاتورة مسودة أو ملغاة',
+      );
+    }
+    const items = await this.ds.query(
+      `SELECT
+         pi.id                          AS purchase_item_id,
+         pi.variant_id,
+         pv.sku, pv.barcode,
+         p.id                           AS product_id,
+         p.name_ar                      AS product_name,
+         c.name_ar                      AS color_name,
+         s.size_label                   AS size_label,
+         pi.quantity                    AS received,
+         pi.unit_cost                   AS unit_cost,
+         pi.base_unit_cost              AS base_unit_cost,
+         COALESCE((
+           SELECT SUM(pri.quantity)
+             FROM purchase_return_items pri
+             JOIN purchase_returns pr ON pr.id = pri.purchase_return_id
+            WHERE pri.purchase_item_id = pi.id
+              AND pr.status = 'posted'
+         ), 0)::numeric(12,3)           AS already_returned,
+         (pi.quantity - COALESCE((
+           SELECT SUM(pri.quantity)
+             FROM purchase_return_items pri
+             JOIN purchase_returns pr ON pr.id = pri.purchase_return_id
+            WHERE pri.purchase_item_id = pi.id
+              AND pr.status = 'posted'
+         ), 0))::numeric(12,3)          AS returnable
+        FROM purchase_items pi
+        JOIN product_variants pv ON pv.id = pi.variant_id
+        JOIN products p          ON p.id = pv.product_id
+        LEFT JOIN colors c       ON c.id = pv.color_id
+        LEFT JOIN sizes s        ON s.id = pv.size_id
+       WHERE pi.purchase_id = $1
+       ORDER BY p.name_ar, pv.sku`,
+      [purchaseId],
+    );
+    return {
+      purchase: {
+        id: purchase.id,
+        purchase_no: purchase.purchase_no,
+        supplier_id: purchase.supplier_id,
+        warehouse_id: purchase.warehouse_id,
+        status: purchase.status,
+      },
+      items,
+    };
+  }
+
+  /**
+   * Create + post a purchase return atomically. 4 settlement modes:
+   *  · supplier_credit  → AP credit (DR 211 / CR 1131) + supplier_ledger 'out'
+   *  · cash_refund      → cash cashbox refund-in (DR cash COA / CR 1131)
+   *  · bank_refund      → non-cash cashbox refund-in (DR bank COA / CR 1131)
+   *  · no_settlement    → stock-only return (no ledger, no cashbox, no GL)
+   *
+   * Hard rule for P2.4A: cash/bank refund_amount === total_amount.
+   */
+  async createReturn(dto: CreatePurchaseReturnDto, userId: string) {
+    const settlementType = dto.settlement_type;
+    if (
+      settlementType === 'cash_refund'
+      || settlementType === 'bank_refund'
+    ) {
+      if (!dto.cashbox_id) {
+        throw new BadRequestException(
+          'يجب تحديد الخزنة للاسترداد النقدي أو البنكي',
+        );
+      }
+      if (dto.refund_amount === undefined || dto.refund_amount === null) {
+        throw new BadRequestException(
+          'يجب تحديد مبلغ الاسترداد للاسترداد النقدي أو البنكي',
+        );
+      }
+    } else {
+      if (dto.cashbox_id) {
+        throw new BadRequestException(
+          'لا تُحدد خزنة لطرق التسوية بخلاف الاسترداد النقدي/البنكي',
+        );
+      }
+      if (dto.refund_amount !== undefined && dto.refund_amount !== null) {
+        throw new BadRequestException(
+          'لا تُحدد مبلغ استرداد لطرق التسوية بخلاف الاسترداد النقدي/البنكي',
+        );
+      }
+    }
+    if (!dto.reason || dto.reason.trim().length < 3) {
+      throw new BadRequestException('يجب كتابة سبب المرتجع (3 أحرف على الأقل)');
+    }
     if (!dto.items?.length) {
       throw new BadRequestException('يجب إضافة صنف واحد على الأقل');
     }
+    const totalAmount = +dto.items
+      .reduce((s, i) => s + Number(i.quantity) * Number(i.unit_cost), 0)
+      .toFixed(2);
+    if (totalAmount < 0.01) {
+      throw new BadRequestException('قيمة المرتجع يجب أن تكون أكبر من صفر');
+    }
+    if (
+      (settlementType === 'cash_refund' || settlementType === 'bank_refund')
+      && Math.abs(Number(dto.refund_amount) - totalAmount) > 0.005
+    ) {
+      throw new BadRequestException(
+        'مبلغ الاسترداد يجب أن يساوي إجمالي قيمة المرتجع في هذه المرحلة',
+      );
+    }
+
+    if (dto.purchase_id) {
+      const [parent] = await this.ds.query(
+        `SELECT id, status FROM purchases WHERE id = $1`,
+        [dto.purchase_id],
+      );
+      if (!parent) {
+        throw new NotFoundException(`Purchase ${dto.purchase_id} not found`);
+      }
+      if (parent.status === 'draft' || parent.status === 'cancelled') {
+        throw new BadRequestException(
+          'لا يمكن إنشاء مرتجع لفاتورة مسودة أو ملغاة',
+        );
+      }
+    }
+
+    if (dto.cashbox_id) {
+      const [cb] = await this.ds.query(
+        `SELECT id, kind FROM cashboxes WHERE id = $1`,
+        [dto.cashbox_id],
+      );
+      if (!cb) {
+        throw new BadRequestException('الخزنة المحددة غير موجودة');
+      }
+      if (cb.kind === 'cash' && settlementType === 'bank_refund') {
+        throw new BadRequestException(
+          'لا يمكن استخدام خزنة نقدية لاسترداد بنكي',
+        );
+      }
+      if (cb.kind && cb.kind !== 'cash' && settlementType === 'cash_refund') {
+        throw new BadRequestException(
+          'لا يمكن استخدام حساب بنكي/محفظة لاسترداد نقدي',
+        );
+      }
+    }
 
     return this.ds.transaction(async (m) => {
-      const total = dto.items.reduce(
-        (s, i) => s + i.quantity * i.unit_cost,
-        0,
-      );
-
       const [ret] = await m.query(
         `INSERT INTO purchase_returns
             (purchase_id, supplier_id, warehouse_id, return_date,
-             total_amount, reason, notes, created_by)
-         VALUES ($1,$2,$3, COALESCE($4::date, CURRENT_DATE), $5, $6, $7, $8)
+             total_amount, reason, notes, status,
+             settlement_type, refund_amount, cashbox_id,
+             posted_at, posted_by, created_by)
+         VALUES ($1,$2,$3, COALESCE($4::date, CURRENT_DATE),
+                 $5, $6, $7, 'posted',
+                 $8, $9, $10,
+                 NOW(), $11, $11)
          RETURNING *`,
         [
           dto.purchase_id ?? null,
           dto.supplier_id,
           dto.warehouse_id,
           dto.return_date ?? null,
-          total,
-          dto.reason ?? null,
-          dto.notes ?? null,
+          totalAmount,
+          dto.reason.trim(),
+          dto.notes?.trim() || null,
+          settlementType,
+          settlementType === 'cash_refund' || settlementType === 'bank_refund'
+            ? totalAmount
+            : null,
+          dto.cashbox_id ?? null,
           userId,
         ],
       );
+      const returnId = ret.id as string;
 
       for (const it of dto.items) {
-        const lineTotal = it.quantity * it.unit_cost;
+        if (it.purchase_item_id) {
+          const [pi] = await m.query(
+            `SELECT pi.id, pi.purchase_id, pi.variant_id, pi.quantity
+               FROM purchase_items pi
+              WHERE pi.id = $1 FOR UPDATE`,
+            [it.purchase_item_id],
+          );
+          if (!pi) {
+            throw new BadRequestException(
+              `بند المشتريات غير موجود: ${it.purchase_item_id}`,
+            );
+          }
+          if (dto.purchase_id && pi.purchase_id !== dto.purchase_id) {
+            throw new BadRequestException('بند المشتريات لا ينتمي لهذه الفاتورة');
+          }
+          if (pi.variant_id !== it.variant_id) {
+            throw new BadRequestException('الصنف غير مطابق لبند المشتريات');
+          }
+          const [prevRow] = await m.query(
+            `SELECT COALESCE(SUM(pri.quantity), 0)::numeric(12,3) AS already
+               FROM purchase_return_items pri
+               JOIN purchase_returns pr ON pr.id = pri.purchase_return_id
+              WHERE pri.purchase_item_id = $1 AND pr.status = 'posted'`,
+            [it.purchase_item_id],
+          );
+          const alreadyReturned = Number(prevRow?.already ?? 0);
+          const received = Number(pi.quantity);
+          const returnable = received - alreadyReturned;
+          if (Number(it.quantity) > returnable + 0.0005) {
+            throw new BadRequestException(
+              `الكمية المطلوبة (${it.quantity}) تتجاوز الكمية القابلة للإرجاع (${returnable.toFixed(3)}) للصنف ${it.variant_id}`,
+            );
+          }
+        }
 
-        // verify enough stock
         const [stockRow] = await m.query(
           `SELECT quantity_on_hand FROM stock
             WHERE variant_id = $1 AND warehouse_id = $2 FOR UPDATE`,
           [it.variant_id, dto.warehouse_id],
         );
         const onHand = Number(stockRow?.quantity_on_hand ?? 0);
-        if (onHand < it.quantity) {
+        if (onHand < Number(it.quantity)) {
           throw new BadRequestException(
             `الكمية غير كافية للصنف ${it.variant_id} (المتاح ${onHand})`,
           );
         }
 
+        const lineTotal = +(
+          Number(it.quantity) * Number(it.unit_cost)
+        ).toFixed(2);
+
         await m.query(
           `INSERT INTO purchase_return_items
-              (purchase_return_id, variant_id, quantity, unit_cost, line_total)
-           VALUES ($1,$2,$3,$4,$5)`,
-          [ret.id, it.variant_id, it.quantity, it.unit_cost, lineTotal],
+              (purchase_return_id, purchase_item_id, variant_id,
+               quantity, unit_cost, line_total)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [
+            returnId,
+            it.purchase_item_id ?? null,
+            it.variant_id,
+            it.quantity,
+            it.unit_cost,
+            lineTotal,
+          ],
         );
 
-        // decrement stock
         await m.query(
           `UPDATE stock
               SET quantity_on_hand = quantity_on_hand - $1, updated_at = NOW()
             WHERE variant_id = $2 AND warehouse_id = $3`,
           [it.quantity, it.variant_id, dto.warehouse_id],
         );
-
-        // stock movement
         await m.query(
           `INSERT INTO stock_movements
              (variant_id, warehouse_id, movement_type, direction,
               quantity, unit_cost, reference_type, reference_id, user_id)
            VALUES ($1,$2,'purchase_return','out', $3, $4, 'purchase_return', $5, $6)`,
-          [it.variant_id, dto.warehouse_id, it.quantity, it.unit_cost, ret.id, userId],
+          [
+            it.variant_id,
+            dto.warehouse_id,
+            it.quantity,
+            it.unit_cost,
+            returnId,
+            userId,
+          ],
         );
       }
 
-      // Reduce supplier balance (we owe less because we're returning goods)
-      await m.query(
-        `UPDATE suppliers
-            SET current_balance = current_balance - $1, updated_at = NOW()
-          WHERE id = $2`,
-        [total, dto.supplier_id],
-      );
-      const [{ current_balance }] = await m.query(
-        `SELECT current_balance FROM suppliers WHERE id = $1`,
-        [dto.supplier_id],
-      );
-      await m.query(
-        `INSERT INTO supplier_ledger
-           (supplier_id, direction, amount, reference_type, reference_id,
-            balance_after, notes, user_id)
-         VALUES ($1,'out', $2, 'purchase_return', $3, $4, $5, $6)`,
-        [
-          dto.supplier_id,
-          total,
-          ret.id,
-          current_balance,
-          `مرتجع مشتريات ${ret.return_no}`,
-          userId,
-        ],
-      );
+      if (settlementType === 'supplier_credit') {
+        await m.query(
+          `UPDATE suppliers
+              SET current_balance = current_balance - $1, updated_at = NOW()
+            WHERE id = $2`,
+          [totalAmount, dto.supplier_id],
+        );
+        const [{ current_balance }] = await m.query(
+          `SELECT current_balance FROM suppliers WHERE id = $1`,
+          [dto.supplier_id],
+        );
+        await m.query(
+          `INSERT INTO supplier_ledger
+              (supplier_id, direction, amount, reference_type,
+               reference_id, balance_after, notes, user_id)
+           VALUES ($1, 'out', $2, 'purchase_return', $3, $4, $5, $6)`,
+          [
+            dto.supplier_id,
+            totalAmount,
+            returnId,
+            current_balance,
+            `مرتجع مشتريات ${ret.return_no} — رصيد دائن للمورد`,
+            userId,
+          ],
+        );
+      } else if (
+        settlementType === 'cash_refund'
+        || settlementType === 'bank_refund'
+      ) {
+        await m.query(
+          `SELECT fn_record_cashbox_txn(
+              $1::uuid, 'in'::text, $2::numeric, 'receipt'::text,
+              'purchase_return'::text, $3::uuid, $4::uuid, $5::text
+           )`,
+          [
+            dto.cashbox_id,
+            totalAmount,
+            returnId,
+            userId,
+            `استرداد مرتجع مشتريات ${ret.return_no}`,
+          ],
+        );
+      }
 
-      return this.getReturn(ret.id);
+      if (settlementType !== 'no_settlement' && this.posting) {
+        const res = (await this.posting.postPurchaseReturn(
+          returnId,
+          userId,
+          m,
+        )) as any;
+        if (res && res.error) {
+          throw new BadRequestException(
+            `فشل ترحيل المرتجع للحسابات: ${res.error}`,
+          );
+        }
+      }
+
+      return this.getReturn(returnId);
     });
   }
 
@@ -1073,31 +1355,31 @@ export class PurchasesService {
         `SELECT * FROM purchase_returns WHERE id = $1 FOR UPDATE`,
         [id],
       );
-      if (!ret) throw new NotFoundException('Return not found');
+      if (!ret) throw new NotFoundException(`Purchase return ${id} not found`);
       if (ret.status === 'cancelled') {
         throw new BadRequestException('المرتجع ملغى بالفعل');
       }
 
       const items = await m.query(
-        `SELECT * FROM purchase_return_items WHERE purchase_return_id = $1`,
+        `SELECT variant_id, quantity, unit_cost
+           FROM purchase_return_items WHERE purchase_return_id = $1`,
         [id],
       );
 
-      // restore stock
       for (const it of items) {
         await m.query(
-          `INSERT INTO stock (variant_id, warehouse_id, quantity_on_hand)
-             VALUES ($1,$2,$3)
-             ON CONFLICT (variant_id, warehouse_id) DO UPDATE
-               SET quantity_on_hand = stock.quantity_on_hand + EXCLUDED.quantity_on_hand,
-                   updated_at = NOW()`,
-          [it.variant_id, ret.warehouse_id, it.quantity],
+          `UPDATE stock
+              SET quantity_on_hand = quantity_on_hand + $1, updated_at = NOW()
+            WHERE variant_id = $2 AND warehouse_id = $3`,
+          [it.quantity, it.variant_id, ret.warehouse_id],
         );
         await m.query(
           `INSERT INTO stock_movements
              (variant_id, warehouse_id, movement_type, direction,
               quantity, unit_cost, reference_type, reference_id, user_id, notes)
-           VALUES ($1,$2,'purchase_return','in', $3, $4, 'purchase_return', $5, $6, 'إلغاء مرتجع مشتريات')`,
+           VALUES ($1,$2,'purchase_return','in', $3, $4,
+                   'purchase_return', $5, $6,
+                   'عكس مرتجع مشتريات')`,
           [
             it.variant_id,
             ret.warehouse_id,
@@ -1109,21 +1391,81 @@ export class PurchasesService {
         );
       }
 
-      // restore supplier balance
-      await m.query(
-        `UPDATE suppliers
-            SET current_balance = current_balance + $1, updated_at = NOW()
-          WHERE id = $2`,
-        [ret.total_amount, ret.supplier_id],
-      );
+      const totalAmount = Number(ret.total_amount);
+      if (ret.settlement_type === 'supplier_credit') {
+        await m.query(
+          `UPDATE suppliers
+              SET current_balance = current_balance + $1, updated_at = NOW()
+            WHERE id = $2`,
+          [totalAmount, ret.supplier_id],
+        );
+        const [{ current_balance }] = await m.query(
+          `SELECT current_balance FROM suppliers WHERE id = $1`,
+          [ret.supplier_id],
+        );
+        await m.query(
+          `INSERT INTO supplier_ledger
+              (supplier_id, direction, amount, reference_type,
+               reference_id, balance_after, notes, user_id)
+           VALUES ($1, 'in', $2, 'purchase_return', $3, $4, $5, $6)`,
+          [
+            ret.supplier_id,
+            totalAmount,
+            id,
+            current_balance,
+            `عكس مرتجع مشتريات ${ret.return_no}`,
+            userId,
+          ],
+        );
+      }
+
+      if (
+        (ret.settlement_type === 'cash_refund'
+          || ret.settlement_type === 'bank_refund')
+        && ret.cashbox_id
+        && ret.refund_amount !== null
+      ) {
+        await m.query(
+          `SELECT fn_record_cashbox_txn(
+              $1::uuid, 'out'::text, $2::numeric, 'receipt'::text,
+              'purchase_return'::text, $3::uuid, $4::uuid, $5::text
+           )`,
+          [
+            ret.cashbox_id,
+            Number(ret.refund_amount),
+            id,
+            userId,
+            `عكس استرداد مرتجع مشتريات ${ret.return_no}`,
+          ],
+        );
+      }
+
+      if (ret.settlement_type !== 'no_settlement' && this.posting) {
+        const res = (await this.posting.reverseByReference(
+          'purchase_return',
+          id,
+          `إلغاء مرتجع مشتريات ${ret.return_no}`,
+          userId,
+          m,
+        )) as any;
+        if (res && res.error) {
+          throw new BadRequestException(
+            `فشل عكس قيد المرتجع: ${res.error}`,
+          );
+        }
+      }
 
       await m.query(
-        `UPDATE purchase_returns SET status = 'cancelled', updated_at = NOW()
+        `UPDATE purchase_returns
+            SET status = 'cancelled',
+                cancelled_at = NOW(),
+                cancelled_by = $2,
+                updated_at = NOW()
           WHERE id = $1`,
-        [id],
+        [id, userId],
       );
 
-      return { cancelled: true };
+      return { cancelled: true, id };
     });
   }
 

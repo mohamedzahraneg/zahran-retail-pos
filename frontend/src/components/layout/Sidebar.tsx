@@ -241,6 +241,9 @@ const groups: NavGroup[] = [
     title: 'المشتريات',
     items: [
       { to: '/purchases', label: 'فواتير المشتريات', icon: FileText, roles: ['admin', 'manager', 'accountant', 'stock_keeper'], permission: 'purchases.view' },
+      // PR-P2.4A — purchase-returns has its own list page; create flow
+      // is launched from the Purchases row action.
+      { to: '/purchases/returns', label: 'مرتجع مشتريات', icon: Undo2, roles: ['admin', 'manager', 'accountant', 'stock_keeper'], permission: 'purchases.view' },
       { to: '/suppliers', label: 'الموردون', icon: Truck, roles: ['admin', 'manager', 'accountant'], permission: 'suppliers.view' },
     ],
   },

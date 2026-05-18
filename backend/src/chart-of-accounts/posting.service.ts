@@ -1550,6 +1550,117 @@ export class AccountingPostingService {
   }
 
   /**
+   * PR-P2.4A — Post a purchase return to the GL.
+   *
+   * Three settlement types post a journal entry; `no_settlement`
+   * is skipped at the caller. The shape is the inverse of
+   * `postPurchase`:
+   *
+   *   supplier_credit:
+   *     DR Supplier Payable (211, supplier_id dim)   = total
+   *     CR Inventory (1131)                          = inventoryCost
+   *     CR VAT Payable (214) [if tax > 0]            = tax
+   *
+   *   cash_refund / bank_refund:
+   *     DR Cash/Bank (cashbox child of GL_CASH)      = refundAmount
+   *     CR Inventory (1131)                          = inventoryCost
+   *     CR VAT Payable (214) [if tax > 0]            = tax
+   *
+   * For P2.4A `refund_amount === total_amount` (enforced at the
+   * service layer), so the cash/bank refund JE balances naturally.
+   * Partial refunds and write-offs are deferred to P2.4B.
+   *
+   * Idempotency: `safe('purchase_return', returnId, …)` short-circuits
+   * if a live JE already exists for this return.
+   */
+  async postPurchaseReturn(
+    returnId: string,
+    userId: string,
+    em?: EntityManager,
+  ) {
+    return this.safe('purchase_return', returnId, em, async (q) => {
+      const [r] = await q(
+        `SELECT pr.id, pr.return_no, pr.return_date,
+                pr.supplier_id, pr.warehouse_id,
+                pr.total_amount, pr.status,
+                pr.settlement_type, pr.refund_amount, pr.cashbox_id
+           FROM purchase_returns pr
+          WHERE pr.id = $1`,
+        [returnId],
+      );
+      if (!r) return null;
+      if (r.status !== 'posted') return null;
+      if (r.settlement_type === 'no_settlement') return null;
+
+      const total = Number(r.total_amount || 0);
+      if (total < 0.01) return null;
+
+      // P2.4A: returns don't carry their own tax/landed columns — the
+      // total_amount is computed from item line_totals (qty × unit_cost).
+      // We treat the whole total as inventory cost (no VAT split). This
+      // mirrors how `purchases.service.createReturn` always treated it
+      // and matches the spec: P2.4A does not implement VAT-on-returns;
+      // that's a P2.4B follow-up if required.
+      const inventoryCost = total;
+
+      const entryDate = this.dateOnly(r.return_date);
+      const invAcc = await this.accountIdByCode(q, '1131');
+      const suppAcc = await this.accountIdByCode(q, GL_SUPPLIER_PAYABLE);
+
+      const lines: PostingLine[] = [];
+
+      if (
+        r.settlement_type === 'cash_refund'
+        || r.settlement_type === 'bank_refund'
+      ) {
+        const refundAmount = Number(r.refund_amount || 0);
+        if (refundAmount < 0.01) return null;
+        // Resolve cashbox COA child (falls back to GL_CASH).
+        const refundAccId = await this.cashboxAccountId(q, r.cashbox_id);
+        if (refundAccId) {
+          lines.push({
+            account_id: refundAccId,
+            debit: refundAmount,
+            credit: 0,
+            description: `استرداد مرتجع مشتريات ${r.return_no}`,
+            cashbox_id: r.cashbox_id ?? undefined,
+          });
+        }
+      } else if (r.settlement_type === 'supplier_credit') {
+        if (suppAcc) {
+          lines.push({
+            account_id: suppAcc,
+            debit: total,
+            credit: 0,
+            description: `رصيد دائن للمورد عن مرتجع ${r.return_no}`,
+            supplier_id: r.supplier_id,
+          });
+        }
+      }
+
+      if (invAcc && inventoryCost > 0) {
+        lines.push({
+          account_id: invAcc,
+          debit: 0,
+          credit: inventoryCost,
+          description: `عكس مخزون عن مرتجع مشتريات ${r.return_no}`,
+        });
+      }
+
+      if (lines.length < 2) return null;
+
+      return this.createEntry(q, {
+        entry_date: entryDate,
+        description: `قيد مرتجع مشتريات ${r.return_no}`,
+        reference_type: 'purchase_return',
+        reference_id: returnId,
+        lines,
+        created_by: userId,
+      });
+    });
+  }
+
+  /**
    * Stock adjustment from a physical count → records shrinkage or overage.
    *   Shortage (qty_delta < 0):
    *     DR Shrinkage (534) = |value|
