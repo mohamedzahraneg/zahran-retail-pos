@@ -1155,10 +1155,14 @@ export class PurchasesService {
           [it.quantity, it.variant_id, dto.warehouse_id],
         );
         await m.query(
+          // PR-PURCHASES-P2.4A-FIX-ENUM: 'purchase_return' is NOT a member
+          // of the stock_movement_type enum. Use the generic 'adjustment'
+          // value (same pattern as fn_void_purchase and POS cancel) and
+          // keep the semantic linkage via reference_type / reference_id.
           `INSERT INTO stock_movements
              (variant_id, warehouse_id, movement_type, direction,
               quantity, unit_cost, reference_type, reference_id, user_id)
-           VALUES ($1,$2,'purchase_return','out', $3, $4, 'purchase_return', $5, $6)`,
+           VALUES ($1,$2,'adjustment','out', $3, $4, 'purchase_return', $5, $6)`,
           [
             it.variant_id,
             dto.warehouse_id,
@@ -1256,10 +1260,14 @@ export class PurchasesService {
           [it.quantity, it.variant_id, ret.warehouse_id],
         );
         await m.query(
+          // PR-PURCHASES-P2.4A-FIX-ENUM: see comment on the create path
+          // above. movement_type='adjustment' + direction='in' is the
+          // cancel reversal; reference_type='purchase_return' keeps the
+          // semantic link for `posting.reverseByReference`.
           `INSERT INTO stock_movements
              (variant_id, warehouse_id, movement_type, direction,
               quantity, unit_cost, reference_type, reference_id, user_id, notes)
-           VALUES ($1,$2,'purchase_return','in', $3, $4,
+           VALUES ($1,$2,'adjustment','in', $3, $4,
                    'purchase_return', $5, $6,
                    'عكس مرتجع مشتريات')`,
           [

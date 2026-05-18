@@ -365,6 +365,15 @@ describe('PurchasesService.createReturn — write footprint per settlement', () 
     expect(sqls.some((s) => /INSERT INTO purchase_return_items/i.test(s))).toBe(true);
     expect(sqls.some((s) => /UPDATE stock\b/i.test(s))).toBe(true);
     expect(sqls.some((s) => /INSERT INTO stock_movements/i.test(s))).toBe(true);
+    // PR-PURCHASES-P2.4A-FIX-ENUM: stock_movements row uses the
+    // valid 'adjustment' enum value with direction='out'; the
+    // purchase-return semantic lives on reference_type.
+    const createSmCall = calls.find((c) =>
+      /INSERT INTO stock_movements/i.test(c.sql),
+    );
+    expect(createSmCall?.sql).toMatch(/'adjustment','out'/);
+    expect(createSmCall?.sql).toMatch(/'purchase_return'/);
+    expect(createSmCall?.sql).not.toMatch(/'purchase_return','out'/);
     expect(sqls.some((s) => /UPDATE suppliers/i.test(s))).toBe(true);
     expect(sqls.some((s) => /INSERT INTO supplier_ledger/i.test(s))).toBe(true);
     expect(sqls.some((s) => /fn_record_cashbox_txn/i.test(s))).toBe(false);
@@ -523,6 +532,11 @@ describe('PurchasesService.cancelReturn — reversal footprint', () => {
         /INSERT INTO stock_movements/i.test(c.sql) && c.sql.includes("'in'"),
     );
     expect(smCall).toBeDefined();
+    // PR-PURCHASES-P2.4A-FIX-ENUM: cancel reversal uses the valid
+    // 'adjustment' enum value with direction='in'.
+    expect(smCall?.sql).toMatch(/'adjustment','in'/);
+    expect(smCall?.sql).toMatch(/'purchase_return'/);
+    expect(smCall?.sql).not.toMatch(/'purchase_return','in'/);
     expect(sqls.some((s) => /UPDATE suppliers/i.test(s))).toBe(true);
     const ledgerCall = calls.find(
       (c) =>
@@ -677,6 +691,34 @@ describe('PurchasesService — purchase-return source guardrails (PR-P2.4A block
     expect(RETURN_BLOCK).toMatch(/'cash_refund'/);
     expect(RETURN_BLOCK).toMatch(/'bank_refund'/);
     expect(RETURN_BLOCK).toMatch(/'no_settlement'/);
+  });
+
+  it('PR-PURCHASES-P2.4A-FIX-ENUM: no stock_movements INSERT in the purchase-return block uses movement_type=\'purchase_return\'', () => {
+    // 'purchase_return' is NOT a member of the stock_movement_type
+    // enum — using it crashes with "invalid input value for enum
+    // stock_movement_type". The valid values used by the rest of the
+    // codebase are 'adjustment' / 'adjustment_in' / 'adjustment_out'.
+    // This regression scans the purchase-return block for any
+    // INSERT … stock_movements … 'purchase_return' value-position
+    // shape and fails if reintroduced. `reference_type='purchase_return'`
+    // is still allowed (it lives on a free-text column).
+    expect(RETURN_BLOCK).not.toMatch(/'purchase_return'\s*,\s*'out'/);
+    expect(RETURN_BLOCK).not.toMatch(/'purchase_return'\s*,\s*'in'/);
+  });
+
+  it('PR-PURCHASES-P2.4A-FIX-ENUM: createReturn uses adjustment/out + reference_type purchase_return', () => {
+    // Find the create-path stock_movements INSERT (carries `returnId`
+    // not `id, userId` — easiest discriminator is the lack of `notes`
+    // column on the create path).
+    expect(RETURN_BLOCK).toMatch(
+      /INSERT INTO stock_movements[\s\S]*?VALUES\s*\(\$1,\$2,'adjustment','out',\s*\$3,\s*\$4,\s*'purchase_return',\s*\$5,\s*\$6\)/,
+    );
+  });
+
+  it('PR-PURCHASES-P2.4A-FIX-ENUM: cancelReturn uses adjustment/in + reference_type purchase_return', () => {
+    expect(RETURN_BLOCK).toMatch(
+      /INSERT INTO stock_movements[\s\S]*?VALUES\s*\(\$1,\$2,'adjustment','in',\s*\$3,\s*\$4,\s*'purchase_return',/,
+    );
   });
 
   it('purchase-return block uses reference_type=purchase_return on stock_movements + supplier_ledger + cashbox + posting', () => {
