@@ -314,15 +314,11 @@ describe('Phase 2F · Layer 2 — reverseByReference call sites are whitelisted'
       role: 'explicit_cancel_void_refund_return',
       note: 'PATCH /purchases/:id/cancel — perm purchases.cancel',
     },
-    {
-      file: 'src/purchases/purchases.service.ts',
-      enclosingFn: 'edit',
-      role: 'explicit_cancel_void_refund_return',
-      note:
-        'P2.3B safe replacement: received + unpaid purchase edit voids ' +
-        'the old purchase and reverses its purchase JE before creating/' +
-        'receiving the replacement.',
-    },
+    // PR-PURCHASES-P2.3C-FIX: the P2.3B `edit` entry was removed.
+    // PurchasesService.edit() no longer calls reverseByReference at
+    // all — received purchase edits are blocked (see Arabic message
+    // in edit()). Re-adding the entry would mask any future
+    // regression that re-introduces a reverse-then-recreate path.
     {
       file: 'src/purchases/purchases.service.ts',
       enclosingFn: 'cancelReturn',

@@ -593,52 +593,34 @@ export class PurchasesService {
    * Edit a purchase invoice.
    *
    * DRAFT (PR-PURCHASES-P2.3A): full in-place edit that re-runs the
-   * landed-cost allocator and rewrites items + extras. Replaces the
-   * pre-P2.3 path which silently dropped `extra_costs` and inserted
-   * `purchase_items` without the `base_unit_cost NOT NULL` column
-   * (P2.1 migration 133). UNCHANGED in P2.3B.
+   * landed-cost allocator and rewrites items + extras. UNCHANGED.
+   * Same `id` + same `purchase_no` preserved.
    *
-   * CANCELLED: blocked. UNCHANGED in P2.3B.
+   * CANCELLED: blocked.
    *
-   * RECEIVED + UNPAID (PR-PURCHASES-P2.3B): safe replacement flow.
-   * Mandates an `edit_reason` ≥ 3 chars, runs the allocator OUTSIDE
-   * the transaction so a manual-allocation mismatch fails before any
-   * writes, then in ONE transaction:
-   *   1. SELECT … FOR UPDATE  — lock the row.
-   *   2. Re-check status='received' AND paid_amount = 0
-   *      AND replaced_by_purchase_id IS NULL (defensive race guard).
-   *   3. SELECT fn_void_purchase(old_id, userId, edit_reason)
-   *      — reverses stock + sets old status='cancelled'.
-   *      No cash payments exist (paid_amount=0), so the cashbox
-   *      reversal section of the SP is a no-op — no double-reverse
-   *      risk against step 4.
-   *   4. posting.reverseByReference('purchase', old_id, …)
-   *      — inverts the receive-side journal_entries (DR Inventory /
-   *      CR AP). NO `.catch()` here: the user's directive is "do not
-   *      swallow failures silently in the edit replacement flow;
-   *      rollback is preferred".
-   *   5. this.create(dto, userId, em)  — official create path.
-   *   6. this.receive(new_id, userId, em) — official receive path
-   *      (writes stock_movements, supplier_ledger, supplier balance,
-   *      and posts the NEW journal_entry via postPurchase).
-   *   7. UPDATE links on both rows (replaces_purchase_id +
-   *      replaced_by_purchase_id + edit_reason) — migration 137
-   *      audit metadata.
+   * RECEIVED (paid_amount = 0): BLOCKED (PR-PURCHASES-P2.3C-FIX).
+   * The previous P2.3B safe-replacement flow created a brand-new
+   * purchase_no + id for every received edit, which surfaced as
+   * "تم إصدار فاتورة بديلة" in the UI — not what the operator wants.
+   * In-place delta editing of a received purchase requires a
+   * dedicated stock/supplier/GL delta design and is deferred to its
+   * own phase. The operator's interim workarounds are documented in
+   * the Arabic blocking message (raise a purchase return for the
+   * affected items, or cancel + re-create if the invoice is still
+   * fully unpaid).
    *
-   * PARTIAL / PAID / paid_amount > 0:
-   *   blocked with the P2.3B Arabic message. The refund + top-up
-   *   flow is the P2.3C deliverable.
+   * PARTIAL / PAID / paid_amount > 0: blocked.
    *
-   * Hard guarantees (asserted by the static guardrail in
-   * purchases.service.p2.3b.spec.ts):
-   *   · No direct `cashbox_transactions` / `cashbox_balances` writes
-   *     from edit(). All cashbox movement happens through
-   *     fn_void_purchase and (later) the new receive()'s GL post.
-   *   · No direct `journal_entries` / `journal_lines` writes from
-   *     edit(). All GL movement happens through reverseByReference
-   *     and postPurchase (the official posting service).
-   *   · No supplier_ledger / supplier_payments writes — those flow
-   *     through the official receive() + (later) pay().
+   * Hard guarantees (pinned by the spec in this directory):
+   *   · No call to `fn_void_purchase` from edit() anymore.
+   *   · No call to `posting.reverseByReference` from edit() anymore.
+   *   · No call to `create()` / `receive()` from edit().
+   *   · No write to `replaces_purchase_id` / `replaced_by_purchase_id`
+   *     from edit(). Existing chained rows from prior P2.3B usage
+   *     keep their links intact; the columns are inert going forward.
+   *   · No direct `journal_entries` / `journal_lines` /
+   *     `cashbox_transactions` / `cashbox_balances` / supplier_ledger
+   *     writes from edit().
    *   · No `backend/src/provisioning/` touch.
    */
   async edit(
@@ -769,8 +751,8 @@ export class PurchasesService {
       });
     }
 
-    // ── PR-PURCHASES-P2.3B — paid / partial / paid_amount > 0 stay
-    // BLOCKED until the P2.3C refund + top-up flow ships. Defensive
+    // ── PR-PURCHASES-P2.3C-FIX — paid / partial / paid_amount > 0 stay
+    // BLOCKED until a dedicated refund + top-up flow ships. Defensive
     // `paid_amount > 0` check covers the edge case where status is
     // somehow still 'received' but a payment has landed.
     const paidAmount = Number(existing.paid_amount ?? 0);
@@ -784,128 +766,28 @@ export class PurchasesService {
       );
     }
 
-    // PR-PURCHASES-P2.3B — already-replaced guard. A purchase that
-    // was itself replaced by an earlier safe-edit cannot be edited
-    // again; the operator must work on the latest link in the chain.
-    if (existing.replaced_by_purchase_id) {
-      throw new BadRequestException(
-        'هذه الفاتورة تم تبديلها بفاتورة مصححة بالفعل. عدّل الفاتورة الأحدث في السلسلة.',
-      );
-    }
-
-    // PR-PURCHASES-P2.3B — require an operator reason. The
-    // `reason` controller default ('تعديل فاتورة مشتريات' from the
-    // controller) is too generic to be useful in audit; on the new
-    // path the operator must supply something specific via
-    // `dto.edit_reason`.
-    const editReason = (dto.edit_reason ?? '').trim();
-    if (editReason.length < 3) {
-      throw new BadRequestException(
-        'سبب التعديل مطلوب (3 أحرف على الأقل).',
-      );
-    }
-
-    // PR-PURCHASES-P2.3B — received + unpaid safe replacement flow.
-    // Allocator runs BEFORE the transaction so a manual-allocation
-    // mismatch surfaces before we touch any row.
-    this.runAllocatorOrThrow(dto);
-
-    return this.ds.transaction(async (em) => {
-      // 1. Lock the row. Re-read everything we depend on so a race
-      //    against pay() / cancel() can't slip through.
-      const [locked] = await em.query(
-        `SELECT id, status, paid_amount, replaced_by_purchase_id
-           FROM purchases WHERE id = $1 FOR UPDATE`,
-        [id],
-      );
-      if (!locked) throw new NotFoundException(`Purchase ${id} not found`);
-      const lockedPaid = Number(locked.paid_amount ?? 0);
-      if (locked.status !== 'received' || lockedPaid > 0) {
-        throw new BadRequestException(
-          'الفاتورة مسددة جزئيًا أو كليًا. التعديل بعد بدء السداد يحتاج خطوة استرداد أو دفعة إضافية، وسيتم تنفيذه في المرحلة القادمة.',
-        );
-      }
-      if (locked.replaced_by_purchase_id) {
-        throw new BadRequestException(
-          'هذه الفاتورة تم تبديلها بفاتورة مصححة بالفعل. عدّل الفاتورة الأحدث في السلسلة.',
-        );
-      }
-
-      // 2. Reverse stock + sets old status='cancelled'. fn_void_purchase
-      //    has a no-op cashbox section when there are no cash payments
-      //    (we just locked paid_amount=0 above).
-      await em.query(`SELECT fn_void_purchase($1, $2, $3)`, [
-        id,
-        userId,
-        editReason,
-      ]);
-
-      // 3. Reverse the receive-side journal_entry. NO `.catch()` —
-      //    a reversal failure must roll back the whole flow per the
-      //    user's directive. When `posting` isn't wired (DI optional
-      //    in tests) we skip; the transactional contract is still
-      //    correct because no JE existed in that scenario either.
-      if (this.posting) {
-        const res = (await this.posting.reverseByReference(
-          'purchase',
-          id,
-          editReason,
-          userId,
-          em,
-        )) as any;
-        if (res && res.error) {
-          throw new BadRequestException(
-            `فشل عكس قيد المشتريات: ${res.error}`,
-          );
-        }
-      }
-
-      // 4. Create the replacement purchase through the OFFICIAL
-      //    create() path (inside our transaction).
-      const tagged = {
-        ...dto,
-        notes: [dto.notes, `تعديل لفاتورة المشتريات رقم ${id}`]
-          .filter(Boolean)
-          .join(' — '),
-      };
-      const created = await this.create(tagged, userId, em);
-      const newId = (created as any).id as string;
-
-      // 5. Receive the replacement through the OFFICIAL receive()
-      //    path. This writes the new stock_movements, supplier_ledger,
-      //    supplier balance, and posts the new journal_entry via
-      //    postPurchase. No direct ledger writes from edit().
-      await this.receive(newId, userId, em);
-
-      // 6. Wire the audit-trail links (migration 137 columns).
-      //    fn_void_purchase already set status='cancelled' on the
-      //    old row; we layer the reason + forward link.
-      await em.query(
-        `UPDATE purchases
-            SET edit_reason             = $2,
-                replaced_by_purchase_id = $3,
-                updated_at              = NOW()
-          WHERE id = $1`,
-        [id, editReason, newId],
-      );
-      await em.query(
-        `UPDATE purchases
-            SET replaces_purchase_id = $2,
-                updated_at           = NOW()
-          WHERE id = $1`,
-        [newId, id],
-      );
-
-      return {
-        replaced: id,
-        purchase: created,
-        replacement: {
-          new_purchase_id: newId,
-          replaces_purchase_id: id,
-          edit_reason: editReason,
-        },
-      };
-    });
+    // ── PR-PURCHASES-P2.3C-FIX — received + unpaid is now BLOCKED.
+    //
+    // The previous P2.3B "safe replacement" flow (fn_void_purchase +
+    // reverseByReference + create + receive + replaces_*_id link) is
+    // removed:
+    //
+    //   · It generated a NEW purchase_no and a NEW purchase id for
+    //     every edit, surfacing as "تم إصدار فاتورة بديلة" in the UI —
+    //     not what the operator wants.
+    //   · `fn_void_purchase` was crashing at runtime on the invalid
+    //     `sp.purchase_id` reference in migration 033 (now fixed in
+    //     migration 140, but this path no longer calls it).
+    //
+    // In-place delta editing of a received purchase requires a
+    // dedicated design for stock/supplier/GL deltas and is deferred
+    // to its own phase (P2.5). For now the operator has two
+    // workarounds documented in the Arabic message: raise a purchase
+    // return (P2.4A) for the impacted items, or cancel the invoice
+    // and re-create it (only safe when the invoice is still unpaid).
+    throw new BadRequestException(
+      'تعديل الفاتورة بعد الاستلام غير متاح حاليًا. استخدم مرتجع مشتريات للأصناف التي تم إرجاعها، أو ألغِ الفاتورة وأعد إنشاءها إذا كانت غير مسددة.',
+    );
   }
 
   // --------------------------------------------------------------------------
