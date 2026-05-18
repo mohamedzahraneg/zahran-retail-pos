@@ -14,7 +14,7 @@
  * Markup vs margin are shown side-by-side everywhere so the operator
  * never confuses one with the other.
  */
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import {
@@ -42,6 +42,10 @@ import {
   type SoldProfitStatus,
   type SoldProfitNetProductRow,
   type SoldProfitNetStatus,
+  type FairPriceAllocationBasis,
+  type FairPriceOverheadSource,
+  type PricingFairPriceParams,
+  type PricingFairPriceRow,
 } from '@/api/reports.api';
 import type {
   CostAdjustmentFilters,
@@ -96,7 +100,13 @@ const STATUS_COLOR: Record<PricingStatus, string> = {
   unknown_cost: 'bg-slate-100 text-slate-700',
 };
 
-type Tab = 'health' | 'losses' | 'history' | 'landed' | 'sold-profit';
+type Tab =
+  | 'health'
+  | 'losses'
+  | 'history'
+  | 'landed'
+  | 'sold-profit'
+  | 'fair-price';
 
 /**
  * Local toolbar trigger that opens the SmartPricingAssistantModal.
@@ -213,6 +223,7 @@ const TABS: { key: Tab; label: string; icon: any }[] = [
   { key: 'history', label: 'تاريخ تغيير الأسعار', icon: HistoryIcon },
   { key: 'landed', label: 'أثر آخر مشتريات', icon: Package },
   { key: 'sold-profit', label: 'الربح الفعلي', icon: DollarSign },
+  { key: 'fair-price', label: 'السعر العادل', icon: AlertTriangle },
 ];
 
 export default function PricingReports() {
@@ -269,6 +280,7 @@ export default function PricingReports() {
           {tab === 'history' && <HistoryTab />}
           {tab === 'landed' && <LandedImpactTab />}
           {tab === 'sold-profit' && <SoldProfitTab />}
+          {tab === 'fair-price' && <FairPriceTab />}
         </div>
       </div>
     </div>
@@ -2040,3 +2052,369 @@ function Tile({ label, value, accent }: TileProps) {
   );
 }
 
+/* ────────────────── PR-P8.1 — Fair Price Report tab ────────────────── */
+
+const FAIR_PRICE_BASIS_LABEL: Record<FairPriceAllocationBasis, string> = {
+  revenue_share: 'حسب حصة الإيرادات',
+  units_share: 'حسب عدد القطع المباعة',
+  stock_value_share: 'حسب قيمة المخزون',
+  flat_per_sku: 'موزّعة بالتساوي على كل صنف',
+};
+
+const FAIR_PRICE_SOURCE_LABEL: Record<FairPriceOverheadSource, string> = {
+  actual_expenses: 'مصروفات فعلية في الفترة',
+  recurring_monthly_equivalent: 'تقدير المصروفات الدورية',
+};
+
+const FAIR_PRICE_WARNING_LABEL: Record<string, string> = {
+  cost_zero: 'التكلفة غير معروفة',
+  no_sales_in_period: 'لا توجد مبيعات في الفترة',
+  no_stock: 'لا يوجد مخزون',
+};
+
+function isoDaysAgo(days: number): string {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() - days);
+  return d.toISOString().slice(0, 10);
+}
+
+function FairPriceTab() {
+  const [from, setFrom] = useState<string>(isoDaysAgo(30));
+  const [to, setTo] = useState<string>(isoDaysAgo(0));
+  const [basis, setBasis] =
+    useState<FairPriceAllocationBasis>('revenue_share');
+  const [source, setSource] =
+    useState<FairPriceOverheadSource>('actual_expenses');
+  // Target margin lives as text so the input is controllable; sent as
+  // number to the API only when non-empty (lets the server fall back to
+  // the smart_pricing.recommended_margin_pct setting otherwise).
+  const [targetMarginText, setTargetMarginText] = useState<string>('');
+  const [q, setQ] = useState<string>('');
+  const [onlyInStock, setOnlyInStock] = useState<boolean>(false);
+  const [onlyActive, setOnlyActive] = useState<boolean>(true);
+
+  const params = useMemo<PricingFairPriceParams>(() => {
+    const p: PricingFairPriceParams = {
+      from,
+      to,
+      allocation_basis: basis,
+      overhead_source: source,
+      only_in_stock: onlyInStock || undefined,
+      only_active: onlyActive,
+      limit: 1000,
+    };
+    const tm = Number(targetMarginText);
+    if (targetMarginText.trim() !== '' && Number.isFinite(tm)) {
+      p.target_margin_pct = tm;
+    }
+    if (q.trim()) p.q = q.trim();
+    return p;
+  }, [from, to, basis, source, targetMarginText, q, onlyInStock, onlyActive]);
+
+  const { data, isLoading, isError, error } = useQuery({
+    queryKey: ['pricing-fair-price', params],
+    queryFn: () => reportsApi.pricingFairPrice(params),
+    placeholderData: (prev) => prev,
+  });
+
+  // Surface server-side validation errors (e.g. target_margin > 94) as
+  // a toast — but only once per error transition so the operator can
+  // see what to fix.
+  useEffect(() => {
+    if (!isError) return;
+    const msg = (error as any)?.response?.data?.message;
+    if (msg) toast.error(String(msg));
+  }, [isError, error]);
+
+  const items = data?.items ?? [];
+  const summary = data?.summary;
+
+  const exportParams = useMemo(() => {
+    const p: Record<string, any> = { ...params };
+    // booleans → 'true'/'false' for the export URL; the existing
+    // `reportsApi.export` helper passes params through as query string.
+    if (onlyInStock) p.only_in_stock = true;
+    return p;
+  }, [params, onlyInStock]);
+
+  return (
+    <div className="space-y-3" data-testid="fair-price-tab">
+      <div
+        className="rounded-lg border border-rose-200 bg-rose-50/60 p-3 text-xs text-rose-900 leading-relaxed"
+        data-testid="fair-price-advisory"
+      >
+        <b>تقرير استرشادي فقط.</b> لا يقوم بأي تعديل تلقائي على الأسعار، ولا
+        يحرّك مخزون أو خزنة أو قيود محاسبية. الأرقام للاسترشاد فقط — قرار
+        التسعير النهائي للمسؤول.
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
+        <div>
+          <label className="text-[11px] text-slate-600 block mb-1">من</label>
+          <input
+            type="date"
+            value={from}
+            onChange={(e) => setFrom(e.target.value)}
+            data-testid="fair-price-from"
+            className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm"
+          />
+        </div>
+        <div>
+          <label className="text-[11px] text-slate-600 block mb-1">إلى</label>
+          <input
+            type="date"
+            value={to}
+            onChange={(e) => setTo(e.target.value)}
+            data-testid="fair-price-to"
+            className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm"
+          />
+        </div>
+        <div>
+          <label className="text-[11px] text-slate-600 block mb-1">
+            توزيع التكاليف التشغيلية
+          </label>
+          <select
+            value={basis}
+            onChange={(e) =>
+              setBasis(e.target.value as FairPriceAllocationBasis)
+            }
+            data-testid="fair-price-basis"
+            className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm"
+          >
+            {(Object.keys(FAIR_PRICE_BASIS_LABEL) as FairPriceAllocationBasis[]).map(
+              (k) => (
+                <option key={k} value={k}>
+                  {FAIR_PRICE_BASIS_LABEL[k]}
+                </option>
+              ),
+            )}
+          </select>
+        </div>
+        <div>
+          <label className="text-[11px] text-slate-600 block mb-1">
+            مصدر التكاليف
+          </label>
+          <select
+            value={source}
+            onChange={(e) =>
+              setSource(e.target.value as FairPriceOverheadSource)
+            }
+            data-testid="fair-price-source"
+            className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm"
+          >
+            {(Object.keys(FAIR_PRICE_SOURCE_LABEL) as FairPriceOverheadSource[]).map(
+              (k) => (
+                <option key={k} value={k}>
+                  {FAIR_PRICE_SOURCE_LABEL[k]}
+                </option>
+              ),
+            )}
+          </select>
+        </div>
+        <div className="md:col-span-2">
+          <label className="text-[11px] text-slate-600 block mb-1">
+            بحث (اسم / SKU / باركود)
+          </label>
+          <input
+            type="search"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            data-testid="fair-price-search"
+            placeholder="بحث"
+            className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm"
+          />
+        </div>
+        <div>
+          <label className="text-[11px] text-slate-600 block mb-1">
+            الهامش المستهدف %
+          </label>
+          <input
+            type="number"
+            inputMode="decimal"
+            min={0}
+            max={94}
+            step="0.1"
+            value={targetMarginText}
+            onChange={(e) => setTargetMarginText(e.target.value)}
+            data-testid="fair-price-target-margin"
+            placeholder="افتراضي من إعدادات التسعير"
+            className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm"
+          />
+        </div>
+        <div className="flex items-end gap-3">
+          <label className="flex items-center gap-2 text-xs">
+            <input
+              type="checkbox"
+              checked={onlyInStock}
+              onChange={(e) => setOnlyInStock(e.target.checked)}
+              data-testid="fair-price-only-in-stock"
+            />
+            <span>في المخزون فقط</span>
+          </label>
+          <label className="flex items-center gap-2 text-xs">
+            <input
+              type="checkbox"
+              checked={onlyActive}
+              onChange={(e) => setOnlyActive(e.target.checked)}
+              data-testid="fair-price-only-active"
+            />
+            <span>أصناف نشطة فقط</span>
+          </label>
+        </div>
+      </div>
+
+      <div className="flex items-center justify-end gap-2 flex-wrap">
+        <ExportButtons
+          slug="pricing/fair-price"
+          params={exportParams}
+          testIdSuffix="fair-price"
+        />
+      </div>
+
+      <SummaryStrip>
+        <Tile
+          label="إجمالي التكاليف التشغيلية"
+          value={EGP(summary?.overhead_total ?? 0)}
+        />
+        <Tile
+          label="عدد الأصناف تحت السعر العادل"
+          value={String(summary?.variants_below_fair ?? 0)}
+          accent={
+            (summary?.variants_below_fair ?? 0) > 0 ? 'amber' : undefined
+          }
+        />
+        <Tile
+          label="إجمالي الفجوة عن السعر العادل"
+          value={EGP(summary?.current_gap_total ?? 0)}
+          accent={
+            (summary?.current_gap_total ?? 0) > 0 ? 'rose' : undefined
+          }
+        />
+        <Tile
+          label="متوسط التكلفة التشغيلية / قطعة"
+          value={EGP(summary?.average_overhead_per_unit ?? 0)}
+        />
+      </SummaryStrip>
+
+      {summary?.truncated && summary?.message_ar && (
+        <div
+          className="rounded-md border border-amber-300 bg-amber-50 p-2 text-[12px] text-amber-800"
+          data-testid="fair-price-truncated"
+        >
+          {summary.message_ar}
+        </div>
+      )}
+
+      {isLoading ? (
+        <div
+          className="text-center text-slate-500 text-sm py-10"
+          data-testid="fair-price-loading"
+        >
+          جاري الحساب…
+        </div>
+      ) : (
+        <div className="border rounded-lg overflow-hidden">
+          <div className="max-h-[60vh] overflow-y-auto">
+            <table className="w-full text-[12px]">
+              <thead className="bg-slate-50 text-slate-600 sticky top-0">
+                <tr>
+                  <th className="p-2 text-right">المنتج</th>
+                  <th className="p-2 text-right">SKU</th>
+                  <th className="p-2 text-left">الكمية المباعة</th>
+                  <th className="p-2 text-left">الإيرادات</th>
+                  <th className="p-2 text-left">سعر البيع الحالي</th>
+                  <th className="p-2 text-left">التكلفة</th>
+                  <th className="p-2 text-left">نصيب التكاليف</th>
+                  <th className="p-2 text-left">تكلفة تشغيلية / قطعة</th>
+                  <th className="p-2 text-left">سعر التعادل</th>
+                  <th className="p-2 text-left">السعر العادل</th>
+                  <th className="p-2 text-left">الفرق</th>
+                  <th className="p-2 text-left">هامش قبل</th>
+                  <th className="p-2 text-left">هامش بعد</th>
+                  <th className="p-2 text-right">ملاحظة</th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((r: PricingFairPriceRow) => (
+                  <tr
+                    key={r.variant_id}
+                    data-testid={`fair-price-row-${r.variant_id}`}
+                    className={
+                      r.gap_to_fair > 0
+                        ? 'bg-rose-50/30'
+                        : r.gap_to_fair < 0
+                          ? 'bg-emerald-50/20'
+                          : ''
+                    }
+                  >
+                    <td className="p-2 text-right font-bold">
+                      {r.product_name}
+                    </td>
+                    <td className="p-2 text-right font-mono text-[11px]">
+                      {r.sku}
+                    </td>
+                    <td className="p-2 text-left">
+                      {r.units_sold_in_period.toLocaleString('en-US')}
+                    </td>
+                    <td className="p-2 text-left">
+                      {EGP(r.revenue_in_period)}
+                    </td>
+                    <td className="p-2 text-left">
+                      {EGP(r.current_selling_price)}
+                    </td>
+                    <td className="p-2 text-left">
+                      {EGP(r.current_cost_price)}
+                    </td>
+                    <td className="p-2 text-left">{EGP(r.overhead_share)}</td>
+                    <td className="p-2 text-left">
+                      {EGP(r.overhead_per_unit)}
+                    </td>
+                    <td className="p-2 text-left">
+                      {EGP(r.break_even_price)}
+                    </td>
+                    <td className="p-2 text-left font-bold">
+                      {EGP(r.fair_price)}
+                    </td>
+                    <td
+                      className={`p-2 text-left ${
+                        r.gap_to_fair > 0
+                          ? 'text-rose-700'
+                          : r.gap_to_fair < 0
+                            ? 'text-emerald-700'
+                            : ''
+                      }`}
+                    >
+                      {EGP(r.gap_to_fair)}
+                    </td>
+                    <td className="p-2 text-left">
+                      {PCT(r.current_margin_pct)}
+                    </td>
+                    <td className="p-2 text-left">
+                      {PCT(r.margin_after_overhead_pct)}
+                    </td>
+                    <td className="p-2 text-right text-[11px] text-amber-700">
+                      {r.warning
+                        ? (FAIR_PRICE_WARNING_LABEL[r.warning] ?? r.warning)
+                        : ''}
+                    </td>
+                  </tr>
+                ))}
+                {items.length === 0 && !isLoading && (
+                  <tr>
+                    <td
+                      colSpan={14}
+                      className="p-6 text-center text-slate-500"
+                    >
+                      لا توجد بيانات لعرضها — جرّب توسيع الفترة أو إزالة
+                      الفلاتر.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

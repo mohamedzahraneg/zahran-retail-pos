@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import * as ExcelJS from 'exceljs';
 import PDFDocument from 'pdfkit';
@@ -1998,6 +1998,424 @@ export class ReportsService {
         ok: filtered.filter((r) => r.status === 'ok').length,
       },
       items: filtered,
+    };
+  }
+
+  // ──────────────────────────────────────────────────────────────────────
+  //  PR-P8.1 — Fair Price Report (read-only, advisory)
+  //
+  //  Combines:
+  //    · product_variants.cost_price       (landed cost reference)
+  //    · operating overhead in the period  (actual_expenses OR
+  //                                          recurring_monthly_equivalent)
+  //    · invoice_items in the period       (revenue / units sold)
+  //    · stock                              (stock-value allocation basis)
+  //
+  //  Per variant, allocates a share of the period's overhead using one of:
+  //    revenue_share | units_share | stock_value_share | flat_per_sku.
+  //  Computes break-even (cost + overhead/unit) and a target-margin-
+  //  adjusted fair price. ADVISORY ONLY — never writes anywhere.
+  //
+  //  Hard guarantees pinned by reports.service.fair-price.spec.ts static
+  //  guardrail (regex scan of this method):
+  //    · No INSERT / UPDATE / DELETE — pure SELECT.
+  //    · No `selling_price =` / `cost_price =` writes.
+  //    · No journal_entries / journal_lines / cashbox_transactions /
+  //      cashbox_balances / stock_movements / supplier_ledger /
+  //      supplier_payments references.
+  //    · No postPurchase / recordTransaction / financialEngine /
+  //      posting.service calls.
+  // ──────────────────────────────────────────────────────────────────────
+  async fairPrice(filters: {
+    from?: string;
+    to?: string;
+    allocation_basis?:
+      | 'revenue_share'
+      | 'units_share'
+      | 'stock_value_share'
+      | 'flat_per_sku';
+    overhead_source?: 'actual_expenses' | 'recurring_monthly_equivalent';
+    target_margin_pct?: number;
+    q?: string;
+    only_in_stock?: boolean;
+    only_active?: boolean;
+    limit?: number;
+  } = {}) {
+    const ALLOC_BASES = [
+      'revenue_share',
+      'units_share',
+      'stock_value_share',
+      'flat_per_sku',
+    ] as const;
+    const OVERHEAD_SOURCES = [
+      'actual_expenses',
+      'recurring_monthly_equivalent',
+    ] as const;
+    const allocation_basis = filters.allocation_basis ?? 'revenue_share';
+    if (!ALLOC_BASES.includes(allocation_basis as any)) {
+      throw new BadRequestException('طريقة التوزيع غير صالحة');
+    }
+    const overhead_source =
+      filters.overhead_source ?? 'actual_expenses';
+    if (!OVERHEAD_SOURCES.includes(overhead_source as any)) {
+      throw new BadRequestException('مصدر التكاليف التشغيلية غير صالح');
+    }
+
+    // target_margin_pct: explicit → setting → fallback 30.
+    let target_margin_pct = filters.target_margin_pct;
+    if (target_margin_pct === undefined || target_margin_pct === null) {
+      const fromSettings = await this.ds
+        .query(
+          `SELECT value FROM settings WHERE key = 'smart_pricing.recommended_margin_pct' LIMIT 1`,
+        )
+        .catch(() => [] as any[]);
+      const v = fromSettings?.[0]?.value;
+      const parsed =
+        typeof v === 'number'
+          ? v
+          : typeof v === 'string'
+            ? Number(v)
+            : v && typeof v === 'object' && 'value' in v
+              ? Number((v as any).value)
+              : NaN;
+      target_margin_pct = Number.isFinite(parsed) ? parsed : 30;
+    }
+    if (!Number.isFinite(target_margin_pct) || target_margin_pct < 0) {
+      throw new BadRequestException(
+        'نسبة الهامش المستهدف يجب أن تكون رقمًا موجبًا',
+      );
+    }
+    if (target_margin_pct >= 95) {
+      throw new BadRequestException(
+        'نسبة الهامش المستهدف لا يمكن أن تتجاوز 94%',
+      );
+    }
+
+    const FAIR_PRICE_LIMIT_DEFAULT = 200;
+    const FAIR_PRICE_LIMIT_MAX = 1000;
+    const effective_limit = Math.min(
+      Math.max(1, Number(filters.limit) || FAIR_PRICE_LIMIT_DEFAULT),
+      FAIR_PRICE_LIMIT_MAX,
+    );
+
+    // Default period: last 30 days ending today (Cairo).
+    const today = this.todayCairoIso();
+    const defaultFrom = (() => {
+      const d = new Date(today);
+      d.setUTCDate(d.getUTCDate() - 30);
+      return d.toISOString().slice(0, 10);
+    })();
+    const fromIso = filters.from ?? defaultFrom;
+    const toIso = filters.to ?? today;
+
+    // 1. Overhead total
+    let overhead_total = 0;
+    if (overhead_source === 'actual_expenses') {
+      const [row] = await this.ds.query(
+        `SELECT COALESCE(SUM(amount), 0)::numeric(14,2) AS s
+           FROM expenses
+          WHERE expense_date >= $1::date
+            AND expense_date <= $2::date`,
+        [fromIso, toIso],
+      );
+      overhead_total = Number(row?.s ?? 0);
+    } else {
+      const [periodRow] = await this.ds.query(
+        `SELECT ($2::date - $1::date + 1)::int AS days`,
+        [fromIso, toIso],
+      );
+      const periodDays = Math.max(1, Number(periodRow?.days ?? 30));
+      const templates = await this.ds.query(
+        `SELECT amount::numeric(14,2) AS amount,
+                frequency::text AS frequency,
+                custom_interval_days
+           FROM recurring_expenses
+          WHERE status = 'active'`,
+      );
+      for (const r of templates as any[]) {
+        const amt = Number(r.amount ?? 0);
+        let daysPerCycle: number;
+        switch (r.frequency) {
+          case 'daily':
+            daysPerCycle = 1;
+            break;
+          case 'weekly':
+            daysPerCycle = 7;
+            break;
+          case 'biweekly':
+            daysPerCycle = 14;
+            break;
+          case 'monthly':
+            daysPerCycle = 30;
+            break;
+          case 'quarterly':
+            daysPerCycle = 91;
+            break;
+          case 'semiannual':
+            daysPerCycle = 182;
+            break;
+          case 'annual':
+            daysPerCycle = 365;
+            break;
+          case 'custom_days': {
+            const custom = Number(r.custom_interval_days);
+            daysPerCycle = Number.isFinite(custom) && custom > 0 ? custom : 0;
+            break;
+          }
+          default:
+            daysPerCycle = 30;
+            break;
+        }
+        if (daysPerCycle <= 0) continue;
+        overhead_total += amt * (periodDays / daysPerCycle);
+      }
+      overhead_total = +overhead_total.toFixed(2);
+    }
+
+    // 2. Variant rows + period revenue/units + stock.
+    const params: any[] = [fromIso, toIso];
+    const conds: string[] = ['pv.deleted_at IS NULL'];
+    if (filters.only_active !== false) {
+      conds.push('pv.is_active = TRUE');
+    }
+    if (filters.q) {
+      params.push(`%${filters.q.trim()}%`);
+      const idx = params.length;
+      conds.push(
+        `(p.name_ar ILIKE $${idx}::text OR pv.sku ILIKE $${idx}::text OR pv.barcode ILIKE $${idx}::text)`,
+      );
+    }
+    const stockFilter = filters.only_in_stock
+      ? 'AND COALESCE(stock_sum.qty, 0) > 0'
+      : '';
+
+    const rows = await this.ds.query(
+      `
+      WITH sales AS (
+        SELECT ii.variant_id,
+               SUM(ii.quantity)::int AS units,
+               SUM(ii.quantity * ii.unit_price - ii.discount_amount)::numeric(14,2)
+                                                                       AS revenue
+          FROM invoice_items ii
+          JOIN invoices i ON i.id = ii.invoice_id
+         WHERE i.status IN ('completed','paid','partially_paid')
+           AND i.completed_at >= $1::timestamptz
+           AND i.completed_at <  $2::timestamptz + interval '1 day'
+         GROUP BY ii.variant_id
+      ),
+      stock_sum AS (
+        SELECT variant_id, SUM(quantity_on_hand)::int AS qty
+          FROM stock
+         GROUP BY variant_id
+      )
+      SELECT
+        pv.id                                          AS variant_id,
+        p.id                                           AS product_id,
+        p.name_ar                                      AS product_name,
+        pv.sku, pv.barcode,
+        cat.name_ar                                    AS category_name,
+        pv.cost_price::numeric(14,2)                   AS current_cost_price,
+        pv.selling_price::numeric(14,2)                AS current_selling_price,
+        COALESCE(sales.units, 0)::int                  AS units_sold_in_period,
+        COALESCE(sales.revenue, 0)::numeric(14,2)      AS revenue_in_period,
+        COALESCE(stock_sum.qty, 0)::int                AS stock_on_hand
+        FROM product_variants pv
+        JOIN products p          ON p.id = pv.product_id
+        LEFT JOIN categories cat ON cat.id = p.category_id
+        LEFT JOIN sales          ON sales.variant_id = pv.id
+        LEFT JOIN stock_sum      ON stock_sum.variant_id = pv.id
+       WHERE ${conds.join(' AND ')}
+       ${stockFilter}
+       ORDER BY revenue_in_period DESC NULLS LAST, p.name_ar
+       LIMIT ${effective_limit + 1}
+      `,
+      params,
+    );
+
+    const [countRow] = await this.ds.query(
+      `
+      SELECT COUNT(DISTINCT pv.id)::int AS n
+        FROM product_variants pv
+        JOIN products p ON p.id = pv.product_id
+        LEFT JOIN (
+          SELECT variant_id, SUM(quantity_on_hand)::int AS qty
+            FROM stock GROUP BY variant_id
+        ) ss ON ss.variant_id = pv.id
+       WHERE pv.deleted_at IS NULL
+         ${filters.only_active !== false ? 'AND pv.is_active = TRUE' : ''}
+         ${filters.only_in_stock ? 'AND COALESCE(ss.qty, 0) > 0' : ''}
+      `,
+    );
+    const total_candidates = Number(countRow?.n ?? 0);
+    const rawRows = (rows as any[]).slice(0, effective_limit);
+    const truncated = (rows as any[]).length > effective_limit;
+
+    // 3. Total basis (across the *returned* rows — overhead is allocated
+    //    across the rows the operator can actually see; allocation
+    //    weights sum to 1 within the visible set when total_basis > 0).
+    let total_basis = 0;
+    switch (allocation_basis) {
+      case 'revenue_share':
+        total_basis = rawRows.reduce(
+          (s, r) => s + Number(r.revenue_in_period || 0),
+          0,
+        );
+        break;
+      case 'units_share':
+        total_basis = rawRows.reduce(
+          (s, r) => s + Number(r.units_sold_in_period || 0),
+          0,
+        );
+        break;
+      case 'stock_value_share':
+        total_basis = rawRows.reduce(
+          (s, r) =>
+            s
+            + Number(r.stock_on_hand || 0) * Number(r.current_cost_price || 0),
+          0,
+        );
+        break;
+      case 'flat_per_sku':
+        total_basis = rawRows.length;
+        break;
+    }
+
+    const items = rawRows.map((r: any) => {
+      const current_cost_price = Number(r.current_cost_price || 0);
+      const current_selling_price = Number(r.current_selling_price || 0);
+      const units_sold_in_period = Number(r.units_sold_in_period || 0);
+      const revenue_in_period = Number(r.revenue_in_period || 0);
+      const stock_on_hand = Number(r.stock_on_hand || 0);
+
+      let allocation_weight = 0;
+      if (total_basis > 0) {
+        switch (allocation_basis) {
+          case 'revenue_share':
+            allocation_weight = revenue_in_period / total_basis;
+            break;
+          case 'units_share':
+            allocation_weight = units_sold_in_period / total_basis;
+            break;
+          case 'stock_value_share':
+            allocation_weight =
+              (stock_on_hand * current_cost_price) / total_basis;
+            break;
+          case 'flat_per_sku':
+            allocation_weight = 1 / total_basis;
+            break;
+        }
+      }
+
+      const overhead_share = +(overhead_total * allocation_weight).toFixed(2);
+      const noSales = units_sold_in_period === 0;
+      const expected_units = Math.max(1, units_sold_in_period);
+      const overhead_per_unit = +(overhead_share / expected_units).toFixed(2);
+      const break_even_price = +(
+        current_cost_price + overhead_per_unit
+      ).toFixed(2);
+      const fair_price = +(
+        break_even_price / (1 - target_margin_pct / 100)
+      ).toFixed(2);
+      const gap_to_fair = +(fair_price - current_selling_price).toFixed(2);
+      const gap_to_fair_pct =
+        current_selling_price > 0
+          ? +((gap_to_fair / current_selling_price) * 100).toFixed(2)
+          : null;
+      const current_margin_pct =
+        current_selling_price > 0
+          ? +(
+              ((current_selling_price - current_cost_price)
+                / current_selling_price)
+              * 100
+            ).toFixed(2)
+          : null;
+      const margin_after_overhead_pct =
+        current_selling_price > 0
+          ? +(
+              ((current_selling_price - break_even_price)
+                / current_selling_price)
+              * 100
+            ).toFixed(2)
+          : null;
+
+      let warning: string | null = null;
+      if (current_cost_price <= 0) {
+        warning = 'cost_zero';
+      } else if (noSales) {
+        warning = 'no_sales_in_period';
+      } else if (
+        stock_on_hand === 0
+        && allocation_basis === 'stock_value_share'
+      ) {
+        warning = 'no_stock';
+      }
+
+      return {
+        variant_id: r.variant_id,
+        product_id: r.product_id,
+        product_name: r.product_name,
+        sku: r.sku,
+        barcode: r.barcode,
+        category_name: r.category_name,
+        current_cost_price,
+        current_selling_price,
+        units_sold_in_period,
+        revenue_in_period,
+        stock_on_hand,
+        allocation_weight: +allocation_weight.toFixed(6),
+        overhead_share,
+        overhead_per_unit,
+        break_even_price,
+        fair_price,
+        gap_to_fair,
+        gap_to_fair_pct,
+        current_margin_pct,
+        margin_after_overhead_pct,
+        warning,
+      };
+    });
+
+    const variants_below_fair = items.filter((i) => i.gap_to_fair > 0).length;
+    const current_gap_total = +items
+      .reduce((s, i) => s + Math.max(0, i.gap_to_fair), 0)
+      .toFixed(2);
+    const average_overhead_per_unit =
+      items.length > 0
+        ? +(
+            items.reduce((s, i) => s + i.overhead_per_unit, 0) / items.length
+          ).toFixed(2)
+        : 0;
+    const units_total = rawRows.reduce(
+      (s, r) => s + Number(r.units_sold_in_period || 0),
+      0,
+    );
+    const revenue_total = +rawRows
+      .reduce((s, r) => s + Number(r.revenue_in_period || 0), 0)
+      .toFixed(2);
+
+    return {
+      items,
+      summary: {
+        from: fromIso,
+        to: toIso,
+        allocation_basis,
+        overhead_source,
+        target_margin_pct,
+        overhead_total: +Number(overhead_total).toFixed(2),
+        units_total,
+        revenue_total,
+        total_candidates,
+        returned_count: items.length,
+        truncated,
+        variants_below_fair,
+        current_gap_total,
+        average_overhead_per_unit,
+        message_ar: truncated
+          ? `تم عرض أول ${items.length} صنف فقط من ${total_candidates}. ضيّق الفلتر أو زد الحد.`
+          : null,
+        advisory:
+          'تقرير استرشادي فقط — لا يقوم بأي تعديل تلقائي على الأسعار، ولا يحرّك مخزون أو خزنة أو قيود محاسبية.',
+      },
     };
   }
 }

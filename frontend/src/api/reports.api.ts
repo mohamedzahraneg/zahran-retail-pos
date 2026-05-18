@@ -226,6 +226,14 @@ export const reportsApi = {
       api.get('/reports/pricing/landed-impact', { params }),
     ),
 
+  // PR-P8.1 — Fair Price Report (read-only, advisory).
+  // 60s axios timeout mirrors smart-pricing/cost-adjustment patterns;
+  // server soft-caps at limit=1000 and surfaces truncation metadata.
+  pricingFairPrice: (params: PricingFairPriceParams = {}) =>
+    unwrap<PricingFairPriceResponse>(
+      api.get('/reports/pricing/fair-price', { params, timeout: 60_000 }),
+    ),
+
   // PR-PURCHASES-P3.4B — sold-profit reports (read-only, gross sales).
   soldProfitSummary: (params: { from?: string; to?: string } = {}) =>
     unwrap<SoldProfitSummary>(
@@ -571,4 +579,78 @@ export interface SoldProfitNetProductsResponse {
     ok: number;
   };
   items: SoldProfitNetProductRow[];
+}
+
+// ─── PR-P8.1 — Fair Price Report types (read-only, advisory) ────────
+export type FairPriceAllocationBasis =
+  | 'revenue_share'
+  | 'units_share'
+  | 'stock_value_share'
+  | 'flat_per_sku';
+
+export type FairPriceOverheadSource =
+  | 'actual_expenses'
+  | 'recurring_monthly_equivalent';
+
+export type FairPriceWarning =
+  | 'cost_zero'
+  | 'no_sales_in_period'
+  | 'no_stock';
+
+export interface PricingFairPriceParams {
+  from?: string;
+  to?: string;
+  allocation_basis?: FairPriceAllocationBasis;
+  overhead_source?: FairPriceOverheadSource;
+  target_margin_pct?: number;
+  q?: string;
+  only_in_stock?: boolean;
+  only_active?: boolean;
+  limit?: number;
+}
+
+export interface PricingFairPriceRow {
+  variant_id: string;
+  product_id: string;
+  product_name: string;
+  sku: string;
+  barcode: string | null;
+  category_name: string | null;
+  current_cost_price: number;
+  current_selling_price: number;
+  units_sold_in_period: number;
+  revenue_in_period: number;
+  stock_on_hand: number;
+  allocation_weight: number;
+  overhead_share: number;
+  overhead_per_unit: number;
+  break_even_price: number;
+  fair_price: number;
+  gap_to_fair: number;
+  gap_to_fair_pct: number | null;
+  current_margin_pct: number | null;
+  margin_after_overhead_pct: number | null;
+  warning: FairPriceWarning | null;
+}
+
+export interface PricingFairPriceResponse {
+  items: PricingFairPriceRow[];
+  summary: {
+    from: string;
+    to: string;
+    allocation_basis: FairPriceAllocationBasis;
+    overhead_source: FairPriceOverheadSource;
+    target_margin_pct: number;
+    overhead_total: number;
+    units_total: number;
+    revenue_total: number;
+    total_candidates: number;
+    returned_count: number;
+    truncated: boolean;
+    variants_below_fair: number;
+    current_gap_total: number;
+    average_overhead_per_unit: number;
+    message_ar: string | null;
+    advisory: string;
+  };
 }

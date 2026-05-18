@@ -70,6 +70,34 @@ function MAP_PRICING_HISTORY(r: any) {
   };
 }
 
+// PR-P8.1 — Fair Price Report row mapper. Advisory-only export; the
+// Arabic column headers mirror what the operator sees in the table.
+const WARNING_LABEL_AR: Record<string, string> = {
+  cost_zero: 'تكلفة غير معروفة',
+  no_sales_in_period: 'لا توجد مبيعات في الفترة',
+  no_stock: 'لا يوجد مخزون',
+};
+function MAP_PRICING_FAIR(r: any) {
+  return {
+    'المنتج': r.product_name ?? '',
+    'SKU': r.sku ?? '',
+    'الفئة': r.category_name ?? '',
+    'الكمية المباعة': fmtNumber(r.units_sold_in_period),
+    'الإيرادات في الفترة': fmtNumber(r.revenue_in_period),
+    'سعر البيع الحالي': fmtNumber(r.current_selling_price),
+    'التكلفة الحالية': fmtNumber(r.current_cost_price),
+    'نصيب التكاليف التشغيلية': fmtNumber(r.overhead_share),
+    'تكلفة تشغيلية / قطعة': fmtNumber(r.overhead_per_unit),
+    'سعر التعادل': fmtNumber(r.break_even_price),
+    'السعر العادل': fmtNumber(r.fair_price),
+    'الفرق عن السعر العادل': fmtNumber(r.gap_to_fair),
+    'هامش الربح الحالي %': fmtNumber(r.current_margin_pct),
+    'الهامش بعد التكلفة التشغيلية %': fmtNumber(r.margin_after_overhead_pct),
+    'المخزون': fmtNumber(r.stock_on_hand),
+    'ملاحظة': r.warning ? WARNING_LABEL_AR[r.warning] ?? r.warning : '',
+  };
+}
+
 function MAP_PRICING_LANDED(r: any) {
   const last = r.last_purchase ?? {};
   return {
@@ -504,6 +532,61 @@ export class ReportsController {
         'pricing-landed-impact',
         'أثر آخر مشتريات',
       );
+    }
+    return result;
+  }
+
+  // ── PR-P8.1 — Fair Price Report (read-only, advisory) ───────────────
+  // Combines variant landed cost + a period overhead allocation
+  // (operating expenses) to surface a break-even and target-margin
+  // "fair price" per variant. Read-only by construction; no Apply
+  // endpoint. The service guardrail spec pins the zero-write contract
+  // (see reports.service.fair-price.spec.ts STATIC GUARDRAIL block).
+  @Get('pricing/fair-price')
+  @ApiOperation({ summary: 'Fair-price advisory based on cost + overhead' })
+  async pricingFairPrice(
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('allocation_basis') allocation_basis?: string,
+    @Query('overhead_source') overhead_source?: string,
+    @Query('target_margin_pct') target_margin_pct?: string,
+    @Query('q') q?: string,
+    @Query('only_in_stock') onlyInStock?: string,
+    @Query('only_active') onlyActive?: string,
+    @Query('limit') limit?: string,
+    @Query('format') format?: 'json' | 'xlsx' | 'pdf',
+    @Res({ passthrough: true }) res?: Response,
+  ) {
+    const result = await this.svc.fairPrice({
+      from,
+      to,
+      allocation_basis: allocation_basis as any,
+      overhead_source: overhead_source as any,
+      target_margin_pct:
+        target_margin_pct !== undefined && target_margin_pct !== ''
+          ? Number(target_margin_pct)
+          : undefined,
+      q,
+      only_in_stock: onlyInStock === 'true' || onlyInStock === '1',
+      only_active:
+        onlyActive === undefined
+          ? undefined
+          : !(onlyActive === 'false' || onlyActive === '0'),
+      limit: limit ? Number(limit) : undefined,
+    });
+    if (format && format !== 'json' && res) {
+      const rows = (result.items || []).map(MAP_PRICING_FAIR);
+      return this.respond(res, rows, format, 'pricing-fair-price', 'السعر العادل', {
+        from: result.summary.from,
+        to: result.summary.to,
+        allocation_basis: result.summary.allocation_basis,
+        overhead_source: result.summary.overhead_source,
+        target_margin_pct: result.summary.target_margin_pct,
+        // The advisory copy travels with the PDF meta block so the
+        // exported file carries the same disclaimer the UI shows.
+        ملاحظة:
+          'تقرير استرشادي فقط — لا يقوم بأي تعديل تلقائي على الأسعار، ولا يحرّك مخزون أو خزنة أو قيود محاسبية.',
+      });
     }
     return result;
   }
