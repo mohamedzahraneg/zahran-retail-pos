@@ -1160,12 +1160,17 @@ export class PurchasesService {
           ],
         );
 
-        await m.query(
-          `UPDATE stock
-              SET quantity_on_hand = quantity_on_hand - $1, updated_at = NOW()
-            WHERE variant_id = $2 AND warehouse_id = $3`,
-          [it.quantity, it.variant_id, dto.warehouse_id],
-        );
+        // PR-FIX-INVENTORY-DOUBLE-WRITE — the AFTER INSERT trigger
+        // `trg_apply_stock_movement` (migration 011) applies the
+        // `direction='out'` delta to `stock.quantity_on_hand`
+        // automatically. The previous explicit `UPDATE stock SET
+        // quantity_on_hand = quantity_on_hand - qty` immediately
+        // before this INSERT was double-debiting every purchase
+        // return. `receive()` (above in this same service) already
+        // demonstrates the correct movement-only pattern and an
+        // inline comment there warns "would double the stock
+        // increase" — the rule is now applied to the return path
+        // too. The INSERT below is the single mutation source.
         await m.query(
           // PR-PURCHASES-P2.4A-FIX-ENUM: 'purchase_return' is NOT a member
           // of the stock_movement_type enum. Use the generic 'adjustment'
@@ -1266,18 +1271,22 @@ export class PurchasesService {
         [id],
       );
 
+      // PR-FIX-INVENTORY-DOUBLE-WRITE — the AFTER INSERT trigger
+      // `trg_apply_stock_movement` applies the `direction='in'` delta
+      // to `stock.quantity_on_hand` automatically (its own ON
+      // CONFLICT path mirrors what the manual UPDATE was doing). The
+      // previous explicit `UPDATE stock SET quantity_on_hand =
+      // quantity_on_hand + qty` immediately before each INSERT below
+      // was double-crediting every purchase-return cancellation. The
+      // INSERT into `stock_movements` is now the single mutation
+      // source.
+      //
+      // PR-PURCHASES-P2.4A-FIX-ENUM: see comment on the create path
+      // above. movement_type='adjustment' + direction='in' is the
+      // cancel reversal; reference_type='purchase_return' keeps the
+      // semantic link for `posting.reverseByReference`.
       for (const it of items) {
         await m.query(
-          `UPDATE stock
-              SET quantity_on_hand = quantity_on_hand + $1, updated_at = NOW()
-            WHERE variant_id = $2 AND warehouse_id = $3`,
-          [it.quantity, it.variant_id, ret.warehouse_id],
-        );
-        await m.query(
-          // PR-PURCHASES-P2.4A-FIX-ENUM: see comment on the create path
-          // above. movement_type='adjustment' + direction='in' is the
-          // cancel reversal; reference_type='purchase_return' keeps the
-          // semantic link for `posting.reverseByReference`.
           `INSERT INTO stock_movements
              (variant_id, warehouse_id, movement_type, direction,
               quantity, unit_cost, reference_type, reference_id, user_id, notes)

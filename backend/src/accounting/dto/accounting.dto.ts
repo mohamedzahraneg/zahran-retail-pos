@@ -135,6 +135,23 @@ export class CreateExpenseDto {
   @IsString()
   @IsIn(['open_shift', 'direct_cashbox'])
   source_type?: 'open_shift' | 'direct_cashbox';
+
+  /**
+   * PR-FIX-ADVANCE-EXPENSE-DEDUPE — operator-supplied UUID per advance
+   * disbursement form-submit. When the caller sends `is_advance=true`,
+   * a retry of the same submit (double-click, network retry) MUST
+   * reuse the same `client_token`; the service then short-circuits
+   * the second call to the previously-created expense row without
+   * spawning approvals, hitting the cashbox, or posting the JE again.
+   *
+   * Optional — when omitted, behaviour is unchanged from the legacy
+   * flow. Non-advance expenses ignore the token entirely (the partial
+   * unique index `uq_expenses_advance_client_token_live` filters on
+   * `is_advance=true`).
+   */
+  @IsOptional()
+  @IsUUID()
+  client_token?: string;
 }
 
 export class UpdateExpenseDto extends PartialType(CreateExpenseDto) {}
@@ -250,6 +267,16 @@ export class CreateDailyExpenseDto {
   @IsString()
   @IsIn(['open_shift', 'direct_cashbox'])
   source_type?: 'open_shift' | 'direct_cashbox';
+
+  /**
+   * PR-FIX-ADVANCE-EXPENSE-DEDUPE — see the matching field on
+   * `CreateExpenseDto` for the full contract. Optional; only the
+   * advance branch (`is_advance=true`) is constrained by the
+   * partial unique index.
+   */
+  @IsOptional()
+  @IsUUID()
+  client_token?: string;
 }
 
 export class ListExpensesDto {

@@ -360,8 +360,16 @@ describe('STATIC GUARDRAIL — cost-adjustment write footprint (P3.6A)', () => {
   const startIdx = SRC.indexOf('PR-PURCHASES-P3.6A');
   // Find the NEXT phase marker after P3.6A to bound the slice — that
   // way future P3.6B/P3.7 work won't drag unrelated code into this
-  // guardrail.
-  const candidates = ['PR-PURCHASES-P3.6B', 'PR-PURCHASES-P3.7'];
+  // guardrail. PR-FIX-INVENTORY-API-FOUNDATION added two read-only
+  // methods (getProduct360/getProductMatrix) to the same file; the
+  // marker below stops their `stock_movements` and `INSERT INTO`
+  // references (purely SELECT-side joins) from leaking into the
+  // cost-adjustment write-footprint slice.
+  const candidates = [
+    'PR-PURCHASES-P3.6B',
+    'PR-PURCHASES-P3.7',
+    'PR-FIX-INVENTORY-API-FOUNDATION',
+  ];
   const ends = candidates
     .map((m) => SRC.indexOf(m, startIdx + 1))
     .filter((i) => i > 0);

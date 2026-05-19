@@ -119,6 +119,17 @@ class SettlementDto {
    *  fired (closed-shift checks, cashbox-mismatch checks). Declaring
    *  it here lets the validator pass it through to the service. */
   @IsOptional() @IsUUID() shift_id?: string;
+  /**
+   * PR-FIX-SETTLEMENT-DEDUPE — operator-supplied UUID per settlement
+   * form-submit. Retries / double-clicks reuse the same token so the
+   * backend deduplicates at the DB level via the partial unique
+   * index `uq_employee_settlements_client_token_live` (migration 141):
+   * a second request with the same token returns the original
+   * settlement row WITHOUT writing a second CT or JE. Optional —
+   * internal orchestrators (attendance.payWage) leave it undefined
+   * and keep the prior behaviour.
+   */
+  @IsOptional() @IsUUID() client_token?: string;
 }
 
 class TaskDto {

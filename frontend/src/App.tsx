@@ -28,6 +28,20 @@ import Shifts from '@/pages/Shifts';
 import ShiftReports from '@/pages/ShiftReports';
 import StockTransfers from '@/pages/StockTransfers';
 import StockCount from '@/pages/StockCount';
+// PR-FIX-INVENTORY-UI-SHELL — new read-only inventory section.
+// Lives alongside the legacy /products, /stock-* routes; nothing is
+// removed or repurposed. Routes: /inventory (dashboard),
+// /inventory/balances, /inventory/movements, /products/:id (360°
+// view), /products/:id/matrix (variant matrix tab).
+import InventoryDashboard from '@/pages/InventoryDashboard';
+import InventoryBalances from '@/pages/InventoryBalances';
+import InventoryMovements from '@/pages/InventoryMovements';
+import InventoryReports from '@/pages/InventoryReports';
+import Product360 from '@/pages/Product360';
+// PR-BRANCHES-WAREHOUSES-FOUNDATION — new admin surface that lets
+// operators curate branches (organisational units) and link them
+// to existing warehouses. No stock / financial side effects.
+import BranchesWarehouses from '@/pages/BranchesWarehouses';
 import Coupons from '@/pages/Coupons';
 import Alerts from '@/pages/Alerts';
 import Accounts from '@/pages/Accounts';
@@ -177,6 +191,77 @@ export default function App() {
         />
         <Route path="stock-transfers" element={<StockTransfers />} />
         <Route path="stock-count" element={<StockCount />} />
+        {/* PR-FIX-INVENTORY-UI-SHELL — read-only inventory section.
+            All five routes gated by the same `products.view`
+            permission the products page already uses, so the
+            inventory team (and admins) inherit access automatically
+            without a new permission slug. */}
+        <Route
+          path="inventory"
+          element={
+            <ProtectedRoute permissions={['products.view']}>
+              <InventoryDashboard />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="inventory/balances"
+          element={
+            <ProtectedRoute permissions={['products.view']}>
+              <InventoryBalances />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="inventory/movements"
+          element={
+            <ProtectedRoute permissions={['products.view']}>
+              <InventoryMovements />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="products/:id"
+          element={
+            <ProtectedRoute permissions={['products.view']}>
+              <Product360 />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="products/:id/matrix"
+          element={
+            <ProtectedRoute permissions={['products.view']}>
+              <Product360 />
+            </ProtectedRoute>
+          }
+        />
+        {/* PR-INVENTORY-REPORTS — dedicated inventory analytics page
+            with branch-aware valuation / low-stock / dead-stock /
+            profitability tabs. Replaces the earlier redirect to
+            /reports. Same `products.view` gate the rest of the new
+            inventory section uses. */}
+        <Route
+          path="inventory/reports"
+          element={
+            <ProtectedRoute permissions={['products.view']}>
+              <InventoryReports />
+            </ProtectedRoute>
+          }
+        />
+        {/* PR-BRANCHES-WAREHOUSES-FOUNDATION — admin surface gated
+            on `warehouses.view`. The new module's POST/PATCH paths
+            additionally require `warehouses.manage`; the FE relies
+            on the API for enforcement and shows the page to anyone
+            who can already see the warehouses list. */}
+        <Route
+          path="branches"
+          element={
+            <ProtectedRoute permissions={['warehouses.view']}>
+              <BranchesWarehouses />
+            </ProtectedRoute>
+          }
+        />
         <Route path="coupons" element={<Coupons />} />
         <Route path="alerts" element={<Alerts />} />
         {/* Legacy /accounting redirects to the unified /accounts page.

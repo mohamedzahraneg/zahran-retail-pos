@@ -129,6 +129,29 @@ export class AccountingService {
     opts: { strictCategoryMapping?: boolean } = {},
   ) {
     return this.ds.transaction(async (em) => {
+      // ━━━ PR-FIX-ADVANCE-EXPENSE-DEDUPE — fast-path replay ━━━
+      // An operator who double-clicks "Save" on the advance form, or
+      // a retried HTTP request, carries the SAME `client_token` UUID
+      // generated once by the frontend. If a prior call with that
+      // token already produced an advance expense (with its paired
+      // CT + JE through the engine), return that row unchanged —
+      // skip approvals, skip cashbox, skip GL. The partial unique
+      // index `uq_expenses_advance_client_token_live` (migration 140)
+      // backs this against concurrent retries via ON CONFLICT below.
+      // Filters on `is_advance = TRUE` so non-advance writers that
+      // happen to send a token aren't affected.
+      const clientToken: string | null =
+        (dto as any).client_token ?? null;
+      if (clientToken) {
+        const [existing] = await em.query(
+          `SELECT * FROM expenses
+            WHERE client_token = $1 AND is_advance = TRUE
+            LIMIT 1`,
+          [clientToken],
+        );
+        if (existing) return existing;
+      }
+
       // Auto-resolve cashbox_id AND shift_id from the user's open
       // shift when not supplied — PR-2 records the shift link so the
       // register, close-out reconciliation, and expense analytics
@@ -364,14 +387,23 @@ export class AccountingService {
       // so the trigger fires before the NOT-NULL check is evaluated.
       // PR-2: shift_id added to the INSERT (column added in migration 093).
       // PR-ESS-2B: source_employee_request_id added (column added in migration 117).
+      // PR-FIX-ADVANCE-EXPENSE-DEDUPE: client_token added (column added in
+      // migration 140) + ON CONFLICT DO NOTHING on the partial unique
+      // index `uq_expenses_advance_client_token_live` so a concurrent
+      // retry that races past the pre-check above can't double-insert.
+      // For non-advance expenses or callers that don't send a token,
+      // client_token is NULL and the partial index ignores the row.
       const [row] = await em.query(
         `INSERT INTO expenses
            (expense_no, warehouse_id, cashbox_id, category_id, amount,
             payment_method, expense_date, description, receipt_url, vendor_name,
             created_by, employee_user_id, is_advance, shift_id,
-            source_employee_request_id)
+            source_employee_request_id, client_token)
          VALUES (NULL,$1,$2,$3,$4,$5::payment_method_code,COALESCE($6,CURRENT_DATE),
-                 $7,$8,$9,$10,$11,$12,$13,$14)
+                 $7,$8,$9,$10,$11,$12,$13,$14,$15)
+         ON CONFLICT (client_token) WHERE is_advance = TRUE
+                                      AND client_token IS NOT NULL
+         DO NOTHING
          RETURNING *`,
         [
           dto.warehouse_id,
@@ -388,8 +420,31 @@ export class AccountingService {
           isAdvance,
           shiftId,
           sourceRequestId,
+          clientToken,
         ],
       );
+
+      // Race-loser recovery: a concurrent retry committed first and
+      // our INSERT was swallowed by `ON CONFLICT DO NOTHING`. Look up
+      // the winning row and return it — same response shape, none of
+      // the duplicate side-effects.
+      if (!row && clientToken && isAdvance) {
+        const [existing] = await em.query(
+          `SELECT * FROM expenses
+            WHERE client_token = $1 AND is_advance = TRUE
+            LIMIT 1`,
+          [clientToken],
+        );
+        if (existing) return existing;
+      }
+      if (!row) {
+        // Defensive — INSERT returned nothing and we can't recover a
+        // row by client_token. Refuse rather than silently proceed
+        // with `row` undefined and crash downstream.
+        throw new BadRequestException(
+          'تعذّر إنشاء المصروف — حاول مرة أخرى',
+        );
+      }
       // ━━━ NO CASH MOVEMENT AT CREATE TIME ━━━
       // The previous implementation decremented the cashbox at insert
       // and *again* at approval (accounting.service.ts:158–188 + 268–292

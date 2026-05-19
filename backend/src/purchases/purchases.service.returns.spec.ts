@@ -363,7 +363,10 @@ describe('PurchasesService.createReturn — write footprint per settlement', () 
 
     expect(sqls.some((s) => /INSERT INTO purchase_returns/i.test(s))).toBe(true);
     expect(sqls.some((s) => /INSERT INTO purchase_return_items/i.test(s))).toBe(true);
-    expect(sqls.some((s) => /UPDATE stock\b/i.test(s))).toBe(true);
+    // PR-FIX-INVENTORY-DOUBLE-WRITE — no raw `UPDATE stock` here; the
+    // INSERT INTO stock_movements drives the stock UPSERT via the
+    // AFTER INSERT trigger `trg_apply_stock_movement`.
+    expect(sqls.some((s) => /UPDATE stock\s+SET/i.test(s))).toBe(false);
     expect(sqls.some((s) => /INSERT INTO stock_movements/i.test(s))).toBe(true);
     // PR-PURCHASES-P2.4A-FIX-ENUM: stock_movements row uses the
     // valid 'adjustment' enum value with direction='out'; the
@@ -410,7 +413,8 @@ describe('PurchasesService.createReturn — write footprint per settlement', () 
     );
     const sqls = calls.map((c) => c.sql);
 
-    expect(sqls.some((s) => /UPDATE stock\b/i.test(s))).toBe(true);
+    // PR-FIX-INVENTORY-DOUBLE-WRITE — see supplier_credit case above.
+    expect(sqls.some((s) => /UPDATE stock\s+SET/i.test(s))).toBe(false);
     expect(sqls.some((s) => /INSERT INTO stock_movements/i.test(s))).toBe(true);
     expect(sqls.some((s) => /fn_record_cashbox_txn/i.test(s))).toBe(true);
     const cashboxCall = calls.find((c) =>
@@ -478,7 +482,8 @@ describe('PurchasesService.createReturn — write footprint per settlement', () 
       USER_ID,
     );
     const sqls = calls.map((c) => c.sql);
-    expect(sqls.some((s) => /UPDATE stock\b/i.test(s))).toBe(true);
+    // PR-FIX-INVENTORY-DOUBLE-WRITE — see supplier_credit case above.
+    expect(sqls.some((s) => /UPDATE stock\s+SET/i.test(s))).toBe(false);
     expect(sqls.some((s) => /INSERT INTO stock_movements/i.test(s))).toBe(true);
     expect(sqls.some((s) => /UPDATE suppliers/i.test(s))).toBe(false);
     expect(sqls.some((s) => /INSERT INTO supplier_ledger/i.test(s))).toBe(false);
@@ -522,11 +527,16 @@ describe('PurchasesService.cancelReturn — reversal footprint', () => {
     await svc.cancelReturn(RETURN_ID, USER_ID);
 
     const sqls = calls.map((c) => c.sql);
+    // PR-FIX-INVENTORY-DOUBLE-WRITE — cancel reversal no longer
+    // emits a raw `UPDATE stock SET quantity_on_hand = … + qty` step;
+    // the AFTER INSERT trigger on stock_movements applies the
+    // direction='in' delta. The smCall below is now the sole stock
+    // mutation source.
     expect(
       sqls.some((s) =>
         /UPDATE stock\s+SET quantity_on_hand = quantity_on_hand \+/i.test(s),
       ),
-    ).toBe(true);
+    ).toBe(false);
     const smCall = calls.find(
       (c) =>
         /INSERT INTO stock_movements/i.test(c.sql) && c.sql.includes("'in'"),
@@ -598,9 +608,16 @@ describe('PurchasesService.cancelReturn — reversal footprint', () => {
     });
     await svc.cancelReturn(RETURN_ID, USER_ID);
     const sqls = calls.map((c) => c.sql);
+    // PR-FIX-INVENTORY-DOUBLE-WRITE — see supplier_credit cancel above.
     expect(
       sqls.some((s) =>
         /UPDATE stock\s+SET quantity_on_hand = quantity_on_hand \+/i.test(s),
+      ),
+    ).toBe(false);
+    expect(
+      sqls.some(
+        (s) =>
+          /INSERT INTO stock_movements/i.test(s) && s.includes("'in'"),
       ),
     ).toBe(true);
     expect(sqls.some((s) => /UPDATE suppliers/i.test(s))).toBe(false);

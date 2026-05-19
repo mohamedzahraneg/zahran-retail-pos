@@ -457,6 +457,17 @@ export const employeesApi = {
        * recordSettlement DTO (employees.service.ts:1355).
        */
       shift_id?: string;
+      /**
+       * PR-FIX-SETTLEMENT-DEDUPE — operator-supplied UUID per
+       * settlement form-submit. Retries / double-clicks of the same
+       * "Save" carry the same token; the BE deduplicates at the DB
+       * level via the partial unique index
+       * `uq_employee_settlements_client_token_live` (migration 141)
+       * so no second CT / JE for the same payout. Optional — mint
+       * via `useSettlementClientToken()` from
+       * frontend/src/lib/settlement-client-token.ts.
+       */
+      client_token?: string;
     },
   ) => unwrap<any>(api.post(`/employees/${id}/settlements`, body)),
 };

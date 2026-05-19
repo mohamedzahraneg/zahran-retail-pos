@@ -221,6 +221,19 @@ export const accountingApi = {
      * behaviour for backward compatibility.
      */
     source_type?: 'open_shift' | 'direct_cashbox';
+    /**
+     * PR-FIX-ADVANCE-EXPENSE-DEDUPE — operator-supplied UUID per
+     * advance disbursement form-submit. When sent with
+     * `is_advance=true`, the backend deduplicates at the DB level
+     * via the partial unique index
+     * `uq_expenses_advance_client_token_live` (migration 140):
+     * retries / double-clicks / network replays that carry the same
+     * token return the original expense row without writing a second
+     * CT or JE. Optional — legacy callers leave it undefined and
+     * keep the prior behaviour. Mint via `useAdvanceClientToken()`
+     * (frontend/src/lib/advance-client-token.ts).
+     */
+    client_token?: string;
   }) => unwrap<Expense>(api.post('/accounting/expenses/daily', body)),
   updateExpense: (id: string, body: Partial<Expense>) =>
     unwrap<Expense>(api.patch(`/accounting/expenses/${id}`, body)),

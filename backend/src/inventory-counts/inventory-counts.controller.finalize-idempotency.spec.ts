@@ -231,8 +231,12 @@ describe('InventoryCountsController route-level wiring — PR-FIX-IDEMPOTENCY-DE
         {
           provide: InventoryCountsService,
           useValue: {
+            create: jest.fn(),
+            freeze: jest.fn(),
             start: jest.fn(),
+            updateItems: jest.fn(),
             submitEntries: jest.fn(),
+            review: jest.fn(),
             finalize: jest.fn(),
             cancel: jest.fn(),
             list: jest.fn(),
@@ -256,12 +260,28 @@ describe('InventoryCountsController route-level wiring — PR-FIX-IDEMPOTENCY-DE
     // ── This PR's target.
     expect(hasInterceptor((controller as any).finalize)).toBe(true);
 
-    // ── Other POST handlers MUST remain undecorated. `start` is
-    //    a state-init transition (no JE/stock writes); `submitEntries`
-    //    only buffers count rows; `cancel` is a status flip — out of
-    //    scope for PR-11F-bis.
+    // PR-INVENTORY-COUNTS-WORKFLOW — the idempotency umbrella now
+    // covers every write transition that flips status or touches the
+    // ledger: create, freeze, start, review, finalize, cancel. The
+    // soft updateItems/entries surfaces (counted_qty buffering) stay
+    // undecorated — they're status-guarded UPDATEs with no stock
+    // motion, and retrying them is harmless by design.
+    const decoratedSiblings: Array<keyof InventoryCountsController> = [
+      'create',
+      'freeze',
+      'start',
+      'review',
+      'cancel',
+    ];
+    for (const name of decoratedSiblings) {
+      const target = (controller as any)[name];
+      if (typeof target !== 'function') continue;
+      expect(hasInterceptor(target)).toBe(true);
+    }
+
     const undecoratedSiblings: Array<keyof InventoryCountsController> = [
-      'start', 'submitEntries', 'cancel',
+      'submitEntries',
+      'updateItems',
     ];
     for (const name of undecoratedSiblings) {
       const target = (controller as any)[name];

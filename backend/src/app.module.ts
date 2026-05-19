@@ -27,6 +27,7 @@ import { ImportModule } from './import/import.module';
 import { ShiftsModule } from './shifts/shifts.module';
 import { StockTransfersModule } from './stock-transfers/stock-transfers.module';
 import { InventoryCountsModule } from './inventory-counts/inventory-counts.module';
+import { InventoryModule } from './inventory/inventory.module';
 import { CouponsModule } from './coupons/coupons.module';
 import { AlertsModule } from './alerts/alerts.module';
 import { RealtimeModule } from './realtime/realtime.module';
@@ -44,6 +45,7 @@ import { ExpenseAllocationsModule } from './expense-allocations/expense-allocati
 import { CustomerGroupsModule } from './customer-groups/customer-groups.module';
 import { CategoriesModule } from './categories/categories.module';
 import { ProductGroupsModule } from './product-groups/product-groups.module';
+import { BranchesModule } from './branches/branches.module';
 import { AttendanceModule } from './attendance/attendance.module';
 import { EmployeesModule } from './employees/employees.module';
 import { ChartOfAccountsModule } from './chart-of-accounts/chart-of-accounts.module';
@@ -98,6 +100,7 @@ class HealthController {
     ShiftsModule,
     StockTransfersModule,
     InventoryCountsModule,
+    InventoryModule,
     CouponsModule,
     AlertsModule,
     RealtimeModule,
@@ -117,6 +120,7 @@ class HealthController {
     CustomerGroupsModule,
     CategoriesModule,
     ProductGroupsModule,
+    BranchesModule,
     ChartOfAccountsModule,
     PaymentsModule,
     FinanceModule,

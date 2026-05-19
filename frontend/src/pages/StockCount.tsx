@@ -1,196 +1,518 @@
-import { useState, useMemo, useEffect } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+/**
+ * StockCount.tsx — PR-INVENTORY-COUNTS-WORKFLOW
+ *
+ * Branch-aware stocktaking page. Surface:
+ *   · Header + 6 summary cards (current-page totals).
+ *   · Filters: search, status, branch, warehouse, date range +
+ *     active chips + clear button.
+ *   · Table with per-status action set + detail drawer.
+ *   · Detail drawer exposes the full workflow: freeze (only on
+ *     drafts created via the new pure-header endpoint), update
+ *     counted quantities (PATCH /items), review, finalize, cancel.
+ *
+ * All stock motion happens server-side via fn_adjust_stock_v2 at
+ * finalize. The page never imports a stock client — enforced by
+ * the source-level guard in the spec.
+ */
+import { useEffect, useMemo, useState } from 'react';
+import {
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from '@tanstack/react-query';
 import toast from 'react-hot-toast';
-// PR-FE-IDEM-FINAL-OPS (Sprint 5 / FE-IDEM PR 8) — per-modal reset
-// hook for CountDetailModal. The "إنهاء الجرد" (finalize) button
-// inside this modal triggers POST /inventory-counts/:id/finalize;
-// mounting/unmounting the modal mints a fresh key for each viewing.
 import { resetInventoryFinalizeIdempotencyKey } from '@/lib/final-ops-idempotency';
 import {
   ClipboardCheck,
   Plus,
   X,
-  Save,
   CheckCircle2,
   XCircle,
-  AlertTriangle,
   Clock,
   Warehouse as WarehouseIcon,
+  Building2,
   Search,
+  Calendar,
+  Filter,
+  ListChecks,
+  Save,
+  Snowflake,
+  ScrollText,
+  ShieldCheck,
+  TrendingUp,
+  TrendingDown,
+  History,
+  type LucideIcon,
 } from 'lucide-react';
-import { api, unwrap } from '@/api/client';
 import {
   inventoryCountsApi,
-  InventoryCount,
-  CountItem,
-  CountStatus,
+  COUNT_STATUSES,
+  COUNT_STATUS_LABELS_AR,
+  type CountStatus,
+  type InventoryCount,
+  type ListCountsFilters,
 } from '@/api/inventory-counts.api';
+import { settingsApi, type Warehouse } from '@/api/settings.api';
+import { branchesApi, type Branch } from '@/api/branches.api';
 
-interface Warehouse {
-  id: string;
-  code: string;
-  name_ar?: string;
-  name?: string;
-  is_active: boolean;
+function fmtDate(s?: string | null): string {
+  if (!s) return '—';
+  try {
+    return new Date(s).toLocaleString('ar-EG', {
+      dateStyle: 'short',
+      timeStyle: 'short',
+    });
+  } catch {
+    return s;
+  }
 }
 
-const warehousesApi = {
-  list: () => unwrap<Warehouse[]>(api.get('/stock/warehouses')),
+function fmtNumber(n: number | string | null | undefined): string {
+  const v = Number(n ?? 0);
+  return Number.isFinite(v) ? v.toLocaleString('en-EG') : '0';
+}
+
+const STATUS_BADGE_CLASS: Record<CountStatus, string> = {
+  draft: 'bg-slate-100 text-slate-700 border-slate-200',
+  open: 'bg-sky-50 text-sky-700 border-sky-200',
+  counting: 'bg-indigo-50 text-indigo-700 border-indigo-200',
+  review: 'bg-amber-50 text-amber-700 border-amber-200',
+  finalized: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+  in_progress: 'bg-indigo-50 text-indigo-700 border-indigo-200',
+  completed: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+  cancelled: 'bg-rose-50 text-rose-700 border-rose-200',
 };
 
-const fmtDate = (s?: string | null) =>
-  s
-    ? new Date(s).toLocaleString('en-US', {
-        dateStyle: 'short',
-        timeStyle: 'short',
-      })
-    : '—';
-
-const STATUS_LABEL: Record<CountStatus, string> = {
-  in_progress: 'جارٍ',
-  completed: 'مكتمل',
-  cancelled: 'ملغى',
-};
-
-const STATUS_COLOR: Record<CountStatus, string> = {
-  in_progress: 'bg-amber-100 text-amber-700',
-  completed: 'bg-emerald-100 text-emerald-700',
-  cancelled: 'bg-rose-100 text-rose-700',
-};
+function useDebounced<T>(value: T, ms = 300): T {
+  const [v, setV] = useState(value);
+  useEffect(() => {
+    const t = setTimeout(() => setV(value), ms);
+    return () => clearTimeout(t);
+  }, [value, ms]);
+  return v;
+}
 
 export default function StockCount() {
+  const qc = useQueryClient();
+
+  // ── filters ──────────────────────────────────────────────────
+  const [searchInput, setSearchInput] = useState('');
+  const search = useDebounced(searchInput);
   const [statusFilter, setStatusFilter] = useState<string>('');
-  const [showStart, setShowStart] = useState(false);
+  const [warehouseId, setWarehouseId] = useState('');
+  const [branchId, setBranchId] = useState('');
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
+
+  // ── modals ───────────────────────────────────────────────────
+  const [showCreate, setShowCreate] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
-  const { data: counts = [], isLoading } = useQuery({
-    queryKey: ['inventory-counts', statusFilter],
-    queryFn: () =>
-      inventoryCountsApi.list(
-        statusFilter ? { status: statusFilter } : undefined,
-      ),
+  // ── reference data ───────────────────────────────────────────
+  const { data: warehouses = [] } = useQuery({
+    queryKey: ['stock-count-warehouses'],
+    queryFn: () => settingsApi.listWarehouses(true),
+    staleTime: 5 * 60_000,
+  });
+  const { data: branches = [] } = useQuery({
+    queryKey: ['stock-count-branches'],
+    queryFn: () => branchesApi.list(),
+    staleTime: 5 * 60_000,
   });
 
-  const grouped = useMemo(() => {
-    const c = { in_progress: 0, completed: 0, cancelled: 0, all: counts.length };
-    for (const t of counts) c[t.status]++;
-    return c;
+  // ── list query ───────────────────────────────────────────────
+  const filters: ListCountsFilters = useMemo(
+    () => ({
+      status: statusFilter || undefined,
+      warehouse_id: warehouseId || undefined,
+      branch_id: branchId || undefined,
+      date_from: dateFrom || undefined,
+      date_to: dateTo || undefined,
+      search: search.trim() || undefined,
+    }),
+    [statusFilter, warehouseId, branchId, dateFrom, dateTo, search],
+  );
+
+  const { data: counts = [], isLoading } = useQuery({
+    queryKey: ['inventory-counts', filters],
+    queryFn: () => inventoryCountsApi.list(filters),
+    placeholderData: (prev) => prev,
+  });
+
+  // ── summary (page-level) ─────────────────────────────────────
+  const summary = useMemo(() => {
+    const acc = {
+      total: counts.length,
+      open: 0,
+      counting: 0,
+      review: 0,
+      finalized: 0,
+      cancelled: 0,
+      positive_diff: 0,
+      negative_diff: 0,
+    };
+    for (const c of counts) {
+      if (c.status === 'draft' || c.status === 'open') acc.open += 1;
+      if (c.status === 'counting' || c.status === 'in_progress')
+        acc.counting += 1;
+      if (c.status === 'review') acc.review += 1;
+      if (c.status === 'finalized' || c.status === 'completed')
+        acc.finalized += 1;
+      if (c.status === 'cancelled') acc.cancelled += 1;
+      acc.positive_diff += Number(c.positive_diff_qty ?? 0);
+      acc.negative_diff += Number(c.negative_diff_qty ?? 0);
+    }
+    return acc;
   }, [counts]);
 
+  // ── active filter chips ──────────────────────────────────────
+  const warehouseById = (id: string) =>
+    (warehouses as Warehouse[]).find((w) => w.id === id);
+  const branchById = (id: string) =>
+    (branches as Branch[]).find((b) => b.id === id);
+
+  const chips: Array<{ key: string; label: string; onClear: () => void }> = [];
+  if (search.trim()) {
+    chips.push({
+      key: 'search',
+      label: `بحث: ${search.trim()}`,
+      onClear: () => setSearchInput(''),
+    });
+  }
+  if (statusFilter) {
+    chips.push({
+      key: 'status',
+      label: `الحالة: ${
+        COUNT_STATUS_LABELS_AR[statusFilter as CountStatus] || statusFilter
+      }`,
+      onClear: () => setStatusFilter(''),
+    });
+  }
+  if (warehouseId) {
+    chips.push({
+      key: 'warehouse',
+      label: `المخزن: ${warehouseById(warehouseId)?.name_ar || warehouseId}`,
+      onClear: () => setWarehouseId(''),
+    });
+  }
+  if (branchId) {
+    chips.push({
+      key: 'branch',
+      label: `الفرع: ${branchById(branchId)?.name_ar || branchId}`,
+      onClear: () => setBranchId(''),
+    });
+  }
+  if (dateFrom) {
+    chips.push({
+      key: 'date-from',
+      label: `من: ${dateFrom}`,
+      onClear: () => setDateFrom(''),
+    });
+  }
+  if (dateTo) {
+    chips.push({
+      key: 'date-to',
+      label: `إلى: ${dateTo}`,
+      onClear: () => setDateTo(''),
+    });
+  }
+
+  const clearAllFilters = () => {
+    setSearchInput('');
+    setStatusFilter('');
+    setWarehouseId('');
+    setBranchId('');
+    setDateFrom('');
+    setDateTo('');
+  };
+
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between flex-wrap gap-3">
+    <div className="space-y-4" dir="rtl" data-testid="stock-count-page">
+      {/* Header */}
+      <header className="flex items-center justify-between gap-3 flex-wrap">
         <div>
-          <h2 className="text-2xl font-black text-slate-800 flex items-center gap-2">
-            <ClipboardCheck className="text-brand-600" /> الجرد الفعلي
-          </h2>
-          <p className="text-sm text-slate-500 mt-1">
-            تجميد أرصدة النظام، إدخال الكميات الفعلية، وتطبيق الفروقات تلقائياً
+          <h1 className="text-xl font-black text-slate-800 flex items-center gap-2">
+            <ClipboardCheck className="w-5 h-5 text-indigo-600" />
+            الجرد الفعلي
+          </h1>
+          <p className="text-xs text-slate-500 mt-0.5">
+            مسار الجرد: مسودة ← تجميد رصيد النظام ← إدخال العدّ الفعلي ← مراجعة ← اعتماد الفروقات عبر <code>fn_adjust_stock_v2</code> فقط.
           </p>
         </div>
-        <button className="btn-primary" onClick={() => setShowStart(true)}>
-          <Plus size={18} /> جرد جديد
+        <button
+          type="button"
+          className="btn btn-primary"
+          onClick={() => setShowCreate(true)}
+          data-testid="counts-create-button"
+        >
+          <Plus size={16} /> جرد جديد
         </button>
-      </div>
+      </header>
 
-      {/* Status tabs */}
-      <div className="flex flex-wrap gap-2">
-        <TabBtn active={!statusFilter} onClick={() => setStatusFilter('')}>
-          الكل <Badge>{grouped.all}</Badge>
-        </TabBtn>
-        <TabBtn
-          active={statusFilter === 'in_progress'}
-          onClick={() => setStatusFilter('in_progress')}
-        >
-          جارٍ <Badge>{grouped.in_progress}</Badge>
-        </TabBtn>
-        <TabBtn
-          active={statusFilter === 'completed'}
-          onClick={() => setStatusFilter('completed')}
-        >
-          مكتمل <Badge>{grouped.completed}</Badge>
-        </TabBtn>
-        <TabBtn
-          active={statusFilter === 'cancelled'}
-          onClick={() => setStatusFilter('cancelled')}
-        >
-          ملغى <Badge>{grouped.cancelled}</Badge>
-        </TabBtn>
-      </div>
+      {/* Summary cards */}
+      <section
+        className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2"
+        data-testid="counts-summary"
+      >
+        <SummaryCard
+          icon={ListChecks}
+          label="إجمالي الصفحة"
+          value={fmtNumber(summary.total)}
+          tone="default"
+        />
+        <SummaryCard
+          icon={Snowflake}
+          label="مسودات/مفتوحة"
+          value={fmtNumber(summary.open)}
+          tone="default"
+        />
+        <SummaryCard
+          icon={Clock}
+          label="قيد العدّ"
+          value={fmtNumber(summary.counting)}
+          tone="amber"
+        />
+        <SummaryCard
+          icon={ScrollText}
+          label="مراجعة"
+          value={fmtNumber(summary.review)}
+          tone="amber"
+        />
+        <SummaryCard
+          icon={CheckCircle2}
+          label="معتمدة"
+          value={fmtNumber(summary.finalized)}
+          tone="emerald"
+        />
+        <SummaryCard
+          icon={XCircle}
+          label="ملغاة"
+          value={fmtNumber(summary.cancelled)}
+          tone="rose"
+        />
+      </section>
 
-      {/* Counts table */}
-      <div className="card overflow-hidden">
-        {isLoading ? (
-          <div className="p-8 text-center text-slate-400">جاري التحميل…</div>
-        ) : counts.length === 0 ? (
-          <div className="p-12 text-center">
-            <ClipboardCheck
-              className="mx-auto text-slate-300 mb-3"
-              size={48}
+      {/* Variance summary (positive / negative — current page) */}
+      <section className="grid grid-cols-1 md:grid-cols-2 gap-2">
+        <VarianceCard
+          icon={TrendingUp}
+          label="فروقات موجبة (زيادة على النظام)"
+          value={fmtNumber(summary.positive_diff)}
+          tone="emerald"
+        />
+        <VarianceCard
+          icon={TrendingDown}
+          label="فروقات سالبة (نقص عن النظام)"
+          value={fmtNumber(summary.negative_diff)}
+          tone="rose"
+        />
+      </section>
+
+      {/* Filters */}
+      <section
+        className="card p-3 space-y-2"
+        data-testid="counts-filters"
+      >
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-2">
+          <label className="flex items-center gap-2 input">
+            <Search size={14} className="text-slate-400" />
+            <input
+              type="text"
+              placeholder="بحث برقم الجرد أو الملاحظات…"
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
+              className="flex-1 bg-transparent outline-none text-sm"
+              data-testid="counts-search"
             />
-            <p className="text-slate-500">لا توجد عمليات جرد</p>
-          </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="bg-slate-50 text-slate-600">
-                <tr>
-                  <Th>الرقم</Th>
-                  <Th>المخزن</Th>
-                  <Th>التقدم</Th>
-                  <Th>عناصر بفروقات</Th>
-                  <Th>إجمالي الفرق</Th>
-                  <Th>تاريخ البدء</Th>
-                  <Th>الحالة</Th>
-                </tr>
-              </thead>
-              <tbody>
-                {counts.map((c) => (
-                  <tr
-                    key={c.id}
-                    className="border-t hover:bg-slate-50 cursor-pointer"
-                    onClick={() => setSelectedId(c.id)}
-                  >
-                    <Td className="font-mono font-bold text-brand-700">
-                      {c.count_no}
-                    </Td>
-                    <Td>{c.warehouse_name}</Td>
-                    <Td>
-                      <span className="font-bold">{c.items_counted ?? 0}</span>
-                      <span className="text-slate-400">
-                        {' '}
-                        / {c.items_total ?? 0}
-                      </span>
-                    </Td>
-                    <Td>
-                      {(c.items_with_diff ?? 0) > 0 ? (
-                        <span className="text-amber-700 font-bold inline-flex items-center gap-1">
-                          <AlertTriangle size={14} /> {c.items_with_diff}
-                        </span>
-                      ) : (
-                        <span className="text-slate-400">0</span>
-                      )}
-                    </Td>
-                    <Td className="font-bold">{c.total_abs_diff ?? 0}</Td>
-                    <Td className="text-slate-500">{fmtDate(c.started_at)}</Td>
-                    <Td>
-                      <span
-                        className={`px-2 py-1 rounded-lg text-xs font-bold ${STATUS_COLOR[c.status]}`}
-                      >
-                        {STATUS_LABEL[c.status]}
-                      </span>
-                    </Td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          </label>
+
+          <select
+            className="input"
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value)}
+            data-testid="counts-status-filter"
+          >
+            <option value="">كل الحالات</option>
+            {COUNT_STATUSES.map((s) => (
+              <option key={s} value={s}>
+                {COUNT_STATUS_LABELS_AR[s]}
+              </option>
+            ))}
+          </select>
+
+          <select
+            className="input"
+            value={branchId}
+            onChange={(e) => setBranchId(e.target.value)}
+            data-testid="counts-branch-filter"
+          >
+            <option value="">كل الفروع</option>
+            {branches.map((b) => (
+              <option key={b.id} value={b.id}>
+                {b.name_ar}
+              </option>
+            ))}
+          </select>
+
+          <select
+            className="input"
+            value={warehouseId}
+            onChange={(e) => setWarehouseId(e.target.value)}
+            data-testid="counts-warehouse-filter"
+          >
+            <option value="">كل المخازن</option>
+            {(warehouses as Warehouse[]).map((w) => (
+              <option key={w.id} value={w.id}>
+                {w.name_ar}
+              </option>
+            ))}
+          </select>
+
+          <label className="flex items-center gap-2 input">
+            <Calendar size={14} className="text-slate-400" />
+            <input
+              type="date"
+              value={dateFrom}
+              onChange={(e) => setDateFrom(e.target.value)}
+              className="flex-1 bg-transparent outline-none text-sm"
+              data-testid="counts-date-from"
+            />
+          </label>
+          <label className="flex items-center gap-2 input">
+            <Calendar size={14} className="text-slate-400" />
+            <input
+              type="date"
+              value={dateTo}
+              onChange={(e) => setDateTo(e.target.value)}
+              className="flex-1 bg-transparent outline-none text-sm"
+              data-testid="counts-date-to"
+            />
+          </label>
+
+          <button
+            type="button"
+            className="btn btn-sm"
+            onClick={clearAllFilters}
+            disabled={chips.length === 0}
+            data-testid="counts-clear-filters"
+          >
+            <X size={13} /> مسح الفلاتر
+          </button>
+        </div>
+
+        {chips.length > 0 && (
+          <div
+            className="flex flex-wrap items-center gap-1 pt-1"
+            data-testid="counts-active-chips"
+          >
+            <Filter size={12} className="text-slate-400" />
+            <span className="text-[10px] text-slate-500">فلاتر نشطة:</span>
+            {chips.map((chip) => (
+              <button
+                key={chip.key}
+                type="button"
+                onClick={chip.onClear}
+                className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full border border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100"
+                data-testid={`counts-chip-${chip.key}`}
+              >
+                {chip.label} <X size={10} />
+              </button>
+            ))}
           </div>
         )}
-      </div>
+      </section>
 
-      {showStart && <StartCountModal onClose={() => setShowStart(false)} />}
+      {/* Table */}
+      <section className="card overflow-x-auto" data-testid="counts-table">
+        {isLoading ? (
+          <div className="p-6 text-center text-sm text-slate-400">
+            جاري التحميل…
+          </div>
+        ) : counts.length === 0 ? (
+          <div className="p-10 text-center">
+            <ClipboardCheck
+              className="mx-auto text-slate-300 mb-2"
+              size={36}
+            />
+            <div className="text-sm text-slate-500">لا توجد عمليات جرد.</div>
+          </div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead className="bg-slate-50 text-xs text-slate-500">
+              <tr>
+                <th className="text-right px-3 py-2">رقم الجرد</th>
+                <th className="text-right px-3 py-2">المخزن</th>
+                <th className="text-center px-3 py-2">الحالة</th>
+                <th className="text-left px-3 py-2">الأصناف</th>
+                <th className="text-left px-3 py-2">معدودة</th>
+                <th className="text-left px-3 py-2">بها فرق</th>
+                <th className="text-right px-3 py-2">بدأ</th>
+                <th className="text-right px-3 py-2">انتهى</th>
+                <th className="text-right px-3 py-2">بدأ بواسطة</th>
+                <th className="text-right px-3 py-2">أنهى بواسطة</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {counts.map((c) => (
+                <tr
+                  key={c.id}
+                  data-testid="count-row"
+                  className="hover:bg-slate-50 cursor-pointer"
+                  onClick={() => setSelectedId(c.id)}
+                >
+                  <td className="px-3 py-2 font-bold text-indigo-700 tabular-nums">
+                    {c.count_no}
+                  </td>
+                  <td className="px-3 py-2">
+                    <WarehouseBranchCell
+                      warehouseName={c.warehouse_name}
+                      branch={c.primary_branch}
+                    />
+                  </td>
+                  <td className="px-3 py-2 text-center">
+                    <StatusBadge status={c.status} />
+                  </td>
+                  <td className="px-3 py-2 text-left tabular-nums">
+                    {fmtNumber(c.items_total)}
+                  </td>
+                  <td className="px-3 py-2 text-left tabular-nums">
+                    {fmtNumber(c.items_counted)}
+                  </td>
+                  <td className="px-3 py-2 text-left tabular-nums text-slate-600">
+                    {fmtNumber(c.items_with_diff)}
+                  </td>
+                  <td className="px-3 py-2 text-xs text-slate-500 whitespace-nowrap">
+                    {fmtDate(c.started_at)}
+                  </td>
+                  <td className="px-3 py-2 text-xs text-slate-500 whitespace-nowrap">
+                    {fmtDate(c.completed_at)}
+                  </td>
+                  <td className="px-3 py-2 text-xs text-slate-600">
+                    {c.started_by_name || '—'}
+                  </td>
+                  <td className="px-3 py-2 text-xs text-slate-600">
+                    {c.completed_by_name || '—'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </section>
+
+      {showCreate && (
+        <CreateCountModal
+          warehouses={warehouses as Warehouse[]}
+          onClose={() => setShowCreate(false)}
+          onCreated={(c) => {
+            setShowCreate(false);
+            qc.invalidateQueries({ queryKey: ['inventory-counts'] });
+            setSelectedId(c.id);
+          }}
+        />
+      )}
       {selectedId && (
-        <CountDetailModal
+        <CountDetailDrawer
           countId={selectedId}
           onClose={() => setSelectedId(null)}
         />
@@ -199,83 +521,221 @@ export default function StockCount() {
   );
 }
 
-/* ---------------- Start Count Modal ---------------- */
+// ─── Summary card ────────────────────────────────────────────────
+function SummaryCard({
+  icon: Icon,
+  label,
+  value,
+  tone,
+}: {
+  icon: LucideIcon;
+  label: string;
+  value: string;
+  tone: 'default' | 'amber' | 'emerald' | 'rose';
+}) {
+  const toneMap: Record<typeof tone, string> = {
+    default: 'border-slate-200 bg-white',
+    amber: 'border-amber-200 bg-amber-50/60',
+    emerald: 'border-emerald-200 bg-emerald-50/60',
+    rose: 'border-rose-200 bg-rose-50/60',
+  };
+  const iconColor: Record<typeof tone, string> = {
+    default: 'text-indigo-600',
+    amber: 'text-amber-600',
+    emerald: 'text-emerald-600',
+    rose: 'text-rose-600',
+  };
+  return (
+    <div
+      className={`card p-2.5 border ${toneMap[tone]}`}
+      data-testid="counts-summary-card"
+    >
+      <div className="flex items-center gap-2 text-[11px] text-slate-500">
+        <Icon size={13} className={iconColor[tone]} />
+        {label}
+      </div>
+      <div className="text-sm font-black text-slate-800 tabular-nums mt-1">
+        {value}
+      </div>
+    </div>
+  );
+}
 
-function StartCountModal({ onClose }: { onClose: () => void }) {
+function VarianceCard({
+  icon: Icon,
+  label,
+  value,
+  tone,
+}: {
+  icon: LucideIcon;
+  label: string;
+  value: string;
+  tone: 'emerald' | 'rose';
+}) {
+  const toneMap: Record<typeof tone, string> = {
+    emerald: 'border-emerald-200 bg-emerald-50/60 text-emerald-800',
+    rose: 'border-rose-200 bg-rose-50/60 text-rose-800',
+  };
+  return (
+    <div
+      className={`card p-3 border ${toneMap[tone]}`}
+      data-testid="counts-variance-card"
+    >
+      <div className="flex items-center gap-2 text-xs">
+        <Icon size={14} />
+        {label}
+      </div>
+      <div className="text-base font-black tabular-nums mt-1">{value}</div>
+    </div>
+  );
+}
+
+function StatusBadge({ status }: { status: CountStatus }) {
+  return (
+    <span
+      className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full border ${STATUS_BADGE_CLASS[status]}`}
+      data-testid="count-status-badge"
+      data-status={status}
+    >
+      {COUNT_STATUS_LABELS_AR[status] || status}
+    </span>
+  );
+}
+
+function WarehouseBranchCell({
+  warehouseName,
+  branch,
+}: {
+  warehouseName?: string;
+  branch?: { name_ar: string } | null;
+}) {
+  return (
+    <div className="min-w-0">
+      <div className="flex items-center gap-1 text-slate-800 text-xs font-medium truncate">
+        <WarehouseIcon size={12} className="text-slate-400" />
+        {warehouseName || '—'}
+      </div>
+      {branch && (
+        <div className="flex items-center gap-1 text-[10px] text-slate-500 truncate">
+          <Building2 size={10} className="text-indigo-400" />
+          {branch.name_ar}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Create modal ────────────────────────────────────────────────
+function CreateCountModal({
+  warehouses,
+  onClose,
+  onCreated,
+}: {
+  warehouses: Warehouse[];
+  onClose: () => void;
+  onCreated: (c: InventoryCount) => void;
+}) {
   const [warehouseId, setWarehouseId] = useState('');
   const [notes, setNotes] = useState('');
-  const qc = useQueryClient();
+  const [autoFreeze, setAutoFreeze] = useState(true);
 
-  const { data: warehouses = [] } = useQuery({
-    queryKey: ['warehouses'],
-    queryFn: warehousesApi.list,
-  });
-
-  const startM = useMutation({
-    mutationFn: inventoryCountsApi.start,
-    onSuccess: () => {
-      toast.success('تم بدء الجرد');
-      qc.invalidateQueries({ queryKey: ['inventory-counts'] });
-      onClose();
+  const createM = useMutation({
+    mutationFn: async () => {
+      const created = await inventoryCountsApi.create({
+        warehouse_id: warehouseId,
+        notes: notes || undefined,
+      });
+      if (autoFreeze) {
+        return inventoryCountsApi.freeze(created.id, {});
+      }
+      return created;
+    },
+    onSuccess: (c) => {
+      toast.success('تم إنشاء جلسة الجرد');
+      onCreated(c);
     },
     onError: (e: any) =>
-      toast.error(e?.response?.data?.message || 'فشل بدء الجرد'),
+      toast.error(e?.response?.data?.message || 'فشل الإنشاء'),
   });
 
+  const submit = () => {
+    if (!warehouseId) {
+      toast.error('اختر المخزن');
+      return;
+    }
+    createM.mutate();
+  };
+
   return (
-    <Modal title="بدء جرد جديد" onClose={onClose}>
+    <Modal
+      title="جرد جديد"
+      onClose={onClose}
+      testid="counts-create-modal"
+    >
       <Field label="المخزن">
         <select
           className="input"
           value={warehouseId}
           onChange={(e) => setWarehouseId(e.target.value)}
+          data-testid="counts-create-warehouse"
         >
           <option value="">اختر المخزن</option>
-          {warehouses.map((w) => (
-            <option key={w.id} value={w.id}>
-              {w.name_ar || w.name || w.code}
-            </option>
-          ))}
+          {warehouses
+            .filter((w) => w.is_active)
+            .map((w) => (
+              <option key={w.id} value={w.id}>
+                {w.name_ar || w.code}
+              </option>
+            ))}
         </select>
       </Field>
-
       <Field label="ملاحظات (اختياري)">
         <textarea
           className="input"
-          rows={3}
+          rows={2}
           value={notes}
           onChange={(e) => setNotes(e.target.value)}
+          data-testid="counts-create-notes"
         />
       </Field>
-
-      <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-xs text-amber-800">
-        ⚠️ سيتم تجميد كميات النظام الحالية لكل الأصناف في هذا المخزن كقاعدة للمقارنة.
+      <label className="flex items-center gap-2 text-xs text-slate-700">
+        <input
+          type="checkbox"
+          checked={autoFreeze}
+          onChange={(e) => setAutoFreeze(e.target.checked)}
+          data-testid="counts-create-auto-freeze"
+        />
+        تجميد رصيد النظام فورًا (مفعّل افتراضيًا)
+      </label>
+      <div className="text-[11px] text-slate-500">
+        نطاق الجرد (تصنيف/علامة/مجموعة/منتج محدد) سيُتاح لاحقًا — حاليًا يتم
+        تجميد كل أصناف المخزن مرة واحدة.
       </div>
-
-      <div className="flex gap-2 justify-end pt-2">
-        <button className="btn-ghost" onClick={onClose}>
+      <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+        <button
+          type="button"
+          className="btn"
+          onClick={onClose}
+          disabled={createM.isPending}
+        >
           إلغاء
         </button>
         <button
-          className="btn-primary"
-          disabled={!warehouseId || startM.isPending}
-          onClick={() =>
-            startM.mutate({
-              warehouse_id: warehouseId,
-              notes: notes || undefined,
-            })
-          }
+          type="button"
+          className="btn btn-primary"
+          onClick={submit}
+          disabled={createM.isPending}
+          data-testid="counts-create-submit"
         >
-          {startM.isPending ? 'جاري البدء…' : 'بدء الجرد'}
+          {createM.isPending ? 'جاري الإنشاء…' : 'إنشاء الجرد'}
         </button>
       </div>
     </Modal>
   );
 }
 
-/* ---------------- Count Detail / Entry Modal ---------------- */
-
-function CountDetailModal({
+// ─── Detail drawer ───────────────────────────────────────────────
+function CountDetailDrawer({
   countId,
   onClose,
 }: {
@@ -283,243 +743,309 @@ function CountDetailModal({
   onClose: () => void;
 }) {
   const qc = useQueryClient();
-
-  // PR-FE-IDEM-FINAL-OPS — clean slate on mount, and clean up on
-  // unmount so the next time the modal opens, a brand-new
-  // Idempotency-Key is minted for the next finalize intent. Retries
-  // within a single mount lifecycle reuse the cached key
-  // (replay-safe by construction).
-  useEffect(() => {
-    resetInventoryFinalizeIdempotencyKey();
-    return () => {
-      resetInventoryFinalizeIdempotencyKey();
-    };
-  }, []);
-
   const { data: c, isLoading } = useQuery({
     queryKey: ['inventory-count', countId],
     queryFn: () => inventoryCountsApi.get(countId),
   });
 
-  const [entries, setEntries] = useState<Record<string, number>>({});
-  const [search, setSearch] = useState('');
-  const [showOnlyDiff, setShowOnlyDiff] = useState(false);
+  const [edits, setEdits] = useState<Record<string, number>>({});
+  const [finalizeNotes, setFinalizeNotes] = useState('');
 
-  const submitM = useMutation({
-    mutationFn: (payload: any) =>
-      inventoryCountsApi.submitEntries(countId, payload),
+  useEffect(() => {
+    resetInventoryFinalizeIdempotencyKey();
+    return () => resetInventoryFinalizeIdempotencyKey();
+  }, []);
+
+  const invalidate = () => {
+    qc.invalidateQueries({ queryKey: ['inventory-counts'] });
+    qc.invalidateQueries({ queryKey: ['inventory-count', countId] });
+  };
+
+  const freezeM = useMutation({
+    mutationFn: () => inventoryCountsApi.freeze(countId, {}),
+    onSuccess: () => {
+      toast.success('تم تجميد رصيد النظام');
+      invalidate();
+    },
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.message || 'فشل التجميد'),
+  });
+
+  const saveCountsM = useMutation({
+    mutationFn: (
+      items: Array<{ item_id: string; counted_qty: number }>,
+    ) => inventoryCountsApi.updateItems(countId, { items }),
     onSuccess: () => {
       toast.success('تم حفظ الكميات');
-      qc.invalidateQueries({ queryKey: ['inventory-count', countId] });
-      qc.invalidateQueries({ queryKey: ['inventory-counts'] });
-      setEntries({});
+      setEdits({});
+      invalidate();
     },
     onError: (e: any) =>
       toast.error(e?.response?.data?.message || 'فشل الحفظ'),
   });
 
-  const finalizeM = useMutation({
-    mutationFn: () => inventoryCountsApi.finalize(countId),
+  const reviewM = useMutation({
+    mutationFn: () => inventoryCountsApi.review(countId),
     onSuccess: () => {
-      toast.success('تم إنهاء الجرد وتطبيق الفروقات');
-      qc.invalidateQueries({ queryKey: ['inventory-counts'] });
+      toast.success('تم نقل الجرد إلى المراجعة');
+      invalidate();
+    },
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.message || 'فشل النقل إلى المراجعة'),
+  });
+
+  const finalizeM = useMutation({
+    mutationFn: (notes?: string) =>
+      inventoryCountsApi.finalize(countId, notes),
+    onSuccess: () => {
+      toast.success('تم اعتماد الجرد وتطبيق الفروقات');
+      setFinalizeNotes('');
+      invalidate();
       onClose();
     },
     onError: (e: any) =>
-      toast.error(e?.response?.data?.message || 'فشل الإنهاء'),
+      toast.error(e?.response?.data?.message || 'فشل الاعتماد'),
   });
 
   const cancelM = useMutation({
-    mutationFn: () => inventoryCountsApi.cancel(countId),
+    mutationFn: (reason?: string) =>
+      inventoryCountsApi.cancel(countId, { reason }),
     onSuccess: () => {
       toast.success('تم إلغاء الجرد');
-      qc.invalidateQueries({ queryKey: ['inventory-counts'] });
+      invalidate();
       onClose();
     },
     onError: (e: any) =>
       toast.error(e?.response?.data?.message || 'فشل الإلغاء'),
   });
 
-  const items = useMemo(() => c?.items || [], [c]);
-
-  const filteredItems = useMemo(
-    () =>
-      items.filter((it: any) => {
-        if (search) {
-          const s = search.toLowerCase();
-          if (
-            !it.product_name?.toLowerCase().includes(s) &&
-            !it.variant_sku?.toLowerCase().includes(s)
-          )
-            return false;
-        }
-        if (showOnlyDiff) {
-          const current =
-            entries[it.id] !== undefined ? entries[it.id] : it.counted_qty;
-          if (current === null || current === undefined) return true;
-          if (Number(current) === Number(it.system_qty)) return false;
-        }
-        return true;
-      }),
-    [items, search, showOnlyDiff, entries],
-  );
-
-  const totals = useMemo(() => {
-    let counted = 0,
-      withDiff = 0,
-      totalAbs = 0;
-    for (const it of items) {
-      const cur =
-        entries[it.id] !== undefined ? entries[it.id] : it.counted_qty;
-      if (cur !== null && cur !== undefined) {
-        counted++;
-        const diff = Number(cur) - Number(it.system_qty);
-        if (diff !== 0) {
-          withDiff++;
-          totalAbs += Math.abs(diff);
-        }
-      }
-    }
-    return { counted, total: items.length, withDiff, totalAbs };
-  }, [items, entries]);
-
   if (isLoading || !c) {
     return (
-      <Modal title="تفاصيل الجرد" onClose={onClose} wide>
-        <div className="p-8 text-center text-slate-400">جاري التحميل…</div>
+      <Modal
+        title="تفاصيل الجرد"
+        onClose={onClose}
+        wide
+        testid="count-detail-modal"
+      >
+        <div className="p-6 text-center text-sm text-slate-400">
+          جاري التحميل…
+        </div>
       </Modal>
     );
   }
 
-  const editable = c.status === 'in_progress';
+  const canFreeze = c.status === 'draft';
+  const canEditItems =
+    c.status === 'open' ||
+    c.status === 'counting' ||
+    c.status === 'in_progress';
+  const canReview =
+    c.status === 'counting' ||
+    c.status === 'open' ||
+    c.status === 'in_progress';
+  const canFinalize =
+    c.status === 'review' ||
+    c.status === 'counting' ||
+    c.status === 'in_progress';
+  const canCancel =
+    c.status !== 'finalized' &&
+    c.status !== 'completed' &&
+    c.status !== 'cancelled';
 
-  const saveEntries = () => {
-    const list = Object.entries(entries).map(([item_id, counted_qty]) => ({
-      item_id,
-      counted_qty,
-    }));
-    if (list.length === 0) {
+  const items = c.items ?? [];
+  const itemCounted = (id: string, persisted: number | null) =>
+    edits[id] !== undefined ? edits[id] : (persisted ?? null);
+
+  const totals = (() => {
+    let pos = 0;
+    let neg = 0;
+    let missing = 0;
+    for (const it of items) {
+      const cur = itemCounted(it.id, it.counted_qty);
+      if (cur == null) {
+        missing += 1;
+        continue;
+      }
+      const diff = Number(cur) - Number(it.system_qty);
+      if (diff > 0) pos += diff;
+      if (diff < 0) neg += -diff;
+    }
+    return { pos, neg, missing };
+  })();
+
+  const submitCountsAndMaybeReview = () => {
+    const toSave = Object.entries(edits)
+      .filter(([_, v]) => v != null && !Number.isNaN(v))
+      .map(([item_id, v]) => ({ item_id, counted_qty: Number(v) }));
+    if (toSave.length === 0) {
       toast('لا توجد تعديلات لحفظها');
       return;
     }
-    submitM.mutate({ items: list });
+    saveCountsM.mutate(toSave);
   };
 
   return (
-    <Modal title={`جرد ${c.count_no}`} onClose={onClose} wide>
-      <div className="grid md:grid-cols-4 gap-3">
+    <Modal
+      title={`جرد ${c.count_no}`}
+      onClose={onClose}
+      wide
+      testid="count-detail-modal"
+    >
+      <div className="grid md:grid-cols-4 gap-2 text-xs">
         <MiniStat
-          icon={<WarehouseIcon className="text-brand-600" />}
+          icon={<History size={14} className="text-indigo-600" />}
+          title="الحالة"
+          value={COUNT_STATUS_LABELS_AR[c.status] || c.status}
+        />
+        <MiniStat
+          icon={<WarehouseIcon size={14} className="text-slate-600" />}
           title="المخزن"
           value={c.warehouse_name || '—'}
+          sub={c.primary_branch?.name_ar || ''}
         />
         <MiniStat
-          icon={<ClipboardCheck className="text-emerald-600" />}
-          title="التقدم"
-          value={`${totals.counted} / ${totals.total}`}
-        />
-        <MiniStat
-          icon={<AlertTriangle className="text-amber-600" />}
-          title="عناصر بفروقات"
-          value={String(totals.withDiff)}
-        />
-        <MiniStat
-          icon={<Clock className="text-slate-600" />}
-          title="تاريخ البدء"
+          icon={<Clock size={14} className="text-amber-600" />}
+          title="بدأ"
           value={fmtDate(c.started_at)}
+          sub={c.started_by_name || ''}
+        />
+        <MiniStat
+          icon={<CheckCircle2 size={14} className="text-emerald-600" />}
+          title="انتهى"
+          value={fmtDate(c.completed_at)}
+          sub={c.completed_by_name || ''}
         />
       </div>
 
-      {/* Filters */}
-      {editable && (
-        <div className="flex gap-2 items-center flex-wrap">
-          <div className="relative flex-1 min-w-[200px]">
-            <Search
-              size={16}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400"
-            />
-            <input
-              className="input pr-10"
-              placeholder="بحث بالصنف أو SKU…"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-            />
+      <div
+        className="grid md:grid-cols-3 gap-2 text-xs"
+        data-testid="count-detail-variance"
+      >
+        <VarianceCard
+          icon={TrendingUp}
+          label="إجمالي الزيادة"
+          value={fmtNumber(totals.pos)}
+          tone="emerald"
+        />
+        <VarianceCard
+          icon={TrendingDown}
+          label="إجمالي النقص"
+          value={fmtNumber(totals.neg)}
+          tone="rose"
+        />
+        <div
+          className="card p-3 border border-amber-200 bg-amber-50/60 text-amber-800"
+          data-testid="count-detail-missing"
+        >
+          <div className="flex items-center gap-2 text-xs">
+            <ListChecks size={14} />
+            عناصر غير معدودة
           </div>
-          <label className="flex items-center gap-2 text-sm cursor-pointer">
-            <input
-              type="checkbox"
-              checked={showOnlyDiff}
-              onChange={(e) => setShowOnlyDiff(e.target.checked)}
-            />
-            الفروقات فقط
-          </label>
+          <div className="text-base font-black tabular-nums mt-1">
+            {fmtNumber(totals.missing)}
+          </div>
+        </div>
+      </div>
+
+      {c.notes && (
+        <div className="bg-amber-50 border border-amber-200 rounded p-2 text-xs">
+          <b>ملاحظات:</b> {c.notes}
         </div>
       )}
 
       {/* Items table */}
-      <div className="card p-0 overflow-hidden max-h-[400px] overflow-y-auto">
+      <div
+        className="card overflow-x-auto"
+        data-testid="count-detail-items"
+      >
         <table className="w-full text-sm">
-          <thead className="bg-slate-50 text-slate-600 sticky top-0">
+          <thead className="bg-slate-50 text-xs text-slate-500">
             <tr>
-              <Th>الصنف</Th>
-              <Th>SKU</Th>
-              <Th>كمية النظام</Th>
-              <Th>الكمية الفعلية</Th>
-              <Th>الفرق</Th>
+              <th className="text-right px-3 py-2">المنتج</th>
+              <th className="text-right px-3 py-2">SKU / باركود</th>
+              <th className="text-right px-3 py-2">اللون / المقاس</th>
+              <th className="text-left px-3 py-2">رصيد النظام</th>
+              <th className="text-left px-3 py-2">
+                {canEditItems ? 'الكمية الفعلية (إدخال)' : 'الكمية الفعلية'}
+              </th>
+              <th className="text-left px-3 py-2">الفرق</th>
+              <th className="text-right px-3 py-2">ملاحظات</th>
             </tr>
           </thead>
-          <tbody>
-            {filteredItems.map((it: CountItem) => {
-              const current =
-                entries[it.id] !== undefined ? entries[it.id] : it.counted_qty;
+          <tbody className="divide-y divide-slate-100">
+            {items.map((it) => {
+              const persisted = it.counted_qty;
+              const inputVal =
+                edits[it.id] !== undefined ? edits[it.id] : persisted ?? '';
+              const display =
+                edits[it.id] !== undefined ? edits[it.id] : persisted;
               const diff =
-                current !== null && current !== undefined
-                  ? Number(current) - Number(it.system_qty)
-                  : null;
+                display == null
+                  ? null
+                  : Number(display) - Number(it.system_qty);
               return (
-                <tr key={it.id} className="border-t">
-                  <Td>
-                    <div className="font-bold">{it.product_name}</div>
-                    <div className="text-xs text-slate-500">
-                      {it.color} {it.size}
+                <tr key={it.id} data-testid="count-detail-item-row">
+                  <td className="px-3 py-2">
+                    <div className="font-medium text-slate-800">
+                      {it.product_name}
                     </div>
-                  </Td>
-                  <Td className="font-mono text-xs">{it.variant_sku}</Td>
-                  <Td className="font-bold">{it.system_qty}</Td>
-                  <Td>
-                    {editable ? (
+                    <div className="text-[10px] text-slate-400">
+                      {it.product_sku}
+                    </div>
+                  </td>
+                  <td className="px-3 py-2 text-xs font-mono">
+                    <div>{it.variant_sku}</div>
+                    {it.barcode && (
+                      <div className="text-[10px] text-slate-400">
+                        {it.barcode}
+                      </div>
+                    )}
+                  </td>
+                  <td className="px-3 py-2 text-xs text-slate-600">
+                    {[it.color, it.size].filter(Boolean).join(' · ') || '—'}
+                  </td>
+                  <td className="px-3 py-2 text-left tabular-nums font-bold text-slate-800">
+                    {fmtNumber(it.system_qty)}
+                  </td>
+                  <td className="px-3 py-2 text-left">
+                    {canEditItems ? (
                       <input
                         type="number"
                         min={0}
-                        className="input w-20 py-1"
-                        value={current ?? ''}
-                        onChange={(e) => {
-                          const v = e.target.value;
-                          setEntries({
-                            ...entries,
-                            [it.id]: v === '' ? (null as any) : Number(v),
-                          });
-                        }}
+                        className="input w-24"
+                        value={inputVal as any}
+                        onChange={(e) =>
+                          setEdits((prev) => ({
+                            ...prev,
+                            [it.id]: Number(e.target.value),
+                          }))
+                        }
+                        data-testid="count-detail-input"
                       />
                     ) : (
-                      <span className="font-bold">{it.counted_qty ?? '—'}</span>
-                    )}
-                  </Td>
-                  <Td>
-                    {diff === null ? (
-                      <span className="text-slate-400">—</span>
-                    ) : diff === 0 ? (
-                      <span className="text-emerald-600 inline-flex items-center gap-1">
-                        <CheckCircle2 size={14} /> مطابق
+                      <span className="tabular-nums font-bold">
+                        {persisted == null ? '—' : fmtNumber(persisted)}
                       </span>
+                    )}
+                  </td>
+                  <td className="px-3 py-2 text-left tabular-nums">
+                    {diff == null ? (
+                      <span className="text-slate-300">—</span>
                     ) : diff > 0 ? (
                       <span className="text-emerald-700 font-bold">
-                        +{diff}
+                        +{fmtNumber(diff)}
+                      </span>
+                    ) : diff < 0 ? (
+                      <span className="text-rose-700 font-bold">
+                        {fmtNumber(diff)}
                       </span>
                     ) : (
-                      <span className="text-rose-700 font-bold">{diff}</span>
+                      <span className="text-slate-500">0</span>
                     )}
-                  </Td>
+                  </td>
+                  <td className="px-3 py-2 text-xs text-slate-500">
+                    {it.notes || '—'}
+                  </td>
                 </tr>
               );
             })}
@@ -527,76 +1053,184 @@ function CountDetailModal({
         </table>
       </div>
 
-      {editable && (
-        <div className="flex gap-2 justify-between items-center pt-2 flex-wrap">
-          <button
-            className="btn-ghost text-rose-600"
-            onClick={() => {
-              if (confirm('تأكيد إلغاء الجرد؟')) cancelM.mutate();
-            }}
-            disabled={cancelM.isPending}
-          >
-            <XCircle size={16} /> إلغاء الجرد
-          </button>
-          <div className="flex gap-2">
-            <button
-              className="btn-ghost"
-              onClick={saveEntries}
-              disabled={submitM.isPending}
-            >
-              <Save size={16} /> حفظ مسودة
-            </button>
-            <button
-              className="btn-primary"
-              onClick={() => {
-                if (
-                  confirm(
-                    `سيتم تطبيق ${totals.withDiff} فرق على المخزون. هل أنت متأكد؟`,
-                  )
-                ) {
-                  finalizeM.mutate();
-                }
-              }}
-              disabled={finalizeM.isPending}
-            >
-              <CheckCircle2 size={16} />{' '}
-              {finalizeM.isPending ? 'جاري الإنهاء…' : 'إنهاء وتطبيق الفروقات'}
-            </button>
+      {/* Linked movements (read-only) */}
+      {(c.movements?.length ?? 0) > 0 && (
+        <div
+          className="card overflow-x-auto"
+          data-testid="count-detail-movements"
+        >
+          <div className="px-4 py-2 border-b border-slate-100 font-bold text-slate-800 text-xs flex items-center gap-2">
+            <History size={13} className="text-indigo-600" />
+            حركات المخزون الناتجة عن الاعتماد
           </div>
+          <table className="w-full text-xs">
+            <thead className="bg-slate-50 text-[10px] text-slate-500">
+              <tr>
+                <th className="text-right px-3 py-2">التاريخ</th>
+                <th className="text-right px-3 py-2">المتغير</th>
+                <th className="text-right px-3 py-2">الإجراء</th>
+                <th className="text-left px-3 py-2">الكمية</th>
+                <th className="text-left px-3 py-2">الرصيد بعدها</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {(c.movements || []).map((m) => (
+                <tr key={m.id} data-testid="count-detail-movement-row">
+                  <td className="px-3 py-2 text-slate-500 whitespace-nowrap">
+                    {fmtDate(m.created_at)}
+                  </td>
+                  <td className="px-3 py-2 font-mono">
+                    {m.variant_sku || '—'}
+                  </td>
+                  <td className="px-3 py-2 text-slate-600">
+                    {m.source_action || m.movement_type}
+                  </td>
+                  <td
+                    className={`px-3 py-2 text-left tabular-nums font-bold ${
+                      m.direction === 'in'
+                        ? 'text-emerald-700'
+                        : 'text-rose-700'
+                    }`}
+                  >
+                    {m.direction === 'in' ? '+' : '-'}
+                    {fmtNumber(m.quantity)}
+                  </td>
+                  <td className="px-3 py-2 text-left tabular-nums text-slate-600">
+                    {m.balance_after_qty == null
+                      ? '—'
+                      : fmtNumber(m.balance_after_qty)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
+
+      {(canFinalize || canReview) && (
+        <Field label="ملاحظات الاعتماد (اختياري)">
+          <textarea
+            className="input"
+            rows={2}
+            value={finalizeNotes}
+            onChange={(e) => setFinalizeNotes(e.target.value)}
+            data-testid="count-detail-finalize-notes"
+          />
+        </Field>
+      )}
+
+      {/* Action bar */}
+      <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t border-slate-100">
+        {canFreeze && (
+          <button
+            type="button"
+            className="btn"
+            onClick={() => freezeM.mutate()}
+            disabled={freezeM.isPending}
+            data-testid="count-action-freeze"
+          >
+            <Snowflake size={14} />
+            تجميد رصيد النظام
+          </button>
+        )}
+        {canEditItems && (
+          <button
+            type="button"
+            className="btn"
+            onClick={submitCountsAndMaybeReview}
+            disabled={saveCountsM.isPending}
+            data-testid="count-action-save"
+          >
+            <Save size={14} />
+            حفظ الكميات
+          </button>
+        )}
+        {canReview && (
+          <button
+            type="button"
+            className="btn"
+            onClick={() => reviewM.mutate()}
+            disabled={reviewM.isPending}
+            data-testid="count-action-review"
+          >
+            <ScrollText size={14} />
+            نقل إلى المراجعة
+          </button>
+        )}
+        {canFinalize && (
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={() => {
+              if (
+                !confirm(
+                  'تأكيد اعتماد الجرد؟ سيتم تطبيق الفروقات على المخزون.',
+                )
+              ) {
+                return;
+              }
+              resetInventoryFinalizeIdempotencyKey();
+              finalizeM.mutate(finalizeNotes || undefined);
+            }}
+            disabled={finalizeM.isPending}
+            data-testid="count-action-finalize"
+          >
+            <ShieldCheck size={14} />
+            اعتماد الجرد
+          </button>
+        )}
+        {canCancel && (
+          <button
+            type="button"
+            className="btn"
+            onClick={() => {
+              if (!confirm('تأكيد إلغاء الجرد؟')) return;
+              cancelM.mutate(undefined);
+            }}
+            disabled={cancelM.isPending}
+            data-testid="count-action-cancel"
+          >
+            <XCircle size={14} />
+            إلغاء الجرد
+          </button>
+        )}
+      </div>
     </Modal>
   );
 }
 
-/* ---------------- Primitives ---------------- */
-
+// ─── Primitives ──────────────────────────────────────────────────
 function Modal({
   title,
   onClose,
   wide,
   children,
+  testid,
 }: {
   title: string;
   onClose: () => void;
   wide?: boolean;
   children: React.ReactNode;
+  testid?: string;
 }) {
   return (
-    <div className="fixed inset-0 bg-slate-900/50 z-50 flex items-start justify-center p-4 overflow-y-auto">
+    <div className="fixed inset-0 bg-slate-900/40 z-50 flex items-start justify-center p-4 overflow-y-auto">
       <div
-        className={`bg-white rounded-2xl shadow-2xl w-full ${wide ? 'max-w-5xl' : 'max-w-xl'} my-8`}
+        className={`bg-white rounded-xl shadow-xl w-full ${wide ? 'max-w-5xl' : 'max-w-xl'} my-6`}
+        data-testid={testid}
       >
-        <div className="flex items-center justify-between p-4 border-b">
-          <h3 className="text-lg font-bold">{title}</h3>
+        <div className="flex items-center justify-between p-3 border-b">
+          <h3 className="font-bold text-slate-800">{title}</h3>
           <button
+            type="button"
             onClick={onClose}
-            className="p-1.5 rounded-lg hover:bg-slate-100"
+            className="icon-btn"
+            aria-label="إغلاق"
           >
-            <X size={18} />
+            <X size={14} />
           </button>
         </div>
-        <div className="p-4 space-y-3">{children}</div>
+        <div className="p-3 space-y-3">{children}</div>
       </div>
     </div>
   );
@@ -610,8 +1244,8 @@ function Field({
   children: React.ReactNode;
 }) {
   return (
-    <div>
-      <label className="block text-sm font-bold text-slate-700 mb-1">
+    <div className="space-y-1">
+      <label className="block text-xs font-bold text-slate-700">
         {label}
       </label>
       {children}
@@ -623,62 +1257,21 @@ function MiniStat({
   icon,
   title,
   value,
+  sub,
 }: {
   icon: React.ReactNode;
   title: string;
   value: string;
+  sub?: string;
 }) {
   return (
-    <div className="card p-3 flex items-center gap-3">
-      <div className="p-2 bg-slate-50 rounded-lg">{icon}</div>
-      <div className="flex-1 min-w-0">
-        <div className="text-xs text-slate-500">{title}</div>
-        <div className="font-bold text-sm truncate">{value}</div>
+    <div className="card p-2 border border-slate-200">
+      <div className="flex items-center gap-2 text-[10px] text-slate-500">
+        {icon}
+        {title}
       </div>
+      <div className="font-bold text-sm text-slate-800 truncate">{value}</div>
+      {sub && <div className="text-[10px] text-slate-500 truncate">{sub}</div>}
     </div>
   );
-}
-
-function TabBtn({
-  active,
-  onClick,
-  children,
-}: {
-  active: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      className={`px-4 py-2 rounded-xl text-sm font-bold flex items-center gap-2 ${
-        active
-          ? 'bg-brand-600 text-white shadow'
-          : 'bg-white text-slate-700 hover:bg-slate-50'
-      }`}
-      onClick={onClick}
-    >
-      {children}
-    </button>
-  );
-}
-
-function Badge({ children }: { children: React.ReactNode }) {
-  return (
-    <span className="bg-white/20 text-xs px-1.5 py-0.5 rounded-md">
-      {children}
-    </span>
-  );
-}
-
-function Th({ children }: { children: React.ReactNode }) {
-  return <th className="text-right font-bold text-xs p-3">{children}</th>;
-}
-function Td({
-  children,
-  className = '',
-}: {
-  children: React.ReactNode;
-  className?: string;
-}) {
-  return <td className={`p-3 ${className}`}>{children}</td>;
 }

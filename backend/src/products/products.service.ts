@@ -1723,4 +1723,409 @@ export class ProductsService {
     );
     return { sku: row?.sku as string };
   }
+
+  // ============================================================================
+  // PR-FIX-INVENTORY-API-FOUNDATION — /products/:id/360
+  // ============================================================================
+  /**
+   * Single-request product 360° payload for the upcoming product
+   * detail screen. Read-only — every query is a SELECT, no
+   * stock/price/cost mutation. The shape is stable enough that the
+   * UI can render the whole screen on one round-trip.
+   *
+   * TODO(tenant): add `AND p.tenant_id = :tenant` once the column
+   * lands on `products`.
+   */
+  async getProduct360(productId: string) {
+    // ── 1. Base info ──────────────────────────────────────────────
+    const [product] = await this.ds.query(
+      `SELECT p.id, p.sku_prefix, p.name_ar, p.name_en,
+              p.description_ar, p.description_en,
+              p.product_type::text AS product_type,
+              p.target_audience::text AS target_audience,
+              p.category_id, cat.name_ar AS category_name,
+              p.brand_id,    b.name_ar   AS brand_name,
+              p.base_cost, p.base_price, p.suggested_price,
+              p.min_margin_pct,
+              p.track_inventory, p.is_active,
+              p.created_at, p.updated_at, p.deleted_at
+         FROM products p
+         LEFT JOIN categories cat ON cat.id = p.category_id
+         LEFT JOIN brands     b   ON b.id   = p.brand_id
+        WHERE p.id = $1::uuid`,
+      [productId],
+    );
+    if (!product) {
+      return null;
+    }
+
+    // ── 2. Variants list with totals across warehouses ────────────
+    // PR-FIX-INVENTORY-API-PRODUCT-GROUPS — each variant carries its
+    // own groups[] array. LATERAL aggregation keeps the row shape
+    // stable (one row per variant) even when a variant belongs to
+    // multiple groups.
+    const variants = await this.ds.query(
+      `SELECT pv.id AS variant_id,
+              pv.sku,
+              pv.barcode::text AS barcode,
+              pv.color_id, c.name_ar AS color_name, c.hex_code,
+              pv.size_id,  sz.size_label, sz.sort_order AS size_sort,
+              pv.cost_price, pv.selling_price,
+              pv.weight_grams,
+              pv.is_active,
+              COALESCE(SUM(s.quantity_on_hand), 0)::int AS total_qty,
+              COALESCE(SUM(s.quantity_reserved), 0)::int AS total_reserved,
+              COALESCE(SUM(s.quantity_on_hand - s.quantity_reserved), 0)::int
+                AS total_available,
+              COALESCE(g.group_ids,      '{}'::text[]) AS group_ids,
+              COALESCE(g.group_names_ar, '{}'::text[]) AS group_names_ar,
+              COALESCE(g.group_names_en, '{}'::text[]) AS group_names_en,
+              COALESCE(g.group_colors,   '{}'::text[]) AS group_colors
+         FROM product_variants pv
+         LEFT JOIN colors c  ON c.id = pv.color_id
+         LEFT JOIN sizes sz  ON sz.id = pv.size_id
+         LEFT JOIN stock s   ON s.variant_id = pv.id
+         LEFT JOIN LATERAL (
+           SELECT array_agg(pg.id::text ORDER BY pg.name_ar) AS group_ids,
+                  array_agg(pg.name_ar  ORDER BY pg.name_ar) AS group_names_ar,
+                  array_agg(pg.name_en  ORDER BY pg.name_ar) AS group_names_en,
+                  array_agg(pg.color    ORDER BY pg.name_ar) AS group_colors
+             FROM product_group_variants pgv
+             JOIN product_groups pg ON pg.id = pgv.group_id
+            WHERE pgv.variant_id = pv.id
+              AND pg.is_active   = TRUE
+         ) g ON TRUE
+        WHERE pv.product_id = $1::uuid
+          AND pv.deleted_at IS NULL
+        GROUP BY pv.id, c.name_ar, c.hex_code, sz.size_label, sz.sort_order,
+                 g.group_ids, g.group_names_ar, g.group_names_en, g.group_colors
+        ORDER BY sz.sort_order ASC NULLS LAST, sz.size_label ASC NULLS LAST, c.name_ar ASC NULLS LAST`,
+      [productId],
+    );
+
+    // PR-FIX-INVENTORY-API-PRODUCT-GROUPS — distinct active groups
+    // that contain ANY variant of this product. Used by the UI for
+    // the "Member of" chip row on the product header.
+    const productGroups = await this.ds.query(
+      `SELECT DISTINCT pg.id::text AS group_id,
+                       pg.name_ar, pg.name_en, pg.color
+         FROM product_variants pv
+         JOIN product_group_variants pgv ON pgv.variant_id = pv.id
+         JOIN product_groups pg          ON pg.id          = pgv.group_id
+        WHERE pv.product_id = $1::uuid
+          AND pv.deleted_at IS NULL
+          AND pg.is_active  = TRUE
+        ORDER BY pg.name_ar`,
+      [productId],
+    );
+
+    // ── 3. Stock by warehouse (per-variant breakdown) ─────────────
+    const stockByWarehouse = await this.ds.query(
+      `SELECT pv.id AS variant_id,
+              pv.sku,
+              w.id  AS warehouse_id,
+              w.name_ar AS warehouse_name,
+              s.quantity_on_hand,
+              s.quantity_reserved,
+              (s.quantity_on_hand - s.quantity_reserved)::int AS available_quantity,
+              s.reorder_point,
+              s.avg_cost,
+              s.updated_at
+         FROM product_variants pv
+         JOIN stock s      ON s.variant_id = pv.id
+         JOIN warehouses w ON w.id = s.warehouse_id
+        WHERE pv.product_id = $1::uuid
+          AND pv.deleted_at IS NULL
+        ORDER BY w.name_ar ASC, pv.sku ASC`,
+      [productId],
+    );
+
+    // ── 4. Totals roll-up + 30-day sales/returns/profit ───────────
+    const [totalsRow] = await this.ds.query(
+      `WITH t AS (
+         SELECT pv.id AS variant_id, pv.cost_price, pv.selling_price
+           FROM product_variants pv
+          WHERE pv.product_id = $1::uuid
+            AND pv.deleted_at IS NULL
+       ),
+       s AS (
+         SELECT t.variant_id,
+                COALESCE(SUM(st.quantity_on_hand), 0)::int AS qty,
+                COALESCE(SUM(st.quantity_on_hand - st.quantity_reserved), 0)::int AS available,
+                COALESCE(SUM(st.quantity_on_hand
+                             * COALESCE(NULLIF(st.avg_cost, 0), t.cost_price, 0)), 0)::numeric(18,2) AS cost_value,
+                COALESCE(SUM(st.quantity_on_hand * t.selling_price), 0)::numeric(18,2) AS sale_value
+           FROM t
+      LEFT JOIN stock st ON st.variant_id = t.variant_id
+          GROUP BY t.variant_id
+       ),
+       sold30 AS (
+         SELECT COALESCE(SUM(ii.quantity), 0)::int        AS sold_qty,
+                COALESCE(SUM(ii.line_total), 0)::numeric(18,2)  AS sold_revenue,
+                COALESCE(SUM(COALESCE(ii.cost_total,
+                                       ii.quantity * ii.unit_cost,
+                                       0)), 0)::numeric(18,2)   AS sold_cost
+           FROM invoice_items ii
+           JOIN invoices inv        ON inv.id = ii.invoice_id
+           JOIN product_variants pv ON pv.id  = ii.variant_id
+          WHERE pv.product_id = $1::uuid
+            AND inv.voided_at IS NULL
+            AND inv.is_return = FALSE
+            AND inv.created_at >= NOW() - INTERVAL '30 days'
+       ),
+       returned30 AS (
+         SELECT COALESCE(SUM(ri.quantity), 0)::int AS returned_qty
+           FROM return_items ri
+           JOIN returns r           ON r.id = ri.return_id
+           JOIN product_variants pv ON pv.id = ri.variant_id
+          WHERE pv.product_id = $1::uuid
+            AND r.created_at >= NOW() - INTERVAL '30 days'
+       )
+       SELECT (SELECT SUM(qty) FROM s)         AS total_qty,
+              (SELECT SUM(available) FROM s)   AS total_available,
+              (SELECT SUM(cost_value) FROM s)  AS total_cost_value,
+              (SELECT SUM(sale_value) FROM s)  AS total_sale_value,
+              (SELECT sold_qty     FROM sold30)     AS sold_qty_30d,
+              (SELECT sold_revenue FROM sold30)     AS sold_revenue_30d,
+              (SELECT sold_cost    FROM sold30)     AS sold_cost_30d,
+              (SELECT returned_qty FROM returned30) AS returned_qty_30d`,
+      [productId],
+    );
+    const grossProfit30d =
+      Number(totalsRow?.sold_revenue_30d ?? 0)
+      - Number(totalsRow?.sold_cost_30d ?? 0);
+
+    // ── 5. Recent stock movements (last 20 across all variants) ───
+    const recentMovements = await this.ds.query(
+      `SELECT sm.id::text AS id, sm.created_at,
+              sm.movement_type::text AS movement_type,
+              sm.direction::text     AS direction,
+              sm.quantity, sm.unit_cost,
+              sm.reference_type::text AS reference_type,
+              sm.reference_id::text   AS reference_id,
+              sm.source_module, sm.source_action,
+              sm.balance_after_qty, sm.notes,
+              pv.id AS variant_id, pv.sku,
+              w.id  AS warehouse_id, w.name_ar AS warehouse_name
+         FROM stock_movements sm
+         JOIN product_variants pv ON pv.id = sm.variant_id
+         JOIN warehouses w        ON w.id  = sm.warehouse_id
+        WHERE pv.product_id = $1::uuid
+        ORDER BY sm.created_at DESC, sm.id DESC
+        LIMIT 20`,
+      [productId],
+    );
+
+    // ── 6. Recent invoice lines (last 20) ─────────────────────────
+    const recentInvoiceItems = await this.ds.query(
+      `SELECT ii.id::text AS id,
+              ii.invoice_id::text AS invoice_id,
+              inv.invoice_no, inv.status, inv.is_return, inv.is_exchange,
+              inv.created_at AS invoice_created_at,
+              inv.voided_at,
+              ii.variant_id::text AS variant_id,
+              pv.sku,
+              ii.quantity, ii.unit_price, ii.unit_cost,
+              ii.line_total
+         FROM invoice_items ii
+         JOIN invoices inv        ON inv.id = ii.invoice_id
+         JOIN product_variants pv ON pv.id  = ii.variant_id
+        WHERE pv.product_id = $1::uuid
+        ORDER BY inv.created_at DESC, ii.id DESC
+        LIMIT 20`,
+      [productId],
+    );
+
+    // ── 7. Recent purchase lines (last 20) ────────────────────────
+    const recentPurchaseItems = await this.ds.query(
+      `SELECT pi.id::text AS id,
+              pi.purchase_id::text AS purchase_id,
+              pur.purchase_no, pur.status,
+              pur.created_at AS purchase_created_at,
+              pi.variant_id::text AS variant_id,
+              pv.sku,
+              pi.quantity, pi.unit_cost, pi.line_total,
+              sup.id AS supplier_id,
+              sup.name_ar AS supplier_name
+         FROM purchase_items pi
+         JOIN purchases pur       ON pur.id = pi.purchase_id
+         JOIN product_variants pv ON pv.id  = pi.variant_id
+         LEFT JOIN suppliers sup  ON sup.id = pur.supplier_id
+        WHERE pv.product_id = $1::uuid
+        ORDER BY pur.created_at DESC, pi.id DESC
+        LIMIT 20`,
+      [productId],
+    );
+
+    // ── 8. Price history (last 20 changes across variants) ────────
+    const priceHistory = await this.ds.query(
+      `SELECT vph.id, vph.variant_id::text AS variant_id, pv.sku,
+              vph.old_selling_price, vph.new_selling_price,
+              vph.source_purchase_id::text AS source_purchase_id,
+              vph.source_purchase_no,
+              vph.reason, vph.changed_at, vph.changed_by,
+              u.username  AS changed_by_username,
+              u.full_name AS changed_by_name
+         FROM variant_price_history vph
+         JOIN product_variants pv ON pv.id = vph.variant_id
+         LEFT JOIN users u        ON u.id  = vph.changed_by
+        WHERE pv.product_id = $1::uuid
+        ORDER BY vph.changed_at DESC, vph.id DESC
+        LIMIT 20`,
+      [productId],
+    );
+
+    // ── 9. Cost history (last 20 changes across variants) ─────────
+    const costHistory = await this.ds.query(
+      `SELECT vch.id, vch.variant_id::text AS variant_id, pv.sku,
+              vch.old_cost_price, vch.new_cost_price,
+              vch.adjustment_type, vch.adjustment_value,
+              vch.reason, vch.source,
+              vch.batch_id::text AS batch_id,
+              vch.changed_at, vch.changed_by,
+              u.username  AS changed_by_username,
+              u.full_name AS changed_by_name
+         FROM variant_cost_history vch
+         JOIN product_variants pv ON pv.id = vch.variant_id
+         LEFT JOIN users u        ON u.id  = vch.changed_by
+        WHERE pv.product_id = $1::uuid
+        ORDER BY vch.changed_at DESC, vch.id DESC
+        LIMIT 20`,
+      [productId],
+    );
+
+    return {
+      product,
+      product_groups: productGroups,
+      variants: variants.map((v: any) => ({
+        ...v,
+        total_qty: Number(v.total_qty),
+        total_reserved: Number(v.total_reserved),
+        total_available: Number(v.total_available),
+      })),
+      stock_by_warehouse: stockByWarehouse,
+      totals: {
+        total_qty: Number(totalsRow?.total_qty ?? 0),
+        total_available: Number(totalsRow?.total_available ?? 0),
+        total_cost_value: Number(totalsRow?.total_cost_value ?? 0),
+        total_sale_value: Number(totalsRow?.total_sale_value ?? 0),
+        sold_qty_30d: Number(totalsRow?.sold_qty_30d ?? 0),
+        sold_revenue_30d: Number(totalsRow?.sold_revenue_30d ?? 0),
+        sold_cost_30d: Number(totalsRow?.sold_cost_30d ?? 0),
+        returned_qty_30d: Number(totalsRow?.returned_qty_30d ?? 0),
+        gross_profit_30d: Number(grossProfit30d.toFixed(2)),
+      },
+      recent_movements: recentMovements,
+      recent_invoice_items: recentInvoiceItems,
+      recent_purchase_items: recentPurchaseItems,
+      price_history: priceHistory,
+      cost_history: costHistory,
+    };
+  }
+
+  // ============================================================================
+  // PR-FIX-INVENTORY-API-FOUNDATION — /products/:id/matrix
+  // ============================================================================
+  /**
+   * Variant matrix laid out as colors × sizes. Each cell is one
+   * variant populated with stock totals + per-warehouse breakdown.
+   * Pure SELECT — no writes.
+   *
+   * TODO(tenant): scope products → tenant once the column lands.
+   */
+  async getProductMatrix(productId: string) {
+    // ── 1. Confirm the product exists (so callers can 404 cleanly) ─
+    const [product] = await this.ds.query(
+      `SELECT id, sku_prefix, name_ar, name_en
+         FROM products
+        WHERE id = $1::uuid AND deleted_at IS NULL`,
+      [productId],
+    );
+    if (!product) {
+      return null;
+    }
+
+    // ── 2. Distinct colors used by this product's variants ────────
+    const colors = await this.ds.query(
+      `SELECT DISTINCT c.id, c.name_ar, c.name_en, c.hex_code
+         FROM product_variants pv
+         JOIN colors c ON c.id = pv.color_id
+        WHERE pv.product_id = $1::uuid
+          AND pv.deleted_at IS NULL
+        ORDER BY c.name_ar`,
+      [productId],
+    );
+
+    // ── 3. Distinct sizes used by this product's variants ─────────
+    const sizes = await this.ds.query(
+      `SELECT DISTINCT sz.id, sz.size_label, sz.size_system, sz.sort_order
+         FROM product_variants pv
+         JOIN sizes sz ON sz.id = pv.size_id
+        WHERE pv.product_id = $1::uuid
+          AND pv.deleted_at IS NULL
+        ORDER BY sz.sort_order ASC NULLS LAST, sz.size_label ASC`,
+      [productId],
+    );
+
+    // ── 4. Cells: variant + totals + per-warehouse JSON breakdown ─
+    // PR-FIX-INVENTORY-API-PRODUCT-GROUPS — each cell carries its
+    // groups[] arrays. LATERAL aggregation = one row per variant
+    // regardless of how many groups the variant belongs to.
+    const cells = await this.ds.query(
+      `SELECT pv.id              AS variant_id,
+              pv.color_id,
+              pv.size_id,
+              pv.sku,
+              pv.barcode::text   AS barcode,
+              pv.cost_price,
+              pv.selling_price,
+              pv.is_active,
+              COALESCE(SUM(s.quantity_on_hand), 0)::int AS total_qty,
+              COALESCE(SUM(s.quantity_on_hand - s.quantity_reserved), 0)::int AS available_qty,
+              COALESCE(
+                JSON_AGG(
+                  JSON_BUILD_OBJECT(
+                    'warehouse_id',       s.warehouse_id,
+                    'warehouse_name',     w.name_ar,
+                    'quantity_on_hand',   s.quantity_on_hand,
+                    'quantity_reserved',  s.quantity_reserved,
+                    'available_quantity', (s.quantity_on_hand - s.quantity_reserved)
+                  ) ORDER BY w.name_ar
+                ) FILTER (WHERE s.warehouse_id IS NOT NULL),
+                '[]'::json
+              ) AS per_warehouse,
+              COALESCE(g.group_ids,      '{}'::text[]) AS group_ids,
+              COALESCE(g.group_names_ar, '{}'::text[]) AS group_names_ar,
+              COALESCE(g.group_names_en, '{}'::text[]) AS group_names_en,
+              COALESCE(g.group_colors,   '{}'::text[]) AS group_colors
+         FROM product_variants pv
+         LEFT JOIN stock s      ON s.variant_id = pv.id
+         LEFT JOIN warehouses w ON w.id = s.warehouse_id
+         LEFT JOIN LATERAL (
+           SELECT array_agg(pg.id::text ORDER BY pg.name_ar) AS group_ids,
+                  array_agg(pg.name_ar  ORDER BY pg.name_ar) AS group_names_ar,
+                  array_agg(pg.name_en  ORDER BY pg.name_ar) AS group_names_en,
+                  array_agg(pg.color    ORDER BY pg.name_ar) AS group_colors
+             FROM product_group_variants pgv
+             JOIN product_groups pg ON pg.id = pgv.group_id
+            WHERE pgv.variant_id = pv.id
+              AND pg.is_active   = TRUE
+         ) g ON TRUE
+        WHERE pv.product_id = $1::uuid
+          AND pv.deleted_at IS NULL
+        GROUP BY pv.id, g.group_ids, g.group_names_ar, g.group_names_en, g.group_colors`,
+      [productId],
+    );
+
+    return {
+      product,
+      colors,
+      sizes,
+      cells: cells.map((c: any) => ({
+        ...c,
+        total_qty: Number(c.total_qty),
+        available_qty: Number(c.available_qty),
+      })),
+    };
+  }
 }
