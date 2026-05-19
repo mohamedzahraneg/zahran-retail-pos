@@ -116,26 +116,31 @@ describe('PR-FIX-INVENTORY-SAFETY — no raw stock writes alongside stock_moveme
   }
 });
 
-describe('PR-FIX-INVENTORY-SAFETY — stock-transfers query references the stock_levels view', () => {
+describe('PR-FIX-INVENTORY-SAFETY — stock-transfers availability check reads a canonical stock-snapshot view', () => {
   const src = readService('stock-transfers/stock-transfers.service.ts');
   const sqlBlocks = backtickBlocks(src);
 
-  it('ship-availability check reads `stock_levels` (companion to migration 142)', () => {
-    // Migration 142 creates `public.stock_levels` as a thin projection
-    // over `public.stock`. Removing the reference here must be a
-    // conscious decision — pin it so a refactor surfaces in CI.
+  it('ship-availability check reads `v_stock_unified` (PR-STOCK-TRANSFERS-WORKFLOW migrated from stock_levels)', () => {
+    // PR-FIX-INVENTORY-HYGIENE (migration 143b) introduced
+    // `v_stock_unified` as the canonical read-side projection over
+    // `public.stock`, exposing `quantity_on_hand` / `quantity_reserved`
+    // / `available_quantity` in one place. PR-STOCK-TRANSFERS-WORKFLOW
+    // adopted it in the ship-availability check so the on-hand vs.
+    // reserved split is unambiguous. The legacy `stock_levels`
+    // (migration 142) is still defined and other modules may still
+    // read from it, but this service deliberately doesn't anymore.
     const referencing = sqlBlocks.filter((b) =>
-      /FROM\s+stock_levels/i.test(b),
+      /FROM\s+v_stock_unified/i.test(b),
     );
     expect(referencing.length).toBeGreaterThan(0);
   });
 
-  it('reads the `quantity` column from stock_levels (matches view shape in migration 142)', () => {
+  it('reads `quantity_on_hand` from v_stock_unified (the column it exposes)', () => {
     const referencing = sqlBlocks.find((b) =>
-      /FROM\s+stock_levels/i.test(b),
+      /FROM\s+v_stock_unified/i.test(b),
     );
     expect(referencing).toBeDefined();
-    expect(referencing!).toMatch(/quantity/i);
+    expect(referencing!).toMatch(/quantity_on_hand/i);
   });
 });
 
