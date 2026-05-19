@@ -1,36 +1,65 @@
 /**
  * InventoryController — PR-FIX-INVENTORY-API-FOUNDATION
+ *   + PR-USER-BRANCH-WAREHOUSE-ACCESS (intersection filter from
+ *     AccessScopeService.getUserWarehouseIds())
  *
- * Read-only inventory endpoints:
- *   GET /inventory/dashboard  — totals + top-N lists for the landing
- *   GET /inventory/balances   — paginated variant × warehouse balances
- *   GET /inventory/movements  — paginated stock-movements ledger
- *
- * All three are pure SELECTs; no writes, no idempotency interceptor,
- * no engine calls. Mounted under the existing `products.view`
- * permission family — operators who can see products can see the
- * inventory dashboards built from those products. A future
- * `inventory.view` permission can replace this in one place.
+ * Read-only inventory endpoints. Per-user warehouse access is
+ * enforced by intersecting the SQL filter with the user's allow-
+ * list; `null` from AccessScopeService means "no restriction"
+ * (bypass role or fallback-allow-all), and the controller passes
+ * `undefined` to the service in that case so the existing query
+ * shape is unchanged.
  */
 import { Controller, Get, ParseUUIDPipe, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { InventoryService } from './inventory.service';
 import { Permissions } from '../common/decorators/roles.decorator';
+import {
+  CurrentUser,
+  JwtUser,
+} from '../common/decorators/current-user.decorator';
+import { AccessScopeService } from '../access-control/access-scope.service';
 
 @ApiBearerAuth()
 @ApiTags('inventory')
 @Permissions('products.view')
 @Controller('inventory')
 export class InventoryController {
-  constructor(private readonly inventory: InventoryService) {}
+  constructor(
+    private readonly inventory: InventoryService,
+    private readonly scope: AccessScopeService,
+  ) {}
+
+  /**
+   * Resolve the user's allow-list of warehouse_ids, intersected with
+   * any explicit `warehouse_id` query param. Returns `undefined` when
+   * the user has no scope restriction (bypass / fallback-allow-all);
+   * an empty array means the user has explicit rows but they don't
+   * intersect with the requested warehouse_id.
+   */
+  private async resolveAllowed(
+    user: JwtUser,
+    requestedWarehouseId?: string,
+  ): Promise<string[] | undefined> {
+    const allowed = await this.scope.getUserWarehouseIds(user.userId, {
+      role: user.role,
+    });
+    if (allowed === null) return undefined;
+    if (!requestedWarehouseId) return allowed;
+    return allowed.includes(requestedWarehouseId)
+      ? [requestedWarehouseId]
+      : [];
+  }
 
   @Get('dashboard')
   @ApiOperation({ summary: 'KPIs + top-N lists for the inventory landing' })
   @ApiQuery({ name: 'branch_id', required: false, description: 'Scope KPIs and top-N lists to warehouses linked to this branch' })
-  dashboard(
+  async dashboard(
+    @CurrentUser() user: JwtUser,
     @Query('branch_id', new ParseUUIDPipe({ optional: true })) branch_id?: string,
   ) {
-    return this.inventory.getDashboard({ branch_id });
+    const warehouse_ids = await this.resolveAllowed(user);
+    return this.inventory.getDashboard({ branch_id, warehouse_ids });
   }
 
   @Get('balances')
@@ -50,7 +79,8 @@ export class InventoryController {
   @ApiQuery({ name: 'branch_id', required: false, description: 'Restrict to warehouses linked to this branch (combinable with warehouse_id)' })
   @ApiQuery({ name: 'low_stock', required: false, type: Boolean })
   @ApiQuery({ name: 'out_of_stock', required: false, type: Boolean })
-  balances(
+  async balances(
+    @CurrentUser() user: JwtUser,
     @Query('page') page?: string,
     @Query('limit') limit?: string,
     @Query('search') search?: string,
@@ -64,6 +94,7 @@ export class InventoryController {
     @Query('low_stock') low_stock?: string,
     @Query('out_of_stock') out_of_stock?: string,
   ) {
+    const warehouse_ids = await this.resolveAllowed(user, warehouse_id);
     return this.inventory.getBalances({
       page: page ? parseInt(page, 10) : undefined,
       limit: limit ? parseInt(limit, 10) : undefined,
@@ -75,6 +106,7 @@ export class InventoryController {
       size_id,
       group_id,
       branch_id,
+      warehouse_ids,
       low_stock: low_stock === 'true',
       out_of_stock: out_of_stock === 'true',
     });
@@ -98,7 +130,8 @@ export class InventoryController {
   @ApiQuery({ name: 'search', required: false })
   @ApiQuery({ name: 'group_id', required: false, description: 'Filter to movements on variants in this product_group' })
   @ApiQuery({ name: 'branch_id', required: false, description: 'Restrict to movements on warehouses linked to this branch' })
-  movements(
+  async movements(
+    @CurrentUser() user: JwtUser,
     @Query('page') page?: string,
     @Query('limit') limit?: string,
     @Query('variant_id', new ParseUUIDPipe({ optional: true })) variant_id?: string,
@@ -113,6 +146,7 @@ export class InventoryController {
     @Query('group_id', new ParseUUIDPipe({ optional: true })) group_id?: string,
     @Query('branch_id', new ParseUUIDPipe({ optional: true })) branch_id?: string,
   ) {
+    const warehouse_ids = await this.resolveAllowed(user, warehouse_id);
     return this.inventory.getMovements({
       page: page ? parseInt(page, 10) : undefined,
       limit: limit ? parseInt(limit, 10) : undefined,
@@ -127,6 +161,7 @@ export class InventoryController {
       search,
       group_id,
       branch_id,
+      warehouse_ids,
     });
   }
 }

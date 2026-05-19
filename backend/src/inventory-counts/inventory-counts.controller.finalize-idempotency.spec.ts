@@ -25,6 +25,7 @@ import { CallHandler, ExecutionContext } from '@nestjs/common';
 import { InventoryCountsController } from './inventory-counts.controller';
 import { InventoryCountsService } from './inventory-counts.service';
 import { IdempotencyInterceptor } from '../common/interceptors/idempotency.interceptor';
+import { AccessScopeService } from '../access-control/access-scope.service';
 import {
   AcquireResult,
   CachedResponse,
@@ -244,6 +245,18 @@ describe('InventoryCountsController route-level wiring — PR-FIX-IDEMPOTENCY-DE
           },
         },
         { provide: IdempotencyCacheService, useValue: {} },
+        // PR-USER-BRANCH-WAREHOUSE-ACCESS — the controller now reads
+        // the user's allowed warehouse set via AccessScopeService.
+        // The route-wiring test doesn't exercise any guard semantics;
+        // a stub that always returns "no restriction" keeps the
+        // module-instantiation path happy.
+        {
+          provide: AccessScopeService,
+          useValue: {
+            getUserWarehouseIds: jest.fn(async () => null),
+            getUserBranchIds: jest.fn(async () => null),
+          },
+        },
         IdempotencyInterceptor,
       ],
     }).compile();

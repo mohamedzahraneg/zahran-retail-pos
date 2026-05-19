@@ -93,6 +93,12 @@ interface ListFilters {
   date_from?: string;
   date_to?: string;
   search?: string;
+  /**
+   * PR-USER-BRANCH-WAREHOUSE-ACCESS — allow-list of warehouse_ids
+   * the caller may see. `undefined` = no restriction (bypass /
+   * fallback-allow-all). Empty array yields zero rows.
+   */
+  allowed_warehouse_ids?: string[];
 }
 
 @Injectable()
@@ -557,6 +563,18 @@ export class InventoryCountsService {
       conds.push(
         `(c.count_no ILIKE $${params.length} OR c.notes ILIKE $${params.length})`,
       );
+    }
+    // PR-USER-BRANCH-WAREHOUSE-ACCESS — intersect with the caller's
+    // allowed warehouses.
+    if (filters.allowed_warehouse_ids !== undefined) {
+      if (filters.allowed_warehouse_ids.length === 0) {
+        conds.push('FALSE');
+      } else {
+        params.push(filters.allowed_warehouse_ids);
+        conds.push(
+          `c.warehouse_id = ANY($${params.length}::uuid[])`,
+        );
+      }
     }
 
     const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';

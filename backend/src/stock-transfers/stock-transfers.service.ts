@@ -106,6 +106,15 @@ interface ListFilters {
   date_from?: string;
   date_to?: string;
   search?: string;
+  /**
+   * PR-USER-BRANCH-WAREHOUSE-ACCESS — allow-list of warehouse_ids
+   * the calling user is permitted to see. The controller fills this
+   * from AccessScopeService. `undefined` = no restriction. Empty
+   * array yields zero rows. The filter matches transfers where
+   * EITHER side (from / to) intersects the allow-list — so a
+   * warehouse-operator sees inbound shipments too.
+   */
+  allowed_warehouse_ids?: string[];
 }
 
 @Injectable()
@@ -623,6 +632,20 @@ export class StockTransfersService {
       conds.push(
         `(t.transfer_no ILIKE $${params.length} OR t.notes ILIKE $${params.length})`,
       );
+    }
+    // PR-USER-BRANCH-WAREHOUSE-ACCESS — intersect with the caller's
+    // allowed warehouses. A transfer is visible if EITHER its source
+    // OR its destination is in the allow-list (a warehouse-operator
+    // should see inbound shipments as well as outbound).
+    if (filters.allowed_warehouse_ids !== undefined) {
+      if (filters.allowed_warehouse_ids.length === 0) {
+        conds.push('FALSE');
+      } else {
+        params.push(filters.allowed_warehouse_ids);
+        conds.push(
+          `(t.from_warehouse_id = ANY($${params.length}::uuid[]) OR t.to_warehouse_id = ANY($${params.length}::uuid[]))`,
+        );
+      }
     }
 
     const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
