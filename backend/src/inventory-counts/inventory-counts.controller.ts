@@ -9,6 +9,7 @@
 import {
   Body,
   Controller,
+  ForbiddenException,
   Get,
   Param,
   ParseUUIDPipe,
@@ -33,13 +34,35 @@ import {
   JwtUser,
 } from '../common/decorators/current-user.decorator';
 import { IdempotencyInterceptor } from '../common/interceptors/idempotency.interceptor';
+import { AccessScopeService } from '../access-control/access-scope.service';
 
 @ApiBearerAuth()
 @ApiTags('inventory-counts')
 @Permissions('inventory.count')
 @Controller('inventory-counts')
 export class InventoryCountsController {
-  constructor(private readonly svc: InventoryCountsService) {}
+  constructor(
+    private readonly svc: InventoryCountsService,
+    private readonly scope: AccessScopeService,
+  ) {}
+
+  /**
+   * PR-USER-BRANCH-WAREHOUSE-ACCESS — refuse to start a count for a
+   * warehouse the operator can't reach. Fallback-allow-all users
+   * (zero access rows) are unaffected.
+   */
+  private async assertCanAccessWarehouse(user: JwtUser, warehouseId: string) {
+    const allowed = await this.scope.getUserWarehouseIds(user.userId, {
+      role: user.role,
+      minLevel: 'operate',
+    });
+    if (allowed === null) return;
+    if (!allowed.includes(warehouseId)) {
+      throw new ForbiddenException(
+        'ليس لديك صلاحية إنشاء جرد لهذا المخزن',
+      );
+    }
+  }
 
   // ─── Create header only (no snapshot) ───────────────────────────
   @Post()
@@ -48,7 +71,11 @@ export class InventoryCountsController {
     summary: 'إنشاء جلسة جرد (مسودة) — بدون تحريك مخزون',
   })
   @UseInterceptors(IdempotencyInterceptor)
-  create(@Body() dto: CreateCountDto, @CurrentUser() user: JwtUser) {
+  async create(
+    @Body() dto: CreateCountDto,
+    @CurrentUser() user: JwtUser,
+  ) {
+    await this.assertCanAccessWarehouse(user, dto.warehouse_id);
     return this.svc.create(dto, user.userId);
   }
 
@@ -72,7 +99,8 @@ export class InventoryCountsController {
   @Roles('admin', 'manager', 'stock_keeper')
   @ApiOperation({ summary: 'بدء جرد جديد (إنشاء + تجميد في خطوة واحدة)' })
   @UseInterceptors(IdempotencyInterceptor)
-  start(@Body() dto: StartCountDto, @CurrentUser() user: JwtUser) {
+  async start(@Body() dto: StartCountDto, @CurrentUser() user: JwtUser) {
+    await this.assertCanAccessWarehouse(user, dto.warehouse_id);
     return this.svc.start(dto, user.userId);
   }
 
@@ -158,7 +186,8 @@ export class InventoryCountsController {
   @ApiQuery({ name: 'date_from', required: false })
   @ApiQuery({ name: 'date_to', required: false })
   @ApiQuery({ name: 'search', required: false })
-  list(
+  async list(
+    @CurrentUser() user: JwtUser,
     @Query('status') status?: string,
     @Query('warehouse_id', new ParseUUIDPipe({ optional: true }))
     warehouseId?: string,
@@ -168,6 +197,9 @@ export class InventoryCountsController {
     @Query('date_to') dateTo?: string,
     @Query('search') search?: string,
   ) {
+    const allowed = await this.scope.getUserWarehouseIds(user.userId, {
+      role: user.role,
+    });
     return this.svc.list({
       status,
       warehouse_id: warehouseId,
@@ -175,12 +207,23 @@ export class InventoryCountsController {
       date_from: dateFrom,
       date_to: dateTo,
       search,
+      allowed_warehouse_ids: allowed ?? undefined,
     });
   }
 
   @Get(':id')
   @ApiOperation({ summary: 'تفاصيل جرد' })
-  findOne(@Param('id', ParseUUIDPipe) id: string) {
-    return this.svc.findOne(id);
+  async findOne(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: JwtUser,
+  ) {
+    const count = await this.svc.findOne(id);
+    const allowed = await this.scope.getUserWarehouseIds(user.userId, {
+      role: user.role,
+    });
+    if (allowed !== null && !allowed.includes(count.warehouse_id)) {
+      throw new ForbiddenException('ليس لديك صلاحية مشاهدة هذا الجرد');
+    }
+    return count;
   }
 }

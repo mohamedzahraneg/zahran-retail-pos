@@ -1,15 +1,26 @@
 /**
  * stock-transfers.controller.ts — PR-STOCK-TRANSFERS-WORKFLOW
+ *   + PR-USER-BRANCH-WAREHOUSE-ACCESS
  *
- * Branch-aware list filters + the new `approve` + PATCH endpoints.
- * The four idempotency-decorated lifecycle routes from the earlier
- * `PR-FIX-IDEMPOTENCY-STOCK-INVENTORY-PATHS` PR keep their
- * IdempotencyInterceptor wrapper; the two new write endpoints
- * (`update`, `approve`) get the same treatment.
+ * Branch-aware list filters + the new `approve` + PATCH endpoints,
+ * with per-user warehouse-access enforcement layered on top:
+ *
+ *   · `list`  intersects the result with the user's allowed warehouse
+ *     set (either side — from / to — counts as a match).
+ *   · `findOne` returns 403 when the user has access rows but neither
+ *     side of the transfer is on the list.
+ *   · `create` returns 403 when either warehouse is outside the user's
+ *     allow-list (only when the user has explicit rows; fallback-allow-
+ *     all users are unaffected).
+ *
+ * Fallback-allow-all: a user with zero rows in `user_warehouse_access`
+ * is treated as "no restriction" so the rollout doesn't break
+ * existing operators.
  */
 import {
   Body,
   Controller,
+  ForbiddenException,
   Get,
   Param,
   ParseUUIDPipe,
@@ -31,20 +42,49 @@ import {
   JwtUser,
 } from '../common/decorators/current-user.decorator';
 import { IdempotencyInterceptor } from '../common/interceptors/idempotency.interceptor';
+import { AccessScopeService } from '../access-control/access-scope.service';
 
 @ApiBearerAuth()
 @ApiTags('stock-transfers')
 @Permissions('inventory.view')
 @Controller('stock-transfers')
 export class StockTransfersController {
-  constructor(private readonly svc: StockTransfersService) {}
+  constructor(
+    private readonly svc: StockTransfersService,
+    private readonly scope: AccessScopeService,
+  ) {}
+
+  private async assertCanAccessWarehouses(
+    user: JwtUser,
+    warehouseIds: string[],
+  ) {
+    const allowed = await this.scope.getUserWarehouseIds(user.userId, {
+      role: user.role,
+      minLevel: 'operate',
+    });
+    if (allowed === null) return; // fallback-allow-all
+    for (const id of warehouseIds) {
+      if (!allowed.includes(id)) {
+        throw new ForbiddenException(
+          'ليس لديك صلاحية الوصول لهذا المخزن',
+        );
+      }
+    }
+  }
 
   // ─── Lifecycle writes ────────────────────────────────────────────
   @Post()
   @Roles('admin', 'manager', 'stock_keeper')
   @ApiOperation({ summary: 'إنشاء تحويل مخزني (مسودة) — لا يحرك مخزون' })
   @UseInterceptors(IdempotencyInterceptor)
-  create(@Body() dto: CreateTransferDto, @CurrentUser() user: JwtUser) {
+  async create(
+    @Body() dto: CreateTransferDto,
+    @CurrentUser() user: JwtUser,
+  ) {
+    await this.assertCanAccessWarehouses(user, [
+      dto.from_warehouse_id,
+      dto.to_warehouse_id,
+    ]);
     return this.svc.create(dto, user.userId);
   }
 
@@ -131,7 +171,8 @@ export class StockTransfersController {
   @ApiQuery({ name: 'date_from', required: false })
   @ApiQuery({ name: 'date_to', required: false })
   @ApiQuery({ name: 'search', required: false })
-  list(
+  async list(
+    @CurrentUser() user: JwtUser,
     @Query('status') status?: string,
     @Query('warehouse_id', new ParseUUIDPipe({ optional: true }))
     warehouseId?: string,
@@ -147,6 +188,9 @@ export class StockTransfersController {
     @Query('date_to') date_to?: string,
     @Query('search') search?: string,
   ) {
+    const allowed = await this.scope.getUserWarehouseIds(user.userId, {
+      role: user.role,
+    });
     return this.svc.list({
       status,
       warehouse_id: warehouseId,
@@ -157,12 +201,30 @@ export class StockTransfersController {
       date_from,
       date_to,
       search,
+      allowed_warehouse_ids: allowed ?? undefined,
     });
   }
 
   @Get(':id')
   @ApiOperation({ summary: 'تفاصيل تحويل (مع الفروع وحركات المخزون)' })
-  findOne(@Param('id', ParseUUIDPipe) id: string) {
-    return this.svc.findOne(id);
+  async findOne(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: JwtUser,
+  ) {
+    const transfer = await this.svc.findOne(id);
+    const allowed = await this.scope.getUserWarehouseIds(user.userId, {
+      role: user.role,
+    });
+    if (allowed !== null) {
+      const ok =
+        allowed.includes(transfer.from_warehouse_id) ||
+        allowed.includes(transfer.to_warehouse_id);
+      if (!ok) {
+        throw new ForbiddenException(
+          'ليس لديك صلاحية مشاهدة هذا التحويل',
+        );
+      }
+    }
+    return transfer;
   }
 }

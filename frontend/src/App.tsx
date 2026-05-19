@@ -70,6 +70,7 @@ import CustomerGroups from '@/pages/CustomerGroups';
 import Settings from '@/pages/Settings';
 import PaymentAccounts from '@/pages/PaymentAccounts';
 import Users from '@/pages/Users';
+import UserAccess from '@/pages/UserAccess';
 import Loyalty from '@/pages/Loyalty';
 // PR-ESS-2A — /me now renders the simplified self-service personal
 // employee file. The legacy EmployeeProfile component still exports
@@ -527,6 +528,17 @@ export default function App() {
           element={
             <ProtectedRoute permissions={['users.view', 'users.manage']}>
               <Users />
+            </ProtectedRoute>
+          }
+        />
+        {/* PR-USER-BRANCH-WAREHOUSE-ACCESS — per-user branch/warehouse
+            access editor. Mounted as a child of /users so the legacy
+            page is untouched. */}
+        <Route
+          path="users/:id/access"
+          element={
+            <ProtectedRoute permissions={['users.view', 'users.manage']}>
+              <UserAccess />
             </ProtectedRoute>
           }
         />

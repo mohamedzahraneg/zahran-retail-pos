@@ -34,6 +34,13 @@ export interface ValuationFilters {
   category_id?: string;
   brand_id?: string;
   search?: string;
+  /**
+   * PR-USER-BRANCH-WAREHOUSE-ACCESS — allow-list filled by the
+   * controller from AccessScopeService.getUserWarehouseIds().
+   * `undefined` = no restriction (bypass / fallback). Empty array
+   * yields zero rows.
+   */
+  warehouse_ids?: string[];
 }
 
 export interface LowStockFilters {
@@ -42,6 +49,7 @@ export interface LowStockFilters {
   group_id?: string;
   category_id?: string;
   brand_id?: string;
+  warehouse_ids?: string[];
 }
 
 export interface DeadStockFilters {
@@ -49,6 +57,7 @@ export interface DeadStockFilters {
   warehouse_id?: string;
   group_id?: string;
   days?: number;
+  warehouse_ids?: string[];
 }
 
 export interface ProfitabilityFilters {
@@ -57,6 +66,7 @@ export interface ProfitabilityFilters {
   group_id?: string;
   date_from?: string;
   date_to?: string;
+  warehouse_ids?: string[];
 }
 
 @Injectable()
@@ -92,6 +102,27 @@ export class InventoryReportsService {
     )`;
   }
 
+  /**
+   * PR-USER-BRANCH-WAREHOUSE-ACCESS — push the user's allow-list of
+   * warehouse_ids into `params` and append the matching `=ANY($N)`
+   * clause to `conds`. Empty allow-list short-circuits the query
+   * with `FALSE` (intersection-no-match).
+   */
+  private addAllowedWarehousesClause(
+    warehouseCol: string,
+    allowed: string[] | undefined,
+    params: any[],
+    conds: string[],
+  ): void {
+    if (allowed === undefined) return;
+    if (allowed.length === 0) {
+      conds.push('FALSE');
+      return;
+    }
+    params.push(allowed);
+    conds.push(`${warehouseCol} = ANY($${params.length}::uuid[])`);
+  }
+
   // ─── 1. Valuation ────────────────────────────────────────────────
   async valuation(filters: ValuationFilters = {}) {
     const conds: string[] = [
@@ -110,6 +141,12 @@ export class InventoryReportsService {
       params.push(filters.branch_id);
       conds.push(this.branchWarehouseExists('s.warehouse_id', params.length));
     }
+    this.addAllowedWarehousesClause(
+      's.warehouse_id',
+      filters.warehouse_ids,
+      params,
+      conds,
+    );
     if (filters.category_id) {
       params.push(filters.category_id);
       conds.push(`p.category_id = $${params.length}::uuid`);
@@ -230,6 +267,12 @@ export class InventoryReportsService {
       params.push(filters.branch_id);
       conds.push(this.branchWarehouseExists('s.warehouse_id', params.length));
     }
+    this.addAllowedWarehousesClause(
+      's.warehouse_id',
+      filters.warehouse_ids,
+      params,
+      conds,
+    );
     if (filters.category_id) {
       params.push(filters.category_id);
       conds.push(`p.category_id = $${params.length}::uuid`);
@@ -317,6 +360,12 @@ export class InventoryReportsService {
       params.push(filters.branch_id);
       conds.push(this.branchWarehouseExists('s.warehouse_id', params.length));
     }
+    this.addAllowedWarehousesClause(
+      's.warehouse_id',
+      filters.warehouse_ids,
+      params,
+      conds,
+    );
     if (filters.group_id) {
       params.push(filters.group_id);
       conds.push(this.groupVariantExists('pv.id', params.length));
@@ -399,6 +448,12 @@ export class InventoryReportsService {
         this.branchWarehouseExists('inv.warehouse_id', params.length),
       );
     }
+    this.addAllowedWarehousesClause(
+      'inv.warehouse_id',
+      filters.warehouse_ids,
+      params,
+      conds,
+    );
     if (filters.group_id) {
       params.push(filters.group_id);
       conds.push(this.groupVariantExists('ii.variant_id', params.length));

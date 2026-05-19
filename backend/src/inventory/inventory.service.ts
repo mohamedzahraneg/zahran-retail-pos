@@ -123,6 +123,14 @@ export interface InventoryBalancesFilters {
    * "this specific warehouse, and it must belong to this branch".
    */
   branch_id?: string;
+  /**
+   * PR-USER-BRANCH-WAREHOUSE-ACCESS — allow-list of warehouse_ids
+   * the calling user is permitted to see. The controller fills this
+   * from AccessScopeService.getUserWarehouseIds(); `undefined` means
+   * "no scope restriction" (admin / fallback-allow-all). An empty
+   * array deliberately yields zero rows.
+   */
+  warehouse_ids?: string[];
   low_stock?: boolean;
   out_of_stock?: boolean;
 }
@@ -149,6 +157,8 @@ export interface InventoryMovementsFilters {
    * warehouses linked to the given branch.
    */
   branch_id?: string;
+  /** PR-USER-BRANCH-WAREHOUSE-ACCESS — see InventoryBalancesFilters. */
+  warehouse_ids?: string[];
 }
 
 /**
@@ -157,6 +167,8 @@ export interface InventoryMovementsFilters {
  */
 export interface InventoryDashboardFilters {
   branch_id?: string;
+  /** PR-USER-BRANCH-WAREHOUSE-ACCESS — see InventoryBalancesFilters. */
+  warehouse_ids?: string[];
 }
 
 @Injectable()
@@ -209,26 +221,51 @@ export class InventoryService {
   async getDashboard(
     filters: InventoryDashboardFilters = {},
   ): Promise<InventoryDashboardResponse> {
-    // ── Build the per-query branch scope. We parameterise each
-    //    sub-query call separately (the totals query takes ONE
-    //    branch_id param at $1; the top-N queries each push it
-    //    locally before binding).
+    // ── Build the per-query scope. The two scope dimensions are:
+    //    · branch_id          → $1 when present (PR-BRANCHES-INVENTORY-FILTERS)
+    //    · warehouse_ids[]    → $1 or $2 depending on branch presence
+    //                           (PR-USER-BRANCH-WAREHOUSE-ACCESS)
+    //
+    //    Both dimensions are AND-combined in every sub-query that
+    //    touches a warehouse-scoped table. The shared `dashParams`
+    //    array is bound positionally to each sub-query call.
     const branchId = filters.branch_id || null;
+    const allowed = filters.warehouse_ids;
+    const allowedEmpty = Array.isArray(allowed) && allowed.length === 0;
 
-    // Branch scope SQL fragments (empty when no branch_id).
-    // For the giant totals SELECT, the parameter index is always $1.
-    const stockBranchClause = branchId
-      ? `AND ${this.branchWarehouseExists('warehouse_id', 1)}`
-      : '';
-    const stockTableBranchClause = branchId
-      ? `AND ${this.branchWarehouseExists('s.warehouse_id', 1)}`
-      : '';
-    const movementsBranchClause = branchId
-      ? `AND ${this.branchWarehouseExists('sm.warehouse_id', 1)}`
-      : '';
-    const warehousesBranchClause = branchId
-      ? `AND ${this.branchWarehouseExists('id', 1)}`
-      : '';
+    const dashParams: any[] = [];
+    if (branchId) dashParams.push(branchId);
+    if (allowed && allowed.length > 0) dashParams.push(allowed);
+
+    const branchIdx = branchId ? dashParams.indexOf(branchId) + 1 : 0;
+    const allowedIdx =
+      allowed && allowed.length > 0
+        ? dashParams.indexOf(allowed) + 1
+        : 0;
+
+    /**
+     * Build the additional AND clause for a sub-query that filters by
+     * a warehouse column. Empty when no scope; otherwise a chain of
+     * `AND <branch EXISTS> AND <warehouse_id = ANY(...)>`. An empty
+     * allow-list short-circuits to `AND FALSE` so the user sees zero
+     * rows.
+     */
+    const scopeClause = (warehouseCol: string): string => {
+      if (allowedEmpty) return 'AND FALSE';
+      const parts: string[] = [];
+      if (branchIdx > 0) {
+        parts.push(`AND ${this.branchWarehouseExists(warehouseCol, branchIdx)}`);
+      }
+      if (allowedIdx > 0) {
+        parts.push(`AND ${warehouseCol} = ANY($${allowedIdx}::uuid[])`);
+      }
+      return parts.join(' ');
+    };
+
+    const stockBranchClause = scopeClause('warehouse_id');
+    const stockTableBranchClause = scopeClause('s.warehouse_id');
+    const movementsBranchClause = scopeClause('sm.warehouse_id');
+    const warehousesBranchClause = scopeClause('id');
 
     // ── Totals (one big SELECT with sub-queries) ───────────────────
     const [totalsRow] = await this.ds.query(
@@ -272,13 +309,11 @@ export class InventoryService {
              AND s.reorder_point   > 0
              AND s.quantity_on_hand > 0
              AND s.quantity_on_hand <= s.reorder_point ${stockTableBranchClause}) AS low_stock_groups_count`,
-      branchId ? [branchId] : [],
+      dashParams,
     );
 
     // ── Top 10 low-stock items ─────────────────────────────────────
-    const topLowStockBranchClause = branchId
-      ? `AND ${this.branchWarehouseExists('s.warehouse_id', 1)}`
-      : '';
+    const topLowStockBranchClause = scopeClause('s.warehouse_id');
     const topLowStock = await this.ds.query(
       `SELECT pv.id          AS variant_id,
               p.id           AS product_id,
@@ -305,7 +340,7 @@ export class InventoryService {
         ORDER BY (s.reorder_point - s.quantity_on_hand) DESC NULLS LAST,
                  s.quantity_on_hand ASC
         LIMIT 10`,
-      branchId ? [branchId] : [],
+      dashParams,
     );
 
     // ── PR-FIX-INVENTORY-API-PRODUCT-GROUPS ────────────────────────
@@ -316,9 +351,7 @@ export class InventoryService {
     // that branch's warehouses — variants only in other branches drop
     // out, and the SUM(quantity_on_hand) reflects only the chosen
     // branch's stock.
-    const stockJoinBranchClause = branchId
-      ? `AND ${this.branchWarehouseExists('s.warehouse_id', 1)}`
-      : '';
+    const stockJoinBranchClause = scopeClause('s.warehouse_id');
     const topGroupsByStockValue = await this.ds.query(
       `SELECT g.id::text         AS group_id,
               g.name_ar, g.name_en, g.color,
@@ -338,7 +371,7 @@ export class InventoryService {
                  stock_qty DESC NULLS LAST,
                  g.name_ar ASC
         LIMIT 5`,
-      branchId ? [branchId] : [],
+      dashParams,
     );
 
     // PR-FIX-INVENTORY-API-PRODUCT-GROUPS — top 5 active groups by
@@ -348,9 +381,7 @@ export class InventoryService {
     // Sales-by-branch: scope by invoices.warehouse_id → branch
     // mapping. The `inv.warehouse_id` column already exists on the
     // invoices table (index `idx_invoices_warehouse`).
-    const invoicesBranchClause = branchId
-      ? `AND ${this.branchWarehouseExists('inv.warehouse_id', 1)}`
-      : '';
+    const invoicesBranchClause = scopeClause('inv.warehouse_id');
     const topGroupsBySales30d = await this.ds.query(
       `SELECT g.id::text         AS group_id,
               g.name_ar, g.color,
@@ -370,12 +401,13 @@ export class InventoryService {
                  qty_30d DESC NULLS LAST,
                  g.name_ar ASC
         LIMIT 5`,
-      branchId ? [branchId] : [],
+      dashParams,
     );
 
     // ── 10 most recent movements (any direction, any type) ─────────
-    const recentMovementsWhere = branchId
-      ? `WHERE ${this.branchWarehouseExists('sm.warehouse_id', 1)}`
+    const recentMovementsScope = scopeClause('sm.warehouse_id');
+    const recentMovementsWhere = recentMovementsScope
+      ? `WHERE ${recentMovementsScope.replace(/^AND\s+/, '')}`
       : '';
     const recentMovements = await this.ds.query(
       `SELECT sm.id::text   AS id,
@@ -396,7 +428,7 @@ export class InventoryService {
         ${recentMovementsWhere}
         ORDER BY sm.created_at DESC, sm.id DESC
         LIMIT 10`,
-      branchId ? [branchId] : [],
+      dashParams,
     );
 
     return {
@@ -475,6 +507,18 @@ export class InventoryService {
     if (filters.branch_id) {
       params.push(filters.branch_id);
       conds.push(this.branchWarehouseExists('s.warehouse_id', params.length));
+    }
+    // PR-USER-BRANCH-WAREHOUSE-ACCESS — intersect with the user's
+    // allowed warehouse set. `undefined` = no restriction. An empty
+    // array yields zero rows (intentional: user has explicit rows
+    // but none match).
+    if (filters.warehouse_ids !== undefined) {
+      if (filters.warehouse_ids.length === 0) {
+        conds.push(`FALSE`);
+      } else {
+        params.push(filters.warehouse_ids);
+        conds.push(`s.warehouse_id = ANY($${params.length}::uuid[])`);
+      }
     }
     if (filters.category_id) {
       params.push(filters.category_id);
@@ -644,6 +688,16 @@ export class InventoryService {
       conds.push(
         this.branchWarehouseExists('sm.warehouse_id', params.length),
       );
+    }
+    // PR-USER-BRANCH-WAREHOUSE-ACCESS — intersect with the user's
+    // allowed warehouse set (see InventoryBalancesFilters above).
+    if (filters.warehouse_ids !== undefined) {
+      if (filters.warehouse_ids.length === 0) {
+        conds.push(`FALSE`);
+      } else {
+        params.push(filters.warehouse_ids);
+        conds.push(`sm.warehouse_id = ANY($${params.length}::uuid[])`);
+      }
     }
     if (filters.movement_type) {
       params.push(filters.movement_type);

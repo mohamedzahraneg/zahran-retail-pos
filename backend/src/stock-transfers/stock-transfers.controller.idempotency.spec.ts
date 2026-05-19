@@ -48,6 +48,7 @@ import { firstValueFrom, of, throwError } from 'rxjs';
 import { CallHandler, ExecutionContext } from '@nestjs/common';
 import { StockTransfersController } from './stock-transfers.controller';
 import { StockTransfersService } from './stock-transfers.service';
+import { AccessScopeService } from '../access-control/access-scope.service';
 import { IdempotencyInterceptor } from '../common/interceptors/idempotency.interceptor';
 import {
   AcquireResult,
@@ -380,6 +381,15 @@ describe('StockTransfersController route-level wiring — PR-FIX-IDEMPOTENCY-STO
           },
         },
         { provide: IdempotencyCacheService, useValue: {} },
+        // PR-USER-BRANCH-WAREHOUSE-ACCESS — see inventory-counts test
+        // for the rationale; stub always returns "no restriction".
+        {
+          provide: AccessScopeService,
+          useValue: {
+            getUserWarehouseIds: jest.fn(async () => null),
+            getUserBranchIds: jest.fn(async () => null),
+          },
+        },
         IdempotencyInterceptor,
       ],
     }).compile();

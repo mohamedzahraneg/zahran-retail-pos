@@ -46,6 +46,7 @@ import { CustomerGroupsModule } from './customer-groups/customer-groups.module';
 import { CategoriesModule } from './categories/categories.module';
 import { ProductGroupsModule } from './product-groups/product-groups.module';
 import { BranchesModule } from './branches/branches.module';
+import { AccessControlModule } from './access-control/access-control.module';
 import { AttendanceModule } from './attendance/attendance.module';
 import { EmployeesModule } from './employees/employees.module';
 import { ChartOfAccountsModule } from './chart-of-accounts/chart-of-accounts.module';
@@ -121,6 +122,7 @@ class HealthController {
     CategoriesModule,
     ProductGroupsModule,
     BranchesModule,
+    AccessControlModule,
     ChartOfAccountsModule,
     PaymentsModule,
     FinanceModule,
