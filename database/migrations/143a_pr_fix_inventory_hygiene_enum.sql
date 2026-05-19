@@ -1,0 +1,28 @@
+-- Migration 143a — PR-FIX-INVENTORY-HYGIENE (enum bootstrap)
+-- ═══════════════════════════════════════════════════════════════════════════
+--
+-- Adds 'stock_transfer' to the `entity_type` enum so future stock
+-- movements emitted by stock-transfers can carry a faithful
+-- `reference_type=stock_transfer` + `reference_id=<transfer.id>`
+-- instead of the legacy fallback `reference_type='other'` that
+-- `fn_adjust_stock` hard-codes today (audit-confirmed bug — the
+-- transfer linkage was only recoverable from parsing notes text).
+--
+-- Why this is its own file
+--
+--   Postgres rule (still enforced in 17.x): `ALTER TYPE … ADD VALUE`
+--   cannot be USED in the same transaction in which it is added.
+--   The new value is consumed by `fn_adjust_stock_v2` and the
+--   stock-transfers service inside migration 143b — they ship in the
+--   companion file so this DDL commits standalone first. Same pattern
+--   used by migration 107 (employee_settlement enum add).
+--
+-- Strict scope
+--   * DDL only — adds one new enum label.
+--   * NO INSERT, NO UPDATE, NO DELETE on any row.
+--   * NO change to existing functions, triggers, tables, or views.
+--   * NO data migration — historical stock_movements rows that carry
+--     `reference_type='other'` STAY EXACTLY AS THEY ARE.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+ALTER TYPE entity_type ADD VALUE IF NOT EXISTS 'stock_transfer';

@@ -676,17 +676,15 @@ export class ReturnsService {
         const qty = Number(it.quantity);
         if (!(qty > 0)) continue;
 
-        // Deduct stock atomically. We don't insert if the row doesn't
-        // exist (it must exist — approve created it).
-        await em.query(
-          `UPDATE stock
-              SET quantity_on_hand = quantity_on_hand - $1,
-                  updated_at = NOW()
-            WHERE variant_id = $2 AND warehouse_id = $3`,
-          [qty, it.variant_id, ret.warehouse_id],
-        );
-
-        // Insert reversal stock_movement; capture id via RETURNING.
+        // PR-FIX-INVENTORY-DOUBLE-WRITE — the AFTER INSERT trigger
+        // `trg_apply_stock_movement` (migration 011) applies the
+        // `direction='out'` delta to `stock.quantity_on_hand`
+        // automatically. The previous explicit `UPDATE stock SET
+        // quantity_on_hand = quantity_on_hand - qty` on this code
+        // path was paired with the INSERT below and double-debited
+        // every cancelled return's items. The INSERT is now the
+        // single mutation source — same RETURNING id semantics, no
+        // change to the audit trail or the linkage table.
         const [smRow] = await em.query(
           `INSERT INTO stock_movements
               (variant_id, warehouse_id, movement_type, direction,

@@ -49,6 +49,40 @@ export class CreateTransferDto {
   items!: TransferItemDto[];
 }
 
+// PR-STOCK-TRANSFERS-WORKFLOW — patch payload. Every field is
+// optional; the service rejects the request if the transfer is no
+// longer in `draft|pending`.
+export class UpdateTransferDto {
+  @ApiProperty({ required: false })
+  @IsOptional()
+  @IsUUID()
+  from_warehouse_id?: string;
+
+  @ApiProperty({ required: false })
+  @IsOptional()
+  @IsUUID()
+  to_warehouse_id?: string;
+
+  @ApiProperty({ required: false })
+  @IsOptional()
+  @IsString()
+  notes?: string;
+
+  /** Only `draft` ↔ `pending` transitions are accepted here. */
+  @ApiProperty({ required: false, enum: ['draft', 'pending'] })
+  @IsOptional()
+  @IsString()
+  status?: string;
+
+  @ApiProperty({ required: false, type: [TransferItemDto] })
+  @IsOptional()
+  @IsArray()
+  @ArrayMinSize(1)
+  @ValidateNested({ each: true })
+  @Type(() => TransferItemDto)
+  items?: TransferItemDto[];
+}
+
 export class ReceiveItemDto {
   @ApiProperty()
   @IsUUID()

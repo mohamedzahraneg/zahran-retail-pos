@@ -520,10 +520,11 @@ export class ReturnEditRequestsService {
         }
 
         // 5c. Reverse stock for back_to_stock items in the BEFORE
-        //     state.  Mirror of cancel: inline UPDATE stock + INSERT
-        //     stock_movements with reference_type='return',
-        //     reference_id=<return_id>, notes prefix
-        //     'edit_request_apply_stock_reversal:'.
+        //     state.  INSERT stock_movements only; the AFTER INSERT
+        //     trigger `trg_apply_stock_movement` updates `stock`
+        //     automatically (PR-FIX-INVENTORY-DOUBLE-WRITE).
+        //     reference_type='return', reference_id=<return_id>,
+        //     notes prefix 'edit_request_apply_stock_reversal:'.
         for (const it of beforeItems) {
           if (!it.back_to_stock) continue;
           const qty = Number(it.quantity);
@@ -541,13 +542,13 @@ export class ReturnEditRequestsService {
           );
           const unitCost = Number(costRow?.cost ?? 0);
 
-          await em.query(
-            `UPDATE stock
-                SET quantity_on_hand = quantity_on_hand - $1,
-                    updated_at = NOW()
-              WHERE variant_id = $2 AND warehouse_id = $3`,
-            [qty, it.variant_id, ret.warehouse_id],
-          );
+          // PR-FIX-INVENTORY-DOUBLE-WRITE — the AFTER INSERT trigger
+          // `trg_apply_stock_movement` (migration 011) applies the
+          // `direction='out'` delta to `stock.quantity_on_hand`
+          // automatically. The previous explicit `UPDATE stock`
+          // immediately before this INSERT was double-debiting every
+          // return-edit reversal. The INSERT is now the single
+          // mutation source.
           const [smRow] = await em.query(
             `INSERT INTO stock_movements
                 (variant_id, warehouse_id, movement_type, direction,
@@ -736,14 +737,13 @@ export class ReturnEditRequestsService {
         for (const it of afterItems) {
           const qty = Number(it.quantity);
           if (!(qty > 0)) continue;
-          await em.query(
-            `INSERT INTO stock (variant_id, warehouse_id, quantity_on_hand)
-             VALUES ($1, $2, $3)
-             ON CONFLICT (variant_id, warehouse_id)
-             DO UPDATE SET quantity_on_hand = stock.quantity_on_hand + EXCLUDED.quantity_on_hand,
-                           updated_at = NOW()`,
-            [it.variant_id, ret.warehouse_id, qty],
-          );
+          // PR-FIX-INVENTORY-DOUBLE-WRITE — the AFTER INSERT trigger
+          // `trg_apply_stock_movement` will UPSERT `stock` with the
+          // `direction='in'` delta automatically (its own ON CONFLICT
+          // path mirrors what this manual UPSERT did). The previous
+          // explicit UPSERT immediately before this INSERT was
+          // double-crediting every return-edit replay. The INSERT is
+          // now the single mutation source.
           const [smRow] = await em.query(
             `INSERT INTO stock_movements
                 (variant_id, warehouse_id, movement_type, direction,
@@ -1140,13 +1140,12 @@ export class ReturnEditRequestsService {
         );
         const unitCost = Number(costRow?.cost_price ?? 0);
 
-        await em.query(
-          `UPDATE stock
-              SET quantity_on_hand = quantity_on_hand - $1,
-                  updated_at = NOW()
-            WHERE variant_id = $2 AND warehouse_id = $3`,
-          [qty, it.variant_id, exc.warehouse_id],
-        );
+        // PR-FIX-INVENTORY-DOUBLE-WRITE — the AFTER INSERT trigger
+        // `trg_apply_stock_movement` applies the `direction='out'`
+        // delta automatically. The previous explicit `UPDATE stock`
+        // immediately before this INSERT was double-debiting every
+        // exchange-edit reversal. The INSERT is now the single
+        // mutation source.
         const [smRow] = await em.query(
           `INSERT INTO stock_movements
               (variant_id, warehouse_id, movement_type, direction,
@@ -1288,14 +1287,12 @@ export class ReturnEditRequestsService {
       for (const it of afterReturnedItems) {
         const qty = Number(it.quantity);
         if (!(qty > 0)) continue;
-        await em.query(
-          `INSERT INTO stock (variant_id, warehouse_id, quantity_on_hand)
-           VALUES ($1, $2, $3)
-           ON CONFLICT (variant_id, warehouse_id)
-           DO UPDATE SET quantity_on_hand = stock.quantity_on_hand + EXCLUDED.quantity_on_hand,
-                         updated_at = NOW()`,
-          [it.variant_id, exc.warehouse_id, qty],
-        );
+        // PR-FIX-INVENTORY-DOUBLE-WRITE — the AFTER INSERT trigger
+        // `trg_apply_stock_movement` will UPSERT `stock` with the
+        // `direction='in'` delta automatically. The previous explicit
+        // UPSERT immediately before this INSERT was double-crediting
+        // every exchange-edit replay. The INSERT is now the single
+        // mutation source.
         const [smRow] = await em.query(
           `INSERT INTO stock_movements
               (variant_id, warehouse_id, movement_type, direction,

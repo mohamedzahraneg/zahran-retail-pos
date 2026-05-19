@@ -111,6 +111,25 @@ export class ProductsController {
     return this.products.listVariants(id);
   }
 
+  // ─── PR-FIX-INVENTORY-API-FOUNDATION — product 360° ────────────────
+  // Single-request payload for the upcoming product detail screen:
+  // base info + variants + per-warehouse stock + totals + 30-day
+  // sales/returns/profit + recent movements/invoices/purchases +
+  // price/cost history. Read-only — no writes anywhere in the path.
+  @Get(':id/360')
+  @ApiQuery({ name: 'id', required: true })
+  product360(@Param('id', ParseUUIDPipe) id: string) {
+    return this.products.getProduct360(id);
+  }
+
+  // ─── PR-FIX-INVENTORY-API-FOUNDATION — variant matrix ──────────────
+  // Colors × sizes grid with stock + per-warehouse breakdown per
+  // cell. Read-only.
+  @Get(':id/matrix')
+  productMatrix(@Param('id', ParseUUIDPipe) id: string) {
+    return this.products.getProductMatrix(id);
+  }
+
   @Post()
   @Roles('admin', 'manager')
   create(@Body() dto: CreateProductDto) {

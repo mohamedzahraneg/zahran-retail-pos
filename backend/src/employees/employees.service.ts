@@ -1589,6 +1589,16 @@ export class EmployeesService {
        * back to the derived (cashbox+time-window) match for visibility.
        */
       shift_id?: string;
+      /**
+       * PR-FIX-SETTLEMENT-DEDUPE — operator-supplied UUID per
+       * settlement form-submit (migration 141). Retries / double-
+       * clicks of the SAME submit carry the same token; the service
+       * short-circuits to the previously-recorded row without
+       * spawning a second CT or JE. Optional — internal orchestrators
+       * (attendance.payWage) and historical callers leave it
+       * undefined and keep the prior behaviour.
+       */
+      client_token?: string;
     },
     createdBy: string,
     userPermissions: string[] = [],
@@ -1674,15 +1684,49 @@ export class EmployeesService {
     }
 
     return this.ds.transaction(async (em) => {
+      // ━━━ PR-FIX-SETTLEMENT-DEDUPE — fast-path replay ━━━
+      // An operator who double-clicks "Save" on the settlement form,
+      // or a retried HTTP request, carries the SAME `client_token`
+      // UUID generated once by the frontend. If a prior call with
+      // that token already produced an employee_settlements row
+      // (with its paired CT + JE through the engine), return that
+      // row unchanged — skip the INSERT and skip the engine call,
+      // so no second cashbox movement and no second journal entry.
+      // The partial unique index
+      // `uq_employee_settlements_client_token_live` (migration 141)
+      // backs this against concurrent retries via ON CONFLICT below.
+      // Filters on `is_void = FALSE` so voided rows don't block
+      // legitimate re-issues by an admin.
+      const clientToken: string | null = dto.client_token ?? null;
+      if (clientToken) {
+        const [existing] = await em.query(
+          `SELECT * FROM employee_settlements
+            WHERE client_token = $1 AND is_void = FALSE
+            LIMIT 1`,
+          [clientToken],
+        );
+        if (existing) return existing;
+      }
+
       // 1. Insert the settlement row (journal_entry_id filled in below).
       // PR-15 — shift_id column added in migration 095. Stored as NULL
       // when the operator chose the direct-cashbox path.
+      // PR-FIX-SETTLEMENT-DEDUPE — client_token added (column added in
+      // migration 141) + ON CONFLICT DO NOTHING on the partial unique
+      // index so a concurrent retry that races past the pre-check
+      // above can't double-insert. For callers that don't send a
+      // token (attendance.payWage internal orchestration, legacy
+      // callers) client_token is NULL and the partial index ignores
+      // the row.
       const [row] = await em.query(
         `INSERT INTO employee_settlements
            (user_id, amount, settlement_date, method, cashbox_id,
-            notes, created_by, shift_id)
+            notes, created_by, shift_id, client_token)
          VALUES ($1, $2, COALESCE($3::date, CURRENT_DATE),
-                 $4, $5, $6, $7, $8)
+                 $4, $5, $6, $7, $8, $9)
+         ON CONFLICT (client_token) WHERE client_token IS NOT NULL
+                                      AND is_void = FALSE
+         DO NOTHING
          RETURNING *`,
         [
           userId,
@@ -1693,8 +1737,32 @@ export class EmployeesService {
           dto.notes || null,
           createdBy,
           resolvedShiftId,
+          clientToken,
         ],
       );
+
+      // Race-loser recovery: a concurrent retry committed first and
+      // our INSERT was swallowed by `ON CONFLICT DO NOTHING`. Look
+      // up the winning row and return it — same response shape,
+      // none of the duplicate side-effects (no second CT, no second
+      // JE, no second cashbox movement).
+      if (!row && clientToken) {
+        const [existing] = await em.query(
+          `SELECT * FROM employee_settlements
+            WHERE client_token = $1 AND is_void = FALSE
+            LIMIT 1`,
+          [clientToken],
+        );
+        if (existing) return existing;
+      }
+      if (!row) {
+        // Defensive — INSERT returned nothing and we can't recover
+        // a row by client_token. Refuse rather than silently proceed
+        // with `row` undefined and crash on the engine post.
+        throw new BadRequestException(
+          'تعذّر إنشاء التسوية — حاول مرة أخرى',
+        );
+      }
 
       // 2. Build the per-method GL spec.
       //

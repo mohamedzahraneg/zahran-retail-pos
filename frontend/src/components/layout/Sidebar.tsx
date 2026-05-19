@@ -58,6 +58,9 @@ import {
   // PR-FIX-EXPENSE-APPROVALS-DISCOVERABILITY — sidebar entry for the
   // existing /financial-controls page (approval inbox lives there).
   Inbox,
+  // PR-BRANCHES-WAREHOUSES-FOUNDATION — sidebar entry for the new
+  // /branches admin page (organisational units + warehouse links).
+  Building2,
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import clsx from 'clsx';
@@ -228,13 +231,28 @@ const groups: NavGroup[] = [
   },
   {
     title: 'المخزون',
+    // PR-FIX-INVENTORY-UI-SHELL — three new read-only entries placed
+    // at the top of this group (Dashboard / Balances / Movements).
+    // All existing entries below stay exactly as they were — no
+    // removed routes, no relabelled items, no permission changes.
     items: [
+      { to: '/inventory', label: 'لوحة المخزون', icon: LayoutDashboard, roles: ['admin', 'manager', 'inventory'], permission: 'products.view' },
       { to: '/products', label: 'المنتجات', icon: Package, roles: ['admin', 'manager', 'inventory'], permission: 'products.view' },
+      { to: '/inventory/balances', label: 'أرصدة المخزون', icon: Scale, roles: ['admin', 'manager', 'inventory'], permission: 'products.view' },
+      { to: '/inventory/movements', label: 'حركات المخزون', icon: Activity, roles: ['admin', 'manager', 'inventory'], permission: 'products.view' },
       { to: '/product-groups', label: 'مجموعات المنتجات', icon: Tags, roles: ['admin', 'manager', 'inventory'], permission: 'products.groups_manage' },
       { to: '/stock-adjustments', label: 'تعديلات المخزون', icon: PackagePlus, roles: ['admin', 'manager', 'inventory'], permission: 'stock.adjust' },
       { to: '/stock-transfers', label: 'تحويلات المخازن', icon: Shuffle, roles: ['admin', 'manager', 'inventory'], permission: 'stock.transfer' },
+      // PR-BRANCHES-WAREHOUSES-FOUNDATION — administer organisational
+      // branches + their warehouse links. Same `warehouses.view` gate
+      // as the legacy warehouses-settings page.
+      { to: '/branches', label: 'الفروع والمخازن', icon: Building2, roles: ['admin', 'manager'], permission: 'warehouses.view' },
       { to: '/stock-count', label: 'الجرد الفعلي', icon: ClipboardCheck, roles: ['admin', 'manager', 'inventory'], permission: 'stock.count' },
       { to: '/barcode-labels', label: 'طباعة الباركود', icon: BarcodeIcon, roles: ['admin', 'manager', 'inventory'], permission: 'products.barcode' },
+      // PR-FIX-INVENTORY-UI-SHELL — alias under the inventory group.
+      // Resolves to /reports via the App.tsx redirect so saved bookmarks
+      // and saved table-views on the existing reports page keep working.
+      { to: '/inventory/reports', label: 'تقارير المخزون', icon: BarChart3, roles: ['admin', 'manager', 'inventory'], permission: 'reports.view' },
     ],
   },
   {

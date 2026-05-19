@@ -1206,7 +1206,58 @@ export class ShiftsService {
       );
 
       let entryId: string | null = null;
-      if (hasVariance && this.engine) {
+      // PR-FIX-SHIFT-SHORTAGE-DEDUPE — for `charge_employee` shortages
+      // the canonical record is a single `employee_deductions` row. We
+      // deliberately skip `engine.recordShiftVariance()` for this case
+      // — that helper also writes a `cashbox_transactions` row
+      // (category='shift_variance') and a JE that debits 1123
+      // Employee Receivable tagged with the employee. Combined with
+      // the deduction row, the same shortage surfaced twice on the
+      // employee profile:
+      //   · once via `v_employee_ledger` (source-table breakdown)
+      //   · once via `v_employee_gl_balance` (GL-tagged 1123 line)
+      // employee_deductions is now the single source of truth; the
+      // existing trg_employee_deduction_post trigger
+      // (migration 039 / 074) posts the wage-side mirror
+      // DR 213 / CR 521 so v_employee_gl_balance still picks the
+      // shortage up — but only once, on the payable account.
+      const chargeEmployeeShortage =
+        hasVariance &&
+        variance < 0 &&
+        resolvedTreatment === 'charge_employee' &&
+        !!resolvedEmployeeId;
+
+      if (chargeEmployeeShortage) {
+        // Idempotency: the partial unique index
+        // `uq_employee_deductions_shift_shortage_live` (migration 139)
+        // ensures retries / double-clicks / a stale request replaying
+        // after admin already approved cannot create a second
+        // shortage row. ON CONFLICT DO NOTHING resolves cleanly when
+        // that happens. shift_id is the natural idempotency key.
+        await em.query(
+          `INSERT INTO employee_deductions
+             (user_id, amount, reason, deduction_date, created_by,
+              source, shift_id, is_recoverable, notes)
+           VALUES ($1, $2, $3, CURRENT_DATE, $4,
+                   'shift_shortage', $5, TRUE, $6)
+           ON CONFLICT (shift_id) WHERE source = 'shift_shortage'
+                                    AND is_void = FALSE
+                                    AND shift_id IS NOT NULL
+           DO NOTHING`,
+          [
+            resolvedEmployeeId!,
+            Math.abs(variance),
+            `عجز وردية ${updated?.shift_no ?? ''}`.trim(),
+            userId,
+            id,
+            resolvedNotes,
+          ],
+        );
+      } else if (hasVariance && this.engine) {
+        // Overage (revenue/suspense) and company_loss shortages keep
+        // the prior accounting flow: a JE + paired CT posted by the
+        // engine. No employee_deductions row — the variance has no
+        // employee dimension on these branches.
         const res = await this.engine.recordShiftVariance({
           shift_id: id,
           shift_no: updated?.shift_no,
@@ -1232,33 +1283,6 @@ export class ShiftsService {
             [entryId, id],
           );
           (updated as any).variance_journal_entry_id = entryId;
-        }
-
-        // Shortage charged to an employee → mirror into
-        // employee_deductions so the profile's Financial Ledger tab
-        // shows the row with a link back to the shift AND the
-        // journal entry.
-        if (
-          variance < 0 &&
-          resolvedTreatment === 'charge_employee' &&
-          resolvedEmployeeId
-        ) {
-          await em.query(
-            `INSERT INTO employee_deductions
-               (user_id, amount, reason, deduction_date, created_by,
-                source, shift_id, journal_entry_id, is_recoverable, notes)
-             VALUES ($1, $2, $3, CURRENT_DATE, $4,
-                     'shift_shortage', $5, $6, TRUE, $7)`,
-            [
-              resolvedEmployeeId,
-              Math.abs(variance),
-              `عجز وردية ${updated?.shift_no ?? ''}`.trim(),
-              userId,
-              id,
-              entryId,
-              resolvedNotes,
-            ],
-          );
         }
       } else if (hasVariance) {
         // Legacy fallback: engine not wired. Keep existing behaviour

@@ -289,9 +289,12 @@ describe('AccountingService.createExpense — PR-ESS-2B disbursement linkage', (
     );
     expect(insertCall).toBeTruthy();
     expect(String(insertCall![0])).toContain('source_employee_request_id');
-    // Last positional arg of the INSERT params is the linkage id.
+    // The penultimate positional arg is the linkage id; the last is
+    // the client_token (PR-FIX-ADVANCE-EXPENSE-DEDUPE / migration 140),
+    // which this legacy-flow test leaves NULL.
     const insertParams = insertCall![1] as any[];
-    expect(insertParams[insertParams.length - 1]).toBe(7);
+    expect(insertParams[insertParams.length - 2]).toBe(7);
+    expect(insertParams[insertParams.length - 1]).toBeNull();
 
     // Status flip ran AFTER engine.recordExpense.
     const flipCall = em.query.mock.calls.find((c) =>

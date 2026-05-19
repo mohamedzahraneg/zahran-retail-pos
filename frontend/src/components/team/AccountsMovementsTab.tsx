@@ -68,6 +68,18 @@ import { TeamRow } from '@/api/employees.api';
 // second caller of POST /accounting/expenses/daily (with is_advance=true);
 // shares the same key module as AddExpenseModal in DailyExpenses.tsx.
 import { resetExpenseIdempotencyKey } from '@/lib/expense-idempotency';
+// PR-FIX-ADVANCE-EXPENSE-DEDUPE — per-submit client_token. Sent only
+// on the advance path so the BE partial unique index
+// `uq_expenses_advance_client_token_live` (migration 140) catches
+// double-clicks / network retries at the DB level. The hook returns
+// a stable handle (`useMemo([])`) so depending on it is safe.
+import { useAdvanceClientToken } from '@/lib/advance-client-token';
+// PR-FIX-SETTLEMENT-DEDUPE — per-submit client_token for the
+// settlement path (POST /employees/:id/settlements). Same lifecycle
+// as the advance token but a distinct DB column + index (migration
+// 141), so the two flows can't accidentally share a token even
+// inside the same modal.
+import { useSettlementClientToken } from '@/lib/settlement-client-token';
 // PR-FE-IDEM-PAYROLL-FAMILY (Sprint 5 / FE-IDEM PR 6) — per-modal
 // reset hooks for the three employee-financial modals hosted here:
 //   · BonusModal     → /employees/:id/bonuses
@@ -662,14 +674,28 @@ export function AdvanceModal({
   // settlementMut path also gets one-key-per-modal-session
   // semantics. The advance leg (POST /employees/me/requests/advance)
   // is state-only and out of scope (no key attached).
+  // PR-FIX-ADVANCE-EXPENSE-DEDUPE — per-submit client_token for the
+  // advance path. The hook owns a useRef token that survives across
+  // React Query retries / double-clicks for ONE submit attempt; the
+  // mutation's onSuccess/onError reset it so the operator's next
+  // attempt (e.g. after fixing a validation error) gets a fresh
+  // token. Defensive reset on unmount alongside the existing keys.
+  const advanceToken = useAdvanceClientToken();
+  // PR-FIX-SETTLEMENT-DEDUPE — independent client_token for the
+  // settlement path (the guard-dialog → "صرف مستحقات" branch).
+  // Distinct from `advanceToken` so a single open modal can dispatch
+  // either branch without the two tokens colliding.
+  const settlementToken = useSettlementClientToken();
   useEffect(() => {
     resetExpenseIdempotencyKey();
     resetPayrollSettlementIdempotencyKey();
     return () => {
       resetExpenseIdempotencyKey();
       resetPayrollSettlementIdempotencyKey();
+      advanceToken.reset();
+      settlementToken.reset();
     };
-  }, []);
+  }, [advanceToken, settlementToken]);
 
   const [amount, setAmount] = useState('');
   const [reason, setReason] = useState('');
@@ -741,6 +767,13 @@ export function AdvanceModal({
       // doesn't have to guess. With `direct_cashbox` the backend
       // skips its legacy shift auto-resolve and `expenses.shift_id`
       // stays NULL — the disbursement is genuinely standalone.
+      // PR-FIX-ADVANCE-EXPENSE-DEDUPE — `client_token` is minted once
+      // per submit attempt by `useAdvanceClientToken()`. The same
+      // token is reused across React Query retries / double-clicks
+      // of THIS attempt; the BE's partial unique index on
+      // (client_token) WHERE is_advance=true catches duplicates so
+      // a second request returns the original expense without
+      // writing a second CT or JE. Reset in onSuccess/onError.
       accountingApi.createDailyExpense({
         source_type:
           source.mode === 'open_shift'
@@ -762,8 +795,10 @@ export function AdvanceModal({
         source_employee_request_id: linkedRequestId
           ? Number(linkedRequestId)
           : undefined,
+        client_token: advanceToken.ensure(),
       }),
     onSuccess: () => {
+      advanceToken.reset();
       // PR-ESS-2C-1 — surface the user-facing request_no (digits only)
       // in the success toast, not the technical id.
       const linkedRequestRow = linkedRequestId
@@ -788,8 +823,14 @@ export function AdvanceModal({
       qc.invalidateQueries({ queryKey: ['my-requests'] });
       onClose();
     },
-    onError: (e: any) =>
-      toast.error(e?.response?.data?.message || 'فشل تسجيل السلفة'),
+    onError: (e: any) => {
+      // PR-FIX-ADVANCE-EXPENSE-DEDUPE — clear the token so the next
+      // submit attempt (after the operator fixes the validation
+      // error) gets a fresh token and the BE treats it as a new
+      // request rather than replaying the previous payload.
+      advanceToken.reset();
+      toast.error(e?.response?.data?.message || 'فشل تسجيل السلفة');
+    },
   });
 
   // PR-T6.1 — settlement path triggered when the operator picks
@@ -804,6 +845,13 @@ export function AdvanceModal({
   // operators were hitting from the employee profile.
   const settlementMut = useMutation({
     mutationFn: () =>
+      // PR-FIX-SETTLEMENT-DEDUPE — `client_token` is minted once per
+      // submit attempt by `useSettlementClientToken()`. Same token
+      // is reused across React Query retries / double-clicks of
+      // THIS attempt; the BE's partial unique index on
+      // (client_token) WHERE is_void=false catches duplicates so a
+      // second request returns the original settlement without
+      // writing a second CT or JE. Reset in onSuccess/onError.
       employeesApi.addSettlement(employee.id, {
         amount: Number(amount),
         method: 'cash',
@@ -814,14 +862,22 @@ export function AdvanceModal({
         shift_id:
           source.mode === 'open_shift' ? source.shift_id : undefined,
         notes: reason.trim() || `صرف مستحقات — ${employee.full_name || employee.username}`,
+        client_token: settlementToken.ensure(),
       }),
     onSuccess: () => {
+      settlementToken.reset();
       toast.success('تم تسجيل صرف المستحقات (DR 213 / CR الخزنة).');
       invalidateAccounts(qc, employee.id);
       onClose();
     },
-    onError: (e: any) =>
-      toast.error(e?.response?.data?.message || 'فشل تسجيل صرف المستحقات'),
+    onError: (e: any) => {
+      // PR-FIX-SETTLEMENT-DEDUPE — clear the token so the next
+      // submit attempt gets a fresh one and the BE treats it as a
+      // new request rather than replaying a payload the operator
+      // may have just edited.
+      settlementToken.reset();
+      toast.error(e?.response?.data?.message || 'فشل تسجيل صرف المستحقات');
+    },
   });
 
   const mut = advanceMut; // ready-state below uses the advance mut for pending check
